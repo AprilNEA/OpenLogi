@@ -10,10 +10,11 @@ use std::sync::{LazyLock, Mutex};
 
 use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
-    KEYEVENTF_KEYUP, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
-    MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
-    MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT, SendInput,
+    GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT,
+    KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN,
+    MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN,
+    MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT,
+    SendInput,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{XBUTTON1, XBUTTON2};
 
@@ -22,7 +23,7 @@ use openlogi_core::binding::{
 };
 use openlogi_core::scroll::ScrollDelta;
 
-use super::{HeldKey, KeyPhase, ScrollQuantizer};
+use super::{HeldKey, HeldOutput, KeyPhase, ScrollQuantizer};
 
 mod keyboard_layout;
 
@@ -46,6 +47,7 @@ const VK_SHIFT: u16 = 0x10;
 const VK_CONTROL: u16 = 0x11;
 const VK_MENU: u16 = 0x12;
 const VK_LWIN: u16 = 0x5B;
+const VK_RWIN: u16 = 0x5C;
 const VK_SNAPSHOT: u16 = 0x2C;
 const VK_BROWSER_BACK: u16 = 0xA6;
 const VK_BROWSER_FORWARD: u16 = 0xA7;
@@ -78,11 +80,11 @@ struct Key {
 impl Key {
     /// A virtual key posted alone, with scan code 0.
     ///
-    /// Only for a key that is not extended: [`key_input`] derives the extended
-    /// flag from the virtual key alone, so an extended key built this way would
-    /// go out flagged with no scan code, a form no keyboard sends. Extended keys
-    /// come from [`Self::for_vk`] or [`Self::for_usage`], which look their scan
-    /// code up.
+    /// Only for a key [`posts_virtual_key_alone`] names, which
+    /// [`Self::for_vk`] builds this way. It is never right for an extended
+    /// key: [`key_input`] derives the extended flag from the virtual key
+    /// alone, so an extended key built this way would go out flagged with no
+    /// scan code, a form no keyboard sends.
     fn plain(vk: u16) -> Self {
         debug_assert!(
             !is_extended_key(vk),
@@ -94,34 +96,27 @@ impl Key {
     /// The key for `usage` under `layout`, or `None` when the usage has no
     /// Windows virtual key.
     ///
-    /// A key a layout can move ([`KeyboardUsage::ascii_char`]) carries the
-    /// scan code of the key `layout` produces its virtual key with, as a
-    /// physical press does (see [`keyboard_layout`]). An extended key needs one
-    /// for the same reason (see [`is_extended_key`]). Every other key keeps
-    /// scan code 0, as it always has.
+    /// The usage resolves to its virtual key, which then gets its scan code
+    /// the way [`Self::for_vk`] gives it one.
     fn for_usage(usage: KeyboardUsage, layout: ForegroundLayout) -> Option<Self> {
-        let vk = super::hid_usage_to_windows(usage.code())?;
-        if usage.ascii_char().is_none() && !is_extended_key(vk) {
-            return Some(Self::plain(vk));
-        }
-        Some(Self {
-            vk,
-            scan: layout.scan_code(vk),
-        })
+        super::hid_usage_to_windows(usage.code()).map(|vk| Self::for_vk(vk, layout))
     }
 
-    /// The key for a bare virtual key, as `post_vk` and `held_key` pass it.
+    /// The key for the virtual key `vk` under `layout`.
     ///
-    /// Extended keys get the scan code `layout` gives them; every other key is
-    /// posted alone, as before.
+    /// The key carries the scan code of the key `layout` produces `vk` with,
+    /// as a physical press does, unless [`posts_virtual_key_alone`] names it.
+    /// For a key a layout can move, that is the key the layout puts the
+    /// virtual key on (see [`keyboard_layout`]); for every other key, it is the
+    /// key's fixed hardware code.
     fn for_vk(vk: u16, layout: ForegroundLayout) -> Self {
-        if is_extended_key(vk) {
-            return Self {
-                vk,
-                scan: layout.scan_code(vk),
-            };
+        if posts_virtual_key_alone(vk) {
+            return Self::plain(vk);
         }
-        Self::plain(vk)
+        Self {
+            vk,
+            scan: layout.scan_code(vk),
+        }
     }
 }
 
@@ -165,6 +160,39 @@ fn is_extended_key(vk: u16) -> bool {
             | VK_INSERT
             | VK_DELETE
             | VK_LWIN
+    )
+}
+
+/// Whether `vk` is posted as its virtual key alone, with scan code 0.
+///
+/// Every other key carries a scan code, as a physical press does, because an
+/// app that reads keys by scan code ignores a key without one. Such apps
+/// ignored letter shortcuts under a non-Latin layout (#2026) and a PageUp in
+/// games (#2170). An app that reads the modifiers that way saw an injected
+/// `Ctrl+A` as a bare `A` and typed it (#2347).
+///
+/// The keys here have no scan code this backend can post faithfully:
+/// - Print Screen: a physical press sends `E0 37`, but `MapVirtualKeyW`
+///   answers `0x54` (see [`is_extended_key`]).
+/// - The browser and media keys: a physical press sends an `E0`-prefixed
+///   code, and this backend models the prefix only for [`is_extended_key`].
+///   Their code without the prefix names a different key.
+///
+/// The `match` keeps the set in one place, like [`is_extended_key`]: a
+/// virtual key added to this backend carries a scan code unless it is added
+/// here.
+fn posts_virtual_key_alone(vk: u16) -> bool {
+    matches!(
+        vk,
+        VK_SNAPSHOT
+            | VK_BROWSER_BACK
+            | VK_BROWSER_FORWARD
+            | VK_VOLUME_MUTE
+            | VK_VOLUME_DOWN
+            | VK_VOLUME_UP
+            | VK_MEDIA_NEXT_TRACK
+            | VK_MEDIA_PREV_TRACK
+            | VK_MEDIA_PLAY_PAUSE
     )
 }
 
@@ -284,13 +312,22 @@ pub(super) fn run_apple_script(_src: &str) {
 }
 
 pub(super) fn run_shell_command(cmd: &str) {
+    super::run_to_end(shell_command(cmd), "shell command");
+}
+
+fn shell_command(cmd: &str) -> std::process::Command {
+    let mut command = std::process::Command::new("cmd");
+    // `args` would escape each `"` as `\"`, which `cmd.exe` does not understand:
+    // a quoted command silently does nothing and still exits 0. `cmd.exe` strips
+    // only the outer quotes added here and runs the rest as written, unless the
+    // whole command is one executable name, like an unquoted path with spaces:
+    // it keeps them then, which is why this can't use `/S`.
+    command.raw_arg(format!("/C \"{cmd}\""));
     // Without this flag `cmd.exe` allocates and briefly flashes a visible
     // console window, since the agent itself is a console-less GUI/background
     // process and the child would otherwise get one of its own.
-    let _ = std::process::Command::new("cmd")
-        .args(["/C", cmd])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output();
+    command.creation_flags(CREATE_NO_WINDOW);
+    command
 }
 
 fn post_click(button: MouseButton) {
@@ -305,32 +342,115 @@ fn post_click(button: MouseButton) {
     send_inputs(&[mouse_input(down, data), mouse_input(up, data)]);
 }
 
-/// Post the already-resolved key `key` with `modifiers` held around it.
-fn post_key(key: Key, modifiers: &[u16]) {
-    post_key_in(key, modifiers, ForegroundLayout::current());
-}
-
 /// Post the bare virtual key `vk` with `modifiers` held around it.
-///
-/// The key goes through [`Key::for_vk`] for the same reason the modifiers do:
-/// an extended key carries its hardware scan code, as a physical press does
-/// (see [`is_extended_key`]).
 fn post_vk(vk: u16, modifiers: &[u16]) {
     let layout = ForegroundLayout::current();
-    post_key_in(Key::for_vk(vk, layout), modifiers, layout);
+    let key = Key::for_vk(vk, layout);
+    super::with_held_output(|held| {
+        let down = ModifiersDown::current(held);
+        send_inputs(&chord_inputs(key, modifiers, layout, &down));
+    });
 }
 
-fn post_key_in(key: Key, modifiers: &[u16], layout: ForegroundLayout) {
+/// The key events that tap `key` with `modifiers` held around it, leaving out
+/// the ones already `down`.
+///
+/// The modifiers go through [`Key::for_vk`] like the key does, so each one
+/// carries its scan code too (see [`posts_virtual_key_alone`]).
+fn chord_inputs(
+    key: Key,
+    modifiers: &[u16],
+    layout: ForegroundLayout,
+    down: &ModifiersDown,
+) -> Vec<INPUT> {
+    let modifiers: Vec<Key> = modifiers
+        .iter()
+        .filter(|&&vk| !down.contains(vk))
+        .map(|&vk| Key::for_vk(vk, layout))
+        .collect();
     let mut inputs = Vec::with_capacity(modifiers.len() * 2 + 2);
-    for modifier in modifiers {
-        inputs.push(key_input(Key::for_vk(*modifier, layout), false));
-    }
+    inputs.extend(modifiers.iter().map(|&modifier| key_input(modifier, false)));
     inputs.push(key_input(key, false));
     inputs.push(key_input(key, true));
-    for modifier in modifiers.iter().rev() {
-        inputs.push(key_input(Key::for_vk(*modifier, layout), true));
+    inputs.extend(
+        modifiers
+            .iter()
+            .rev()
+            .map(|&modifier| key_input(modifier, true)),
+    );
+    inputs
+}
+
+/// The chord modifiers already down when a chord is tapped or a hold starts.
+///
+/// A tapped chord leaves these out of both of its edges. Its up edge would
+/// otherwise release a modifier the user still holds on the keyboard, or one
+/// a held chord keeps down, and later input would arrive without it (#2413).
+/// The key between the edges still arrives with the modifier down.
+/// A held chord does the same through [`held_modifiers_down`] (#2417).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct ModifiersDown(Vec<u16>);
+
+impl ModifiersDown {
+    /// The chord modifiers down right now, from the system's async key state.
+    ///
+    /// That state follows every keyboard and every injected edge, wherever
+    /// the focus is. The high-order bit of `GetKeyState` would not do: it
+    /// follows the calling thread's input queue, and the thread that taps a
+    /// chord owns no window.
+    ///
+    /// It takes the held-chord owners, so only a caller under the lock that
+    /// orders held-chord edges can read it. Send the chord under that same
+    /// lock: a held chord that ended between the read and the send would
+    /// leave its modifier out of the chord and up on the system.
+    fn current(_held: &HeldOutput) -> Self {
+        Self(
+            [VK_CONTROL, VK_SHIFT, VK_MENU, VK_LWIN]
+                .into_iter()
+                .filter(|&vk| modifier_down(vk))
+                .collect(),
+        )
     }
-    send_inputs(&inputs);
+
+    fn contains(&self, vk: u16) -> bool {
+        self.0.contains(&vk)
+    }
+
+    /// These modifiers as the keys a held chord owns.
+    fn held_keys(&self) -> Vec<HeldKey> {
+        [
+            HeldKey::Control,
+            HeldKey::Shift,
+            HeldKey::Alt,
+            HeldKey::Super,
+        ]
+        .into_iter()
+        .filter(|&key| modifier_vk(key).is_some_and(|vk| self.contains(vk)))
+        .collect()
+    }
+}
+
+/// The held-chord modifiers down right now, as [`ModifiersDown::current`]
+/// reads them. A hold that takes one of them posts neither of its edges.
+pub(super) fn held_modifiers_down(held: &HeldOutput) -> Vec<HeldKey> {
+    ModifiersDown::current(held).held_keys()
+}
+
+/// Whether the chord modifier `vk` is down. `VK_CONTROL`, `VK_SHIFT` and
+/// `VK_MENU` answer for either key of the pair. The Windows key has no such
+/// code, and a chord posts the left one, but either key makes the chord a
+/// Windows-key shortcut.
+fn modifier_down(vk: u16) -> bool {
+    if vk == VK_LWIN {
+        return async_key_down(VK_LWIN) || async_key_down(VK_RWIN);
+    }
+    async_key_down(vk)
+}
+
+fn async_key_down(vk: u16) -> bool {
+    // SAFETY: `GetAsyncKeyState` takes a virtual-key code by value and has no
+    // other precondition.
+    (unsafe { GetAsyncKeyState(i32::from(vk)) }) < 0
 }
 
 /// Synthesise one scroll tick in direction `(dx, dy)`. Unit direction
@@ -374,16 +494,30 @@ pub(super) fn post_scroll(delta: ScrollDelta) {
 }
 
 pub(super) fn press_combo(combo: &KeyCombo) {
-    let Some(key) = Key::for_usage(combo.key(), ForegroundLayout::current()) else {
+    let layout = ForegroundLayout::current();
+    let sent = super::with_held_output(|held| {
+        let inputs = combo_inputs(combo, layout, &ModifiersDown::current(held))?;
+        send_inputs(&inputs);
+        Some(())
+    });
+    if sent.is_none() {
         tracing::warn!(
             usage = combo.key().code(),
             chord = %combo.rendered_label(),
             "CustomShortcut key has no Windows mapping yet; press ignored"
         );
-        return;
-    };
+    }
+}
 
-    post_key(key, &combo_modifiers(combo));
+/// The key events that tap `combo` under `layout`, leaving out the modifiers
+/// already `down`, or `None` when its key has no Windows virtual key.
+fn combo_inputs(
+    combo: &KeyCombo,
+    layout: ForegroundLayout,
+    down: &ModifiersDown,
+) -> Option<Vec<INPUT>> {
+    let key = Key::for_usage(combo.key(), layout)?;
+    Some(chord_inputs(key, &combo_modifiers(combo), layout, down))
 }
 
 fn combo_modifiers(combo: &KeyCombo) -> Vec<u16> {
@@ -427,21 +561,28 @@ pub(super) fn hold_keys(keys: &[HeldKey], phase: KeyPhase) {
 /// The two differ only if the layout changes during the hold, and the
 /// virtual key, which the system's key state is indexed by, stays the same.
 fn held_key(key: HeldKey, layout: ForegroundLayout) -> Option<Key> {
+    let HeldKey::Key(usage) = key else {
+        return modifier_vk(key).map(|vk| Key::for_vk(vk, layout));
+    };
+    let key = Key::for_usage(usage, layout);
+    if key.is_none() {
+        tracing::warn!(
+            usage = usage.code(),
+            "held shortcut usage has no Windows mapping — edge ignored"
+        );
+    }
+    key
+}
+
+/// The virtual key a held chord posts for the modifier `key`, or `None` for
+/// an ordinary key.
+fn modifier_vk(key: HeldKey) -> Option<u16> {
     match key {
-        HeldKey::Control => Some(Key::for_vk(VK_CONTROL, layout)),
-        HeldKey::Shift => Some(Key::for_vk(VK_SHIFT, layout)),
-        HeldKey::Alt => Some(Key::for_vk(VK_MENU, layout)),
-        HeldKey::Super => Some(Key::for_vk(VK_LWIN, layout)),
-        HeldKey::Key(usage) => {
-            let key = Key::for_usage(usage, layout);
-            if key.is_none() {
-                tracing::warn!(
-                    usage = usage.code(),
-                    "held shortcut usage has no Windows mapping — edge ignored"
-                );
-            }
-            key
-        }
+        HeldKey::Control => Some(VK_CONTROL),
+        HeldKey::Shift => Some(VK_SHIFT),
+        HeldKey::Alt => Some(VK_MENU),
+        HeldKey::Super => Some(VK_LWIN),
+        HeldKey::Key(_) => None,
     }
 }
 
@@ -524,9 +665,12 @@ mod tests {
 
     use super::{
         ForegroundLayout, HeldKey, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
-        KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, Key, VK_BROWSER_BACK, VK_BROWSER_FORWARD,
-        VK_DELETE, VK_DOWN, VK_END, VK_HOME, VK_INSERT, VK_LEFT, VK_LWIN, VK_NEXT, VK_PRIOR,
-        VK_RIGHT, VK_SHIFT, VK_UP, combo, held_key, is_extended_key, key_input, send_inputs,
+        KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, Key, ModifiersDown, VK_BROWSER_BACK,
+        VK_BROWSER_FORWARD, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_HOME, VK_INSERT, VK_LEFT,
+        VK_LWIN, VK_MEDIA_NEXT_TRACK, VK_MEDIA_PLAY_PAUSE, VK_MEDIA_PREV_TRACK, VK_MENU, VK_NEXT,
+        VK_PRIOR, VK_RIGHT, VK_SHIFT, VK_SNAPSHOT, VK_UP, VK_VOLUME_DOWN, VK_VOLUME_MUTE,
+        VK_VOLUME_UP, chord_inputs, combo, combo_inputs, held_key, is_extended_key, key_input,
+        send_inputs, shell_command,
     };
 
     fn usage(label: &str) -> KeyboardUsage {
@@ -534,6 +678,46 @@ mod tests {
             .parse::<KeyCombo>()
             .expect("test key must be valid")
             .key()
+    }
+
+    /// Quotes must reach `cmd.exe` as written. `Command::args` escapes them and
+    /// the command silently does nothing; `/C` without the outer quotes strips
+    /// the wrong ones when a command has more than one quoted part, as this one
+    /// does.
+    #[test]
+    fn shell_command_keeps_quotes_as_written() {
+        let dir = std::env::temp_dir().join(format!("openlogi run {}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir must be writable");
+        let marker = dir.join("marker.txt");
+        let comspec = std::env::var("ComSpec").expect("Windows sets ComSpec");
+        let cmd = format!("\"{comspec}\" /c echo done> \"{}\"", marker.display());
+
+        let status = shell_command(&cmd).status().expect("cmd.exe must start");
+        let written = std::fs::read_to_string(&marker).unwrap_or_default();
+        std::fs::remove_dir_all(&dir).expect("temp dir must be removable");
+
+        assert!(status.success());
+        assert_eq!(written.trim(), "done");
+    }
+
+    /// An unquoted path with spaces must keep working: existing configs use it.
+    /// `cmd.exe` keeps the outer quotes around one executable name, and `/S`
+    /// would strip them and stop the command at the first space.
+    #[test]
+    fn shell_command_runs_unquoted_path_with_spaces() {
+        let dir = std::env::temp_dir().join(format!("openlogi path {}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir must be writable");
+        let root = std::env::var("SystemRoot").expect("Windows sets SystemRoot");
+        let exe = dir.join("hostname.exe");
+        std::fs::copy(format!(r"{root}\System32\hostname.exe"), &exe)
+            .expect("hostname.exe must be copyable");
+
+        let output = shell_command(&exe.display().to_string())
+            .output()
+            .expect("cmd.exe must start");
+        std::fs::remove_dir_all(&dir).expect("temp dir must be removable");
+
+        assert!(output.status.success());
     }
 
     /// A key a layout can move must carry the scan code of the key that
@@ -559,16 +743,218 @@ mod tests {
         }
     }
 
-    /// Keys a layout never moves are posted as their virtual key alone, as
-    /// they were before #2026.
+    /// Keys a layout never moves carry their fixed hardware scan code
+    /// (scancode set 1), as a physical press does. An app that reads keys by
+    /// scan code ignores one without it, as games did with PageUp (#2170).
     #[test]
-    fn fixed_keys_post_the_virtual_key_alone() {
+    fn fixed_keys_carry_their_hardware_scan_code() {
         let layout = ForegroundLayout::current();
-        for label in ["Enter", "Escape", "Tab", "Space", "F5"] {
+        for (label, expected_scan) in [
+            ("Enter", 0x1C),
+            ("Escape", 0x01),
+            ("Tab", 0x0F),
+            ("Space", 0x39),
+            ("Backspace", 0x0E),
+            ("F5", 0x3F),
+        ] {
             let key = Key::for_usage(usage(label), layout)
                 .expect("fixed keys have a Windows virtual key");
-            assert_eq!(key.scan, 0, "{label} must not carry a scan code");
+            assert_eq!(
+                key.scan, expected_scan,
+                "{label} must carry its hardware scan code"
+            );
         }
+    }
+
+    /// The modifiers a chord holds, as [`super::combo_modifiers`] and
+    /// [`held_key`] name them, with the hardware scan code of the left key.
+    const MODIFIERS_AND_THEIR_SCAN_CODES: &[(u16, HeldKey, u16)] = &[
+        (VK_CONTROL, HeldKey::Control, 0x1D),
+        (VK_SHIFT, HeldKey::Shift, 0x2A),
+        (VK_MENU, HeldKey::Alt, 0x38),
+    ];
+
+    /// A modifier posted with scan code 0 is lost on an app that reads
+    /// modifiers by scan code, while the letter beside it, which carries its
+    /// scan code, gets through: an injected `Ctrl+A` typed a bare `A` (#2347).
+    /// Both the tapped chord and the held one take the modifier through these
+    /// paths. None of these keys is extended.
+    #[test]
+    fn modifiers_carry_their_hardware_scan_code() {
+        let layout = ForegroundLayout::current();
+        for &(vk, held, scan) in MODIFIERS_AND_THEIR_SCAN_CODES {
+            let expected = Key { vk, scan };
+            assert_eq!(
+                Key::for_vk(vk, layout),
+                expected,
+                "modifier {vk:#x} must carry its hardware scan code"
+            );
+            assert_eq!(
+                held_key(held, layout),
+                Some(expected),
+                "held modifier {vk:#x} must carry its hardware scan code"
+            );
+            // SAFETY: `key_input` fully initialises the `INPUT` it returns, so
+            // reading the `ki` arm of the union is well-defined.
+            let ki = unsafe { key_input(expected, false).Anonymous.ki };
+            assert_eq!(ki.dwFlags & KEYEVENTF_EXTENDEDKEY, 0);
+        }
+    }
+
+    /// Every edge of a tapped chord carries the scan code of its key: the
+    /// modifiers' presses, the key's press and release, and the modifiers'
+    /// releases. The chords are the ones from #2347, and `Copy`, which the
+    /// action list sends as `Ctrl+C`.
+    #[test]
+    fn every_edge_of_a_chord_carries_a_scan_code() {
+        let layout = ForegroundLayout::current();
+        let copy = combo(Shortcut::Copy).expect("Copy is a chord on Windows");
+        let chords = ["Ctrl+Shift+R", "Alt+2", "Ctrl+A"]
+            .map(|label| label.parse::<KeyCombo>().expect("test chord must be valid"));
+        for chord in chords.iter().chain([&copy]) {
+            let label = chord.rendered_label();
+            let inputs = combo_inputs(chord, layout, &ModifiersDown::default())
+                .expect("test chords have a Windows key");
+            assert!(inputs.len() >= 4, "{label} must hold at least one modifier");
+            for input in &inputs {
+                // SAFETY: `combo_inputs` builds every `INPUT` with
+                // `key_input`, which initialises the `ki` arm of the union.
+                let ki = unsafe { input.Anonymous.ki };
+                assert_ne!(
+                    ki.wScan, 0,
+                    "{label}: virtual key {:#x} must carry a scan code",
+                    ki.wVk
+                );
+                assert_eq!(
+                    ki.wScan,
+                    layout.scan_code(ki.wVk),
+                    "{label}: virtual key {:#x} must carry the layout's scan code",
+                    ki.wVk
+                );
+            }
+        }
+    }
+
+    /// Each edge of `inputs` as its virtual key and whether it is a release.
+    fn edges(inputs: &[INPUT]) -> Vec<(u16, bool)> {
+        inputs
+            .iter()
+            .map(|input| {
+                // SAFETY: the chord builders make every `INPUT` with
+                // `key_input`, which initialises the `ki` arm of the union.
+                let ki = unsafe { input.Anonymous.ki };
+                (ki.wVk, ki.dwFlags & KEYEVENTF_KEYUP != 0)
+            })
+            .collect()
+    }
+
+    /// A modifier already down stays out of both edges of a tapped chord,
+    /// while the chord still presses the ones nobody holds. Its up edge would
+    /// release the modifier while the user still holds it on the keyboard,
+    /// and the next click would arrive without it (#2413).
+    #[test]
+    fn chord_leaves_modifiers_already_down_alone() {
+        let layout = ForegroundLayout::current();
+        let key = Key::for_vk(VK_RIGHT, layout);
+        let modifiers = [VK_LWIN, VK_CONTROL];
+        let tap = |down: &[u16]| {
+            edges(&chord_inputs(
+                key,
+                &modifiers,
+                layout,
+                &ModifiersDown(down.to_vec()),
+            ))
+        };
+
+        assert_eq!(
+            tap(&[]),
+            [
+                (VK_LWIN, false),
+                (VK_CONTROL, false),
+                (VK_RIGHT, false),
+                (VK_RIGHT, true),
+                (VK_CONTROL, true),
+                (VK_LWIN, true),
+            ]
+        );
+        assert_eq!(
+            tap(&[VK_CONTROL]),
+            [
+                (VK_LWIN, false),
+                (VK_RIGHT, false),
+                (VK_RIGHT, true),
+                (VK_LWIN, true),
+            ],
+            "a held Ctrl must get neither edge"
+        );
+        assert_eq!(
+            tap(&[VK_LWIN, VK_CONTROL, VK_SHIFT]),
+            [(VK_RIGHT, false), (VK_RIGHT, true)],
+            "a chord whose modifiers are all held taps only its key"
+        );
+    }
+
+    /// A user-recorded shortcut takes the same path: `Copy` with Ctrl held on
+    /// the keyboard taps C alone, which the system reads as Ctrl+C.
+    #[test]
+    fn shortcut_with_its_modifier_held_taps_the_key_alone() {
+        let layout = ForegroundLayout::current();
+        let copy = combo(Shortcut::Copy).expect("Copy is a chord on Windows");
+        let c = Key::for_usage(copy.key(), layout)
+            .expect("C has a Windows virtual key")
+            .vk;
+        let inputs = combo_inputs(&copy, layout, &ModifiersDown(vec![VK_CONTROL]))
+            .expect("Copy has a Windows key");
+        assert_eq!(edges(&inputs), [(c, false), (c, true)]);
+    }
+
+    /// The modifiers the system reports down reach a hold as the keys it
+    /// owns, so a hold leaves out the one the user holds and no other
+    /// (#2417).
+    #[test]
+    fn modifiers_down_name_the_keys_a_hold_owns() {
+        assert_eq!(
+            ModifiersDown(vec![VK_CONTROL, VK_LWIN]).held_keys(),
+            [HeldKey::Control, HeldKey::Super]
+        );
+        assert_eq!(
+            ModifiersDown(vec![VK_SHIFT, VK_MENU]).held_keys(),
+            [HeldKey::Shift, HeldKey::Alt]
+        );
+        assert!(ModifiersDown::default().held_keys().is_empty());
+    }
+
+    /// The keys with no faithful scan code keep the plain virtual-key form
+    /// they have always had: Print Screen, whose `MapVirtualKeyW` answer no
+    /// keyboard sends, and the `E0`-prefixed browser and media keys.
+    #[test]
+    fn keys_without_a_faithful_scan_code_post_the_virtual_key_alone() {
+        let layout = ForegroundLayout::current();
+        for vk in [
+            VK_SNAPSHOT,
+            VK_BROWSER_BACK,
+            VK_BROWSER_FORWARD,
+            VK_VOLUME_MUTE,
+            VK_VOLUME_DOWN,
+            VK_VOLUME_UP,
+            VK_MEDIA_NEXT_TRACK,
+            VK_MEDIA_PREV_TRACK,
+            VK_MEDIA_PLAY_PAUSE,
+        ] {
+            assert_eq!(
+                Key::for_vk(vk, layout),
+                Key { vk, scan: 0 },
+                "virtual key {vk:#x} must be posted alone"
+            );
+        }
+        assert_eq!(
+            Key::for_usage(usage("PrintScreen"), layout),
+            Some(Key {
+                vk: VK_SNAPSHOT,
+                scan: 0
+            }),
+            "Print Screen in a shortcut must be posted alone"
+        );
     }
 
     /// `key_input` posts the scan code beside the virtual key on both edges.
@@ -781,14 +1167,17 @@ mod tests {
         }
     }
 
-    /// A plain key must not be flagged and must not carry a scan code: marking
-    /// `B` extended would make Windows read it as a keypad key.
+    /// A key outside [`is_extended_key`] must not be flagged, even now that it
+    /// carries its scan code: marking `B` extended would make Windows read it
+    /// as a different key.
     #[test]
-    fn key_input_leaves_plain_keys_alone() {
+    fn key_input_does_not_flag_keys_that_are_not_extended() {
+        let layout = ForegroundLayout::current();
+        let vk = u16::from(b'B');
         // SAFETY: `key_input` fully initialises the `INPUT` it returns.
-        let ki = unsafe { key_input(Key::plain(u16::from(b'B')), false).Anonymous.ki };
-        assert_eq!(ki.wVk, u16::from(b'B'));
-        assert_eq!(ki.wScan, 0);
+        let ki = unsafe { key_input(Key::for_vk(vk, layout), false).Anonymous.ki };
+        assert_eq!(ki.wVk, vk);
+        assert_eq!(ki.wScan, layout.scan_code(vk));
         assert_eq!(ki.dwFlags & KEYEVENTF_EXTENDEDKEY, 0);
     }
 

@@ -1,9 +1,17 @@
-use gpui::{Entity, KeyDownEvent, Keystroke, Modifiers, TestAppContext, VisualTestContext, size};
+use std::cell::Cell;
+use std::rc::Rc;
+
+use gpui::{
+    Entity, KeyBinding, KeyDownEvent, Keystroke, Modifiers, TestAppContext, VisualTestContext,
+    actions, size,
+};
 use openlogi_core::binding::default_binding;
 use openlogi_core::config::Config;
 
 use super::ShortcutError::{ShiftedSymbol, Unrecognized};
 use super::*;
+use crate::features::mouse::editor_mode::Selection;
+use crate::features::mouse::inspector::{InvalidDrafts, ShortcutMode};
 use crate::features::mouse::leader_lines::Side;
 use crate::services::assets::AssetResolver;
 use crate::services::i18n::LOCALE_LOCK;
@@ -17,6 +25,15 @@ fn install_app_state(cx: &mut TestAppContext) {
             cx.new(|_| AppState::new(Sources::in_memory(Config::ephemeral(), &resolver, commands)));
         AppState::set_global(state, cx);
     });
+}
+
+fn picker_open(view: &MouseModelView) -> bool {
+    view.mode.drafts().is_some()
+}
+
+/// The open picker's drafts; panics while the picker is closed.
+fn picker_drafts(view: &MouseModelView) -> PickerDrafts {
+    *view.mode.drafts().expect("the picker is open")
 }
 
 fn click_picker_control(cx: &mut VisualTestContext, selector: &'static str) {
@@ -71,7 +88,7 @@ fn long_bindings_stay_inside_their_label_card(cx: &mut TestAppContext) {
     // would have made this a false pass.
     let _locale = LOCALE_LOCK.lock().unwrap();
     rust_i18n::set_locale("en");
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     install_app_state(cx);
     let (view, cx) = cx.add_window_view(MouseModelView::new);
     // Wide enough for labels on both sides (`model_layout` hides them under 960).
@@ -112,7 +129,7 @@ fn long_bindings_stay_inside_their_label_card(cx: &mut TestAppContext) {
 /// where the clipped tab can cut them off.
 #[gpui::test]
 fn cards_that_reach_past_a_shrunk_model_stay_on_the_canvas(cx: &mut TestAppContext) {
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     install_app_state(cx);
     let (view, cx) = cx.add_window_view(MouseModelView::new);
     cx.simulate_resize(size(px(960.), px(680.)));
@@ -148,7 +165,7 @@ fn cards_that_reach_past_a_shrunk_model_stay_on_the_canvas(cx: &mut TestAppConte
 fn action_picker_renders_after_opening_through_the_inspector(cx: &mut TestAppContext) {
     let _locale = LOCALE_LOCK.lock().unwrap();
     rust_i18n::set_locale("en");
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     install_app_state(cx);
     let (view, cx) = cx.add_window_view(MouseModelView::new);
     cx.simulate_resize(size(px(1200.), px(1000.)));
@@ -156,13 +173,13 @@ fn action_picker_renders_after_opening_through_the_inspector(cx: &mut TestAppCon
 
     click_picker_control(cx, "label-card-Button(Forward)");
     click_picker_control(cx, "inspector-current-action");
-    view.read_with(cx, |view, _| assert!(view.action_picker_open));
+    view.read_with(cx, |view, _| assert!(picker_open(view)));
     assert!(cx.debug_bounds("inspector-action-Copy").is_some());
 
     click_picker_control(cx, "inspector-action-custom-shortcut-add");
     view.read_with(cx, |view, _| {
-        assert_eq!(view.invalid_drafts.shortcut, Some(Unrecognized));
-        assert!(!view.invalid_drafts.application);
+        assert_eq!(picker_drafts(view).invalid.shortcut, Some(Unrecognized));
+        assert!(!picker_drafts(view).invalid.application);
     });
     assert!(
         cx.debug_bounds("inspector-action-custom-shortcut-error")
@@ -171,9 +188,9 @@ fn action_picker_renders_after_opening_through_the_inspector(cx: &mut TestAppCon
 
     click_picker_control(cx, "inspector-action-custom-application-add");
     view.read_with(cx, |view, _| {
-        assert!(view.action_picker_open);
-        assert_eq!(view.invalid_drafts.shortcut, Some(Unrecognized));
-        assert!(view.invalid_drafts.application);
+        assert!(picker_open(view));
+        assert_eq!(picker_drafts(view).invalid.shortcut, Some(Unrecognized));
+        assert!(picker_drafts(view).invalid.application);
     });
     assert!(
         cx.debug_bounds("inspector-action-custom-application-error")
@@ -185,8 +202,8 @@ fn action_picker_renders_after_opening_through_the_inspector(cx: &mut TestAppCon
     cx.simulate_input("Cmd+K");
     cx.update(|window, cx| window.draw(cx).clear(cx));
     view.read_with(cx, |view, _| {
-        assert_eq!(view.invalid_drafts.shortcut, None);
-        assert!(view.invalid_drafts.application);
+        assert_eq!(picker_drafts(view).invalid.shortcut, None);
+        assert!(picker_drafts(view).invalid.application);
     });
     assert!(
         cx.debug_bounds("inspector-action-custom-shortcut-error")
@@ -197,14 +214,14 @@ fn action_picker_renders_after_opening_through_the_inspector(cx: &mut TestAppCon
             .is_some()
     );
     click_picker_control(cx, "inspector-action-custom-shortcut-add");
-    view.read_with(cx, |view, _| assert!(!view.action_picker_open));
+    view.read_with(cx, |view, _| assert!(!picker_open(view)));
     assert_forward_binding(cx, &Action::CustomShortcut("Cmd+K".parse().unwrap()));
 
     click_picker_control(cx, "inspector-current-action");
     view.read_with(cx, |view, cx| {
         assert_eq!(view.custom_shortcut_input.read(cx).value(), "");
         assert_eq!(view.custom_application_input.read(cx).value(), "");
-        assert!(!view.invalid_drafts.application);
+        assert!(!picker_drafts(view).invalid.application);
     });
     assert!(
         cx.debug_bounds("inspector-action-custom-application-error")
@@ -213,7 +230,7 @@ fn action_picker_renders_after_opening_through_the_inspector(cx: &mut TestAppCon
     click_picker_control(cx, "inspector-action-custom-application-input");
     cx.simulate_input("/Applications/Calculator.app");
     click_picker_control(cx, "inspector-action-custom-application-add");
-    view.read_with(cx, |view, _| assert!(!view.action_picker_open));
+    view.read_with(cx, |view, _| assert!(!picker_open(view)));
     cx.update(|_, cx| {
         let Action::OpenApplication(target) =
             &AppState::try_read(cx).unwrap().button_bindings()[&ButtonId::Forward]
@@ -226,17 +243,17 @@ fn action_picker_renders_after_opening_through_the_inspector(cx: &mut TestAppCon
     click_picker_control(cx, "inspector-current-action");
     click_picker_control(cx, "inspector-action-shortcut-hold");
     view.read_with(cx, |view, _| {
-        assert_eq!(view.shortcut_mode, ShortcutMode::Hold);
+        assert_eq!(picker_drafts(view).shortcut_mode, ShortcutMode::Hold);
     });
     click_picker_control(cx, "inspector-action-custom-shortcut-input");
     cx.simulate_input("Cmd+K");
     click_picker_control(cx, "inspector-action-custom-shortcut-add");
-    view.read_with(cx, |view, _| assert!(!view.action_picker_open));
+    view.read_with(cx, |view, _| assert!(!picker_open(view)));
     assert_forward_binding(cx, &Action::HoldShortcut("Cmd+K".parse().unwrap()));
 
     click_picker_control(cx, "inspector-current-action");
     view.read_with(cx, |view, _| {
-        assert_eq!(view.shortcut_mode, ShortcutMode::Tap);
+        assert_eq!(picker_drafts(view).shortcut_mode, ShortcutMode::Tap);
     });
     cx.update(|window, cx| {
         view.read(cx)
@@ -247,7 +264,7 @@ fn action_picker_renders_after_opening_through_the_inspector(cx: &mut TestAppCon
     cx.simulate_input("Copy");
     cx.update(|window, cx| window.draw(cx).clear(cx));
     click_picker_control(cx, "inspector-action-Copy");
-    view.read_with(cx, |view, _| assert!(!view.action_picker_open));
+    view.read_with(cx, |view, _| assert!(!picker_open(view)));
     assert_forward_binding(cx, &Action::Copy);
 
     drop(view);
@@ -261,7 +278,7 @@ fn action_picker_renders_after_opening_through_the_inspector(cx: &mut TestAppCon
 fn record_fills_the_custom_shortcut_from_the_next_key_press(cx: &mut TestAppContext) {
     let _locale = LOCALE_LOCK.lock().unwrap();
     rust_i18n::set_locale("en");
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     install_app_state(cx);
     let (view, cx) = cx.add_window_view(MouseModelView::new);
     cx.simulate_resize(size(px(1200.), px(1000.)));
@@ -293,7 +310,7 @@ fn record_fills_the_custom_shortcut_from_the_next_key_press(cx: &mut TestAppCont
             .is_none()
     );
     view.read_with(cx, |view, _| {
-        assert!(view.action_picker_open, "recording alone commits nothing");
+        assert!(picker_open(view), "recording alone commits nothing");
     });
     assert_forward_binding(cx, &default_binding(ButtonId::Forward));
 
@@ -308,7 +325,7 @@ fn record_fills_the_custom_shortcut_from_the_next_key_press(cx: &mut TestAppCont
     click_picker_control(cx, "inspector-action-custom-shortcut-record");
     press(cx, "f21");
     view.read_with(cx, |view, _| {
-        assert_eq!(view.invalid_drafts.shortcut, Some(Unrecognized));
+        assert_eq!(picker_drafts(view).invalid.shortcut, Some(Unrecognized));
     });
     assert!(
         cx.debug_bounds("inspector-action-custom-shortcut-error")
@@ -320,8 +337,8 @@ fn record_fills_the_custom_shortcut_from_the_next_key_press(cx: &mut TestAppCont
     click_picker_control(cx, "inspector-action-custom-shortcut-record");
     press_shifted_symbol(cx, "}");
     view.read_with(cx, |view, _| {
-        assert_eq!(view.invalid_drafts.shortcut, Some(ShiftedSymbol));
-        assert!(view.shortcut_recorder.is_none());
+        assert_eq!(picker_drafts(view).invalid.shortcut, Some(ShiftedSymbol));
+        assert!(!view.mode.is_recording());
     });
     assert_eq!(shortcut_text(cx), "Ctrl+Shift+PageUp");
 
@@ -329,7 +346,7 @@ fn record_fills_the_custom_shortcut_from_the_next_key_press(cx: &mut TestAppCont
     // key press reaches the newly focused field (#2138 review).
     click_picker_control(cx, "inspector-action-custom-shortcut-record");
     click_picker_control(cx, "inspector-action-custom-application-input");
-    view.read_with(cx, |view, _| assert!(view.shortcut_recorder.is_none()));
+    view.read_with(cx, |view, _| assert!(!view.mode.is_recording()));
     assert!(
         cx.debug_bounds("inspector-action-custom-shortcut-recording")
             .is_none()
@@ -341,11 +358,125 @@ fn record_fills_the_custom_shortcut_from_the_next_key_press(cx: &mut TestAppCont
     assert_eq!(shortcut_text(cx), "Ctrl+Shift+PageUp");
 
     click_picker_control(cx, "inspector-action-custom-shortcut-add");
-    view.read_with(cx, |view, _| assert!(!view.action_picker_open));
+    view.read_with(cx, |view, _| assert!(!picker_open(view)));
     assert_forward_binding(
         cx,
         &Action::CustomShortcut("Ctrl+Shift+PageUp".parse().unwrap()),
     );
+
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}
+
+actions!(mouse_view_test, [CloseProbe]);
+
+/// Two mice, with the mouse view recording Forward's custom shortcut, and
+/// the count of Cmd+W presses that reach `CloseProbe`, bound app-wide as the
+/// app binds closing the window: the chord a recording that outlived its
+/// picker would swallow. Callers hold `LOCALE_LOCK` in English.
+fn recording_forward(
+    cx: &mut TestAppContext,
+) -> (
+    Entity<MouseModelView>,
+    Rc<Cell<u32>>,
+    &mut VisualTestContext,
+) {
+    cx.update(gpui_kit::init);
+    let closed = Rc::new(Cell::new(0));
+    cx.update(|cx| {
+        cx.bind_keys([KeyBinding::new("cmd-w", CloseProbe, None)]);
+        let counter = closed.clone();
+        cx.on_action(move |_: &CloseProbe, _| counter.set(counter.get() + 1));
+        let resolver = AssetResolver::new();
+        let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut other = crate::state::tests::direct_inventory([0x11, 0x22, 0x33, 0x44]);
+        other.receiver.product_id = 0xb037;
+        let mice = [
+            crate::state::tests::direct_inventory([0xa3, 0x93, 0xca, 0xe0]),
+            other,
+        ];
+        let state = cx.new(|_| {
+            AppState::new(Sources {
+                inventories: &mice,
+                ..Sources::in_memory(Config::ephemeral(), &resolver, commands)
+            })
+        });
+        AppState::set_global(state, cx);
+    });
+    let (view, cx) = cx.add_window_view(MouseModelView::new);
+    cx.simulate_resize(size(px(1200.), px(1000.)));
+    // Focus events, which end a recording, only fire in an active window.
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    click_picker_control(cx, "label-card-Button(Forward)");
+    click_picker_control(cx, "inspector-current-action");
+    click_picker_control(cx, "inspector-action-custom-shortcut-record");
+    view.read_with(cx, |view, _| assert!(view.mode.is_recording()));
+    assert!(
+        cx.debug_bounds("inspector-action-custom-shortcut-recording")
+            .is_some()
+    );
+    (view, closed, cx)
+}
+
+/// Switching devices ends the editor's mode, a recording included. The
+/// other mouse has a Forward button too, so a recording that survived would
+/// keep its Record area, and the focus in it, and swallow the next Cmd+W.
+#[gpui::test]
+fn a_device_switch_ends_a_recording(cx: &mut TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    let (view, closed, cx) = recording_forward(cx);
+
+    cx.update(|_, cx| {
+        AppState::apply(cx, |state| {
+            let other = state.selected_device_index().map_or(0, |index| 1 - index);
+            state.select_device(other)
+        });
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    view.read_with(cx, |view, _| {
+        assert!(matches!(view.mode, EditorMode::Idle));
+    });
+    assert!(cx.debug_bounds("inspector-current-action").is_none());
+    cx.simulate_keystrokes("cmd-w");
+    assert_eq!(closed.get(), 1, "Cmd+W reaches its binding");
+    view.read_with(cx, |view, cx| {
+        assert_eq!(view.custom_shortcut_input.read(cx).value(), "");
+    });
+
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}
+
+/// Closing the picker, as picking an action or resetting the button does,
+/// ends its recording rather than leaving it to intercept key presses.
+#[gpui::test]
+fn closing_the_picker_ends_its_recording(cx: &mut TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    let (view, closed, cx) = recording_forward(cx);
+
+    view.update(cx, |view, cx| {
+        view.close_action_picker();
+        cx.notify();
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    view.read_with(cx, |view, _| {
+        assert!(matches!(view.mode, EditorMode::Selected(_)));
+    });
+    assert!(
+        cx.debug_bounds("inspector-action-custom-shortcut-record")
+            .is_none()
+    );
+    cx.simulate_keystrokes("cmd-w");
+    assert_eq!(closed.get(), 1, "Cmd+W reaches its binding");
 
     drop(view);
     cx.update(|window, _| window.remove_window());
@@ -358,7 +489,7 @@ fn record_fills_the_custom_shortcut_from_the_next_key_press(cx: &mut TestAppCont
 fn the_action_picker_binds_a_button_to_a_shell_command(cx: &mut TestAppContext) {
     let _locale = LOCALE_LOCK.lock().unwrap();
     rust_i18n::set_locale("en");
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     install_app_state(cx);
     let (view, cx) = cx.add_window_view(MouseModelView::new);
     cx.simulate_resize(size(px(1200.), px(1000.)));
@@ -369,9 +500,9 @@ fn the_action_picker_binds_a_button_to_a_shell_command(cx: &mut TestAppContext) 
 
     click_picker_control(cx, "inspector-action-custom-command-add");
     view.read_with(cx, |view, _| {
-        assert!(view.action_picker_open);
+        assert!(picker_open(view));
         assert_eq!(
-            view.invalid_drafts,
+            picker_drafts(view).invalid,
             InvalidDrafts {
                 command: true,
                 ..InvalidDrafts::default()
@@ -387,13 +518,13 @@ fn the_action_picker_binds_a_button_to_a_shell_command(cx: &mut TestAppContext) 
     click_picker_control(cx, "inspector-action-custom-command-input");
     cx.simulate_input("snipaste snip");
     cx.update(|window, cx| window.draw(cx).clear(cx));
-    view.read_with(cx, |view, _| assert!(!view.invalid_drafts.command));
+    view.read_with(cx, |view, _| assert!(!picker_drafts(view).invalid.command));
     assert!(
         cx.debug_bounds("inspector-action-custom-command-error")
             .is_none()
     );
     click_picker_control(cx, "inspector-action-custom-command-add");
-    view.read_with(cx, |view, _| assert!(!view.action_picker_open));
+    view.read_with(cx, |view, _| assert!(!picker_open(view)));
     assert_forward_binding(cx, &Action::RunShellCommand("snipaste snip".into()));
 
     click_picker_control(cx, "inspector-current-action");
@@ -408,13 +539,14 @@ fn the_action_picker_binds_a_button_to_a_shell_command(cx: &mut TestAppContext) 
 
 #[gpui::test]
 fn a_selected_gesture_can_render_in_the_binding_inspector(cx: &mut TestAppContext) {
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     install_app_state(cx);
     let (view, cx) = cx.add_window_view(MouseModelView::new);
     cx.run_until_parked();
 
     view.update(cx, |view, cx| {
-        view.set_gesture_selected_dir(Some(GestureDirection::Up));
+        view.select(MouseControlId::Button(ButtonId::MiddleClick));
+        view.select_gesture_direction(GestureDirection::Up);
         let gesture_maps = BTreeMap::from([(
             ButtonId::MiddleClick,
             BTreeMap::from([(
@@ -427,8 +559,7 @@ fn a_selected_gesture_can_render_in_the_binding_inspector(cx: &mut TestAppContex
 
         binding_inspector(
             BindingInspectorData {
-                selected: Some(MouseControlId::Button(ButtonId::MiddleClick)),
-                gesture_direction: Some(GestureDirection::Up),
+                selected: view.mode.selection(),
                 bindings: &bindings,
                 layout: None,
                 gesture_maps: &gesture_maps,
@@ -448,10 +579,10 @@ fn a_selected_gesture_can_render_in_the_binding_inspector(cx: &mut TestAppContex
                 shortcut_input: &view.custom_shortcut_input,
                 application_input: &view.custom_application_input,
                 command_input: &view.custom_command_input,
-                shortcut_mode: view.shortcut_mode,
+                shortcut_mode: ShortcutMode::Tap,
                 shortcut_recording: false,
                 shortcut_record_focus: &view.shortcut_record_focus,
-                invalid: view.invalid_drafts,
+                invalid: InvalidDrafts::default(),
                 view: &entity,
             },
             cx,
@@ -465,18 +596,23 @@ fn a_selected_gesture_can_render_in_the_binding_inspector(cx: &mut TestAppContex
 
 #[gpui::test]
 fn selecting_another_control_closes_the_action_picker(cx: &mut TestAppContext) {
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     install_app_state(cx);
     let (view, cx) = cx.add_window_view(MouseModelView::new);
     cx.run_until_parked();
 
     view.update(cx, |view, _| {
-        view.selected = Some(MouseControlId::Button(ButtonId::Back));
-        view.action_picker_open = true;
+        view.select(MouseControlId::Button(ButtonId::Back));
+        view.mode = mem::take(&mut view.mode).open_picker();
+        assert!(picker_open(view));
 
         view.select(MouseControlId::Button(ButtonId::Forward));
 
-        assert!(!view.action_picker_open);
+        assert!(!picker_open(view));
+        assert_eq!(
+            view.mode.control(),
+            Some(MouseControlId::Button(ButtonId::Forward))
+        );
     });
     drop(view);
     cx.update(|window, _| window.remove_window());
@@ -484,37 +620,44 @@ fn selecting_another_control_closes_the_action_picker(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn clearing_custom_action_drafts_resets_text_and_invalid_state(cx: &mut TestAppContext) {
-    cx.update(gpui_component::init);
+fn reopening_the_picker_clears_every_custom_action_draft(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
     install_app_state(cx);
     let (view, cx) = cx.add_window_view(MouseModelView::new);
     cx.run_until_parked();
+    let held = PickerDrafts {
+        shortcut_mode: ShortcutMode::Hold,
+        invalid: InvalidDrafts {
+            shortcut: Some(ShiftedSymbol),
+            application: true,
+            command: true,
+        },
+    };
 
-    cx.update(|window, cx| {
-        view.update(cx, |view, cx| {
-            view.custom_shortcut_input
-                .update(cx, |input, cx| input.set_value("Cmd+K", window, cx));
-            view.custom_application_input
-                .update(cx, |input, cx| input.set_value("/bin/true", window, cx));
-            view.custom_command_input
-                .update(cx, |input, cx| input.set_value("echo hi", window, cx));
-            view.invalid_drafts = InvalidDrafts {
-                shortcut: Some(ShiftedSymbol),
-                application: true,
-                command: true,
-            };
-            view.shortcut_mode = ShortcutMode::Hold;
+    view.update_in(cx, |view, window, cx| {
+        view.select(MouseControlId::Button(ButtonId::Forward));
+        view.open_action_picker(window, cx);
+        for (input, text) in [
+            (&view.action_search, "Copy"),
+            (&view.custom_shortcut_input, "Cmd+K"),
+            (&view.custom_application_input, "/bin/true"),
+            (&view.custom_command_input, "echo hi"),
+        ] {
+            input.update(cx, |input, cx| input.set_value(text, window, cx));
+        }
+        view.edit_picker_drafts(|drafts| *drafts = held);
+        assert_eq!(picker_drafts(view), held);
 
-            view.clear_custom_action_drafts(window, cx);
-        });
+        view.close_action_picker();
+        view.open_action_picker(window, cx);
     });
 
     view.update(cx, |view, cx| {
+        assert_eq!(view.action_search.read(cx).value(), "");
         assert_eq!(view.custom_shortcut_input.read(cx).value(), "");
         assert_eq!(view.custom_application_input.read(cx).value(), "");
         assert_eq!(view.custom_command_input.read(cx).value(), "");
-        assert_eq!(view.invalid_drafts, InvalidDrafts::default());
-        assert_eq!(view.shortcut_mode, ShortcutMode::Tap);
+        assert_eq!(picker_drafts(view), PickerDrafts::default());
     });
     drop(view);
     cx.update(|window, _| window.remove_window());
@@ -563,7 +706,7 @@ fn wheel_hold_view(
     config: Config,
     button: ButtonId,
 ) -> (Entity<MouseModelView>, &mut VisualTestContext) {
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     cx.update(|cx| {
         let resolver = AssetResolver::new();
         let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -736,7 +879,7 @@ fn a_gesture_button_offers_wheel_hold_and_leaves_gestures_for_it(cx: &mut TestAp
     config.set_gesture_mode(crate::state::tests::KNOWN_MOUSE_KEY, ButtonId::Back, true);
     let (view, cx) = wheel_hold_view(cx, true, config, ButtonId::Back);
     view.update(cx, |view, _| {
-        view.set_gesture_selected_dir(Some(GestureDirection::Up));
+        view.select_gesture_direction(GestureDirection::Up);
     });
     cx.update(|window, cx| window.draw(cx).clear(cx));
     assert!(in_gesture_mode(cx, ButtonId::Back));
@@ -752,7 +895,12 @@ fn a_gesture_button_offers_wheel_hold_and_leaves_gestures_for_it(cx: &mut TestAp
         !in_gesture_mode(cx, ButtonId::Back),
         "holding the wheel leaves gesture mode"
     );
-    view.read_with(cx, |view, _| assert_eq!(view.gesture_active_dir, None));
+    view.read_with(cx, |view, _| {
+        assert_eq!(
+            view.mode.selection().and_then(Selection::button),
+            Some((ButtonId::Back, GestureDirection::Click))
+        );
+    });
     assert!(
         cx.debug_bounds("inspector-wheel-hold-row").is_some(),
         "the single-action inspector shows the switch, now on"
@@ -797,7 +945,9 @@ fn an_inherited_gesture_button_offers_the_held_actions(cx: &mut TestAppContext) 
             state.set_editing_app(Some("com.apple.Safari".into()))
         });
     });
-    view.update(cx, |view, _| view.action_picker_open = true);
+    view.update(cx, |view, _| {
+        view.mode = mem::take(&mut view.mode).open_picker();
+    });
     cx.update(|window, cx| window.draw(cx).clear(cx));
 
     assert!(cx.debug_bounds("inspector-gesture-override-Copy").is_some());
@@ -810,11 +960,12 @@ fn an_inherited_gesture_button_offers_the_held_actions(cx: &mut TestAppContext) 
     cx.run_until_parked();
 }
 
-/// Card metrics for values whose widest measures `widest` on one line, with
-/// the card chrome and line height the default rem size gives.
+/// Card metrics for values whose widest measures `widest` on one line and
+/// splits evenly onto more, with the card chrome and line height the default
+/// rem size gives.
 fn values(widest: f32) -> ValueMetrics {
     ValueMetrics {
-        widest,
+        fit_w: [widest, widest / 2., widest / 3.],
         chrome_w: 70.,
         line_h: 22.,
     }
@@ -951,6 +1102,58 @@ fn a_value_too_long_for_the_widest_card_wraps_to_two_lines() {
     assert_cards_on_the_canvas(&layout);
 }
 
+/// The MX Master's six values in Russian with its thumb wheel on the
+/// desktop preset: "Предыдущий / следующий рабочий стол", the longest value
+/// its controls show in any shipped catalog, wraps past two lines even in the
+/// widest card the default window allows. Its card takes a third line instead
+/// of cutting the value off, and the taller cards still fit beside the model.
+#[gpui::test]
+fn the_longest_translated_value_wraps_to_three_lines(cx: &mut TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("ru");
+    let longest = tr!("pointer.previous_next_desktop");
+    let shown = [
+        tr!("actions.middle_click"),
+        tr!("actions.back_button_4"),
+        tr!("actions.forward_button_5"),
+        tr!("pointer.cycle_dpi_presets"),
+        tr!("actions.five_directions"),
+        longest.clone(),
+    ];
+    let cx = cx.add_empty_window();
+    let (layout, lines_needed) = cx.update(|window, _| {
+        let values = ValueMetrics::measure(shown, window);
+        let layout = model_layout(None, None, DEFAULT_ROOM, 1256., true, values);
+        // How the value text wraps the longest value at the card's width.
+        let wrapped = window
+            .text_system()
+            .shape_text(
+                longest.clone(),
+                px(15.),
+                &[window.text_style().to_run(longest.len())],
+                Some(px(layout.card.w - values.chrome_w)),
+                None,
+            )
+            .expect("the value shapes");
+        let lines: usize = wrapped
+            .iter()
+            .map(|line| line.wrap_boundaries().len() + 1)
+            .sum();
+        (layout, lines)
+    });
+    rust_i18n::set_locale("en");
+
+    assert_eq!(lines_needed, 3, "the value no longer needs a third line");
+    assert_eq!(layout.card.value_lines, 3, "{:?}", layout.card);
+    assert_eq!(layout.labels.len(), 6);
+    assert!(
+        layout.canvas_h <= DEFAULT_ROOM.height + 0.01,
+        "{}",
+        layout.canvas_h
+    );
+    assert_cards_on_the_canvas(&layout);
+}
+
 /// The mouse view below chrome taller than the fixed reserve it used to
 /// assume, as the app's header, profile bar and status line together are.
 struct UnderChrome {
@@ -970,7 +1173,7 @@ impl Render for UnderChrome {
 fn the_model_and_full_values_fit_the_canvas_area_below_the_chrome(cx: &mut TestAppContext) {
     let _locale = LOCALE_LOCK.lock().unwrap();
     rust_i18n::set_locale("en");
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     install_app_state(cx);
     let (view, cx) = cx.add_window_view(|window, cx| UnderChrome {
         model: cx.new(|cx| MouseModelView::new(window, cx)),
@@ -1026,7 +1229,7 @@ fn check_gaming_side_buttons(cx: &mut TestAppContext, model_id: u16, gestures: b
 
     let _locale = LOCALE_LOCK.lock().unwrap();
     rust_i18n::set_locale("en");
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     cx.update(|cx| {
         let resolver = AssetResolver::new();
         let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();

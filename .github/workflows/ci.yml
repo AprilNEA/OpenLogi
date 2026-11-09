@@ -25,17 +25,37 @@ env:
   # 10 GB allowance. Let PRs reuse master's compiler objects without filling
   # the cache with entries no other PR can read.
   SCCACHE_GHA_RW_MODE: ${{ (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main') && 'READ_WRITE' || 'READ_ONLY' }}
+  # Cargo never deletes a stale artifact, so a cached target/ only grows. The
+  # cache-volume jobs empty it past this size: the volume is the default
+  # 20 GB, and it also holds about 2 GB of registry and git sources plus up to
+  # 6 GB that one cold build adds.
+  CACHED_TARGET_LIMIT_MB: 10240
 
+# Runners: every job runs on Namespace (namespace.so), which sponsors
+# OpenLogi's CI. Labels pick the shape: 2x4 for jobs that compile nothing,
+# 8x16 for the Linux and Windows compile jobs (8x32 for Linux clippy and
+# MSRV, which need the memory), 6x14 for macOS. Namespace has no Intel Macs,
+# so the macOS x86_64 tests run on Apple Silicon under Rosetta 2.
+#
 # Cache policy:
-# - rust-cache keeps Cargo's registry/git inputs only; caching target/ produced
-#   0.8-1.4 GB archives whose transfer often cost more than the cache saved.
+# - The Linux compile jobs (clippy, MSRV, rustdoc, tests) each attach their own
+#   Namespace cache volume, tagged per job because a shared one would be
+#   overwritten by whichever job finished last. nscloud-cache-action keeps
+#   Cargo's registry, git sources and target/ on it, so unchanged dependencies
+#   are fresh and never reach rustc. Only a push to master commits the volume:
+#   every other run gets nscloud-cache-exp-do-not-commit, because a fork's PR
+#   branch can be called master too.
+# - rust-cache keeps Cargo's registry/git inputs only for the other jobs;
+#   caching target/ through the GitHub cache produced 0.8-1.4 GB archives
+#   whose transfer often cost more than the cache saved. publish closure and
+#   wasm still save the linux-stable-debug key that stale-allows.yml restores.
 # - sccache stores compiler outputs individually, so jobs fetch only objects
 #   they need and can share unchanged dependencies across Cargo commands.
 # - only master/main writes CI caches; PR-scoped entries cannot warm other PRs.
 jobs:
   fmt:
     name: rustfmt
-    runs-on: ubuntu-latest
+    runs-on: nscloud-ubuntu-24.04-amd64-2x4
     permissions:
       contents: read
     outputs:
@@ -82,7 +102,7 @@ jobs:
 
   typos:
     name: typos
-    runs-on: ubuntu-latest
+    runs-on: nscloud-ubuntu-24.04-amd64-2x4
     steps:
       - uses: actions/checkout@v7
       - uses: crate-ci/typos@8a48f81b6c64dcfea44b3633223084c4be58ac5f # v1.49.0
@@ -93,7 +113,7 @@ jobs:
   # that owns a decision and fails on its ingredients anywhere else.
   ast-grep:
     name: ast-grep
-    runs-on: ubuntu-latest
+    runs-on: nscloud-ubuntu-24.04-amd64-2x4
     steps:
       - uses: actions/checkout@v7
       - uses: ast-grep/action@370e627637505696e4365db4a149af9f2311afe8 # v1.4
@@ -106,7 +126,7 @@ jobs:
 
   publish-closure:
     name: publish closure
-    runs-on: ubuntu-latest
+    runs-on: nscloud-ubuntu-24.04-amd64-8x16
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -128,7 +148,7 @@ jobs:
   # printer flag here would silently discard that file.
   shell:
     name: shell
-    runs-on: ubuntu-latest
+    runs-on: nscloud-ubuntu-24.04-amd64-2x4
     steps:
       - uses: actions/checkout@v7
       - uses: taiki-e/install-action@v2
@@ -143,7 +163,11 @@ jobs:
 
   clippy:
     name: clippy
-    runs-on: ubuntu-latest
+    # Peaked at 86% of 16 GB on 8x16, the most of any Linux job in this file.
+    runs-on:
+      - nscloud-ubuntu-24.04-amd64-8x32-with-cache
+      - nscloud-cache-tag-openlogi-clippy
+      - ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' && 'nscloud-cache-allow-commit-from-master' || 'nscloud-cache-exp-do-not-commit' }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -152,12 +176,11 @@ jobs:
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: "v0.16.0"
-      - uses: Swatinem/rust-cache@v2
+      - uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9 # v1.7.0
         with:
-          prefix-key: v2-cargo
-          shared-key: linux-stable-debug
-          cache-targets: false
-          save-if: ${{ github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main' }}
+          cache: rust
+      - name: Bound the cached target directory
+        run: if [ "$(du -sm target | cut -f1)" -gt "$CACHED_TARGET_LIMIT_MB" ]; then find target -mindepth 1 -delete; fi
       - run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -176,7 +199,7 @@ jobs:
   # too-new stabilization on the other side.
   msrv:
     name: MSRV (cargo check, ${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
     env:
       # `rust-toolchain.toml` pins the channel to `stable`, and rustup honours
       # that file over whatever toolchain this job installs — so for its whole
@@ -187,17 +210,25 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-latest]
+        include:
+          - os: macos
+            runner: nscloud-macos-tahoe-arm64-6x14
+          # 32 GB: on 8x16 a rustc in this check was killed by signal 9.
+          - os: linux
+            runner:
+              - nscloud-ubuntu-24.04-amd64-8x32-with-cache
+              - nscloud-cache-tag-openlogi-msrv-linux
+              - ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' && 'nscloud-cache-allow-commit-from-master' || 'nscloud-cache-exp-do-not-commit' }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.99
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: "v0.16.0"
-      - uses: Swatinem/rust-cache@v2
+      - if: runner.os == 'macOS'
+        uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v2-cargo
-          # Host OS splits Linux vs macOS; the rustc version is already in the key.
           shared-key: msrv-debug
           cache-targets: false
           save-if: ${{ github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main' }}
@@ -209,6 +240,13 @@ jobs:
             gcc g++ clang libfontconfig-dev libwayland-dev \
             libxkbcommon-x11-dev libx11-xcb-dev \
             libssl-dev libzstd-dev pkg-config
+      - if: runner.os == 'Linux'
+        uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9 # v1.7.0
+        with:
+          cache: rust
+      - if: runner.os == 'Linux'
+        name: Bound the cached target directory
+        run: if [ "$(du -sm target | cut -f1)" -gt "$CACHED_TARGET_LIMIT_MB" ]; then find target -mindepth 1 -delete; fi
       - run: cargo check --workspace --all-targets
 
   # Stable Linux typecheck is covered by `clippy` above (clippy subsumes
@@ -217,21 +255,21 @@ jobs:
 
   docs:
     name: rustdoc (non-GUI crates)
-    runs-on: ubuntu-latest
+    runs-on:
+      - nscloud-ubuntu-24.04-amd64-8x16-with-cache
+      - nscloud-cache-tag-openlogi-rustdoc
+      - ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' && 'nscloud-cache-allow-commit-from-master' || 'nscloud-cache-exp-do-not-commit' }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: "v0.16.0"
-      - uses: Swatinem/rust-cache@v2
+      - uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9 # v1.7.0
         with:
-          prefix-key: v2-cargo
-          # Share debug deps with clippy/test-linux; RUSTDOCFLAGS is step-scoped
-          # below so it does not fork the rust-cache env hash.
-          shared-key: linux-stable-debug
-          cache-targets: false
-          save-if: ${{ github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main' }}
+          cache: rust
+      - name: Bound the cached target directory
+        run: if [ "$(du -sm target | cut -f1)" -gt "$CACHED_TARGET_LIMIT_MB" ]; then find target -mindepth 1 -delete; fi
       - run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -261,19 +299,21 @@ jobs:
     # A formatting failure must not suppress tests after successful path detection.
     if: ${{ !cancelled() && needs.fmt.outputs.tests == 'true' }}
     name: tests (linux)
-    runs-on: ubuntu-latest
+    runs-on:
+      - nscloud-ubuntu-24.04-amd64-8x16-with-cache
+      - nscloud-cache-tag-openlogi-tests-linux
+      - ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' && 'nscloud-cache-allow-commit-from-master' || 'nscloud-cache-exp-do-not-commit' }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: "v0.16.0"
-      - uses: Swatinem/rust-cache@v2
+      - uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9 # v1.7.0
         with:
-          prefix-key: v2-cargo
-          shared-key: linux-stable-debug
-          cache-targets: false
-          save-if: ${{ github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main' }}
+          cache: rust
+      - name: Bound the cached target directory
+        run: if [ "$(du -sm target | cut -f1)" -gt "$CACHED_TARGET_LIMIT_MB" ]; then find target -mindepth 1 -delete; fi
       - run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -288,31 +328,45 @@ jobs:
     # A formatting failure must not suppress tests after successful path detection.
     if: ${{ !cancelled() && needs.fmt.outputs.tests == 'true' }}
     name: tests (macos, ${{ matrix.arch }})
-    runs-on: ${{ matrix.runner }}
+    runs-on: nscloud-macos-tahoe-arm64-6x14
     strategy:
       fail-fast: false
       matrix:
+        # Namespace has no Intel Macs. The x86_64 leg cross-compiles on Apple
+        # Silicon, as build.yml does for the Intel DMG, and Rosetta 2 runs the
+        # x86_64 test binaries. Cargo builds proc-macro tests for the host.
         include:
           - arch: arm64
-            runner: macos-latest
           - arch: x86_64
-            runner: macos-15-intel
+            target: x86_64-apple-darwin
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: "v0.16.0"
       - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v2-cargo
-          # Host triple already splits arm64 vs x86_64 in the final cache key.
+          # Both legs run on the same arm64 host, and Cargo's registry/git
+          # inputs do not depend on the target triple.
           shared-key: macos-stable-debug
           cache-targets: false
           save-if: ${{ github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main' }}
-      - name: Verify runner architecture
-        run: test "$(uname -m)" = "${{ matrix.arch }}"
-      - run: cargo test --workspace --all-targets
+      # Fails here, not halfway through the suite, when x86_64 code cannot run.
+      - name: Ensure Rosetta 2
+        if: ${{ matrix.target }}
+        run: |
+          if ! /usr/bin/arch -x86_64 /usr/bin/true 2>/dev/null; then
+            sudo softwareupdate --install-rosetta --agree-to-license
+          fi
+          /usr/bin/arch -x86_64 /usr/bin/true
+      - if: ${{ !matrix.target }}
+        run: cargo test --workspace --all-targets
+      - if: ${{ matrix.target }}
+        run: cargo test --workspace --all-targets --target ${{ matrix.target }}
 
   # Runs the workspace's tests on Windows — including the `cfg(windows)` ones,
   # which `clippy (windows)` only compiles and no other host can execute. The
@@ -322,7 +376,7 @@ jobs:
     # A formatting failure must not suppress tests after successful path detection.
     if: ${{ !cancelled() && needs.fmt.outputs.tests == 'true' }}
     name: tests (windows)
-    runs-on: windows-latest
+    runs-on: nscloud-windows-2022-amd64-8x16
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -339,7 +393,7 @@ jobs:
 
   cargo-deny:
     name: cargo-deny
-    runs-on: ubuntu-latest
+    runs-on: nscloud-ubuntu-24.04-amd64-2x4
     env:
       # cargo-deny calls `rustc -vV` through cargo metadata but does not compile.
       # This job deliberately skips the sccache setup used by compilation jobs.
@@ -362,7 +416,7 @@ jobs:
 
   clippy-windows:
     name: clippy (windows)
-    runs-on: windows-latest
+    runs-on: nscloud-windows-2022-amd64-8x16
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -392,7 +446,7 @@ jobs:
   # a hook can be skipped. Same cache key as `tests (macos)`.
   clippy-macos:
     name: clippy (macos)
-    runs-on: macos-latest
+    runs-on: nscloud-macos-tahoe-arm64-6x14
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -411,7 +465,7 @@ jobs:
 
   wasm:
     name: wasm (portable crates)
-    runs-on: ubuntu-latest
+    runs-on: nscloud-ubuntu-24.04-amd64-8x16
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -464,7 +518,7 @@ jobs:
       - clippy-windows
       - clippy-macos
       - wasm
-    runs-on: ubuntu-latest
+    runs-on: nscloud-ubuntu-24.04-amd64-2x4
     permissions: {}
     steps:
       - name: Summarize

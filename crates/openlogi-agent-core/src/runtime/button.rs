@@ -365,6 +365,7 @@ enum ButtonCommand {
     Input { generation: u64, input: ButtonInput },
     CancelStalePress(PressToken),
     CancelSource(ButtonSource),
+    CancelGKeys(ButtonSource),
     CancelHooks,
     CancelPointerExcept(openlogi_hook::PointerTarget),
     Wake,
@@ -411,6 +412,15 @@ impl ButtonState {
 
     fn cancel_source(&mut self, source: &ButtonSource) -> Vec<ActivePress> {
         self.cancel_where(|key| key.source == *source)
+    }
+
+    /// The G-key presses `source` holds: they belong to the M profile that
+    /// was active when they went down, and another profile's release must
+    /// not end them. The source's other presses keep running.
+    fn cancel_g_keys(&mut self, source: &ButtonSource) -> Vec<ActivePress> {
+        self.cancel_where(|key| {
+            key.source == *source && matches!(key.control, PressControl::Button(ButtonId::GKey(_)))
+        })
     }
 
     fn cancel_hooks(&mut self) -> Vec<ActivePress> {
@@ -638,6 +648,13 @@ impl ButtonInputHandle {
 
     pub(crate) fn cancel_hidpp_session(&self, session: &HidppSessionId) {
         self.try_command(ButtonCommand::CancelSource(ButtonSource::Hidpp(
+            session.clone(),
+        )));
+    }
+
+    /// End the G-key presses `session` holds, leaving its other keys down.
+    pub(crate) fn cancel_hidpp_g_keys(&self, session: &HidppSessionId) {
+        self.try_command(ButtonCommand::CancelGKeys(ButtonSource::Hidpp(
             session.clone(),
         )));
     }

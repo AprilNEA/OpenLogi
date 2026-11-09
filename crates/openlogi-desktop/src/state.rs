@@ -29,13 +29,20 @@ pub use config::ConfigPersistence;
 pub(crate) use device_key::DeviceKey;
 pub(crate) use device_session::ObservedConnection;
 pub use devices::DeviceRecord;
+/// For test fixtures that build a record by hand.
+#[cfg(test)]
+pub(crate) use devices::{Link, Presence};
 pub(crate) use easy_switch::HostRenameRefusal;
 pub(crate) use events::{StateEvent, StateEvents};
+pub(crate) use flow::{
+    FlowDeviceRow, FlowHealth, FlowHost, FlowIssue, FlowPairingRefusal, FlowReadiness,
+};
+pub(crate) use gaming_keys::GamingKeys;
 pub use light::LightCommandStatus;
 pub(crate) use load::Load;
 pub use load::{
     BacklightLoad, DisableKeysLoad, DpiLoad, EasySwitchLoad, FnLockLoad, ForceSensingLoad,
-    OnboardLoad, PointerSpeedLoad, ReportRateLoad, SmartShiftLoad,
+    OnboardLoad, PointerSpeedLoad, ReportRateLoad, SidetoneLoad, SmartShiftLoad,
 };
 
 /// Result of confirming a SmartShift write by reading the value back.
@@ -84,8 +91,11 @@ mod disable_keys;
 mod dpi;
 mod easy_switch;
 mod events;
+mod flow;
 mod fn_lock;
 mod force_sensing;
+mod gaming_keys;
+mod host_switch;
 mod inventory;
 mod light;
 mod lighting;
@@ -98,6 +108,7 @@ mod reconciliation;
 mod report_rate;
 mod scroll;
 mod settings;
+mod sidetone;
 mod smartshift;
 
 #[cfg(test)]
@@ -179,12 +190,6 @@ pub enum AgentLink {
     Ready(openlogi_ipc::AgentStatus),
 }
 
-/// Inventory snapshots can briefly miss a real device while another HID++
-/// request is in flight. Keep the previous record through this many
-/// consecutive misses so a transient probe timeout does not make the device card
-/// disappear mid-interaction.
-const INVENTORY_MISS_GRACE: u8 = 2;
-
 pub struct AppState {
     /// Live configuration and its last persisted rollback point.
     config: ConfigState,
@@ -254,6 +259,7 @@ impl AppState {
             state.load_current_fn_lock(cx);
             state.load_current_report_rate(cx);
             state.load_current_pointer_speed(cx);
+            state.load_current_sidetone(cx);
             state.load_current_force_sensing(cx);
             state.load_current_backlight(cx);
             state.load_current_easy_switch(cx);

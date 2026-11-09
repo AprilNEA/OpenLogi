@@ -3,7 +3,8 @@ use std::sync::{Mutex, PoisonError};
 use hidpp::feature::extended_dpi::{Lod, SensorCapabilities};
 
 use super::*;
-use crate::channel::scripted::{ScriptedRawHidChannel, scripted_channel};
+use crate::channel::scripted::{ScriptedRawHidChannel, feature_error, scripted_channel};
+use crate::write::HidppFeatureErrorKind;
 
 const ADJUSTABLE_INDEX: u8 = 0x04;
 const GET_DPI_LIST: u8 = 1;
@@ -17,6 +18,11 @@ const GET_RANGES: u8 = 2;
 const GET_PARAMETERS: u8 = 5;
 const SET_PARAMETERS: u8 = 6;
 
+/// HID++ 2.0 `InvalidArgument`.
+const INVALID_ARGUMENT: u8 = 0x02;
+/// HID++ 2.0 `Busy`.
+const BUSY: u8 = 0x08;
+
 /// The firmware side of a scripted DPI feature.
 trait Sensor: Send + 'static {
     /// HID++ feature ID the sensor's feature lookup answers for.
@@ -27,6 +33,12 @@ trait Sensor: Send + 'static {
     /// Feature version that lookup reports.
     fn version(&self) -> u8 {
         0
+    }
+
+    /// The HID++ 2.0 error code the sensor answers `request` with instead of
+    /// a payload, if any.
+    fn rejects(&self, _request: &[u8]) -> Option<u8> {
+        None
     }
 
     /// The payload answering one request to [`Self::INDEX`].
@@ -74,6 +86,35 @@ impl Sensor for AdjustableSensor {
             _ => return None,
         }
         Some(payload)
+    }
+}
+
+/// An [`AdjustableSensor`] that answers one `0x2201` function with a HID++
+/// 2.0 error. The G602 (wpid `402c`) answers `getSensorDpiList` with
+/// `InvalidArgument`.
+#[derive(Clone, Copy)]
+struct RejectingSensor {
+    sensor: AdjustableSensor,
+    /// The function the sensor rejects.
+    function: u8,
+    /// The HID++ 2.0 error code it answers that function with.
+    error: u8,
+}
+
+impl Sensor for RejectingSensor {
+    const FEATURE_ID: u16 = AdjustableSensor::FEATURE_ID;
+    const INDEX: u8 = AdjustableSensor::INDEX;
+
+    fn version(&self) -> u8 {
+        self.sensor.version()
+    }
+
+    fn rejects(&self, request: &[u8]) -> Option<u8> {
+        (request[3] >> 4 == self.function).then_some(self.error)
+    }
+
+    fn respond(&mut self, request: &[u8]) -> Option<[u8; 16]> {
+        self.sensor.respond(request)
     }
 }
 
@@ -141,7 +182,8 @@ impl Sensor for ExtendedSensor {
 }
 
 /// Answer the root ping and feature lookup, and hand everything addressed to
-/// the sensor's feature index to the sensor.
+/// the sensor's feature index to the sensor, as a HID++ 2.0 error when the
+/// sensor rejects it.
 fn respond<S: Sensor>(sensor: &mut S, request: &[u8]) -> Option<Vec<u8>> {
     let mut payload = [0u8; 16];
     match (request[2], request[3] >> 4) {
@@ -153,7 +195,12 @@ fn respond<S: Sensor>(sensor: &mut S, request: &[u8]) -> Option<Vec<u8>> {
                 payload[2] = sensor.version();
             }
         }
-        (index, _) if index == S::INDEX => payload = sensor.respond(request)?,
+        (index, _) if index == S::INDEX => {
+            if let Some(error) = sensor.rejects(request) {
+                return Some(feature_error(request, error));
+            }
+            payload = sensor.respond(request)?;
+        }
         _ => return None,
     }
     let mut response = vec![0u8; 20];
@@ -455,4 +502,49 @@ async fn the_default_target_takes_the_feature_version_from_the_feature_table()
         );
     }
     Ok(())
+}
+
+/// The sensor every [`RejectingSensor`] case wraps.
+const LISTING_SENSOR: AdjustableSensor = AdjustableSensor {
+    version: 1,
+    current: 800,
+    default: 800,
+    stuck_at: None,
+};
+
+#[tokio::test]
+async fn a_dpi_read_the_device_rejects_as_an_invalid_argument_is_unsupported() {
+    for function in [GET_SENSOR_COUNT, GET_DPI, GET_DPI_LIST] {
+        let harness = Harness::new(RejectingSensor {
+            sensor: LISTING_SENSOR,
+            function,
+            error: INVALID_ARGUMENT,
+        })
+        .await;
+        assert_eq!(
+            get_dpi_info_on(&harness.shared).await,
+            Err(WriteError::FeatureUnsupported {
+                feature_hex: 0x2201
+            }),
+            "function {function}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_busy_dpi_list_read_stays_transient() {
+    let harness = Harness::new(RejectingSensor {
+        sensor: LISTING_SENSOR,
+        function: GET_DPI_LIST,
+        error: BUSY,
+    })
+    .await;
+    assert_eq!(
+        get_dpi_info_on(&harness.shared).await,
+        Err(WriteError::HidppFeature {
+            operation: HidppOperation::ReadDpiCapabilities,
+            feature_hex: 0x2201,
+            kind: HidppFeatureErrorKind::Busy,
+        })
+    );
 }

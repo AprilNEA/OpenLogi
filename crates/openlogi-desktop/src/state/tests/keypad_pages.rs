@@ -122,7 +122,7 @@ fn offline_numpad_state(route_key: &str) -> AppState {
 fn an_unplugged_keypad_is_still_the_keypad() {
     let state = offline_numpad_state("direct:046d:c354");
     let record = state.current_record().unwrap();
-    assert!(!record.online);
+    assert!(!record.is_online());
     assert_eq!(record.route, None);
     assert_eq!(
         state.current_keypad().map(|keypad| keypad.name),

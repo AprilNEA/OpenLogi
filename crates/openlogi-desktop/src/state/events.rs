@@ -57,6 +57,8 @@ pub(crate) enum StateEvent {
     ReportRateChanged(DeviceKey),
     /// The mouse's pointer-speed read landed or changed.
     PointerSpeedChanged(DeviceKey),
+    /// The headset's sidetone read landed or changed.
+    SidetoneChanged(DeviceKey),
     /// The device's press-force read landed or changed.
     ForceSensingChanged(DeviceKey),
     /// The keyboard's backlight read landed or changed.
@@ -84,6 +86,8 @@ pub(crate) enum StateEvent {
     DeviceConfigChanged(DeviceKey),
     /// Application-wide preferences changed.
     SettingsChanged,
+    /// The `[flow]` configuration or a peer's link state changed.
+    FlowChanged,
     /// The interface language switched live. Views re-render localized strings
     /// on the accompanying refresh; this event is for localized text *cached
     /// in state*, which must be recomputed in the new locale.
@@ -101,6 +105,7 @@ impl StateEvent {
             | Self::FnLockChanged(key)
             | Self::ReportRateChanged(key)
             | Self::PointerSpeedChanged(key)
+            | Self::SidetoneChanged(key)
             | Self::ForceSensingChanged(key)
             | Self::BacklightChanged(key)
             | Self::EasySwitchChanged(key)
@@ -117,6 +122,7 @@ impl StateEvent {
             | Self::CameraChanged
             | Self::CameraPermissionChanged
             | Self::SettingsChanged
+            | Self::FlowChanged
             | Self::LanguageChanged => None,
         }
     }
@@ -162,9 +168,15 @@ impl StateEvents {
     pub(crate) fn emit(self, cx: &mut Context<AppState>) {
         for event in self.0 {
             let language_changed = event == StateEvent::LanguageChanged;
+            let agent_changed = event == StateEvent::AgentChanged;
             cx.emit(event);
             if language_changed {
                 relocalize_windows(cx);
+            } else if agent_changed {
+                // The menu bar's Add Device follows the agent link. Deferred
+                // like `relocalize_windows`: the menu reads this entity,
+                // whose lease is still held here.
+                cx.defer(crate::app::menu::rebuild);
             }
         }
     }
@@ -254,6 +266,7 @@ impl AppState {
             | StateEvent::FnLockChanged(_)
             | StateEvent::ReportRateChanged(_)
             | StateEvent::PointerSpeedChanged(_)
+            | StateEvent::SidetoneChanged(_)
             | StateEvent::ForceSensingChanged(_)
             | StateEvent::BacklightChanged(_)
             | StateEvent::EasySwitchChanged(_)
@@ -264,6 +277,7 @@ impl AppState {
             | StateEvent::CameraPermissionChanged
             | StateEvent::DeviceConfigChanged(_)
             | StateEvent::SettingsChanged
+            | StateEvent::FlowChanged
             | StateEvent::LanguageChanged => {
                 topic(event) && event.device().is_none_or(|key| self.is_current_device(key))
             }

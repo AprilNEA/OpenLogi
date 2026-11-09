@@ -137,64 +137,89 @@ mod capability_bits {
 /// Which `/dev/input` nodes count, over fixture sysfs attributes — the shape of
 /// #1959's report: the receiver's mouse node carries a `uaccess` ACL, and the
 /// agent's pass-through mouse, which mirrors that mouse's vendor and
-/// capabilities, does not.
+/// capabilities, does not. And #2365's: an MX Keys node that clicks and moves,
+/// which udev does not classify as a mouse, so the rules leave it root-owned.
 mod event_node_selection {
     use std::io::ErrorKind;
 
     use openlogi_core::uinput::Device;
 
-    use crate::linux::{EventProbe, classify_event_nodes};
+    use crate::linux::{EventNodes, EventProbe, UdevMouse, classify_event_nodes};
 
     const MOUSE_REL: &str = "1943\n";
     const MOUSE_KEY: &str = "ffff0000 0 0 0 0\n";
 
-    /// One fixture node: its `/dev/input` name, sysfs `device/name`, and
-    /// whether `open()` succeeds.
+    /// One fixture node: its `/dev/input` name, sysfs `device/name`, udev's
+    /// classification, and whether `open()` succeeds.
+    #[derive(Clone, Copy)]
     struct Node {
         entry: &'static str,
         name: &'static str,
+        udev: UdevMouse,
         readable: bool,
     }
 
-    /// Every node is a Logitech mouse by vendor and capabilities; only the name
-    /// and the access differ.
-    fn classify(nodes: &[Node]) -> EventProbe {
-        let find = |node: &str| {
-            nodes
+    /// Every node is a Logitech mouse by vendor and capabilities; only the
+    /// name, udev's classification and the access differ.
+    struct Fixture<'a>(&'a [Node]);
+
+    impl Fixture<'_> {
+        fn find(&self, node: &str) -> Node {
+            *self
+                .0
                 .iter()
                 .find(|n| n.entry == node)
                 .expect("fixture node")
-        };
-        classify_event_nodes(
-            nodes.iter().map(|n| n.entry),
-            |node, attr| {
-                let value = match attr {
-                    "name" => format!("{}\n", find(node).name),
-                    "id/vendor" => "046d\n".to_owned(),
-                    "capabilities/rel" => MOUSE_REL.to_owned(),
-                    "capabilities/key" => MOUSE_KEY.to_owned(),
-                    _ => return None,
-                };
-                Some(value)
-            },
-            |node| {
-                if find(node).readable {
-                    Ok(())
-                } else {
-                    Err(ErrorKind::PermissionDenied)
-                }
-            },
-        )
+        }
+    }
+
+    impl EventNodes for Fixture<'_> {
+        fn attr(&self, node: &str, attr: &str) -> Option<String> {
+            let value = match attr {
+                "name" => format!("{}\n", self.find(node).name),
+                "id/vendor" => "046d\n".to_owned(),
+                "capabilities/rel" => MOUSE_REL.to_owned(),
+                "capabilities/key" => MOUSE_KEY.to_owned(),
+                _ => return None,
+            };
+            Some(value)
+        }
+
+        fn udev_mouse(&self, node: &str) -> UdevMouse {
+            self.find(node).udev
+        }
+
+        fn open(&self, node: &str) -> Result<(), ErrorKind> {
+            if self.find(node).readable {
+                Ok(())
+            } else {
+                Err(ErrorKind::PermissionDenied)
+            }
+        }
+    }
+
+    fn classify(nodes: &[Node]) -> EventProbe {
+        classify_event_nodes(nodes.iter().map(|n| n.entry), &Fixture(nodes))
     }
 
     const PHYSICAL: Node = Node {
         entry: "event7",
         name: "Logitech USB Receiver Mouse",
+        udev: UdevMouse::Mouse,
         readable: true,
     };
     const PASS_THROUGH: Node = Node {
         entry: "event31",
         name: Device::PassThroughMouse.name(),
+        udev: UdevMouse::Mouse,
+        readable: false,
+    };
+    /// An MX Keys on a Unifying receiver: its node reports `REL_X`, `REL_Y`
+    /// and `BTN_LEFT`, and systemd's hwdb sets `ID_INPUT_MOUSE=0` for it.
+    const MX_KEYS: Node = Node {
+        entry: "event3",
+        name: "Logitech MX Keys",
+        udev: UdevMouse::NotMouse,
         readable: false,
     };
 
@@ -206,12 +231,32 @@ mod event_node_selection {
     }
 
     #[test]
+    fn a_keyboard_udev_does_not_call_a_mouse_is_ignored() {
+        assert_eq!(classify(&[MX_KEYS, PHYSICAL]), EventProbe::Readable);
+        assert_eq!(classify(&[MX_KEYS]), EventProbe::NonePresent);
+    }
+
+    /// Without udev's database the capability test decides alone, so a denied
+    /// node still reports `Denied` there.
+    #[test]
+    fn an_unrecorded_node_still_counts() {
+        let unrecorded = Node {
+            udev: UdevMouse::Unrecorded,
+            ..MX_KEYS
+        };
+        assert_eq!(classify(&[unrecorded, PHYSICAL]), EventProbe::Denied);
+    }
+
+    #[test]
     fn an_unreadable_physical_mouse_is_still_denied() {
         let denied = Node {
             readable: false,
             ..PHYSICAL
         };
-        assert_eq!(classify(&[denied, PASS_THROUGH]), EventProbe::Denied);
+        assert_eq!(
+            classify(&[denied, PASS_THROUGH, MX_KEYS]),
+            EventProbe::Denied
+        );
     }
 
     #[test]
@@ -229,6 +274,55 @@ mod event_node_selection {
             ..PHYSICAL
         };
         assert_eq!(classify(&[PHYSICAL, mouse0]), EventProbe::Readable);
+    }
+}
+
+/// udev database records, trimmed to the lines that matter, in the format
+/// `/run/udev/data/c13:<minor>` holds them.
+mod udev_records {
+    use crate::linux::UdevMouse;
+
+    /// A Logitech mouse node behind a Unifying receiver.
+    const MOUSE: &str = "I:4211732\n\
+                         E:ID_INPUT=1\n\
+                         E:ID_INPUT_MOUSE=1\n\
+                         E:ID_BUS=usb\n\
+                         G:uaccess\n\
+                         G:seat\n";
+
+    /// The MX Keys after systemd's hwdb override: a keyboard, not a mouse.
+    const MX_KEYS: &str = "I:4211740\n\
+                           E:ID_INPUT=1\n\
+                           E:ID_INPUT_KEY=1\n\
+                           E:ID_INPUT_KEYBOARD=1\n\
+                           E:ID_INPUT_MOUSE=0\n\
+                           E:ID_BUS=usb\n\
+                           G:seat\n";
+
+    #[test]
+    fn a_mouse_record_is_a_mouse() {
+        assert_eq!(UdevMouse::from_record(MOUSE), UdevMouse::Mouse);
+    }
+
+    #[test]
+    fn an_overridden_keyboard_is_not_a_mouse() {
+        assert_eq!(UdevMouse::from_record(MX_KEYS), UdevMouse::NotMouse);
+    }
+
+    /// `input_id` leaves the property out entirely for a node it does not
+    /// call a mouse, and a longer name that merely starts with it is another
+    /// property.
+    #[test]
+    fn a_record_without_the_property_is_not_a_mouse() {
+        assert_eq!(
+            UdevMouse::from_record("E:ID_INPUT=1\nE:ID_INPUT_KEYBOARD=1\n"),
+            UdevMouse::NotMouse
+        );
+        assert_eq!(
+            UdevMouse::from_record("E:ID_INPUT_MOUSE_DPI=1\n"),
+            UdevMouse::NotMouse
+        );
+        assert_eq!(UdevMouse::from_record(""), UdevMouse::NotMouse);
     }
 }
 

@@ -380,6 +380,46 @@ pub fn is_pairing_identity_traffic(report: &[u8]) -> bool {
     is_pairing_report(report)
 }
 
+/// One request a recorded channel sent, with the incoming report the channel
+/// matched to it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RecordedRequestReports<'a> {
+    /// The outgoing request report.
+    pub request: &'a [u8],
+    /// The one incoming report matched to the request, or `None` when the
+    /// channel matched none or more than one.
+    pub answer: Option<&'a [u8]>,
+}
+
+impl RecordedRequestReports<'_> {
+    /// Whether `report`, an incoming report the channel matched to no request,
+    /// could still be the device's answer to this request.
+    ///
+    /// When it could, the answer recorded for this request may belong to
+    /// another sender, so the recording proves nothing about this exchange.
+    /// When it could not, the report is input nobody in the recording asked
+    /// for: a notification, or another host driver's traffic on the shared
+    /// node. Linux's hid-logitech-dj and hid-logitech-hidpp drive receivers
+    /// through the same hidraw node, so their requests' replies reach every
+    /// reader.
+    ///
+    /// A report cannot answer a request when its correlation header differs,
+    /// when it repeats the recorded answer byte for byte (whichever copy the
+    /// channel matched, the exchange is the same), or when it is a Root ping
+    /// reply echoing data this ping did not send. Framing this module cannot
+    /// read fails closed: such a report may answer.
+    #[must_use]
+    pub fn may_be_answered_by(&self, report: &[u8]) -> bool {
+        if validate_report(self.request).is_err() || validate_report(report).is_err() {
+            return true;
+        }
+        if !correlates(self.request, report) || self.answer == Some(report) {
+            return false;
+        }
+        !echoes_another_ping(self.request, report)
+    }
+}
+
 fn field(kind: SyntheticIdentityKind, range: Range<usize>) -> ProtocolIdentityField {
     ProtocolIdentityField { kind, range }
 }
@@ -450,6 +490,31 @@ fn validate_hidpp20_correlation(
     (normal || error)
         .then_some(())
         .ok_or(ProtocolIdentityError::CorrelationMismatch)
+}
+
+/// Whether `report` correlates with `request` under either protocol version.
+///
+/// An unmatched report's version is unknown, so both readings count.
+fn correlates(request: &[u8], report: &[u8]) -> bool {
+    validate_hidpp10_correlation(request, report).is_ok()
+        || validate_hidpp20_correlation(request, report).is_ok()
+}
+
+/// Whether `report` is a Root ping reply to `request`'s header that echoes a
+/// different data byte.
+///
+/// The ping (Root function 1) is the one request whose reply echoes a token
+/// of the request: the third parameter byte. hid-logitech-hidpp pings with
+/// software id 1 and data `0x5a` on every connection event, so its reply
+/// shares the header of an OpenLogi ping on the same lease and differs only
+/// there.
+fn echoes_another_ping(request: &[u8], report: &[u8]) -> bool {
+    const PING_DATA: usize = 6;
+    request[2] == 0x00
+        && request[3] >> 4 == 1
+        && report[2] == request[2]
+        && report[3] == request[3]
+        && report[PING_DATA] != request[PING_DATA]
 }
 
 fn is_cross_version_ping(request: &[u8], response: &[u8]) -> bool {

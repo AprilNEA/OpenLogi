@@ -1,17 +1,18 @@
-use super::home::{connection_icon_path, ordered_device_indices};
+use super::home::{ConnectionGlyph, connection_glyph, ordered_device_indices};
 use super::{DetailTab, DeviceKind, DeviceRecord};
 use crate::services::assets::ResolvedAsset;
+use crate::state::{Link, Presence};
 use crate::ui::battery::battery_charging_no_reading;
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceModelInfo, DeviceTransports,
     LightCapabilities, LightValueRange, LightValueUnit,
 };
-use openlogi_core::hid::DeviceRoute;
+use openlogi_core::hid::{DeviceRoute, ReceiverBrand};
 
 #[gpui::test]
 fn config_error_folder_button_opens_from_the_active_window(cx: &mut gpui::TestAppContext) {
     use gpui::{AppContext as _, Modifiers};
-    use gpui_component::Root;
+    use gpui_kit::component::Root;
 
     use super::{AppView, menu};
     use crate::services::{assets::AssetResolver, i18n::LOCALE_LOCK};
@@ -19,7 +20,7 @@ fn config_error_folder_button_opens_from_the_active_window(cx: &mut gpui::TestAp
 
     let _locale = LOCALE_LOCK.lock().unwrap();
     cx.update(|cx| {
-        gpui_component::init(cx);
+        gpui_kit::init(cx);
         crate::ui::theme::register_builtin_themes(cx);
         let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
         let resolver = AssetResolver::new();
@@ -64,13 +65,13 @@ fn main_window_renders_profile_confirmation_dialogs(cx: &mut gpui::TestAppContex
     use std::{cell::Cell, rc::Rc};
 
     use gpui::{AppContext as _, InteractiveElement as _, ParentElement as _, div};
-    use gpui_component::{Root, WindowExt as _};
+    use gpui_kit::component::{Root, WindowExt as _};
 
     use super::AppView;
     use crate::services::assets::AssetResolver;
     use crate::state::{AppState, Sources};
 
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     cx.update(|cx| {
         let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
         let resolver = AssetResolver::new();
@@ -116,7 +117,7 @@ fn main_window_renders_profile_confirmation_dialogs(cx: &mut gpui::TestAppContex
 #[gpui::test]
 fn the_device_rename_dialog_offers_save_and_cancel(cx: &mut gpui::TestAppContext) {
     use gpui::{AppContext as _, Modifiers};
-    use gpui_component::Root;
+    use gpui_kit::component::Root;
 
     use super::{AppView, home::open_rename_dialog};
     use crate::services::{assets::AssetResolver, i18n::LOCALE_LOCK};
@@ -124,7 +125,7 @@ fn the_device_rename_dialog_offers_save_and_cancel(cx: &mut gpui::TestAppContext
 
     let _locale = LOCALE_LOCK.lock().unwrap();
     rust_i18n::set_locale("en");
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     // The dialog slides in on the wall clock, so on a slow runner a redraw
     // between measuring Cancel and clicking it moves the button away from
     // the click. Reduced motion draws the dialog where it comes to rest.
@@ -183,14 +184,14 @@ fn open_device_detail(
     use std::{cell::RefCell, rc::Rc};
 
     use gpui::AppContext as _;
-    use gpui_component::Root;
+    use gpui_kit::component::Root;
 
     use super::AppView;
     use crate::services::assets::AssetResolver;
     use crate::state::{AgentLink, AppState, Sources};
 
     rust_i18n::set_locale("en");
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     cx.update(|cx| {
         let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
         let resolver = AssetResolver::new();
@@ -287,7 +288,7 @@ fn the_pointer_tab_offers_the_smooth_wheel(cx: &mut gpui::TestAppContext) {
 /// the profile bar.
 #[gpui::test]
 fn a_tab_opens_at_its_top_after_another_tab_scrolled(cx: &mut gpui::TestAppContext) {
-    use gpui::{Bounds, Modifiers, Pixels, ScrollDelta, ScrollWheelEvent, point, px, size};
+    use gpui::{Bounds, Modifiers, Pixels, ScrollDelta, ScrollEvent, point, px, size};
 
     use crate::services::i18n::LOCALE_LOCK;
     use crate::state::tests::direct_inventory;
@@ -311,7 +312,7 @@ fn a_tab_opens_at_its_top_after_another_tab_scrolled(cx: &mut gpui::TestAppConte
 
     let ring_top = open_tab(cx, "detail-navigation-ActionsRing").top();
     let pointer = open_tab(cx, "detail-navigation-Pointer");
-    cx.simulate_event(ScrollWheelEvent {
+    cx.simulate_event(ScrollEvent {
         position: point(pointer.left() + px(8.), px(300.)),
         delta: ScrollDelta::Pixels(point(px(0.), px(-5000.))),
         ..Default::default()
@@ -374,7 +375,7 @@ fn charging_without_reading_suppresses_percentage() {
 /// Builds a [`DeviceModelInfo`] with `transports` and the packed per-transport
 /// PIDs a real device would report for them (ascending bit order: Bluetooth,
 /// BTLE, eQuad, USB — see [`DeviceModelInfo::model_ids`]), so tests can probe
-/// `connection_icon_path` with a `Direct` route's product id matching one of
+/// `connection_glyph` with a `Direct` route's product id matching one of
 /// the live slots.
 fn model_with_pids(transports: DeviceTransports, pids: &[u16]) -> DeviceModelInfo {
     let mut model_ids = [0u16; 3];
@@ -386,6 +387,28 @@ fn model_with_pids(transports: DeviceTransports, pids: &[u16]) -> DeviceModelInf
         transports,
         model_ids,
         extended_model_id: 0,
+    }
+}
+
+/// Nano and Lightspeed receivers ride the Unifying route but are not
+/// Unifying receivers, so they never wear the Unifying logo.
+#[test]
+fn nano_and_lightspeed_receivers_get_the_dongle_icon() {
+    let route = DeviceRoute::Unifying {
+        receiver_uid: "r".into(),
+        slot: 1,
+    };
+    for (brand, glyph) in [
+        (Some(ReceiverBrand::Lightspeed), ConnectionGlyph::Dongle),
+        (Some(ReceiverBrand::Nano), ConnectionGlyph::Dongle),
+        (Some(ReceiverBrand::Unifying), ConnectionGlyph::Unifying),
+        (None, ConnectionGlyph::Unifying),
+    ] {
+        assert_eq!(
+            connection_glyph(Some(&route), brand, None, None),
+            glyph,
+            "{brand:?}"
+        );
     }
 }
 
@@ -415,12 +438,12 @@ fn connection_icon_matches_route() {
         ..DeviceTransports::default()
     };
     assert_eq!(
-        connection_icon_path(Some(&bolt), None, None),
-        "action-icons/bolt.svg"
+        connection_glyph(Some(&bolt), None, None, None),
+        ConnectionGlyph::Bolt
     );
     assert_eq!(
-        connection_icon_path(Some(&uni), None, None),
-        "action-icons/unifying.svg"
+        connection_glyph(Some(&uni), None, None, None),
+        ConnectionGlyph::Unifying
     );
     // The matching USB PID selects the cable icon.
     let direct_wired_pid = DeviceRoute::Direct {
@@ -428,12 +451,13 @@ fn connection_icon_matches_route() {
         product_id: 0xb019,
     };
     assert_eq!(
-        connection_icon_path(
+        connection_glyph(
             Some(&direct_wired_pid),
+            None,
             Some(&model_with_pids(wired, &[0xb019])),
             None
         ),
-        "action-icons/usb.svg"
+        ConnectionGlyph::Cable
     );
     // eQuad is receiver-only, so an equad-only table on a *direct* route
     // still means a cable — not Bluetooth.
@@ -446,12 +470,13 @@ fn connection_icon_matches_route() {
         product_id: 0xb01a,
     };
     assert_eq!(
-        connection_icon_path(
+        connection_glyph(
             Some(&direct_equad_pid),
+            None,
             Some(&model_with_pids(equad_only, &[0xb01a])),
             None
         ),
-        "action-icons/usb.svg"
+        ConnectionGlyph::Cable
     );
     // An all-false table is "unknown", not "wired".
     let direct_unknown_pid = DeviceRoute::Direct {
@@ -459,40 +484,43 @@ fn connection_icon_matches_route() {
         product_id: 0xffff,
     };
     assert_eq!(
-        connection_icon_path(
+        connection_glyph(
             Some(&direct_unknown_pid),
+            None,
             Some(&model_with_pids(DeviceTransports::default(), &[])),
             None
         ),
-        "action-icons/bluetooth.svg"
+        ConnectionGlyph::Bluetooth
     );
     // Product id doesn't match a live slot (stale/unknown info): falls back
     // to guessing from the static flags, same as before this fix.
     assert_eq!(
-        connection_icon_path(
+        connection_glyph(
             Some(&direct_unknown_pid),
+            None,
             Some(&model_with_pids(bt, &[0xb019])),
             None
         ),
-        "action-icons/bluetooth.svg"
+        ConnectionGlyph::Bluetooth
     );
     assert_eq!(
-        connection_icon_path(
+        connection_glyph(
             Some(&direct_unknown_pid),
+            None,
             Some(&model_with_pids(btle, &[0xb01b])),
             None
         ),
-        "action-icons/bluetooth.svg"
+        ConnectionGlyph::Bluetooth
     );
     // Unknown transports (no 0x0003 snapshot) keep the old default.
     assert_eq!(
-        connection_icon_path(Some(&direct_unknown_pid), None, None),
-        "action-icons/bluetooth.svg"
+        connection_glyph(Some(&direct_unknown_pid), None, None, None),
+        ConnectionGlyph::Bluetooth
     );
     // No route and no model information means the default icon.
     assert_eq!(
-        connection_icon_path(None, None, None),
-        "action-icons/circle-dot.svg"
+        connection_glyph(None, None, None, None),
+        ConnectionGlyph::Unknown
     );
 }
 
@@ -530,14 +558,16 @@ fn connection_icon_preserves_saved_wired_device_without_live_route() {
         .current_record()
         .expect("saved keyboard must remain visible");
 
-    assert!(!record.online);
+    assert!(!record.is_online());
     assert!(record.route.is_none());
     assert_eq!(
-        connection_icon_path(
+        connection_glyph(
             record.route.as_ref(),
+            record.receiver_brand,
             record.model_info.as_ref(),
             state.offline_connection(record)
-        ),
+        )
+        .path(),
         "action-icons/usb.svg",
         "a saved wired-only keyboard must not acquire a Bluetooth icon while offline"
     );
@@ -567,13 +597,13 @@ fn connection_icon_follows_live_route_on_multi_transport_device() {
         product_id: 0xb38a,
     };
     assert_eq!(
-        connection_icon_path(Some(&usb_direct), Some(&model), None),
+        connection_glyph(Some(&usb_direct), None, Some(&model), None).path(),
         "action-icons/usb.svg",
         "plugged in over USB must show the USB glyph even though the same \
          device also supports Bluetooth/BTLE"
     );
     assert_eq!(
-        connection_icon_path(Some(&btle_direct), Some(&model), None),
+        connection_glyph(Some(&btle_direct), None, Some(&model), None).path(),
         "action-icons/bluetooth.svg",
         "the same device connected over BTLE must show the Bluetooth glyph"
     );
@@ -628,29 +658,33 @@ fn disconnected_gaming_keyboards_keep_the_observed_usb_icon() {
             ..Sources::in_memory(Config::ephemeral(), &resolver, commands)
         });
         let record = state.current_record().expect("connected keyboard");
-        assert!(record.online);
+        assert!(record.is_online());
         assert_eq!(
-            connection_icon_path(
+            connection_glyph(
                 record.route.as_ref(),
+                record.receiver_brand,
                 record.model_info.as_ref(),
                 state.offline_connection(record)
-            ),
+            )
+            .path(),
             "action-icons/usb.svg"
         );
 
         let _ = state.refresh_inventories(&[], &[], &resolver, &[]);
         let record = state.current_record().expect("saved disconnected keyboard");
-        assert!(!record.online);
+        assert!(!record.is_online());
         assert!(
             record.route.is_none(),
             "offline writes must remain disabled"
         );
         assert_eq!(
-            connection_icon_path(
+            connection_glyph(
                 record.route.as_ref(),
+                record.receiver_brand,
                 record.model_info.as_ref(),
                 state.offline_connection(record)
-            ),
+            )
+            .path(),
             "action-icons/usb.svg",
             "{name} must not acquire a Bluetooth icon when its USB node disappears"
         );
@@ -669,7 +703,7 @@ fn disconnected_multi_transport_keyboard_without_history_is_unknown() {
         &[0xb38a, 0x40b5, 0xc356],
     );
     assert_eq!(
-        connection_icon_path(None, Some(&model), None),
+        connection_glyph(None, None, Some(&model), None).path(),
         "action-icons/circle-dot.svg"
     );
 }
@@ -726,14 +760,16 @@ fn disconnected_keyboard_icon_uses_only_unambiguous_saved_links() {
         let record = state
             .current_record()
             .expect("saved keyboard after restart");
-        assert!(!record.online);
+        assert!(!record.is_online());
         assert!(record.route.is_none());
         assert_eq!(
-            connection_icon_path(
+            connection_glyph(
                 record.route.as_ref(),
+                record.receiver_brand,
                 record.model_info.as_ref(),
                 state.offline_connection(record),
-            ),
+            )
+            .path(),
             *expected,
             "saved links: {links:?}"
         );
@@ -758,13 +794,15 @@ fn live_bluetooth_icon_does_not_use_a_saved_usb_transport() {
         product_id: 0xb389,
     };
     assert_eq!(
-        connection_icon_path(
+        connection_glyph(
             Some(&route),
+            None,
             Some(&model),
             Some(crate::state::ObservedConnection::Direct(
                 ModelTransport::Usb
             ))
-        ),
+        )
+        .path(),
         "action-icons/bluetooth.svg"
     );
 }
@@ -819,11 +857,13 @@ fn assert_keyboard_profile(state: &crate::state::AppState, key: &str, icon: &str
         Some(&Action::Screenshot)
     );
     assert_eq!(
-        connection_icon_path(
+        connection_glyph(
             record.route.as_ref(),
+            record.receiver_brand,
             record.model_info.as_ref(),
             state.offline_connection(record)
-        ),
+        )
+        .path(),
         icon,
     );
 }
@@ -865,7 +905,7 @@ fn assert_keyboard_modes(
     if let Some(icon) = offline_icon {
         let _ = state.refresh_inventories(&[], &[], &resolver, &[]);
         let record = state.current_record().expect("saved keyboard");
-        assert!(!record.online);
+        assert!(!record.is_online());
         assert!(
             record.route.is_none(),
             "history must not restore a writable route"
@@ -1038,6 +1078,7 @@ fn record(kind: DeviceKind, capabilities: Option<Capabilities>) -> DeviceRecord 
         asset: None,
         model_info: None,
         codename: None,
+        wpid: None,
         serial_number: None,
         unit_id: [0; 4],
         driver_id: None,
@@ -1050,7 +1091,7 @@ fn record(kind: DeviceKind, capabilities: Option<Capabilities>) -> DeviceRecord 
         hidpp10: false,
         light_capabilities: None,
         slot: 1,
-        online: true,
+        presence: Presence::Listed(Link::Online),
         battery: None,
         settings_revision: 0,
         stale_pairings: Vec::new(),
@@ -1066,7 +1107,7 @@ fn home_transport_icon_paints_in_its_transport_color(cx: &mut gpui::TestAppConte
     use super::home::transport_icon;
     use crate::ui::theme;
 
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     let pal = cx.update(|cx| theme::palette(cx));
     let routed = |route| DeviceRecord {
         route: Some(route),
@@ -1080,15 +1121,29 @@ fn home_transport_icon_paints_in_its_transport_color(cx: &mut gpui::TestAppConte
         vendor_id: 0x046d,
         product_id: 0xb034,
     });
+    let lightspeed = DeviceRecord {
+        receiver_brand: Some(ReceiverBrand::Lightspeed),
+        ..routed(DeviceRoute::Unifying {
+            receiver_uid: "r".into(),
+            slot: 1,
+        })
+    };
     let camera = record(DeviceKind::Camera, None);
-    let expected: [(&DeviceRecord, Hsla); 3] = [
+    let expected: [(&DeviceRecord, Hsla); 4] = [
         (&bolt, rgb(theme::STATUS_CONNECTED).into()),
+        (&lightspeed, rgb(theme::STATUS_CONNECTED).into()),
         (&bluetooth, rgb(theme::ACCENT_BLUE).into()),
         (&camera, pal.text_muted),
     ];
     for (record, color) in expected {
         let mut icon = transport_icon(record, None, pal);
-        assert_eq!(icon.style().text.color, Some(color), "{:?}", record.kind);
+        assert_eq!(
+            icon.style().text.color,
+            Some(color),
+            "{:?} {:?}",
+            record.kind,
+            record.route
+        );
     }
 }
 
@@ -1097,7 +1152,7 @@ fn home_transport_icon_paints_in_its_transport_color(cx: &mut gpui::TestAppConte
 #[gpui::test]
 fn home_grid_cards_share_one_column_width(cx: &mut gpui::TestAppContext) {
     use gpui::{AppContext as _, px, size};
-    use gpui_component::Root;
+    use gpui_kit::component::Root;
 
     use super::AppView;
     use crate::services::{assets::AssetResolver, i18n::LOCALE_LOCK};
@@ -1105,7 +1160,7 @@ fn home_grid_cards_share_one_column_width(cx: &mut gpui::TestAppContext) {
     use crate::state::{AgentLink, AppState, Sources};
 
     let _locale = LOCALE_LOCK.lock().unwrap();
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     cx.update(|cx| {
         let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
         let resolver = AssetResolver::new();
@@ -1166,8 +1221,8 @@ fn gallery_order_moves_connected_devices_first_stably() {
         record(DeviceKind::Trackball, None),
         record(DeviceKind::Light, None),
     ];
-    records[0].online = false;
-    records[2].online = false;
+    records[0].presence = Presence::Listed(Link::Offline);
+    records[2].presence = Presence::Listed(Link::Offline);
 
     assert_eq!(ordered_device_indices(&records), vec![1, 3, 0, 2]);
 }
@@ -1201,6 +1256,11 @@ fn tabs_prefer_buttons_when_a_keyboard_kind_measures_a_pointer() {
         disable_keys: false,
         onboard_profiles: false,
         button_spy: false,
+        sidetone: false,
+        g_keys: false,
+        m_keys: false,
+        macro_record: false,
+        change_host: false,
     });
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
     assert!(
@@ -1239,6 +1299,11 @@ fn tabs_follow_capabilities_not_kind() {
         disable_keys: false,
         onboard_profiles: false,
         button_spy: false,
+        sidetone: false,
+        g_keys: false,
+        m_keys: false,
+        macro_record: false,
+        change_host: false,
     });
     // After 0x0005 kind-correction the record has kind=Mouse, not Keyboard.
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Mouse, caps));
@@ -1324,6 +1389,11 @@ fn keyboard_without_asset_hides_buttons_tab() {
         disable_keys: false,
         onboard_profiles: false,
         button_spy: false,
+        sidetone: false,
+        g_keys: false,
+        m_keys: false,
+        macro_record: false,
+        change_host: false,
     });
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
     assert!(
@@ -1356,6 +1426,11 @@ fn keyboard_with_buttons_shows_keys_tab() {
         disable_keys: false,
         onboard_profiles: false,
         button_spy: false,
+        sidetone: false,
+        g_keys: false,
+        m_keys: false,
+        macro_record: false,
+        change_host: false,
     });
     let keyboard = record(DeviceKind::Keyboard, caps);
     let tabs = DetailTab::tabs_for(&keyboard);
@@ -1434,6 +1509,21 @@ fn light_tab_follows_light_capabilities() {
         DetailTab::tabs_for(&device),
         vec![DetailTab::Light, DetailTab::Device]
     );
+}
+
+/// A G535 measures sidetone and nothing else, so it opens on the Audio tab.
+#[test]
+fn a_sidetone_headset_opens_on_the_audio_tab() {
+    let caps = Some(Capabilities {
+        sidetone: true,
+        ..Capabilities::default()
+    });
+    let headset = record(DeviceKind::Headset, caps);
+    assert_eq!(
+        DetailTab::tabs_for(&headset),
+        vec![DetailTab::Audio, DetailTab::Device]
+    );
+    assert_eq!(DetailTab::default_for(&headset), DetailTab::Audio);
 }
 
 /// An unprobed (offline) device has no measured capabilities and falls back
@@ -1595,7 +1685,7 @@ fn open_main_window_with_secure_input(
     use std::rc::Rc;
 
     use gpui::AppContext as _;
-    use gpui_component::Root;
+    use gpui_kit::component::Root;
     use openlogi_core::binding::Action;
 
     use super::AppView;
@@ -1603,7 +1693,7 @@ fn open_main_window_with_secure_input(
     use crate::state::{AgentLink, AppState, Sources};
 
     rust_i18n::set_locale("en");
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     cx.update(|cx| {
         let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
         let resolver = AssetResolver::new();
@@ -1704,24 +1794,44 @@ fn a_key_binding_edit_repaints_the_secure_input_notice(cx: &mut gpui::TestAppCon
     assert!(!secure_input_notice_drawn(cx));
 }
 
-/// A lost agent first marks the window's last state as reconnecting. Once it
-/// is unreachable, the notice replaces only the content: the header keeps
-/// Settings usable, Add Device stays shut, and Retry asks the IPC client to
-/// try again now.
+/// Whether the menu bar's Add Device can be chosen.
+fn menu_offers_add_device(cx: &mut gpui::VisualTestContext) -> bool {
+    use gpui::OwnedMenuItem;
+
+    cx.update(|_, cx| {
+        let menus = cx.get_menus().expect("the menu bar is published");
+        let add_device = menus
+            .iter()
+            .flat_map(|menu| &menu.items)
+            .find_map(|item| match item {
+                OwnedMenuItem::Action {
+                    action, disabled, ..
+                } if action.partial_eq(&super::menu::OpenAddDevice) => Some(!*disabled),
+                _ => None,
+            });
+        add_device.expect("the Device menu lists Add Device")
+    })
+}
+
+/// A lost agent first marks the window's last state as reconnecting, and
+/// every Add Device entry shuts: the header's, the empty state's, and the
+/// menu bar's. Once it is unreachable, the notice replaces only the content:
+/// the header keeps Settings usable, and Retry asks the IPC client to try
+/// again now.
 #[gpui::test]
 fn an_unreachable_agent_keeps_the_header_and_offers_retry(cx: &mut gpui::TestAppContext) {
     use gpui::{AppContext as _, Modifiers};
-    use gpui_component::Root;
+    use gpui_kit::component::Root;
     use openlogi_ipc::SecureInput;
 
-    use super::AppView;
+    use super::{AppView, menu};
     use crate::services::ipc::Command;
     use crate::services::{assets::AssetResolver, i18n::LOCALE_LOCK};
     use crate::state::{AgentLink, AppState, Sources};
 
     let _locale = LOCALE_LOCK.lock().unwrap();
     rust_i18n::set_locale("en");
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     let (commands, mut sent) = tokio::sync::mpsc::unbounded_channel();
     cx.update(|cx| {
         let resolver = AssetResolver::new();
@@ -1735,6 +1845,7 @@ fn an_unreachable_agent_keeps_the_header_and_offers_retry(cx: &mut gpui::TestApp
             state
         });
         AppState::set_global(state, cx);
+        menu::install(cx);
     });
     let (_, cx) = cx.add_window_view(|window, cx| {
         let view = cx.new(|cx| AppView::new(window, cx));
@@ -1744,11 +1855,29 @@ fn an_unreachable_agent_keeps_the_header_and_offers_retry(cx: &mut gpui::TestApp
 
     draw(cx);
     assert!(cx.debug_bounds("agent-reconnecting").is_none());
+    assert!(
+        menu_offers_add_device(cx),
+        "a live agent pairs from the menu"
+    );
     cx.update(|_, cx| AppState::apply(cx, AppState::agent_link_lost));
     draw(cx);
     assert!(
         cx.debug_bounds("agent-reconnecting").is_some(),
         "a lost agent's last state is not presented as live"
+    );
+    let empty_add_device = cx
+        .debug_bounds("empty-add-device")
+        .expect("the empty state keeps its Add Device");
+    let windows = cx.update(|_, cx| cx.windows().len());
+    cx.simulate_click(empty_add_device.center(), Modifiers::none());
+    assert_eq!(
+        cx.update(|_, cx| cx.windows().len()),
+        windows,
+        "pairing needs the agent, so the empty state's Add Device opens nothing"
+    );
+    assert!(
+        !menu_offers_add_device(cx),
+        "nor does the menu bar's, which follows the link"
     );
 
     cx.update(|_, cx| {
@@ -1782,6 +1911,171 @@ fn an_unreachable_agent_keeps_the_header_and_offers_retry(cx: &mut gpui::TestApp
         cx.update(|_, cx| AppState::try_read(cx).unwrap().agent_link().clone()),
         AgentLink::Unreachable { retrying: true },
         "the notice shows the attempt until the IPC client answers it"
+    );
+
+    cx.update(|_, cx| {
+        AppState::apply(cx, |state| {
+            state.set_agent_link(AgentLink::Ready(status_with(SecureInput::Off)))
+        });
+    });
+    assert!(
+        menu_offers_add_device(cx),
+        "the agent's answer reopens pairing in the menu"
+    );
+}
+
+/// While the window reconnects, a device the agent last reported connected
+/// is shown as reconnecting — on its card in every Home layout and in the
+/// detail header — and one it reported offline stays offline.
+#[gpui::test]
+fn a_lost_agent_marks_connected_devices_as_reconnecting(cx: &mut gpui::TestAppContext) {
+    use std::{cell::RefCell, rc::Rc};
+
+    use gpui::{AppContext as _, Modifiers, px, size};
+    use gpui_kit::component::Root;
+    use openlogi_core::config::DeviceViewMode;
+
+    use super::AppView;
+    use crate::services::{assets::AssetResolver, i18n::LOCALE_LOCK};
+    use crate::state::tests::direct_inventory;
+    use crate::state::{AgentLink, AppState, Sources};
+
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    cx.update(gpui_kit::component::init);
+    cx.update(|cx| {
+        let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let resolver = AssetResolver::new();
+        let mut asleep = direct_inventory([0xa3, 0x93, 0xca, 0xe1]);
+        asleep.paired[0].online = false;
+        let inventories = [direct_inventory([0xa3, 0x93, 0xca, 0xe0]), asleep];
+        let state = cx.new(|_| {
+            let mut state = AppState::new(Sources {
+                inventories: &inventories,
+                ..Sources::in_memory(
+                    openlogi_core::config::Config::ephemeral(),
+                    &resolver,
+                    commands,
+                )
+            });
+            let _ = state.set_agent_link(AgentLink::Ready(status_with(
+                openlogi_ipc::SecureInput::Off,
+            )));
+            state
+        });
+        AppState::set_global(state, cx);
+    });
+    let hosted = Rc::new(RefCell::new(None));
+    let slot = Rc::clone(&hosted);
+    let (_, cx) = cx.add_window_view(move |window, cx| {
+        let view = cx.new(|cx| AppView::new(window, cx));
+        *slot.borrow_mut() = Some(view.clone());
+        Root::new(view, window, cx)
+    });
+    let app_view = hosted
+        .borrow_mut()
+        .take()
+        .expect("the window hosts the app");
+    cx.simulate_resize(size(px(1280.), px(900.)));
+    let draw = |cx: &mut gpui::VisualTestContext| cx.update(|window, cx| window.draw(cx).clear(cx));
+    let show = |cx: &mut gpui::VisualTestContext, mode: DeviceViewMode| {
+        cx.update(|_, cx| {
+            AppState::apply(cx, |state| state.commit_device_view_mode(mode));
+            app_view.update(cx, |_, cx| cx.notify());
+        });
+        draw(cx);
+    };
+
+    draw(cx);
+    assert!(
+        cx.debug_bounds("device-reconnecting").is_none(),
+        "a live agent confirms the device"
+    );
+    cx.update(|_, cx| AppState::apply(cx, AppState::agent_link_lost));
+    draw(cx);
+    let [live_card, _asleep_card] = ["home-grid-card-0", "home-grid-card-1"]
+        .map(|card| cx.debug_bounds(card).expect("the grid shows both devices"));
+    // The last marker painted wins the selector, and the offline card paints
+    // after the connected one: a marker on the first card proves the second
+    // carries none.
+    let marker = cx
+        .debug_bounds("device-reconnecting")
+        .expect("the grid card says it is reconnecting");
+    assert!(
+        live_card.contains(&marker.center()),
+        "{marker:?} in {live_card:?}"
+    );
+    for mode in [DeviceViewMode::List, DeviceViewMode::Carousel] {
+        show(cx, mode);
+        assert!(
+            cx.debug_bounds("device-reconnecting").is_some(),
+            "the {mode:?} layout says it is reconnecting"
+        );
+    }
+
+    show(cx, DeviceViewMode::Grid);
+    cx.simulate_click(live_card.center(), Modifiers::none());
+    draw(cx);
+    assert!(
+        cx.debug_bounds("home-grid-card-0").is_none(),
+        "the detail screen shows"
+    );
+    assert!(
+        cx.debug_bounds("device-reconnecting").is_some(),
+        "the detail header's pill says it is reconnecting"
+    );
+}
+
+/// The header's Flow button opens the Flow window once; pressing it again
+/// focuses that window instead of opening another.
+#[gpui::test]
+fn the_flow_button_opens_one_flow_window(cx: &mut gpui::TestAppContext) {
+    use gpui::{AppContext as _, Modifiers};
+    use gpui_kit::component::Root;
+    use openlogi_ipc::SecureInput;
+
+    use super::AppView;
+    use crate::services::{assets::AssetResolver, i18n::LOCALE_LOCK};
+    use crate::state::{AgentLink, AppState, Sources};
+
+    // The click lands on the centre measured from the first draw; a locale
+    // switched by a parallel test re-lays the header out under it.
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        crate::ui::theme::register_builtin_themes(cx);
+        let (commands, _sent) = tokio::sync::mpsc::unbounded_channel();
+        let resolver = AssetResolver::new();
+        let state = cx.new(|_| {
+            let mut state = AppState::new(Sources::in_memory(
+                openlogi_core::config::Config::ephemeral(),
+                &resolver,
+                commands,
+            ));
+            let _ = state.set_agent_link(AgentLink::Ready(status_with(SecureInput::Off)));
+            state
+        });
+        AppState::set_global(state, cx);
+    });
+    let (_, cx) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| AppView::new(window, cx));
+        Root::new(view, window, cx)
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    let button = cx
+        .debug_bounds("home-flow")
+        .expect("the header carries the Flow button");
+    let windows = cx.update(|_, cx| cx.windows().len());
+    cx.simulate_click(button.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(cx.update(|_, cx| cx.windows().len()), windows + 1);
+    cx.simulate_click(button.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        cx.update(|_, cx| cx.windows().len()),
+        windows + 1,
+        "a second press focuses the open Flow window"
     );
 }
 

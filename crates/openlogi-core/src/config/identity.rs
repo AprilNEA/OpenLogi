@@ -7,7 +7,7 @@
 
 #[cfg(test)]
 use crate::binding::{Action, ButtonId};
-use crate::config::{Config, DeviceConfig};
+use crate::config::{Config, DeviceConfig, GKeyOwner, GamingKeyMode};
 #[cfg(test)]
 use crate::config::{LightSettings, Lighting, LinkConfig};
 use crate::device::Capabilities;
@@ -21,6 +21,24 @@ impl DeviceIdentity {
     #[must_use]
     pub fn config_key(&self) -> Option<String> {
         self.is_physical().then(|| self.key())
+    }
+}
+
+impl PhysicalDeviceKey {
+    /// Whether this key names, by its own identity, a device that reports
+    /// `serial` or `unit_id`: the `serial:` or `unit:` key
+    /// [`DeviceIdentity::config_key`] writes for either one. A device that
+    /// reports both is named by both, so a hand-edited `unit:` key still finds
+    /// a device the inventory keys by its serial.
+    #[must_use]
+    pub fn names_identity(&self, serial: Option<&str>, unit_id: [u8; 4]) -> bool {
+        let serial =
+            serial.and_then(|serial| DeviceIdentity::from_parts(Some(serial), [0; 4]).config_key());
+        let unit = DeviceIdentity::from_parts(None, unit_id).config_key();
+        [serial, unit]
+            .into_iter()
+            .flatten()
+            .any(|key| key == self.as_str())
     }
 }
 
@@ -292,6 +310,14 @@ pub(super) fn fold(device: &mut DeviceConfig, mut legacy: DeviceConfig, route_ke
     // `smooth_wheel` is a bare opt-in with no per-link slot: for the same
     // reason only a legacy `true` is evidence of a choice, so it carries over.
     device.smooth_wheel |= legacy.smooth_wheel;
+    // Handing the G-keys to OpenLogi is the same kind of bare opt-in.
+    if legacy.g_key_owner == GKeyOwner::OpenLogi {
+        device.g_key_owner = GKeyOwner::OpenLogi;
+    }
+    // Only a mode the user picked is evidence; the default is never-set.
+    if device.gaming_key_mode == GamingKeyMode::default() {
+        device.gaming_key_mode = legacy.gaming_key_mode;
+    }
 
     // Scalar values with no per-link override slot: take the legacy value
     // when the canonical side is unset. A genuine disagreement keeps the
@@ -406,6 +432,7 @@ fn fold_maps(device: &mut DeviceConfig, legacy: &mut DeviceConfig, route_key: &s
     fold_map_field!(disabled_gestures);
     fold_map_field!(per_app_bindings);
     fold_map_field!(camera_profiles);
+    fold_map_field!(g_key_profile_names);
 }
 
 #[cfg(test)]

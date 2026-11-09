@@ -21,12 +21,17 @@ use super::device_key::DeviceKey;
 use super::device_session::ObservedConnection;
 use crate::services::assets::{AssetResolver, ResolvedAsset};
 
+pub(super) mod presence;
+
+pub(crate) use presence::{Link, Presence};
+
 /// One paired device with everything the UI needs to switch to it in O(1):
 /// its settings and runtime identities, display name, resolved asset (PNG +
 /// metadata, or `None` for the synthetic fallback), and the [`DeviceRoute`]
 /// HID++ writes / capture target.
 ///
-/// The `kind` / `slot` / `online` / `battery` fields mirror the source
+/// The `kind` / `slot` / `battery` fields and the listed link of
+/// [`Self::presence`] mirror the source
 /// [`PairedDevice`](openlogi_core::device::PairedDevice) so the gallery can
 /// render straight from the device list — the list is the single source of
 /// truth for "which devices exist", keeping gallery order aligned with the
@@ -65,6 +70,12 @@ pub struct DeviceRecord {
     pub asset: Option<ResolvedAsset>,
     pub model_info: Option<DeviceModelInfo>,
     pub codename: Option<String>,
+    /// The agent's [`PairedDevice::wpid`]. `None` when the agent read none,
+    /// and for a record with no paired device behind it: a camera, a
+    /// standalone device, an offline placeholder, the dev-only demo keyboard.
+    ///
+    /// [`PairedDevice::wpid`]: openlogi_core::device::PairedDevice::wpid
+    pub wpid: Option<u16>,
     pub serial_number: Option<String>,
     pub unit_id: [u8; 4],
     /// Standalone driver family, if this is a non-HID++ record.
@@ -95,7 +106,10 @@ pub struct DeviceRecord {
     /// Capabilities for standalone non-HID++ controls such as Litra lights.
     pub light_capabilities: Option<LightCapabilities>,
     pub slot: u8,
-    pub online: bool,
+    /// Where the device stands against the latest inventory merge: listed
+    /// online or offline, or grace-kept after the snapshot left it out.
+    /// Read it through [`Self::is_online`] and [`Self::addressable_route`].
+    pub(crate) presence: Presence,
     pub battery: Option<BatteryInfo>,
     /// The agent's [`PairedDevice::settings_revision`]: a move between two
     /// snapshots of one route means the device changed a setting itself.
@@ -126,7 +140,7 @@ impl DeviceRecord {
     }
 
     /// Typed key for `AppState`'s per-device UI caches (DPI/SmartShift load
-    /// state, standalone-light overrides, inventory-miss counters). Wraps
+    /// state, standalone-light overrides, write lifecycles). Wraps
     /// [`Self::config_key`] — see [`DeviceKey`].
     pub(crate) fn device_key(&self) -> DeviceKey {
         DeviceKey::of_record(&self.config_key)
@@ -327,6 +341,7 @@ pub(super) fn build_device_list(
                 asset,
                 model_info,
                 codename,
+                wpid: paired.wpid,
                 serial_number,
                 unit_id,
                 driver_id: None,
@@ -339,7 +354,7 @@ pub(super) fn build_device_list(
                 hidpp10: paired.hidpp10,
                 light_capabilities: None,
                 slot: paired.slot,
-                online: paired.online,
+                presence: Presence::listed(paired.online),
                 battery: paired.battery.clone(),
                 settings_revision: paired.settings_revision,
                 stale_pairings: Vec::new(),
@@ -414,7 +429,7 @@ fn collapse_duplicate_pairings(list: &mut Vec<DeviceRecord>, config: &Config) ->
         let Some(&keeper) = members.iter().max_by_key(|&&index| {
             let record = &list[index];
             (
-                record.online,
+                record.is_online(),
                 record.config_key == identity,
                 config
                     .devices
@@ -427,7 +442,7 @@ fn collapse_duplicate_pairings(list: &mut Vec<DeviceRecord>, config: &Config) ->
         };
         let mut stale: Vec<usize> = members
             .into_iter()
-            .filter(|&index| index != keeper && !list[index].online)
+            .filter(|&index| index != keeper && !list[index].is_online())
             .collect();
         if stale.is_empty() {
             continue;
@@ -496,6 +511,7 @@ fn camera_record(camera: &Camera, resolver: &AssetResolver) -> DeviceRecord {
         asset,
         model_info: None,
         codename: None,
+        wpid: None,
         serial_number: camera.serial_number.clone(),
         unit_id: [0; 4],
         driver_id: None,
@@ -508,7 +524,7 @@ fn camera_record(camera: &Camera, resolver: &AssetResolver) -> DeviceRecord {
         hidpp10: false,
         light_capabilities: None,
         slot: 0,
-        online: true,
+        presence: Presence::Listed(Link::Online),
         battery: None,
         settings_revision: 0,
         stale_pairings: Vec::new(),
@@ -577,6 +593,7 @@ fn append_standalone(
             asset,
             model_info: None,
             codename: None,
+            wpid: None,
             serial_number: device.serial_number.clone(),
             unit_id: device.unit_id,
             driver_id: Some(device.driver_id.clone()),
@@ -589,7 +606,7 @@ fn append_standalone(
             hidpp10: false,
             light_capabilities: device.light_capabilities,
             slot: openlogi_core::hid::DIRECT_DEVICE_INDEX,
-            online: device.online,
+            presence: Presence::listed(device.online),
             battery: None,
             settings_revision: 0,
             stale_pairings: Vec::new(),
@@ -779,6 +796,7 @@ fn offline_record(
         asset,
         model_info,
         codename: identity.codename.clone(),
+        wpid: None,
         serial_number: None,
         unit_id: [0; 4],
         driver_id: identity.driver_id.clone(),
@@ -791,7 +809,7 @@ fn offline_record(
         hidpp10: false,
         light_capabilities: identity.light_capabilities,
         slot: 0,
-        online: false,
+        presence: Presence::Listed(Link::Offline),
         battery: None,
         settings_revision: 0,
         stale_pairings: Vec::new(),
@@ -839,6 +857,7 @@ pub(super) fn adopt_transient_record(known: &DeviceRecord, live: DeviceRecord) -
         asset: known.asset.clone().or(live.asset),
         model_info: known.model_info.clone().or(live.model_info),
         codename: known.codename.clone().or(live.codename),
+        wpid: live.wpid.or(known.wpid),
         serial_number: known.serial_number.clone().or(live.serial_number),
         unit_id: known.unit_id,
         driver_id: live.driver_id.or_else(|| known.driver_id.clone()),
@@ -858,7 +877,7 @@ pub(super) fn adopt_transient_record(known: &DeviceRecord, live: DeviceRecord) -
         hidpp10: live.hidpp10,
         light_capabilities: live.light_capabilities.or(known.light_capabilities),
         slot: live.slot,
-        online: live.online,
+        presence: live.presence,
         battery: live.battery.or_else(|| known.battery.clone()),
         settings_revision: live.settings_revision,
         stale_pairings: live.stale_pairings,
@@ -891,7 +910,7 @@ pub(super) fn fold_by_inventory_key(
             }
             Entry::Occupied(mut slot) => {
                 let mut record = record;
-                if record.online || !slot.get().online {
+                if record.is_online() || !slot.get().is_online() {
                     let mut stale = std::mem::take(&mut slot.get_mut().stale_pairings);
                     stale.append(&mut record.stale_pairings);
                     record.stale_pairings = stale;
@@ -946,6 +965,7 @@ fn demo_keyboard() -> DeviceRecord {
         asset: None,
         model_info: None,
         codename: None,
+        wpid: None,
         serial_number: None,
         unit_id: [0; 4],
         driver_id: None,
@@ -961,7 +981,7 @@ fn demo_keyboard() -> DeviceRecord {
         hidpp10: false,
         light_capabilities: None,
         slot: 0,
-        online: true,
+        presence: Presence::Listed(Link::Online),
         battery: None,
         settings_revision: 0,
         stale_pairings: Vec::new(),

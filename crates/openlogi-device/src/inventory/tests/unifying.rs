@@ -1,15 +1,19 @@
-//! The Unifying receiver: arrival broadcasts, the arrival trigger and its retries, and codename reads.
+//! The Unifying receiver: arrival broadcasts, the arrival trigger and its retries, slot walks, and codename reads.
 
-use openlogi_core::device::BatteryLevel;
+use std::time::Duration;
+
+use hidpp::channel::SEND_RESPONSE_TIMEOUT;
+use hidpp::receiver::unifying::DeviceConnection;
+use openlogi_core::device::{BatteryLevel, BatteryStatus};
 
 use super::*;
 use crate::channel::scripted::register_error;
 
-#[tokio::test]
-async fn offline_arrival_rebroadcasts_surface_without_probing_the_device() {
-    // The exact wire bytes once misread as proof that the online bit is
-    // stuck: `04 62 69 40` is an encrypted MX Master 2S (wpid 0x4069) slot
-    // re-broadcast with bit 6 *set* — link not established, device offline.
+/// Slot 1's offline re-broadcast. The exact wire bytes once misread as proof
+/// that the online bit is stuck: `04 62 69 40` is an encrypted MX Master 2S
+/// (wpid 0x4069) slot re-broadcast with bit 6 *set* — link not established,
+/// device offline.
+fn offline_mx_master_2s_arrival() -> DeviceConnection {
     let message = Message::Short(
         MessageHeader {
             device_index: 1,
@@ -21,8 +25,25 @@ async fn offline_arrival_rebroadcasts_surface_without_probing_the_device() {
         panic!("expected a device-connection event");
     };
     assert!(!event.online, "bit 6 set must decode as offline");
+    event
+}
 
-    let (raw, handle) = ScriptedRawHidChannel::with_responder(|_| None);
+#[tokio::test]
+async fn offline_slot_is_named_by_the_receiver_without_probing_the_device() {
+    let event = offline_mx_master_2s_arrival();
+    let (raw, handle) = ScriptedRawHidChannel::with_responder(|request| {
+        match (request[1], request[2], request[3]) {
+            // #447: the receiver keeps slot 1's name at sub-register 0x40,
+            // so a stale pairing is named while its device is away.
+            (0xff, 0x83, 0xb5) if request[4] == 0x40 => {
+                let mut response = vec![0x11, 0xff, 0x83, 0xb5, 0x40, 0x0c];
+                response.extend_from_slice(b"MX Master 2S");
+                response.resize(20, 0);
+                Some(response)
+            }
+            _ => panic!("an offline slot must not be probed: {request:02x?}"),
+        }
+    });
     let channel = scripted_channel(raw).await;
     let writes_before = handle.written_reports().len();
 
@@ -45,10 +66,47 @@ async fn offline_arrival_rebroadcasts_surface_without_probing_the_device() {
 
     assert!(!device.online);
     assert_eq!(device.wpid, Some(0x4069));
-    assert_eq!(
-        handle.written_reports().len(),
-        writes_before,
-        "an offline slot must not be probed for features, battery, or codename"
+    assert_eq!(device.codename.as_deref(), Some("MX Master 2S"));
+    let writes = &handle.written_reports()[writes_before..];
+    assert!(
+        writes.iter().all(|report| report[1] == 0xff),
+        "an offline slot must not be probed for features or battery: {writes:02x?}"
+    );
+}
+
+#[tokio::test]
+async fn offline_slot_name_read_is_bounded_when_the_receiver_drops_the_reply() {
+    // The offline name read runs on every reconciliation under the register
+    // phase, so a receiver that never answers it must cost the receiver's
+    // short budget, not a full request timeout.
+    let event = offline_mx_master_2s_arrival();
+    let (raw, _) = ScriptedRawHidChannel::with_responder(|_| None);
+    let channel = scripted_channel(raw).await;
+
+    let cache = HashMap::new();
+    let pass = PassContext {
+        cache: &cache,
+        now: Instant::now(),
+        subscriptions: None,
+        timeouts: &ProbeTimeouts::DEFAULT,
+    };
+    let started = Instant::now();
+    let (device, _) = probe_unifying_slot(
+        &channel,
+        &event,
+        "SERIAL",
+        &host_lock::ReceiverRegisterPhase::uncontended(),
+        pass,
+    )
+    .await
+    .expect("an offline slot surfaces without its name");
+
+    assert!(!device.online);
+    assert_eq!(device.codename, None);
+    let waited = started.elapsed();
+    assert!(
+        waited < SEND_RESPONSE_TIMEOUT,
+        "the name read waited {waited:?}"
     );
 }
 
@@ -174,6 +232,144 @@ async fn hidpp10_trackball_slot_takes_its_kind_from_the_arrival() {
     assert_eq!(device.kind, DeviceKind::Trackball);
     assert_eq!(device.capabilities, None);
     assert!(device.hidpp10);
+}
+
+/// The feature table of a K470 (wpid 0x4075, firmware RQK 71.00.B0002) after
+/// the root, as `(feature id, type flags)`: Solaar's dump of that keyboard,
+/// which #2444's reporter confirmed reports `0x1000` at index 5.
+const K470_FEATURES: [(u16, u8); 19] = [
+    (0x0001, 0),
+    (0x0003, 0),
+    (0x0005, 0),
+    (0x0020, 0),
+    (0x1000, 0),
+    (0x1b04, 0),
+    (0x1d4b, 0),
+    (0x40a2, 0),
+    (0x4100, 0),
+    (0x4220, 0),
+    (0x4521, 0),
+    (0x1810, 0x60),
+    (0x1830, 0x60),
+    (0x1890, 0x60),
+    (0x18a0, 0x60),
+    (0x18b0, 0x60),
+    (0x1df3, 0x60),
+    (0x1e00, 0x40),
+    (0x1868, 0x60),
+];
+
+/// What one request costs on a K470's link. On #2444's reporter's receiver
+/// the first-sight walk finished inside 3.5 s on some runs and ran past it on
+/// most: ~100 ms a request. Half as much again covers the receiver's other
+/// slot walking at the same time.
+const K470_REQUEST: Duration = Duration::from_millis(150);
+
+/// A K470 answering its first-sight walk. The battery replies are the ones
+/// #2444's reporter read from it; the four controls' ids are not a capture.
+fn k470(request: &[u8]) -> Vec<u8> {
+    const NAME: &[u8] = b"Wireless Keyboard";
+    let mut response = vec![0; 20];
+    response[..4].copy_from_slice(&request[..4]);
+    response[0] = 0x11;
+    let feature = match request[2] {
+        0 => 0x0000,
+        index => K470_FEATURES[usize::from(index) - 1].0,
+    };
+    match (feature, request[3] >> 4) {
+        // Ping: HID++ 4.5.
+        (0x0000, 1) => response[4..6].copy_from_slice(&[4, 5]),
+        (0x0000, 0) => {
+            let id = u16::from_be_bytes([request[4], request[5]]);
+            let index = K470_FEATURES
+                .iter()
+                .position(|&(feature, _)| feature == id)
+                .map_or(0, |position| position + 1);
+            response[4] = u8::try_from(index).unwrap();
+        }
+        (0x0001, 0) => response[4] = u8::try_from(K470_FEATURES.len()).unwrap(),
+        (0x0001, 1) => {
+            let (id, flags) = K470_FEATURES[usize::from(request[4]) - 1];
+            response[4..6].copy_from_slice(&id.to_be_bytes());
+            response[6] = flags;
+        }
+        // Two entities; no unit id, model id, transport or serial number.
+        (0x0003, 0) => response[4] = 2,
+        (0x0005, 0) => response[4] = u8::try_from(NAME.len()).unwrap(),
+        (0x0005, 1) => {
+            let start = usize::from(request[4]);
+            let chunk = &NAME[start..NAME.len().min(start + 16)];
+            response[4..4 + chunk.len()].copy_from_slice(chunk);
+        }
+        // Device type 0: keyboard.
+        (0x0005, 2) => response[4] = 0,
+        // 30, next level 5, discharging.
+        (0x1000, 0) => response[4..7].copy_from_slice(&[0x1e, 0x05, 0x00]),
+        // Two levels, no mileage.
+        (0x1000, 1) => response[4..6].copy_from_slice(&[0x02, 0x00]),
+        (0x1b04, 0) => response[4] = 4,
+        (0x1b04, 1) => response[4..6].copy_from_slice(&[0x00, 0xc0 + request[4]]),
+        _ => panic!("unexpected request: {request:02x?}"),
+    }
+    response
+}
+
+#[tokio::test]
+async fn a_slow_keyboards_first_sight_walk_fits_the_unifying_slot_budget() {
+    // #2444: a K470 on a C534 Nano receiver surfaced as an unknown keyboard
+    // without a battery. Its first-sight walk ran past the 3.5 s slot budget,
+    // a cut-off walk caches nothing, and every retry ran it again under the
+    // same budget. `0x21` is the keyboard nibble plus the encryption bit.
+    let message = Message::Short(
+        MessageHeader {
+            device_index: 1,
+            sub_id: 0x41,
+        },
+        [0x04, 0x21, 0x75, 0x40],
+    );
+    let Some(UnifyingEvent::DeviceConnection(event)) = decode_notification(&message) else {
+        panic!("expected a device-connection event");
+    };
+    assert!(event.online);
+    let (raw, handle) = ScriptedRawHidChannel::with_responder(|request| Some(k470(request)));
+    let channel = scripted_channel(raw).await;
+    let writes_before = handle.written_reports().len();
+
+    let cache = HashMap::new();
+    let pass = PassContext {
+        cache: &cache,
+        now: Instant::now(),
+        subscriptions: None,
+        timeouts: &ProbeTimeouts::DEFAULT,
+    };
+    let (device, outcome) = probe_unifying_slot(
+        &channel,
+        &event,
+        "pid:c534",
+        &host_lock::ReceiverRegisterPhase::uncontended(),
+        pass,
+    )
+    .await
+    .expect("an online slot surfaces");
+
+    assert_eq!(device.codename.as_deref(), Some("Wireless Keyboard"));
+    assert_eq!(device.kind, DeviceKind::Keyboard);
+    let battery = device.battery.expect("0x1000 reports the battery");
+    assert_eq!(battery.status, BatteryStatus::Discharging);
+    assert!(
+        matches!(outcome, CacheOutcome::Fresh(..)),
+        "a completed walk is memoized, so later passes only re-read the battery"
+    );
+
+    // The agent also reads the lock-key state (`0x4220`) once per connection,
+    // inside the same budget; this pass has no event subscriptions to do it.
+    let requests = handle.written_reports().len() - writes_before + 1;
+    let walk = K470_REQUEST * u32::try_from(requests).unwrap();
+    assert!(
+        walk <= UNIFYING_SLOT_PROBE_TIMEOUT,
+        "{requests} requests take {walk:?} on a K470 link, past the \
+         {UNIFYING_SLOT_PROBE_TIMEOUT:?} first-sight budget"
+    );
 }
 
 #[test]

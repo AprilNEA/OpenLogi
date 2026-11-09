@@ -5,7 +5,7 @@ use gpui::{
     StatefulInteractiveElement as _, Styled, div, linear_color_stop, linear_gradient,
     prelude::FluentBuilder as _, px, rgb, svg,
 };
-use gpui_component::{
+use gpui_kit::component::{
     Icon, IconName, Selectable as _, button::Button, h_flex, input::InputState,
     scroll::ScrollableElement as _, v_flex,
 };
@@ -169,7 +169,7 @@ fn action_rows_scroller(
                 .size_full()
                 .track_scroll(scroll)
                 .overflow_y_scroll()
-                .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                .on_scroll(|_, _, cx| cx.stop_propagation())
                 .child(content),
         )
         // Fade the cut-off bottom edge into the card so a partly visible row
@@ -445,8 +445,8 @@ fn commit_icon(slot: ActionRingSlot, icon: Option<ActionRingIcon>, cx: &mut gpui
 #[cfg(test)]
 mod tests {
     use gpui::{
-        AppContext as _, Context, Render, ScrollDelta, ScrollHandle, ScrollWheelEvent,
-        TestAppContext, Window, point, px,
+        AppContext as _, Context, Render, ScrollDelta, ScrollEvent, ScrollHandle, TestAppContext,
+        Window, point, px,
     };
 
     use super::*;
@@ -508,7 +508,8 @@ mod tests {
 
     #[gpui::test]
     fn sidebar_scroll_does_not_move_the_page(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+        cx.update(gpui_kit::init);
         let page_scroll = ScrollHandle::new();
         let sidebar_scroll = ScrollHandle::new();
         let (_, cx) = cx.add_window_view({
@@ -529,7 +530,7 @@ mod tests {
         assert_eq!(overlay_before.size, gpui::size(px(160.0), px(100.0)));
 
         // Scroll inside the sidebar scroller
-        cx.simulate_event(ScrollWheelEvent {
+        cx.simulate_event(ScrollEvent {
             position: point(px(80.0), px(50.0)),
             delta: ScrollDelta::Pixels(point(px(0.0), px(-20.0))),
             ..Default::default()
@@ -561,7 +562,7 @@ mod tests {
         assert_eq!(page_scroll.offset().y, px(0.0));
 
         // Now scroll the outer page from outside the sidebar (e.g. at y: 110px)
-        cx.simulate_event(ScrollWheelEvent {
+        cx.simulate_event(ScrollEvent {
             position: point(px(10.0), px(110.0)),
             delta: ScrollDelta::Pixels(point(px(0.0), px(-15.0))),
             ..Default::default()
@@ -580,7 +581,8 @@ mod tests {
 
     #[gpui::test]
     fn custom_shortcut_stays_inside_the_slot_editor(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+        cx.update(gpui_kit::init);
         let library_scroll = ScrollHandle::new();
         let (_, cx) = cx.add_window_view({
             let library_scroll = library_scroll.clone();
@@ -612,7 +614,7 @@ mod tests {
         );
 
         // Scrolling the library leaves the shortcut field where it was.
-        cx.simulate_event(ScrollWheelEvent {
+        cx.simulate_event(ScrollEvent {
             position: card.center(),
             delta: ScrollDelta::Pixels(point(px(0.0), px(-200.0))),
             ..Default::default()

@@ -10,7 +10,7 @@ pub mod hook;
 mod pointer;
 pub mod scroll;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::sync::{Arc, Mutex, PoisonError, RwLock, mpsc};
 use std::time::{Duration, Instant};
@@ -62,8 +62,9 @@ pub enum PageTurn {
 }
 
 /// An action the agent itself carries out rather than the OS injector,
-/// handed from the dispatcher to the agent's lifecycle loop, which owns the
-/// state it changes. Each carries the config key of the device it was pressed
+/// or the outcome of a device write an action made, handed from the
+/// dispatcher to the agent's lifecycle loop, which owns the state it
+/// changes. An action carries the config key of the device it was pressed
 /// on, when the source knows one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActionRequest {
@@ -72,12 +73,22 @@ pub enum ActionRequest {
         /// The pressing device.
         device_key: Option<String>,
     },
+    /// A button whose press opened the Actions Ring was released.
+    ActionsRingTriggerReleased,
     /// Turn the pressing keypad's binding page.
     TurnKeypadPage {
         /// The pressing device.
         device_key: Option<String>,
         /// Which way.
         turn: PageTurn,
+    },
+    /// A DPI or pointer-speed write an action made to the mouse at `route`
+    /// settled. The mouse broadcasts nothing for a host write, so the agent
+    /// announces it and clients read the mouse's settings again instead of
+    /// showing what they read before (#2425).
+    SettingsWritten {
+        /// The mouse written.
+        route: DeviceRoute,
     },
 }
 
@@ -246,7 +257,8 @@ impl ActionExecutor {
     }
 
     /// [`Self::write_speed_reading`], running `on_failed` when the mouse
-    /// rejects the write or it times out.
+    /// rejects the write or it times out. Either way, the write is then
+    /// announced ([`Self::announce_written`]).
     fn write_speed_then(
         &self,
         write: SpeedWrite,
@@ -261,6 +273,8 @@ impl ActionExecutor {
             restore,
             led,
         } = write;
+        let applied = self.announce_written(&route);
+        let failed = self.announce_written(&route);
         write_pointer_speed_in_background(
             self.access.op(&route),
             ticket,
@@ -271,9 +285,30 @@ impl ActionExecutor {
                 if let Some(restore) = restore {
                     speeds.restored(&restore);
                 }
+                applied();
             },
-            on_failed,
+            move || {
+                on_failed();
+                failed();
+            },
         );
+    }
+
+    /// Ask the agent, once called, to announce that a write an action made
+    /// to the mouse at `route` settled, so clients read its settings again.
+    /// A failed write is announced too: a timeout can follow a write the
+    /// mouse took.
+    fn announce_written(&self, route: &DeviceRoute) -> impl FnOnce() + Send + 'static {
+        let requests = self.requests.clone();
+        let route = route.clone();
+        move || {
+            if requests
+                .send(ActionRequest::SettingsWritten { route })
+                .is_err()
+            {
+                debug!("agent runtime unavailable — action write not announced");
+            }
+        }
     }
 
     /// `device_key`'s session entered host mode, which may have loaded the
@@ -341,6 +376,9 @@ impl ActionExecutor {
         } = self.pointer_speeds.preset_place(&route);
         let cycles = Arc::clone(&self.dpi_cycle);
         let speeds = Arc::clone(&self.pointer_speeds);
+        let applied = self.announce_written(&route);
+        let failed = self.announce_written(&route);
+        let rejected = self.preset_rejected(route.clone());
         step_dpi_in_background(
             self.access.op(&route),
             ticket,
@@ -353,8 +391,12 @@ impl ActionExecutor {
                 if let Some(restore) = restore {
                     speeds.restored(&restore);
                 }
+                applied();
             },
-            self.preset_rejected(route.clone()),
+            move |dpi| {
+                rejected(dpi);
+                failed();
+            },
         );
         true
     }
@@ -593,6 +635,8 @@ impl HeldDpiShifts {
         };
         let cycles = Arc::clone(&executor.dpi_cycle);
         let speeds = Arc::clone(&executor.pointer_speeds);
+        let restored = executor.announce_written(&held.route);
+        let failed = executor.announce_written(&held.route);
         // Settling a restore ends the precision speed, so the LED goes dark.
         let led = restore.as_ref().map(|_| false);
         restore_dpi_in_background(
@@ -605,7 +649,9 @@ impl HeldDpiShifts {
                 if let Some(restore) = restore {
                     speeds.restored(&restore);
                 }
+                restored();
             },
+            failed,
         );
     }
 }
@@ -614,6 +660,10 @@ struct ButtonEventHandler {
     executor: ActionExecutor,
     held: HeldShortcuts,
     held_dpi: HeldDpiShifts,
+    /// Presses that opened the Actions Ring as they went down. Releasing one
+    /// can choose a slot; a ring a gesture or a long press opened stays open
+    /// past the release that follows it.
+    ring_triggers: HashSet<PressToken>,
 }
 
 impl ButtonEventHandler {
@@ -622,6 +672,7 @@ impl ButtonEventHandler {
             executor,
             held: HeldShortcuts::default(),
             held_dpi: HeldDpiShifts::default(),
+            ring_triggers: HashSet::new(),
         }
     }
 
@@ -631,6 +682,9 @@ impl ButtonEventHandler {
                 if let Some(action) = press.start_action() {
                     if press.captured_by_os_hook() {
                         log_bound_action(press.control(), action);
+                    }
+                    if matches!(action, Action::ShowActionsRing) {
+                        self.ring_triggers.insert(press.token().clone());
                     }
                     self.start_action(press.token(), action, press.device_key(), press.target());
                 }
@@ -644,6 +698,18 @@ impl ButtonEventHandler {
             ButtonRuntimeEvent::Ended { press, reason } => {
                 self.held.end(press.token());
                 self.held_dpi.end(&self.executor, press.token());
+                // A canceled press may never have been let go, so it chooses
+                // nothing and the ring stays open for the pointer.
+                if self.ring_triggers.remove(press.token())
+                    && reason == EndReason::Released
+                    && self
+                        .executor
+                        .requests
+                        .send(ActionRequest::ActionsRingTriggerReleased)
+                        .is_err()
+                {
+                    warn!("agent runtime unavailable — Actions Ring release ignored");
+                }
                 if let EndReason::Canceled(reason) = reason {
                     match press.control() {
                         PressControl::Button(button) => {
@@ -859,6 +925,12 @@ impl ActionDispatcher {
         self.buttons.cancel_hidpp_session(session);
     }
 
+    /// Cancel the G-key presses a HID++ keyboard session holds after its M
+    /// profile changed; its other keys keep running.
+    pub(crate) fn cancel_hidpp_g_keys(&self, session: &HidppSessionId) {
+        self.buttons.cancel_hidpp_g_keys(session);
+    }
+
     /// Invalidate every active lifecycle after a binding/profile change or
     /// capture-owner transition. Events already queued under the old
     /// generation are ignored even if they arrive after this call's wake-up.
@@ -968,6 +1040,8 @@ fn dispatch_browser_navigation(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
 
     static BROWSER_NAV_TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -1144,6 +1218,53 @@ mod tests {
             })
         );
     }
+
+    /// The release of a button that opened the ring reaches the agent, which
+    /// decides whether the hold chose a slot. A press canceled before its
+    /// release was seen must not choose.
+    #[test]
+    fn a_ring_trigger_reports_its_release_unless_canceled() {
+        let (_signal, device_io) = openlogi_hid::device_io_channel();
+        let (requests, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let mut runtime = ActionRuntime::new(
+            Arc::default(),
+            Arc::default(),
+            DeviceAccess {
+                channel: openlogi_hid::CaptureChannelSlot::default(),
+                registry: openlogi_hid::ChannelRegistry::default(),
+                receiver_access: crate::receiver_access::ReceiverAccess::default(),
+                device_io,
+                transport_turns: crate::hardware::TransportTurns::default(),
+            },
+            requests,
+        )
+        .expect("the button worker must start");
+        let buttons = runtime.dispatcher().buttons;
+        let ring = Binding::Single(Action::ShowActionsRing);
+        let opened = ActionRequest::ShowActionsRing { device_key: None };
+
+        buttons
+            .try_hook_down(ButtonId::MiddleClick, Some(&ring))
+            .expect("the press must be accepted");
+        assert!(buttons.try_hook_up(ButtonId::MiddleClick));
+        assert_eq!(received.blocking_recv(), Some(opened.clone()));
+        assert_eq!(
+            received.blocking_recv(),
+            Some(ActionRequest::ActionsRingTriggerReleased)
+        );
+
+        buttons
+            .try_hook_down(ButtonId::MiddleClick, Some(&ring))
+            .expect("the press must be accepted");
+        buttons.cancel_hook_thread();
+        assert_eq!(received.blocking_recv(), Some(opened));
+        runtime.shutdown();
+        assert!(
+            received.try_recv().is_err(),
+            "a canceled trigger must not report a release"
+        );
+    }
+
     /// Page actions go to the agent, keyed by the pressing keypad, and — like
     /// the ring — no pointer target gates them: the press acts on the keypad.
     #[test]
@@ -1212,6 +1333,121 @@ mod tests {
         let mut executor = executor_with(Arc::default());
         executor.dpi_cycle = Arc::new(RwLock::new(cycles));
         executor
+    }
+
+    /// [`dpi_shift_executor`] over a mouse that answers at 800 DPI, and the
+    /// requests the executor hands the agent. `accept` runs on each DPI
+    /// write and says whether the mouse takes it.
+    async fn answered_dpi_executor(
+        current: Option<Dpi>,
+        accept: impl Fn() -> bool + Send + Sync + 'static,
+    ) -> (
+        ActionExecutor,
+        tokio::sync::mpsc::UnboundedReceiver<ActionRequest>,
+        DeviceRoute,
+    ) {
+        let mut executor = dpi_shift_executor(current);
+        let route = executor.dpi_cycle.read().unwrap().by_key["mouse"]
+            .target
+            .clone()
+            .unwrap();
+        crate::test_support::publish_dpi_mouse(&executor.access.registry, route.clone(), accept)
+            .await;
+        let (requests, received) = tokio::sync::mpsc::unbounded_channel();
+        executor.requests = requests;
+        (executor, received, route)
+    }
+
+    /// The next request the executor hands the agent, once a background
+    /// write settled.
+    async fn next_request(
+        received: &mut tokio::sync::mpsc::UnboundedReceiver<ActionRequest>,
+    ) -> ActionRequest {
+        tokio::time::timeout(std::time::Duration::from_secs(5), received.recv())
+            .await
+            .expect("the write settles")
+            .expect("the executor still holds its sender")
+    }
+
+    /// The mouse broadcasts nothing for a DPI a preset action writes, so
+    /// the agent announces the write once it settles and the GUI reads the
+    /// mouse again instead of showing the DPI from before (#2425). A write
+    /// the mouse rejects is announced as well.
+    #[tokio::test]
+    async fn a_dpi_preset_write_is_announced_once_it_settles() {
+        for accept in [true, false] {
+            let (executor, mut received, route) =
+                answered_dpi_executor(Some(Dpi::new(400)), move || accept).await;
+
+            executor.dispatch(&Action::CycleDpiPresets, Some("mouse"));
+
+            assert_eq!(
+                next_request(&mut received).await,
+                ActionRequest::SettingsWritten { route },
+                "accepted: {accept}"
+            );
+        }
+    }
+
+    /// A preset step on a mouse whose DPI OpenLogi never set reads the
+    /// mouse before it writes, and is announced the same way.
+    #[tokio::test]
+    async fn a_dpi_step_from_the_mouse_reading_is_announced() {
+        let (executor, mut received, route) = answered_dpi_executor(None, || true).await;
+
+        executor.dispatch(&Action::NextDpiPreset, Some("mouse"));
+
+        assert_eq!(
+            next_request(&mut received).await,
+            ActionRequest::SettingsWritten { route }
+        );
+    }
+
+    /// A DPI shift announces both its write and the restore its release
+    /// writes, so the GUI follows the mouse down and back. A restore the
+    /// mouse rejects is announced as well, as a timed-out one is: the mouse
+    /// may have taken it.
+    #[tokio::test]
+    async fn a_dpi_shift_and_its_restore_are_announced() {
+        for restore_lands in [true, false] {
+            // The shift's write lands; the restore is the second write.
+            let writes = Arc::new(AtomicUsize::new(0));
+            let counted = Arc::clone(&writes);
+            let (executor, mut received, route) = answered_dpi_executor(None, move || {
+                counted.fetch_add(1, Ordering::SeqCst) == 0 || restore_lands
+            })
+            .await;
+            // The mouse lists only 800 and 1600, so the shift goes to 800.
+            executor
+                .dpi_cycle
+                .write()
+                .unwrap()
+                .by_key
+                .get_mut("mouse")
+                .unwrap()
+                .presets = vec![Dpi::new(800), Dpi::new(1600)];
+            let press = PressToken::hook_for_test(1, ButtonId::G6);
+            let mut held = HeldDpiShifts::default();
+
+            held.start(&executor, &press, Some("mouse"));
+            assert_eq!(
+                next_request(&mut received).await,
+                ActionRequest::SettingsWritten {
+                    route: route.clone()
+                }
+            );
+            held.end(&executor, &press);
+            assert_eq!(
+                next_request(&mut received).await,
+                ActionRequest::SettingsWritten { route },
+                "restore lands: {restore_lands}"
+            );
+            assert_eq!(
+                writes.load(Ordering::SeqCst),
+                2,
+                "both writes reach the mouse"
+            );
+        }
     }
 
     /// A preset step reads the mouse first only while OpenLogi never set its

@@ -11,11 +11,11 @@ use gpui::{
     App, Context, FocusHandle, InteractiveElement, IntoElement, ParentElement as _, Render, Size,
     Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px,
 };
-use gpui_component::{
+use gpui_kit::component::{
     Disableable as _, button::ButtonVariants as _, h_flex, scroll::ScrollableElement as _, v_flex,
 };
 
-use crate::app::menu::{CloseWindow, Minimize, Zoom};
+use crate::app::menu::{DIALOG_KEY_CONTEXT, Dismiss};
 use crate::state::AppState;
 use crate::ui::components::control_button;
 use crate::ui::theme;
@@ -84,10 +84,9 @@ impl Render for UpdateConsentView {
             .size_full()
             .bg(pal.page)
             .text_color(pal.text_primary)
+            .key_context(DIALOG_KEY_CONTEXT)
             .track_focus(&self.focus_handle)
-            .on_action(|_: &CloseWindow, window, _| window.remove_window())
-            .on_action(|_: &Minimize, window, _| window.minimize_window())
-            .on_action(|_: &Zoom, window, _| window.zoom_window())
+            .on_action(|_: &Dismiss, window, cx| answer(false, window, cx))
             // Only where the compositor left the chrome to us; the centred
             // content sits in the flex-column below it.
             .when(windows::needs_client_titlebar(window), |this| {
@@ -156,7 +155,7 @@ impl Render for UpdateConsentView {
 #[cfg(test)]
 mod tests {
     use gpui::{
-        AppContext as _, Bounds, Modifiers, ScrollDelta, ScrollWheelEvent, TestAppContext,
+        AppContext as _, Bounds, Modifiers, ScrollDelta, ScrollEvent, TestAppContext,
         VisualTestContext, point, size,
     };
     use openlogi_core::config::{Config, UiScale};
@@ -169,7 +168,7 @@ mod tests {
     fn consent_actions_stay_visible_while_long_copy_scrolls(cx: &mut TestAppContext) {
         let _locale = LOCALE_LOCK.lock().unwrap();
         cx.update(|cx| {
-            gpui_component::init(cx);
+            gpui_kit::init(cx);
             theme::register_builtin_themes(cx);
         });
 
@@ -210,7 +209,7 @@ mod tests {
             if height < 320. {
                 let body = visual.debug_bounds("update-consent-body").unwrap();
                 let before = visual.debug_bounds("update-consent-description").unwrap();
-                visual.simulate_event(ScrollWheelEvent {
+                visual.simulate_event(ScrollEvent {
                     // ScrollableElement gives the source div its content height;
                     // its centre can be below the clipped viewport and footer.
                     position: body.origin + point(px(20.), px(20.)),
@@ -240,12 +239,13 @@ mod tests {
     }
 
     #[gpui::test]
-    fn invalid_manifest_disables_enable_but_allows_decline(cx: &mut TestAppContext) {
+    fn invalid_manifest_disables_enable_but_escape_declines(cx: &mut TestAppContext) {
         let _locale = LOCALE_LOCK.lock().unwrap();
         rust_i18n::set_locale("en");
         cx.update(|cx| {
-            gpui_component::init(cx);
+            gpui_kit::init(cx);
             theme::register_builtin_themes(cx);
+            crate::app::menu::install(cx);
             let (commands, _) = tokio::sync::mpsc::unbounded_channel();
             let state = cx.new(|_| {
                 AppState::new(Sources::in_memory(
@@ -259,7 +259,7 @@ mod tests {
         let handle = cx.open_window(size(px(380.), px(320.)), |window, cx| {
             let consent =
                 cx.new(|cx| UpdateConsentView::new(Err(url::ParseError::EmptyHost), window, cx));
-            gpui_component::Root::new(consent, window, cx)
+            gpui_kit::component::Root::new(consent, window, cx)
         });
         let mut visual = VisualTestContext::from_window(handle.into(), cx);
         visual.update(|window, cx| window.draw(cx).clear(cx));
@@ -272,8 +272,8 @@ mod tests {
             assert!(!state.app_settings().check_for_updates);
         });
 
-        let decline = visual.debug_bounds("update-consent-decline").unwrap();
-        visual.simulate_click(decline.center(), Modifiers::default());
+        // Escape answers the way "Not now" does.
+        visual.simulate_keystrokes("escape");
         cx.update(|cx| {
             let state = AppState::try_read(cx).unwrap();
             assert!(state.app_settings().update_prompt_seen);

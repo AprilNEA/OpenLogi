@@ -152,6 +152,23 @@ impl RgbEngine {
         .await
     }
 
+    /// Run `body` under software control, with every cluster that offers
+    /// Static set to `base` first, for host frames that outlive one paint.
+    /// The returned lease is the caller's to hand back with [`release`].
+    pub(super) async fn under_per_key_control(
+        &self,
+        index: u8,
+        base: Rgb,
+        scope: &WriteScope<impl Fn() -> bool, impl Fn() -> bool>,
+        body: impl AsyncFnOnce() -> Result<(), WriteError>,
+    ) -> Result<RgbControlLease, WriteError> {
+        self.under_control(index, scope, async |_| {
+            self.paint_statics(base, scope).await?;
+            body().await
+        })
+        .await
+    }
+
     async fn paint_statics(
         &self,
         color: Rgb,

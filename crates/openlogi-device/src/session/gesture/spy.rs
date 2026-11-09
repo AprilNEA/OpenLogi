@@ -514,6 +514,7 @@ mod tests {
                 spy_index: 10,
                 baseline: Some(vec![1, 2, 3, 4, 5, 6]),
             }),
+            None,
         );
         registry.replace_node(node.clone(), [], channel.clone());
         let stop = wait_for_channel_change(&registry, &shared).await;

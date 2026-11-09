@@ -16,11 +16,12 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{
-    ActionRingIcon, Binding, ButtonId, GamingButtons, GamingLayout, GridKey, KeypadPage,
+    ActionRingIcon, Binding, ButtonId, GamingButtons, GamingLayout, GridKey, KeypadPage, ModeKey,
 };
 use openlogi_core::bindings::{bindings_on_page, button_bindings_for, oshook_gestures_for};
 use openlogi_core::config::{
-    AppSettings, Config, ConfigRevision, LightSettings, MouseProfileTarget, canonical_device_key,
+    AppSettings, Config, ConfigRevision, GKeyOwner, GamingKeyMode, LightSettings,
+    MouseProfileTarget, canonical_device_key,
 };
 use openlogi_core::device::{
     BatteryInfo, Capabilities, ChangedOnLight, DeviceInventory, DeviceKind, LightCapabilities,
@@ -30,8 +31,9 @@ use openlogi_core::device_order::{DeviceIdentity, DeviceStableId, PhysicalDevice
 use openlogi_hid::{
     BacklightChange, BacklightState, CaptureChannelSlot, ChannelPool, ChannelRegistry,
     DeviceIoGate, DeviceRoute, DisableKeysMask, Dpi, EasySwitchHosts, FnLockState,
-    ForceSensingInfo, HidppOperation, HostOs, PointerSpeed, ReportRate, ReportRateInfo, WriteError,
-    commands_for_light_settings, is_reserved_keyboard_control, key_display_for,
+    ForceSensingInfo, GamingWanted, HidppOperation, HostOs, PointerSpeed, ReportRate,
+    ReportRateInfo, SidetoneLevel, WriteError, commands_for_light_settings,
+    is_reserved_keyboard_control, key_display_for,
 };
 #[cfg(test)]
 use openlogi_ipc::ChosenLight;
@@ -189,6 +191,8 @@ pub struct SharedHandles {
     pointer_speeds: Arc<PointerSpeeds>,
     /// Orders every path's press-force writes per force-sensing device.
     force_sensing_order: WriteOrder,
+    /// Orders the GUI's sidetone writes per headset.
+    sidetone_order: WriteOrder,
     /// Orders the GUI's backlight writes per keyboard.
     backlight_order: WriteOrder,
     /// Orders host renames per device.
@@ -357,6 +361,26 @@ impl SharedHandles {
                 &ticket,
                 |c| async move { openlogi_hid::set_force_sensing_on(&c, force).await },
                 |c| async move { openlogi_hid::get_force_sensing_on(&c).await },
+            )
+            .await
+    }
+
+    /// Write `level` to the headset at `route` and return the level it
+    /// confirms. When a newer sidetone write for the headset is requested
+    /// before this one gets its turn, this one reads the headset instead of
+    /// writing a level that is about to be replaced.
+    pub async fn set_sidetone(
+        &self,
+        route: &DeviceRoute,
+        level: SidetoneLevel,
+    ) -> Result<SidetoneLevel, WriteError> {
+        let ticket = self.sidetone_order.request(route);
+        self.device(route)
+            .run_in_turn(
+                HidppOperation::WriteSidetone,
+                &ticket,
+                |c| async move { openlogi_hid::set_sidetone_on(&c, level).await },
+                |c| async move { openlogi_hid::get_sidetone_on(&c).await },
             )
             .await
     }
@@ -551,16 +575,9 @@ pub struct Orchestrator {
     /// the distinction (as [`InventoryHealth`]) so the GUI can tell them
     /// apart.
     inventory: InventoryState,
-    /// Set after a system wake or a device's own reconnect broadcast: devices
-    /// may have power-cycled while their set/route/online state looks
-    /// identical across the gap, so the next refresh re-applies volatile
-    /// settings to every online device. The value is the confirming re-apply
-    /// budget the forced targets are queued with — a system wake keeps the
-    /// boot-race ladder, a device reconnect needs only a link-race confirm.
-    forced_reapply_budget: Option<u8>,
-    /// System resume must rearm every online capture; an identity-free device
-    /// wake only reapplies settings, since each armed listener owns its wake.
-    forced_capture_rearm: bool,
+    /// What the next inventory refresh forces after a reset no snapshot can
+    /// show; every refresh drains it, and nothing else does.
+    forced_reapply: ForcedReapply,
     /// Rearm epochs belong to exact routes. Discovery or wake on one link
     /// must not retire a still-running capture on another link.
     capture_route_generations: HashMap<DeviceRoute, u64>,
@@ -571,10 +588,6 @@ pub struct Orchestrator {
     panel_generations: HashMap<DeviceRoute, u64>,
     /// The last panel epoch handed out.
     panel_epoch: u64,
-    /// Whether the last enumeration pass failed to open HID++ nodes; published
-    /// atomically with the inventory so no observation pairs a fresh device
-    /// set with a stale flag.
-    hid_open_failures: bool,
     /// Physical identities of devices first sighted (or targeted after wake)
     /// recently, with remaining confirming re-apply budget: the first write can
     /// race the device's own boot or reconnect and be lost.
@@ -585,8 +598,9 @@ pub struct Orchestrator {
     disabled_keys_recovery: BTreeMap<DeviceStableId, u8>,
     /// Agent-owned settings changes on each route, added to the published
     /// [`PairedDevice::settings_revision`](openlogi_core::device::PairedDevice::settings_revision).
-    /// Disable Keys recovery and backlight writes can change the keyboard
-    /// without a firmware broadcast, so clients need this move to read again.
+    /// Disable Keys recovery and backlight writes can change the keyboard,
+    /// and a DPI action the mouse, without a firmware broadcast, so clients
+    /// need this move to read again.
     settings_epochs: Vec<(DeviceRoute, u64)>,
     /// Last successful aggregate camera-use sample. `None` means the macOS
     /// watcher has not produced its first usable observation yet.
@@ -652,9 +666,92 @@ enum InventoryState {
     Ready {
         inventories: Vec<DeviceInventory>,
         standalone: Vec<StandaloneDevice>,
+        /// Whether this pass failed to open HID++ nodes. It travels with the
+        /// device set so no observation pairs a fresh set with a stale flag.
+        hid_open_failures: bool,
     },
     /// Enumeration has never succeeded (broken HID backend / dead watcher).
     Unavailable,
+}
+
+/// The forced re-apply latched for the next inventory refresh. After a system
+/// wake or an unobserved device reconnect, devices may have power-cycled while
+/// their set/route/online state looks identical across the gap, so the
+/// refresh re-applies volatile settings to every online device instead of
+/// only the ones whose snapshot shows a reconnect. Requests coalesce until one
+/// refresh drains the latch back to [`Self::Quiet`] (its `Default`).
+///
+/// Only the transitions below write a pending variant, and the refresh reads
+/// both of its decisions — [`Self::budget`] and [`Self::rearms_every_capture`]
+/// — off the one drained value. The `agent-forced-reapply-owner` ast-grep rule
+/// keeps every other path from naming a variant.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ForcedReapply {
+    /// Nothing forced.
+    #[default]
+    Quiet,
+    /// Re-apply settings to every online device, queueing `budget` confirming
+    /// passes. Captures follow their own route and listener transitions: an
+    /// armed listener owns its device's wake.
+    ReapplyPending { budget: u8 },
+    /// The system resumed: re-apply as [`Self::ReapplyPending`] and also rearm
+    /// every online capture, which may have lost its volatile diversion.
+    ResumePending { budget: u8 },
+}
+
+impl ForcedReapply {
+    /// Volatile settings may have reset (a node change or recovery): re-apply
+    /// with the boot-race ladder.
+    #[must_use]
+    fn settings_reset(self) -> Self {
+        self.reapply(VOLATILE_REAPPLY_CONFIRM_RETRIES)
+    }
+
+    /// A device reconnected unobserved. It was already booted, so its forced
+    /// re-apply needs only the link-race confirm.
+    #[must_use]
+    fn device_reconnected(self) -> Self {
+        self.reapply(RECONNECT_REAPPLY_CONFIRM_RETRIES)
+    }
+
+    /// The system resumed: re-apply with the boot-race ladder and rearm every
+    /// online capture.
+    #[must_use]
+    fn system_resumed(self) -> Self {
+        Self::ResumePending {
+            budget: self.coalesce(VOLATILE_REAPPLY_CONFIRM_RETRIES),
+        }
+    }
+
+    /// A settings request keeps a pending resume's rearm, and the larger
+    /// budget: a device reconnect arriving between a system wake and its
+    /// snapshot must not shrink the wake's boot-race ladder.
+    fn reapply(self, budget: u8) -> Self {
+        let budget = self.coalesce(budget);
+        match self {
+            Self::Quiet | Self::ReapplyPending { .. } => Self::ReapplyPending { budget },
+            Self::ResumePending { .. } => Self::ResumePending { budget },
+        }
+    }
+
+    fn coalesce(self, budget: u8) -> u8 {
+        self.budget().map_or(budget, |pending| pending.max(budget))
+    }
+
+    /// The confirming re-apply budget every online device is forced with, or
+    /// `None` when nothing is forced.
+    fn budget(self) -> Option<u8> {
+        match self {
+            Self::Quiet => None,
+            Self::ReapplyPending { budget } | Self::ResumePending { budget } => Some(budget),
+        }
+    }
+
+    /// Whether every online capture rearms, not only those whose own online
+    /// transition requires it.
+    fn rearms_every_capture(self) -> bool {
+        matches!(self, Self::ResumePending { .. })
+    }
 }
 
 impl Orchestrator {
@@ -720,6 +817,7 @@ impl Orchestrator {
             report_rate_order: WriteOrder::default(),
             pointer_speeds: Arc::default(),
             force_sensing_order: WriteOrder::default(),
+            sidetone_order: WriteOrder::default(),
             backlight_order: WriteOrder::default(),
             host_name_order: WriteOrder::default(),
             follower_cookie_order: WriteOrder::default(),
@@ -736,12 +834,10 @@ impl Orchestrator {
                 target: openlogi_hook::PointerTarget::Unavailable,
             },
             inventory: InventoryState::Pending,
-            forced_reapply_budget: None,
-            forced_capture_rearm: false,
+            forced_reapply: ForcedReapply::default(),
             capture_route_generations: HashMap::new(),
             panel_generations: HashMap::new(),
             panel_epoch: 0,
-            hid_open_failures: false,
             reapply_followup: BTreeMap::new(),
             disabled_keys_recovery: BTreeMap::new(),
             settings_epochs: Vec::new(),
@@ -776,11 +872,16 @@ impl Orchestrator {
         self.shared.clone()
     }
 
-    fn current_key(&self) -> Option<&str> {
+    /// The selected inventory entry. A device seen on two links has an entry
+    /// per link under one key; this is the one [`pick_current`] chose.
+    fn current_device(&self) -> Option<&AgentDevice> {
         self.devices
             .get(self.current)
             .filter(|device| is_hidpp_device(device))
-            .map(|d| d.config_key.as_str())
+    }
+
+    fn current_key(&self) -> Option<&str> {
+        self.current_device().map(|d| d.config_key.as_str())
     }
 
     /// The app whose mouse profile applies, and the pointer target dispatch
@@ -823,11 +924,13 @@ impl Orchestrator {
         })
     }
 
-    /// Build the OS-hook callback's maps for `key` and its mouse context. Both hook
-    /// sub-maps are app-scoped (a per-app override can demote the gesture owner),
-    /// so they're built together here and published under one lock — keeping
-    /// `rebuild` and `set_current_app` from drifting into a half-populated write.
-    fn hook_maps_for(&self, key: Option<&str>) -> HookMaps {
+    /// Build the OS-hook callback's maps for the `selected` device and its mouse
+    /// context. Both hook sub-maps are app-scoped (a per-app override can demote
+    /// the gesture owner), so they're built together here and published under
+    /// one lock — keeping `rebuild` and `set_current_app` from drifting into a
+    /// half-populated write.
+    fn hook_maps_for(&self, selected: Option<&AgentDevice>) -> HookMaps {
+        let key = selected.map(|device| device.config_key.as_str());
         // A disabled selected device gets empty maps: the OS hook then passes
         // its events through untouched instead of applying remaps to a device
         // the user asked OpenLogi to leave alone.
@@ -877,6 +980,9 @@ impl Orchestrator {
             gestures,
             pointer,
             selected_device: key.map(str::to_owned),
+            // The selected entry's own link: another entry under the same key
+            // names a link its capture session is not on.
+            selected_route: selected.and_then(|device| device.route.clone()),
             shift_bindings,
             ..HookMaps::default()
         }
@@ -953,8 +1059,12 @@ impl Orchestrator {
             .iter()
             .filter(|d| d.kind.is_keyboard_family())
             .filter(|d| self.config.device_enabled(&d.config_key))
-            .filter(|d| binds_keys_in_some_profile(&self.config, &d.config_key))
             .filter_map(|dev| {
+                let gaming = gaming_wanted(&self.config, dev);
+                if !gaming.take_g_row && !binds_keys_in_some_profile(&self.config, &dev.config_key)
+                {
+                    return None;
+                }
                 let route = dev.route.clone()?;
                 let stored = self.foreground_key_bindings(&dev.config_key);
                 // Capture from every page; dispatch the current page's.
@@ -965,12 +1075,16 @@ impl Orchestrator {
                         dev,
                         bindings,
                         divert,
+                        gaming,
                     },
                     route,
                 ))
             });
         let rank = |candidate: &KeyboardCandidate<'_>| {
-            (candidate.divert.captures_nothing(), !candidate.dev.online)
+            (
+                candidate.divert.captures_nothing() && !candidate.gaming.take_g_row,
+                !candidate.dev.online,
+            )
         };
         let mut chosen: Vec<(KeyboardCandidate<'_>, DeviceRoute)> = Vec::new();
         for (candidate, route) in candidates {
@@ -996,6 +1110,8 @@ impl Orchestrator {
                 route,
                 wanted: chosen.divert.wanted,
                 grid: chosen.divert.grid,
+                gaming: chosen.gaming,
+                gaming_mode: self.config.gaming_key_mode(&chosen.dev.config_key),
                 bindings: chosen.bindings,
             });
         }
@@ -1059,7 +1175,7 @@ impl Orchestrator {
     /// Rewrite every shared map from the current config + selected device.
     fn rebuild(&self) {
         let key = self.current_key();
-        self.publish_hook_maps(self.hook_maps_for(key));
+        self.publish_hook_maps(self.hook_maps_for(self.current_device()));
         self.publish_scroll_inversion(key);
         self.publish_device_runtime();
     }
@@ -1395,10 +1511,10 @@ impl Orchestrator {
         // Even an empty snapshot is a *completed* enumeration — the watcher
         // skips failed ticks — so the device set is now known either way (and
         // a recovered backend upgrades `Unavailable` back to live data).
-        self.hid_open_failures = hid_open_failures;
         self.inventory = InventoryState::Ready {
             inventories: inventories.to_vec(),
             standalone: standalone.to_vec(),
+            hid_open_failures,
         };
         self.publish_inventory();
         let devices = build_devices(&self.config, inventories, standalone);
@@ -1428,10 +1544,10 @@ impl Orchestrator {
         // device's own `0x1d4b` reconnect broadcast, or a channel the
         // enumerator replaced after retiring it, where none of those
         // transitions are observable.
-        let forced = self.forced_reapply_budget.take();
+        let forced = std::mem::take(&mut self.forced_reapply);
         let next_current = pick_current(&devices, self.config.selected_device());
-        self.rearm_capture_routes(&devices);
-        self.repaint_panels(&devices, forced.is_some());
+        self.rearm_capture_routes(&devices, forced);
+        self.repaint_panels(&devices, forced.budget().is_some());
         // Manual cancellation can happen long after the boot/reconnect ladder
         // drained. Its owner requests only a Disable Keys recovery, and does
         // not consume a request while a successor still owns the setting.
@@ -1453,8 +1569,13 @@ impl Orchestrator {
             plan_disabled_keys_recovery(&devices, &disabled_keys_recovery, confirm_reapply);
         self.disabled_keys_recovery = next_disabled_keys_recovery;
         let followup = std::mem::take(&mut self.reapply_followup);
-        let (targets, next_followup) =
-            plan_reapply(&self.devices, &devices, &followup, forced, confirm_reapply);
+        let (targets, next_followup) = plan_reapply(
+            &self.devices,
+            &devices,
+            &followup,
+            forced.budget(),
+            confirm_reapply,
+        );
         self.reapply_followup = next_followup;
         // A keyboard switched to another platform on the device (a platform
         // key combination) is put back, as Logi Options+ does on its
@@ -1583,13 +1704,12 @@ impl Orchestrator {
         }
     }
 
-    /// Advance only the captures whose own online transition requires it.
-    /// Keep a resume request latched until an authoritative snapshot arrives.
-    fn rearm_capture_routes(&mut self, devices: &[AgentDevice]) {
-        let all = std::mem::take(&mut self.forced_capture_rearm);
+    /// Advance only the captures whose own online transition requires it, or
+    /// every online capture when `forced` carries a system resume.
+    fn rearm_capture_routes(&mut self, devices: &[AgentDevice], forced: ForcedReapply) {
         self.capture_route_generations
             .retain(|route, _| devices.iter().any(|dev| dev.route.as_ref() == Some(route)));
-        let targets = reapply_targets(&self.devices, devices, all);
+        let targets = reapply_targets(&self.devices, devices, forced.rearms_every_capture());
         if targets.is_empty() {
             return;
         }
@@ -1632,15 +1752,14 @@ impl Orchestrator {
     /// or recovery. Capture follows its own route and listener transitions;
     /// a general settings request must not cycle unrelated capture epochs.
     pub fn reapply_volatile_on_next_refresh(&mut self) {
-        self.force_reapply(VOLATILE_REAPPLY_CONFIRM_RETRIES);
+        self.forced_reapply = self.forced_reapply.settings_reset();
     }
 
     /// After system resume, reapply settings and rearm every online capture.
     /// Devices may have lost volatile diversion even when the snapshot looks
     /// identical; retain this intent until an authoritative refresh arrives.
     pub fn reapply_after_system_resume(&mut self) {
-        self.forced_capture_rearm = true;
-        self.reapply_volatile_on_next_refresh();
+        self.forced_reapply = self.forced_reapply.system_resumed();
     }
 
     /// Force a volatile-settings re-apply on the next inventory refresh
@@ -1655,15 +1774,7 @@ impl Orchestrator {
     /// re-applies; the writes are idempotent and the confirm budget is the
     /// short link-race one, not the boot ladder.
     pub fn reapply_reconnected_on_next_refresh(&mut self) {
-        self.force_reapply(RECONNECT_REAPPLY_CONFIRM_RETRIES);
-    }
-
-    /// Coalesce forced re-apply requests, keeping the largest confirm budget:
-    /// a device reconnect arriving between a system wake and its snapshot must
-    /// not shrink the wake's boot-race ladder.
-    fn force_reapply(&mut self, confirm_retries: u8) {
-        self.forced_reapply_budget =
-            Some(self.forced_reapply_budget.unwrap_or(0).max(confirm_retries));
+        self.forced_reapply = self.forced_reapply.device_reconnected();
     }
 
     /// Push the persisted volatile settings (lighting, sensor DPI, SmartShift,
@@ -1953,6 +2064,7 @@ impl Orchestrator {
             haptic_route,
             layout,
             language: self.config.app_settings.language.clone(),
+            size: ring.size,
         })
     }
 
@@ -1999,18 +2111,14 @@ impl Orchestrator {
             InventoryState::Ready {
                 inventories,
                 standalone,
+                hid_open_failures,
             } => {
                 let inventories = published_inventories(inventories, &self.settings_epochs);
-                self.observable.set_inventory(
-                    health,
-                    &inventories,
-                    standalone,
-                    self.hid_open_failures,
-                );
+                self.observable
+                    .set_inventory(health, &inventories, standalone, *hid_open_failures);
             }
             InventoryState::Pending | InventoryState::Unavailable => {
-                self.observable
-                    .set_inventory(health, &[], &[], self.hid_open_failures);
+                self.observable.set_inventory(health, &[], &[], false);
             }
         }
     }
@@ -2050,7 +2158,7 @@ impl Orchestrator {
             return false;
         }
         let previous = std::mem::replace(&mut self.current_app, id);
-        self.publish_hook_maps(self.hook_maps_for(self.current_key()));
+        self.publish_hook_maps(self.hook_maps_for(self.current_device()));
         // Capture plans are app-scoped (per-app binding overlays); republish
         // them with the keyboard's effective bindings.
         self.publish_device_runtime();
@@ -2080,7 +2188,7 @@ impl Orchestrator {
         if self.config.app_settings.mouse_profile_target == MouseProfileTarget::Focused {
             return false;
         }
-        self.publish_hook_maps(self.hook_maps_for(self.current_key()));
+        self.publish_hook_maps(self.hook_maps_for(self.current_device()));
         self.publish_capture_plans();
         previous != self.mouse_context().1
     }
@@ -2389,6 +2497,7 @@ struct KeyboardCandidate<'a> {
     dev: &'a AgentDevice,
     bindings: BTreeMap<ButtonId, Binding>,
     divert: KeyboardDivertSet,
+    gaming: GamingWanted,
 }
 
 /// What the bindings ask a keyboard capture session to do: the `0x1b04`
@@ -2459,6 +2568,32 @@ fn keyboard_divert_set(bindings: &BTreeMap<ButtonId, Binding>) -> KeyboardDivert
         }
     }
     set
+}
+
+/// What `dev`'s capture session does with a G-series gaming cluster: nothing
+/// until the user hands G1–G5 to OpenLogi on this device, then the whole
+/// `0x8010` row, plus M1–M3 when the device has them, plus MR in
+/// [`GamingKeyMode::NineButtons`]. Bound or not, every G-key is then
+/// OpenLogi's, so the takeover is an explicit per-device choice.
+fn gaming_wanted(config: &Config, dev: &AgentDevice) -> GamingWanted {
+    let Some(capabilities) = dev.capabilities.as_ref().filter(|c| c.g_keys) else {
+        return GamingWanted::default();
+    };
+    if config.g_key_owner(&dev.config_key) != GKeyOwner::OpenLogi {
+        return GamingWanted::default();
+    }
+    let nine_buttons = config.gaming_key_mode(&dev.config_key) == GamingKeyMode::NineButtons;
+    let mode_keys = ModeKey::ALL
+        .into_iter()
+        .filter(|key| match key.profile() {
+            Some(_) => capabilities.m_keys,
+            None => capabilities.macro_record && nine_buttons,
+        })
+        .collect();
+    GamingWanted {
+        take_g_row: true,
+        mode_keys,
+    }
 }
 
 /// Whether `config_key` binds a key the capture session would take over in

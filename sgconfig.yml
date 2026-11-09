@@ -3,6 +3,7 @@
 ruleDirs:
   - .ast-grep/rules
   - crates/openlogi-agent-core/.ast-grep/rules
+  - crates/openlogi-agent/.ast-grep/rules
   - crates/openlogi-camera/.ast-grep/rules
   - crates/openlogi-cli/.ast-grep/rules
   - crates/openlogi-core/.ast-grep/rules
@@ -14,4 +15,5 @@ ruleDirs:
   - crates/openlogi-hook/.ast-grep/rules
   - crates/openlogi-inject/.ast-grep/rules
   - crates/openlogi-ipc/.ast-grep/rules
+  - crates/openlogi-ui/.ast-grep/rules
   - xtask/.ast-grep/rules
