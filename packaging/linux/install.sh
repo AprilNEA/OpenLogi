@@ -391,6 +391,25 @@ install_source_file() {
   fi
 }
 
+# Earlier installers wrote the rule to /etc/udev/rules.d, where udev lets it
+# shadow the copy under /usr/lib. Remove that copy only after the /usr/lib rule
+# is in place, and only when it is byte-identical to the bundled rule and no
+# package owns it. Any other file at that path is an administrator's override:
+# keep it and say that it takes precedence.
+LEGACY_UDEV_RULE=/etc/udev/rules.d/70-openlogi.rules
+migrate_legacy_udev_rule() {
+  bundled_rule=$1
+  [ -e "$LEGACY_UDEV_RULE" ] || return 0
+  owned_by_package "$LEGACY_UDEV_RULE" && return 0
+  if cmp -s "$bundled_rule" "$LEGACY_UDEV_RULE"; then
+    printf 'Removing the old copy of the udev rule from /etc/udev/rules.d...\n'
+    run_source_privileged rm -f "$LEGACY_UDEV_RULE"
+  else
+    printf '%s\n' "Keeping $LEGACY_UDEV_RULE: it differs from the bundled rule and" \
+      "takes precedence over /usr/lib/udev/rules.d. Remove it to use the bundled rule." >&2
+  fi
+}
+
 run_source_privileged() {
   if [ "$DRY_RUN" -eq 1 ]; then
     print_command sudo "$@"
@@ -437,24 +456,9 @@ install_source() {
     install_source_file 755 "${BUILD_DIR}/${binary}" "${BINDIR}/${binary}"
   done
 
-  # /etc/udev/rules.d is reserved for admin-authored overrides, not a file a
-  # package or installer ships; pacman's udev-reload hook only watches
-  # /usr/lib/udev/rules.d, so a prior install there never reloaded on an
-  # Arch-family system without a manual `udevadm control --reload-rules`. A
-  # stale copy at the old path also shadows the new one (udev prefers /etc),
-  # so a previous run of this same script needs migrating off it — but only
-  # when it isn't a package's own file, which owns its lifecycle independently.
-  if [ -e /etc/udev/rules.d/70-openlogi.rules ] &&
-    ! owned_by_package /etc/udev/rules.d/70-openlogi.rules; then
-    if [ "$DRY_RUN" -eq 1 ]; then
-      print_command sudo rm -f /etc/udev/rules.d/70-openlogi.rules
-    else
-      printf 'Migrating the udev rule from /etc to /usr/lib...\n'
-      run_privileged rm -f /etc/udev/rules.d/70-openlogi.rules
-    fi
-  fi
   install_source_file 644 "${SCRIPT_DIR}/udev/70-openlogi.rules" \
     /usr/lib/udev/rules.d/70-openlogi.rules
+  migrate_legacy_udev_rule "${SCRIPT_DIR}/udev/70-openlogi.rules"
   install_source_file 644 "${TEMP_DIR}/openlogi-agent.service" \
     /usr/lib/systemd/user/openlogi-agent.service
   install_source_file 644 "${SCRIPT_DIR}/desktop/openlogi.desktop" \

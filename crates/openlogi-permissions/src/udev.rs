@@ -45,6 +45,11 @@ use std::process::{Command, Stdio};
 const RULES: &str = include_str!("../../../packaging/linux/udev/70-openlogi.rules");
 
 /// Where the packages and `install.sh` put [`RULES`].
+const PACKAGED_RULES_DIR: &str = "/usr/lib/udev/rules.d";
+
+/// Where the root half and the Flatpak host command put [`RULES`]: the
+/// administrator's directory, since `/usr` may be read-only. udev prefers it
+/// over [`PACKAGED_RULES_DIR`], so a copy here outlives package upgrades.
 const RULES_DIR: &str = "/etc/udev/rules.d";
 const RULES_FILE: &str = "70-openlogi.rules";
 
@@ -224,13 +229,14 @@ pub enum InstallError {
 /// `/etc/udev/rules.d`, reload udev, and re-run the rules for the nodes they
 /// cover. Needs root.
 ///
-/// Writes nothing when the installed file already matches, so a package's
-/// copy is left untouched and the run only re-applies it.
+/// Writes nothing when a package already installed the same rules, or when
+/// the file in `/etc/udev/rules.d` already matches. The run then only
+/// re-applies them, which is what an install missing its udev reload needs.
 pub fn install_rules() -> Result<(), InstallError> {
     if let Some(manager) = rules_manager() {
         return Err(InstallError::Managed(manager));
     }
-    write_rules(Path::new(RULES_DIR))?;
+    place_rules(Path::new(PACKAGED_RULES_DIR), Path::new(RULES_DIR))?;
     for args in UDEVADM_STEPS {
         udevadm(args)?;
     }
@@ -240,10 +246,23 @@ pub fn install_rules() -> Result<(), InstallError> {
     Ok(())
 }
 
+/// Write [`RULES`] into `admin_dir` unless `packaged_dir` already holds them.
+fn place_rules(packaged_dir: &Path, admin_dir: &Path) -> Result<(), InstallError> {
+    if holds_rules(packaged_dir) {
+        return Ok(());
+    }
+    write_rules(admin_dir)
+}
+
+/// Whether `dir` holds a `70-openlogi.rules` identical to [`RULES`].
+fn holds_rules(dir: &Path) -> bool {
+    fs::read(dir.join(RULES_FILE)).is_ok_and(|current| current == RULES.as_bytes())
+}
+
 /// Write [`RULES`] into `dir` unless an identical file is already there.
 fn write_rules(dir: &Path) -> Result<(), InstallError> {
     let path = dir.join(RULES_FILE);
-    if fs::read(&path).is_ok_and(|current| current == RULES.as_bytes()) {
+    if holds_rules(dir) {
         return Ok(());
     }
     let write_error = |error| InstallError::Write {
