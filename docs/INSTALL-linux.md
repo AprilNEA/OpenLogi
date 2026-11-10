@@ -68,6 +68,29 @@ The installer enables and starts `openlogi-agent.service` for the current user
 when systemd is available; failure to reach the user service manager does not
 roll back an otherwise successful package installation.
 
+## Updating
+
+A `.deb`, `.rpm`, or Arch `.pkg.tar.zst` from the releases page updates from
+**Settings → Updates**. OpenLogi reads the release manifest, downloads the
+package for this machine's architecture and package format, and hands it to
+`/usr/libexec/openlogi-update-install` through `pkexec`. Your desktop shows a
+polkit prompt for an administrator password; the helper copies the package into
+a root-owned directory, checks its minisign signature against the same public
+key `install.sh` embeds and its SHA-256 against the manifest, and only then runs
+apt/dpkg, dnf/yum/zypper/rpm, or pacman. When the install finishes,
+**Restart to Update** starts the new version.
+
+- With **Automatically download and install** on, a background check that finds
+  a newer version starts the install right away, and the polkit prompt appears
+  then. It does not wait for the next restart as on macOS and Windows.
+- Releases before the helper existed cannot install in-app. Update once with
+  the installer above (or your package manager and the next release package),
+  and later versions install from Settings.
+- Flatpak, Nix, and source builds, and repackaged installs that the package
+  manager does not report as `openlogi` (such as the AUR `openlogi-bin`), are
+  not updated in-app. Settings → Updates reports the installation as
+  unsupported; update it with the tool that installed it.
+
 ## Arch Linux (AUR)
 
 The [`openlogi`](https://aur.archlinux.org/packages/openlogi) AUR package
