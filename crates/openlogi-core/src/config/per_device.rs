@@ -10,8 +10,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
     CameraControls, CameraStreamMode, Config, DeviceIdentity, DisableKey, GKeyOwner, GamingKeyMode,
-    LightSettings, Lighting, MomentumScrolling, OnboardMemory, ScrollResolution, SmartShift,
-    ThumbwheelSensitivity,
+    LightSettings, Lighting, MomentumScrolling, OnboardMemory, PinnedOs, ScrollResolution,
+    SmartShift, ThumbwheelSensitivity,
 };
 use crate::binding::{
     Action, ActionRingConfig, ActionRingIcon, ActionRingSize, ActionRingSlot, Binding, ButtonId,
@@ -397,6 +397,22 @@ impl Config {
             .entry(device_key.to_string())
             .or_default()
             .keep_os_layout = Some(keep);
+    }
+
+    /// The OS `device_key`'s key layout is pinned to while "keep OS layout" is
+    /// off, or `None` when it has no pin.
+    #[must_use]
+    pub fn os_layout_pin(&self, device_key: &str) -> Option<PinnedOs> {
+        self.devices.get(device_key).and_then(|d| d.os_layout_pin)
+    }
+
+    /// Record the OS `device_key`'s key layout is pinned to, or `None` to
+    /// clear the pin.
+    pub fn set_os_layout_pin(&mut self, device_key: &str, pin: Option<PinnedOs>) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .os_layout_pin = pin;
     }
 
     /// The stored onboard memory of `device_key`.

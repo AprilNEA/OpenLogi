@@ -43,10 +43,12 @@ v10 adds the per-device `disabled_keys` policy. Older readers reject a v10
 header before parsing its fields. A v9 file without the policy still loads.
 v11 adds the `[flow]` section. Older readers reject a v11 header before
 parsing its fields. A v10 file without the section loads with Flow disabled.
+v12 adds the per-device `os_layout_pin`. Older readers reject a v12 header
+before parsing its field. A v11 file without the pin still loads.
 
 ## Shape
 
-`schema_version` is required and currently `11`. `selected_device` is an
+`schema_version` is required and currently `12`. `selected_device` is an
 optional physical device key.
 
 `[app_settings]` contains application-wide preferences:
@@ -271,6 +273,10 @@ Common device fields are:
 - `keep_os_layout` for keyboards whose key layout software can set (HID++
   `0x4531`): absent or `true` keeps the layout on the host OS, as Logi Options+
   does; `false` leaves the keyboard's layout to its own shortcuts
+- `os_layout_pin` for the same keyboards: `"macos"`, `"windows"`, or `"linux"`.
+  While `keep_os_layout` is `false`, the agent writes that OS's layout when the
+  keyboard connects and whenever the pin changes, and the keyboard keeps it.
+  Absent leaves the layout where it is. `keep_os_layout = true` ignores it
 - `report_rate` for mice with an adjustable report rate (HID++ `0x8060` or
   `0x8061`), in hertz. The agent writes it when the mouse reconnects over a
   connection that offers that rate; absent leaves the mouse's own rate

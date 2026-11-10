@@ -3,6 +3,7 @@
 use super::fn_lock::{drain, keyboard_inventory};
 use super::*;
 use crate::services::ipc::Command;
+use openlogi_core::config::PinnedOs;
 
 /// The fn-lock test keyboard, with or without a settable key layout.
 fn keyboard_state(os_layout: bool) -> (AppState, tokio::sync::mpsc::UnboundedReceiver<Command>) {
@@ -46,6 +47,49 @@ fn keep_os_layout_is_on_by_default_and_the_toggle_saves_and_reloads_only() {
         [StateEvent::DeviceConfigChanged(key)]
     );
     assert!(state.current_keep_os_layout());
+}
+
+#[test]
+fn the_layout_pin_saves_and_reloads_only() {
+    let (mut state, mut receiver) = keyboard_state(true);
+    drain(&mut receiver);
+    assert_eq!(state.current_os_layout_pin(), None);
+    let key = state
+        .current_record()
+        .expect("the keyboard is selected")
+        .device_key();
+    assert_eq!(
+        state.commit_os_layout_pin(Some(PinnedOs::MacOs)),
+        [StateEvent::DeviceConfigChanged(key.clone())]
+    );
+    assert_eq!(state.current_os_layout_pin(), Some(PinnedOs::MacOs));
+    let commands = drain(&mut receiver);
+    assert!(
+        matches!(commands.as_slice(), [Command::ReloadConfig(_)]),
+        "only a reload reaches the agent, got {} commands",
+        commands.len()
+    );
+    assert_eq!(
+        state.commit_os_layout_pin(None),
+        [StateEvent::DeviceConfigChanged(key)]
+    );
+    assert_eq!(state.current_os_layout_pin(), None);
+}
+
+#[test]
+fn a_keyboard_without_a_settable_layout_ignores_the_pin() {
+    let (mut state, mut receiver) = keyboard_state(false);
+    drain(&mut receiver);
+    let key = state
+        .current_record()
+        .expect("the keyboard is selected")
+        .device_key();
+    assert_eq!(
+        state.commit_os_layout_pin(Some(PinnedOs::MacOs)),
+        [StateEvent::DeviceConfigChanged(key)]
+    );
+    assert_eq!(state.current_os_layout_pin(), None);
+    assert!(drain(&mut receiver).is_empty());
 }
 
 #[test]
