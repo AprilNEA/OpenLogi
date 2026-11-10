@@ -16,6 +16,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use openlogi_core::device::{BatteryInfo, BatteryLevel, BatteryStatus, DeviceKind};
@@ -360,18 +361,40 @@ fn advance_discharging_entry(
     }
 }
 
+/// Numbers this process's telemetry staging files so two saves never share one.
+static TELEMETRY_STAGED_SEQ: AtomicU32 = AtomicU32::new(0);
+
+fn staged_telemetry_path(path: &Path) -> PathBuf {
+    let seq = TELEMETRY_STAGED_SEQ.fetch_add(1, Ordering::Relaxed);
+    next_staged_telemetry_path_for_seq(path, seq)
+}
+
+fn next_staged_telemetry_path_for_seq(path: &Path, seq: u32) -> PathBuf {
+    let mut staged = path.as_os_str().to_owned();
+    staged.push(format!(".{}-{seq}.tmp", std::process::id()));
+    PathBuf::from(staged)
+}
+
 fn write_telemetry_atomic(path: &Path, store: &TelemetryStore) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
     let json = serde_json::to_vec_pretty(store).map_err(std::io::Error::other)?;
-    let tmp_path = path.with_extension("json.tmp");
-    {
-        let mut file = File::create(&tmp_path)?;
+    let staging = staged_telemetry_path(path);
+    let written = (|| -> std::io::Result<()> {
+        let mut file = File::create(&staging)?;
         file.write_all(&json)?;
-        file.sync_all()?;
+        file.sync_all()
+    })();
+    if let Err(err) = written {
+        let _ = fs::remove_file(&staging);
+        return Err(err);
     }
-    fs::rename(&tmp_path, path)
+    if let Err(err) = fs::rename(&staging, path) {
+        let _ = fs::remove_file(&staging);
+        return Err(err);
+    }
+    Ok(())
 }
 
 /// Complete battery duration and health estimate for a single device.
@@ -897,8 +920,9 @@ mod tests {
     };
 
     use super::{
-        BatteryTelemetry, DischargePhase, MAX_LEARN_WINDOW_SECS, MIN_LEARN_WINDOW_SECS,
-        estimate_for_device, nominal_profile_for_device, observe_state_telemetry_at,
+        BatteryTelemetry, DischargePhase, MAX_LEARN_WINDOW_SECS, MIN_LEARN_WINDOW_SECS, Ordering,
+        TELEMETRY_STAGED_SEQ, estimate_for_device, next_staged_telemetry_path_for_seq,
+        nominal_profile_for_device, observe_state_telemetry_at, staged_telemetry_path,
     };
     use crate::services::assets::AssetResolver;
     use crate::services::i18n::LOCALE_LOCK;
@@ -1337,50 +1361,101 @@ mod tests {
         let _ = std::fs::remove_dir_all(&temp_dir);
         std::fs::create_dir_all(&temp_dir).unwrap();
 
-        // Point telemetry path at a directory where `.json.tmp` creation or rename will fail
-        // by creating a directory at `battery-telemetry.json.tmp`
         let file_path = temp_dir.join("battery-telemetry.json");
-        let blocker_tmp = temp_dir.join("battery-telemetry.json.tmp");
-        std::fs::create_dir_all(&blocker_tmp).unwrap();
 
+        // Each call to staged_telemetry_path uses a distinct per-call staging file.
+        let stage_a = staged_telemetry_path(&file_path);
+        let stage_b = staged_telemetry_path(&file_path);
+        assert_ne!(stage_a, stage_b, "every save must use its own staging path");
+
+        // 1. Persist initial readable history (85% @ t=1000 -> 75% @ t=4600, 1 learned sample).
         let mut telemetry = BatteryTelemetry::with_path(file_path.clone());
-        let battery = BatteryInfo {
+        let battery_85 = BatteryInfo {
             percentage: Some(85),
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Discharging,
+        };
+        let battery_75 = BatteryInfo {
+            percentage: Some(75),
             level: BatteryLevel::Good,
             status: BatteryStatus::Discharging,
         };
         telemetry.observe_device(
             "serial:test",
             true,
-            Some(&battery),
+            Some(&battery_85),
             Some("kbd:standard"),
             2880,
-            1000,
+            1_000,
+        );
+        telemetry.observe_device(
+            "serial:test",
+            true,
+            Some(&battery_75),
+            Some("kbd:standard"),
+            2880,
+            4_600,
+        );
+        telemetry.flush();
+        assert!(!telemetry.is_dirty());
+        assert!(file_path.exists());
+
+        // 2. Simulate an interrupted previous staging write left behind plus a failed save
+        // on the next sequence number (by placing a directory at the next per-call staging path).
+        std::fs::write(&stage_a, b"{\"devices\": {\"serial:test\": ").unwrap();
+        let next_seq = TELEMETRY_STAGED_SEQ.load(Ordering::Relaxed);
+        let blocked_staging = next_staged_telemetry_path_for_seq(&file_path, next_seq);
+        std::fs::create_dir_all(&blocked_staging).unwrap();
+
+        let battery_65 = BatteryInfo {
+            percentage: Some(65),
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Discharging,
+        };
+        telemetry.observe_device(
+            "serial:test",
+            true,
+            Some(&battery_65),
+            Some("kbd:standard"),
+            2880,
+            8_200,
         );
         assert!(telemetry.is_dirty());
 
-        // Flush fails because `.json.tmp` is a directory -> dirty remains true
+        // Flush fails on the blocked staging path -> dirty remains true AND the previous
+        // readable history on disk (75% @ t=4600, 1 sample) is preserved intact!
         telemetry.flush();
         assert!(
             telemetry.is_dirty(),
             "dirty flag must remain true when atomic write fails"
         );
+        let preserved = BatteryTelemetry::with_path(file_path.clone());
+        assert_eq!(
+            preserved.phase_for("serial:test"),
+            Some(&DischargePhase::Discharging {
+                percentage: 75,
+                timestamp_secs: 4_600,
+                signature: "kbd:standard".into(),
+            }),
+            "interrupted or failed save must preserve the previous readable history on disk"
+        );
+        assert_eq!(preserved.query("serial:test", "kbd:standard").2, 1);
 
-        // Remove blocker directory and flush again -> succeeds and clears dirty
-        std::fs::remove_dir_all(&blocker_tmp).unwrap();
+        // 3. Subsequent flush uses the next per-call staging file (`next_seq + 1`), so it
+        // succeeds automatically even without removing `blocked_staging`, and clears dirty!
         telemetry.flush();
         assert!(!telemetry.is_dirty());
-        assert!(file_path.exists());
 
         let reloaded = BatteryTelemetry::with_path(file_path);
         assert_eq!(
             reloaded.phase_for("serial:test"),
             Some(&DischargePhase::Discharging {
-                percentage: 85,
-                timestamp_secs: 1000,
+                percentage: 65,
+                timestamp_secs: 8_200,
                 signature: "kbd:standard".into(),
             })
         );
+        assert_eq!(reloaded.query("serial:test", "kbd:standard").2, 2);
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
