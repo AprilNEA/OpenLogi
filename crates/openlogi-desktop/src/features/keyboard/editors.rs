@@ -62,7 +62,7 @@ impl PowerUserKind {
 
 pub(crate) fn text_editor_placeholder(kind: PowerUserKind) -> gpui::SharedString {
     match kind {
-        PowerUserKind::CustomShortcut => "Ctrl+F11".into(),
+        PowerUserKind::CustomShortcut => tr!("action_ring.shortcut_e_g_cmd_plus_shift_plus_p"),
         PowerUserKind::OpenApplication => tr!("action_ring.application_folder_path_or_url"),
         PowerUserKind::TypeText => tr!("actions.type_text_placeholder"),
         PowerUserKind::RunAppleScript => "display dialog \"Hello\"".into(),
