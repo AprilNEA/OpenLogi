@@ -1,11 +1,15 @@
+use std::future::Future;
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::time::Duration;
 
 use super::*;
 use hidpp::feature::FeatureType;
+use hidpp::feature::color_led_effects::EffectIntensity;
 use hidpp::feature::extended_dpi::{DpiRange, Lod, SensorCapabilities};
 use hidpp::feature::per_key_lighting::FramePersistence;
 use hidpp::feature::smartshift::WheelMode;
 use hidpp::protocol::v20::ErrorType;
+use openlogi_core::config::LightingEffectPeriod;
 
 use crate::SharedChannel;
 use crate::channel::scripted::{ScriptedRawHidChannel, feature_error, scripted_channel};
@@ -1814,6 +1818,297 @@ async fn a_zone_whose_info_is_rejected_is_not_written_with_a_guessed_index() {
         })
     );
     assert!(zone_effect_writes(&handle).is_empty());
+}
+
+/// Every `setZoneEffect` the device received, as `(zone, effect index, the
+/// ten parameter bytes)`, each checked to be a volatile write.
+fn zone_effect_params(handle: &crate::replay::ReplayChannelHandle) -> Vec<(u8, u8, [u8; 10])> {
+    handle
+        .written_reports()
+        .into_iter()
+        .filter(|report| {
+            report.len() == 20 && report[2] == COLOR_LED_EFFECTS_INDEX && report[3] >> 4 == 0x03
+        })
+        .map(|report| {
+            assert_eq!(report[16], 0, "effects are applied volatilely");
+            let mut params = [0; 10];
+            params.copy_from_slice(&report[6..16]);
+            (report[4], report[5], params)
+        })
+        .collect()
+}
+
+/// How long one lighting test may take, setup included, before it fails
+/// instead of leaving CI waiting on a stuck write.
+const LIGHTING_TEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// `test`, failed with a clear message once [`LIGHTING_TEST_TIMEOUT`] passes.
+async fn bounded<T>(test: impl Future<Output = T>) -> T {
+    tokio::time::timeout(LIGHTING_TEST_TIMEOUT, test)
+        .await
+        .expect("the lighting test did not finish within LIGHTING_TEST_TIMEOUT")
+}
+
+fn period(ms: u16) -> LightingEffectPeriod {
+    LightingEffectPeriod::try_new(ms).expect("valid lighting effect period")
+}
+
+/// Every `getZoneInfo` the device received: one per zone per walk of the list.
+fn zone_info_reads(handle: &crate::replay::ReplayChannelHandle) -> usize {
+    handle
+        .written_reports()
+        .into_iter()
+        .filter(|report| report[2] == COLOR_LED_EFFECTS_INDEX && report[3] >> 4 == 0x01)
+        .count()
+}
+
+/// A write of the colour `11 22 33` playing `animation`, the way the agent
+/// sends it.
+async fn animate(
+    shared: &SharedChannel,
+    animation: LightingAnimation,
+) -> Result<Option<RgbControlLease>, WriteError> {
+    animate_with(shared, LightingMethod::Auto, animation).await
+}
+
+/// [`animate`] over a chosen lighting path.
+async fn animate_with(
+    shared: &SharedChannel,
+    method: LightingMethod,
+    animation: LightingAnimation,
+) -> Result<Option<RgbControlLease>, WriteError> {
+    LightingWrite {
+        method,
+        color: openlogi_core::color::Rgb::new(0x11, 0x22, 0x33),
+        animation,
+    }
+    .apply_on(shared, || false, || true)
+    .await
+}
+
+// The effect lists of the two devices the animations were verified on. The
+// G203 Prodigy lists the colour cycle before breathing, the G733 after.
+const G203_PRODIGY_ZONES: ScriptedZones = &[(0x0002, &[0x0000, 0x0001, 0x0003, 0x000a])];
+const G733_ZONES: ScriptedZones = &[
+    (0x0002, &[0x0000, 0x0001, 0x000a, 0x0003]),
+    (0x0001, &[0x0000, 0x0001, 0x000a, 0x0003]),
+];
+
+#[tokio::test]
+async fn breathing_targets_each_devices_own_breathing_index() -> Result<(), WriteError> {
+    bounded(async {
+        let breathing = LightingAnimation::Breathing {
+            period: period(4_000),
+        };
+        // Colour 11 22 33, 4000 ms = 0x0fa0, default waveform, full intensity.
+        let params = [0x11, 0x22, 0x33, 0x0f, 0xa0, 0, 0, 0, 0, 0];
+
+        let (shared, handle) = color_led_effects_shared(G203_PRODIGY_ZONES).await;
+        assert!(animate(&shared, breathing).await?.is_none());
+        assert_eq!(zone_effect_params(&handle), [(0, 3, params)]);
+
+        let (shared, handle) = color_led_effects_shared(G733_ZONES).await;
+        assert!(animate(&shared, breathing).await?.is_none());
+        assert_eq!(
+            zone_effect_params(&handle),
+            [(0, 2, params), (1, 2, params)]
+        );
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_colour_cycle_carries_its_period_and_intensity() -> Result<(), WriteError> {
+    bounded(async {
+        let cycle = LightingAnimation::ColorCycle {
+            period: period(10_000),
+            intensity: EffectIntensity::from_percent(40),
+        };
+        // 10000 ms = 0x2710 at bytes 5–6, intensity at byte 7.
+        let params = [0, 0, 0, 0, 0, 0x27, 0x10, 40, 0, 0];
+
+        let (shared, handle) = color_led_effects_shared(G203_PRODIGY_ZONES).await;
+        animate(&shared, cycle).await?;
+        assert_eq!(zone_effect_params(&handle), [(0, 2, params)]);
+
+        let (shared, handle) = color_led_effects_shared(G733_ZONES).await;
+        animate(&shared, cycle).await?;
+        assert_eq!(
+            zone_effect_params(&handle),
+            [(0, 3, params), (1, 3, params)]
+        );
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn zones_without_the_animation_are_left_alone() -> Result<(), WriteError> {
+    // Zone 1 lists only a fixed colour, zone 2 neither effect. Writing the
+    // fixed colour to zone 1 would cancel zone 0's animation on a keyboard
+    // like the G213, whose zone 0 drives every key.
+    bounded(async {
+        const ZONES: ScriptedZones = &[
+            (0x0002, &[0x0001, 0x000a]),
+            (0x0001, &[0x0000, 0x0001]),
+            (0x0003, &[0x0004]),
+        ];
+        let (shared, handle) = color_led_effects_shared(ZONES).await;
+
+        animate(
+            &shared,
+            LightingAnimation::Breathing {
+                period: period(2_000),
+            },
+        )
+        .await?;
+
+        assert_eq!(
+            zone_effect_params(&handle),
+            [(0, 1, [0x11, 0x22, 0x33, 0x07, 0xd0, 0, 0, 0, 0, 0])]
+        );
+        Ok(())
+    })
+    .await
+}
+
+// The G213 (wired `046d:c336`) as jockel09 measured it on #2023: zone 0
+// drives every key and offers the animations, zones 1 to 5 offer only a
+// fixed colour.
+const G213_ZONES: ScriptedZones = &[
+    (0x0001, &[0x0000, 0x0001, 0x000a, 0x0003, 0x0004]),
+    (0x0006, &[0x0000, 0x0001]),
+    (0x0007, &[0x0000, 0x0001]),
+    (0x0008, &[0x0000, 0x0001]),
+    (0x0009, &[0x0000, 0x0001]),
+    (0x000a, &[0x0000, 0x0001]),
+];
+
+#[tokio::test]
+async fn the_g213_animates_through_zone_0_alone() -> Result<(), WriteError> {
+    bounded(async {
+        let (shared, handle) = color_led_effects_shared(G213_ZONES).await;
+        animate(
+            &shared,
+            LightingAnimation::Breathing {
+                period: period(2_000),
+            },
+        )
+        .await?;
+        assert_eq!(
+            zone_effect_params(&handle),
+            [(0, 2, [0x11, 0x22, 0x33, 0x07, 0xd0, 0, 0, 0, 0, 0])]
+        );
+
+        let (shared, handle) = color_led_effects_shared(G213_ZONES).await;
+        animate(
+            &shared,
+            LightingAnimation::ColorCycle {
+                period: period(3_000),
+                intensity: EffectIntensity::FULL,
+            },
+        )
+        .await?;
+        assert_eq!(
+            zone_effect_params(&handle),
+            [(0, 3, [0, 0, 0, 0, 0, 0x0b, 0xb8, 0, 0, 0])]
+        );
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_steady_colour_on_the_g213_reaches_every_zone() -> Result<(), WriteError> {
+    // Going back to a steady colour must overwrite zone 0's animation, and
+    // colour the five zones the animation left alone.
+    bounded(async {
+        let (shared, handle) = color_led_effects_shared(G213_ZONES).await;
+        animate(&shared, LightingAnimation::Static).await?;
+        let fixed = [0x11, 0x22, 0x33, 0, 0, 0, 0, 0, 0, 0];
+        assert_eq!(
+            zone_effect_params(&handle),
+            (0..6).map(|zone| (zone, 1, fixed)).collect::<Vec<_>>()
+        );
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_device_that_cannot_animate_shows_the_colour_instead() -> Result<(), WriteError> {
+    // No zone lists a colour cycle: nothing animated is written, and every
+    // zone that has a fixed colour shows it, from one walk of the zones.
+    bounded(async {
+        const ZONES: ScriptedZones = &[(0x0002, &[0x0000, 0x0001]), (0x0001, &[0x0001, 0x000a])];
+        let cycle = LightingAnimation::ColorCycle {
+            period: period(5_000),
+            intensity: EffectIntensity::FULL,
+        };
+        let fixed = [0x11, 0x22, 0x33, 0, 0, 0, 0, 0, 0, 0];
+
+        for method in [LightingMethod::Auto, LightingMethod::Effects] {
+            let (shared, handle) = color_led_effects_shared(ZONES).await;
+            animate_with(&shared, method, cycle).await?;
+            assert_eq!(
+                zone_effect_params(&handle),
+                [(0, 1, fixed), (1, 0, fixed)],
+                "{method:?}"
+            );
+            assert_eq!(zone_info_reads(&handle), ZONES.len(), "{method:?}");
+        }
+        Ok(())
+    })
+    .await
+}
+
+#[test]
+fn settings_scale_the_colour_and_give_a_colour_cycle_the_brightness() {
+    use openlogi_core::config::{Lighting, LightingEffect};
+
+    let lighting = |effect, enabled, brightness| Lighting {
+        enabled,
+        color: openlogi_core::color::Rgb::new(200, 100, 50),
+        brightness,
+        effect,
+        effect_period_ms: period(3_000),
+    };
+    let write = |lighting: &Lighting| {
+        let write = LightingWrite::for_settings(lighting);
+        (write.color.components(), write.animation)
+    };
+
+    assert_eq!(
+        write(&lighting(LightingEffect::Static, true, 50)),
+        ((100, 50, 25), LightingAnimation::Static)
+    );
+    assert_eq!(
+        write(&lighting(LightingEffect::Breathing, true, 50)),
+        (
+            (100, 50, 25),
+            LightingAnimation::Breathing {
+                period: period(3_000)
+            }
+        )
+    );
+    assert_eq!(
+        write(&lighting(LightingEffect::ColorCycle, true, 50)).1,
+        LightingAnimation::ColorCycle {
+            period: period(3_000),
+            intensity: EffectIntensity::from_percent(50),
+        }
+    );
+    // Off, or at zero brightness, every effect is a dark static colour.
+    for effect in [
+        LightingEffect::Static,
+        LightingEffect::Breathing,
+        LightingEffect::ColorCycle,
+    ] {
+        for dark in [lighting(effect, false, 80), lighting(effect, true, 0)] {
+            assert_eq!(write(&dark), ((0, 0, 0), LightingAnimation::Static));
+        }
+    }
 }
 
 /// `true` for the 20-byte `0x8080` frameEnd sent to the scripted keyboard,

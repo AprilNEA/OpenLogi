@@ -230,6 +230,108 @@ fn open_device_detail(
     (app_view, cx)
 }
 
+/// The Lighting tab of a device that animates, in the main window at its
+/// minimum size and 125 % scale: each effect button and the cycle-length
+/// slider stay inside the window, a click on Breathing plays it and shows the
+/// slider, a click on the slider commits a new cycle length, and Static hides
+/// the slider again.
+#[gpui::test]
+fn the_effect_picker_stays_usable_in_the_smallest_window(cx: &mut gpui::TestAppContext) {
+    use gpui::{Bounds, Modifiers, Pixels, point, px};
+    use openlogi_core::config::{LightingEffect, LightingEffectPeriod};
+
+    use crate::features::lighting::keyboard_rgb::PERIOD_SLIDER;
+    use crate::services::i18n::LOCALE_LOCK;
+    use crate::state::AppState;
+    use crate::state::tests::direct_inventory;
+    use crate::windows::main_window::MIN_SIZE;
+
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    let mut inventory = direct_inventory([0xa3, 0x93, 0xca, 0xe0]);
+    let capabilities = inventory.paired[0]
+        .capabilities
+        .as_mut()
+        .expect("the fixture mouse has capabilities");
+    capabilities.lighting = true;
+    capabilities.lighting_effects = true;
+    let (_view, cx) = open_device_detail(cx, inventory, openlogi_core::config::Config::ephemeral());
+    cx.simulate_scale_factor_change(1.25);
+    cx.simulate_resize(MIN_SIZE);
+    let redraw =
+        |cx: &mut gpui::VisualTestContext| cx.update(|window, cx| window.draw(cx).clear(cx));
+    redraw(cx);
+    let tab = cx
+        .debug_bounds("detail-navigation-Lighting")
+        .expect("a device with lighting gets the Lighting tab");
+    cx.simulate_click(tab.center(), Modifiers::none());
+    redraw(cx);
+
+    let window = Bounds::new(point(px(0.), px(0.)), MIN_SIZE);
+    let inside = |name: &str, bounds: Bounds<Pixels>| {
+        assert!(
+            bounds.left() >= window.left()
+                && bounds.right() <= window.right()
+                && bounds.top() >= window.top()
+                && bounds.bottom() <= window.bottom(),
+            "{name} {bounds:?} must sit inside the {MIN_SIZE:?} window"
+        );
+    };
+    let lighting = |cx: &mut gpui::VisualTestContext| {
+        cx.update(|_, cx| {
+            AppState::try_read(cx)
+                .expect("state is installed")
+                .lighting()
+        })
+    };
+
+    for button in [
+        "lighting-effect-static",
+        "lighting-effect-breathing",
+        "lighting-effect-color-cycle",
+    ] {
+        let bounds = cx
+            .debug_bounds(button)
+            .unwrap_or_else(|| panic!("{button} is offered"));
+        inside(button, bounds);
+    }
+    assert!(
+        cx.debug_bounds(PERIOD_SLIDER).is_none(),
+        "a steady colour has no cycle length"
+    );
+
+    let breathing = cx.debug_bounds("lighting-effect-breathing").unwrap();
+    cx.simulate_click(breathing.center(), Modifiers::none());
+    redraw(cx);
+    assert_eq!(lighting(cx).effect, LightingEffect::Breathing);
+
+    let slider = cx
+        .debug_bounds(PERIOD_SLIDER)
+        .expect("an animation shows its cycle length");
+    inside("the cycle-length slider", slider);
+    let before = lighting(cx).effect_period_ms;
+    cx.simulate_click(
+        point(slider.right() - px(2.), slider.center().y),
+        Modifiers::none(),
+    );
+    redraw(cx);
+    let after = lighting(cx).effect_period_ms;
+    assert_ne!(
+        after, before,
+        "a click on the slider commits a cycle length"
+    );
+    assert_eq!(
+        after,
+        LightingEffectPeriod::MAX,
+        "its right end is the longest"
+    );
+
+    let fixed = cx.debug_bounds("lighting-effect-static").unwrap();
+    cx.simulate_click(fixed.center(), Modifiers::none());
+    redraw(cx);
+    assert_eq!(lighting(cx).effect, LightingEffect::Static);
+    assert!(cx.debug_bounds(PERIOD_SLIDER).is_none());
+}
+
 /// The Pointer tab's Scrolling card carries the smooth-wheel switch, shows the
 /// saved setting (a smooth wheel turned on earlier switches off) and knows this
 /// link has `0x2121` (so it switches back on).
@@ -1317,6 +1419,7 @@ fn tabs_prefer_buttons_when_a_keyboard_kind_measures_a_pointer() {
         m_keys: false,
         macro_record: false,
         change_host: false,
+        lighting_effects: false,
     });
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
     assert!(
@@ -1360,6 +1463,7 @@ fn tabs_follow_capabilities_not_kind() {
         m_keys: false,
         macro_record: false,
         change_host: false,
+        lighting_effects: false,
     });
     // After 0x0005 kind-correction the record has kind=Mouse, not Keyboard.
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Mouse, caps));
@@ -1450,6 +1554,7 @@ fn keyboard_without_asset_hides_buttons_tab() {
         m_keys: false,
         macro_record: false,
         change_host: false,
+        lighting_effects: false,
     });
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
     assert!(
@@ -1487,6 +1592,7 @@ fn keyboard_with_buttons_shows_keys_tab() {
         m_keys: false,
         macro_record: false,
         change_host: false,
+        lighting_effects: false,
     });
     let keyboard = record(DeviceKind::Keyboard, caps);
     let tabs = DetailTab::tabs_for(&keyboard);

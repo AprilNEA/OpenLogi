@@ -1,31 +1,37 @@
 //! RGB keyboard lighting controls.
 //!
-//! A palette of color swatches, an on/off toggle, and a brightness slider,
+//! A palette of color swatches, an on/off toggle, a brightness slider and, on
+//! a device that can animate, an effect picker with its cycle length,
 //! persisted per device via [`AppState::commit_lighting`] and pushed to the
 //! keyboard through `openlogi_agent_core::hardware::set_lighting_in_background`
 //! (the agent, over IPC — the GUI has no device I/O of its own).
 
 use crate::ui::theme::FocusRingStyle as _;
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Context, InteractiveElement, IntoElement, ParentElement, Render, Role,
+    App, Context, InteractiveElement, IntoElement, ParentElement, Render, Role,
     StatefulInteractiveElement as _, Styled, Subscription, Toggled, Window, div, px, rgb,
 };
 use gpui_kit::base::Button as BaseButton;
+use gpui_kit::component::button::{Button, ButtonGroup};
 use gpui_kit::component::{Selectable as _, h_flex, slider::Slider, v_flex};
 use openlogi_core::color::Rgb;
-use openlogi_core::config::Lighting;
+use openlogi_core::config::{Lighting, LightingEffect, LightingEffectPeriod};
 
 use crate::state::{AppState, StateEvent};
 use crate::ui::commit_slider::{CommitSlider, SliderRange};
 use crate::ui::components::{Toggle, toggle_row};
 use crate::ui::slider_row::SliderRow;
-use crate::ui::theme::{self, Palette};
+use crate::ui::theme::{self, Palette, SelectableStyle as _, Typography as _};
 
 /// The coloured face of a swatch.
 const SWATCH: f32 = 24.;
 /// The selection ring around a swatch, and the clear gap between the two.
 const SWATCH_RING: f32 = 2.;
 const SWATCH_RING_GAP: f32 = 2.;
+
+/// The cycle-length slider, for tests that drive it.
+pub(crate) const PERIOD_SLIDER: &str = "lighting-effect-period-slider";
 
 /// Preset colors. Deliberately small — covering the common keyboard accent
 /// colors.
@@ -43,6 +49,7 @@ const PALETTE: &[Rgb] = &[
 
 pub struct LightingPanel {
     brightness: CommitSlider<u8>,
+    period: CommitSlider<LightingEffectPeriod>,
     _state_obs: Subscription,
 }
 
@@ -64,10 +71,27 @@ impl LightingPanel {
                 });
             },
         );
+        let initial_period = AppState::try_read(cx).map_or(LightingEffectPeriod::DEFAULT, |s| {
+            s.lighting().effect_period_ms
+        });
+        let period = CommitSlider::new(
+            SliderRange::new(LightingEffectPeriod::MIN, LightingEffectPeriod::MAX).step(500.),
+            initial_period,
+            cx,
+            |_, period, cx| {
+                AppState::apply(cx, |state| {
+                    let mut lighting = state.lighting();
+                    lighting.enabled = true;
+                    lighting.effect_period_ms = period;
+                    state.commit_lighting(lighting)
+                });
+            },
+        );
         let state_obs =
             AppState::repaint_on(cx, |event| matches!(event, StateEvent::LightingChanged(_)));
         Self {
             brightness,
+            period,
             _state_obs: state_obs,
         }
     }
@@ -79,11 +103,13 @@ impl Render for LightingPanel {
         let lighting = AppState::try_read(cx)
             .map(AppState::lighting)
             .unwrap_or_default();
+        let animates = AppState::try_read(cx).is_some_and(AppState::lighting_effects_supported);
 
         // Pull the slider thumb to the active device's brightness whenever it
         // changed in `AppState` (device switch / external edit), without
         // disturbing an in-progress drag.
         self.brightness.sync(lighting.brightness, window, cx);
+        self.period.sync(lighting.effect_period_ms, window, cx);
 
         let swatches: Vec<_> = PALETTE
             .iter()
@@ -123,7 +149,78 @@ impl Render for LightingPanel {
                     ["100%"],
                 ),
             )
+            .when(animates, |panel| {
+                panel
+                    .child(
+                        div()
+                            .text_caption()
+                            .text_color(pal.text_muted)
+                            .child(tr!("lighting.effect")),
+                    )
+                    .child(effect_segment(lighting.effect, cx))
+            })
+            .when(
+                animates && lighting.effect != LightingEffect::Static,
+                |panel| {
+                    panel.child(
+                        SliderRow::new(
+                            tr!("lighting.effect_period"),
+                            div()
+                                .w_full()
+                                .debug_selector(|| PERIOD_SLIDER.into())
+                                .child(Slider::new(self.period.slider()).horizontal()),
+                        )
+                        .value(
+                            seconds(self.period.shown(lighting.effect_period_ms)),
+                            ["20.0 s"],
+                        ),
+                    )
+                },
+            )
     }
+}
+
+/// Static / Breathing / Color cycle. Clicking one turns lighting on and plays
+/// that effect.
+///
+/// Each button commits its own effect: `ButtonGroup::on_click` runs only on a
+/// pointer click on the group, so Enter and Space on a focused button would
+/// not reach it.
+fn effect_segment(current: LightingEffect, cx: &App) -> ButtonGroup {
+    const EFFECTS: [(LightingEffect, &str); 3] = [
+        (LightingEffect::Static, "lighting-effect-static"),
+        (LightingEffect::Breathing, "lighting-effect-breathing"),
+        (LightingEffect::ColorCycle, "lighting-effect-color-cycle"),
+    ];
+    ButtonGroup::new("lighting-effect")
+        .w_full()
+        .outline()
+        .children(EFFECTS.map(|(effect, id)| {
+            let label = match effect {
+                LightingEffect::Static => tr!("lighting.effect_static"),
+                LightingEffect::Breathing => tr!("lighting.effect_breathing"),
+                LightingEffect::ColorCycle => tr!("lighting.effect_color_cycle"),
+            };
+            Button::new(id)
+                .flex_1()
+                .label(label)
+                .selected(current == effect)
+                .selected_segment(current == effect, cx)
+                .debug_selector(move || id.into())
+                .on_click(move |_, _, cx| {
+                    AppState::apply(cx, |state| {
+                        let mut next = state.lighting();
+                        next.enabled = true;
+                        next.effect = effect;
+                        state.commit_lighting(next)
+                    });
+                })
+        }))
+}
+
+/// A cycle length in seconds, to the half second the slider steps by.
+fn seconds(period: LightingEffectPeriod) -> String {
+    format!("{:.1} s", f32::from(period) / 1000.)
 }
 
 /// One color swatch. Clicking it turns lighting on and sets that color.

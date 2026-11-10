@@ -8,10 +8,14 @@
 //! the agent owns the device's HID channel and the device leaves this
 //! computer's radio link after the write.
 
-use anyhow::{Result, anyhow};
+use std::future::Future;
+
+use anyhow::{Context as _, Result, anyhow, bail};
 use clap::Subcommand;
 use openlogi_core::device::DeviceInventory;
+use openlogi_core::single_instance::{self, InstanceError, InstanceGuard, Role};
 use openlogi_hid::{DeviceRoute, dump_features};
+use openlogi_ipc::client::ConnectError;
 
 pub mod battery;
 pub mod controls;
@@ -20,6 +24,7 @@ pub mod features;
 pub mod hidpp;
 pub mod host_switch;
 pub mod lighting;
+pub mod lighting_zones;
 pub mod mouse_buttons;
 pub mod onboard;
 pub mod pointer_speed;
@@ -44,6 +49,8 @@ pub enum DiagCmd {
     Smartshift(smartshift::SmartshiftArgs),
     /// Set an online RGB device to a solid colour (e.g. `ff0000` for red).
     Lighting(lighting::LightingArgs),
+    /// List the 0x8070 lighting zones of an RGB device and the effects each offers.
+    LightingZones(lighting_zones::LightingZonesArgs),
     /// Read or set the HID++ 0x2121 wheel reporting resolution.
     Wheel(wheel::WheelArgs),
     /// Read 0x2205 pointer scaling → write a test value → read back → restore.
@@ -75,6 +82,7 @@ impl DiagCmd {
             Self::Dpi(args) => dpi::run(args).await,
             Self::Smartshift(args) => smartshift::run(args).await,
             Self::Lighting(args) => lighting::run(args).await,
+            Self::LightingZones(args) => lighting_zones::run(args).await,
             Self::Wheel(args) => wheel::run(args).await,
             Self::PointerSpeed(args) => pointer_speed::run(args).await,
             Self::Onboard(args) => onboard::run(args).await,
@@ -92,6 +100,38 @@ impl DiagCmd {
     fn opens_devices_directly(&self) -> bool {
         !matches!(self, Self::HostSwitch(_))
     }
+}
+
+/// Keep the agent off the device for a direct diagnostic's whole run: hold
+/// the returned guard until the last read. The agent takes the same instance
+/// lock before any HID I/O, so the guard stops one from starting; the
+/// endpoint check catches an agent that is already up.
+///
+/// # Errors
+///
+/// When the lock is held elsewhere, or anything answers on the agent's
+/// endpoint.
+pub(crate) async fn exclude_agent() -> Result<InstanceGuard> {
+    admit_direct_run(
+        single_instance::acquire(Role::Agent),
+        crate::agent::connect(),
+    )
+    .await
+}
+
+/// [`exclude_agent`]'s verdict from a lock attempt and an endpoint probe. The
+/// probe only runs once the lock is held.
+async fn admit_direct_run<G, C>(
+    lock: Result<G, InstanceError>,
+    probe: impl Future<Output = Result<C, ConnectError>>,
+) -> Result<G> {
+    let guard = lock.context(
+        "could not take the agent's instance lock; quit the OpenLogi agent, then run this again",
+    )?;
+    if !matches!(probe.await, Err(ConnectError::Endpoint(_))) {
+        bail!("the OpenLogi agent is running; quit it, then run this again");
+    }
+    Ok(guard)
 }
 
 /// One online, paired device discovered during enumeration, already resolved to

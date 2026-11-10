@@ -4,8 +4,9 @@ use std::assert_matches;
 
 use super::event::{ColorLedEffectsEvent, decode_event};
 use super::types::{
-    ColorLedInfo, EffectId, EffectSettings, ExtCapabilities, LedBinIndex, LedBinInfo,
-    LocationEffect, NvCapabilities, PersistencyCapabilities, ZoneEffect, ZoneEffectInfo, ZoneInfo,
+    BreathingWaveform, ColorLedInfo, EffectId, EffectIntensity, EffectSettings, ExtCapabilities,
+    LedBinIndex, LedBinInfo, LocationEffect, NvCapabilities, PersistencyCapabilities, Rgb,
+    ZoneEffect, ZoneEffectInfo, ZoneEffectParams, ZoneInfo,
 };
 use super::validate_single_nv_capability;
 use crate::protocol::v20::{ErrorType, Hidpp20Error};
@@ -362,4 +363,77 @@ fn version_1_functions_keep_their_wire_layout() {
         assert_eq!(written[0], [0x10, 3, 8, 0x71, 0, 0, 0]);
         assert_eq!(written[1][..8], [0x11, 3, 8, 0xd1, 0xff, 0x00, 0xff, 0xfe]);
     });
+}
+
+#[test]
+fn encodes_a_fixed_colour_as_rgb() {
+    let params = ZoneEffectParams::FixedColor {
+        color: Rgb {
+            red: 0x11,
+            green: 0x22,
+            blue: 0x33,
+        },
+    };
+    assert_eq!(params.effect_id(), EffectId::FixedColor);
+    assert_eq!(params.to_params(), [0x11, 0x22, 0x33, 0, 0, 0, 0, 0, 0, 0]);
+}
+
+#[test]
+fn encodes_breathing_colour_period_waveform_and_intensity() {
+    let params = ZoneEffectParams::Breathing {
+        color: Rgb {
+            red: 0xff,
+            green: 0x40,
+            blue: 0x00,
+        },
+        period_ms: 4000,
+        waveform: BreathingWaveform::Sine,
+        intensity: EffectIntensity::from_percent(60),
+    };
+    assert_eq!(params.effect_id(), EffectId::PulsingBreathingWaveform);
+    // 4000 ms = 0x0fa0, big-endian.
+    assert_eq!(
+        params.to_params(),
+        [0xff, 0x40, 0x00, 0x0f, 0xa0, 0x01, 60, 0, 0, 0]
+    );
+}
+
+#[test]
+fn encodes_cycling_period_and_intensity_after_five_unused_bytes() {
+    let params = ZoneEffectParams::Cycling {
+        period_ms: 10_000,
+        intensity: EffectIntensity::from_percent(25),
+    };
+    assert_eq!(params.effect_id(), EffectId::Cycling);
+    // 10000 ms = 0x2710, big-endian.
+    assert_eq!(params.to_params(), [0, 0, 0, 0, 0, 0x27, 0x10, 25, 0, 0]);
+}
+
+#[test]
+fn disabled_carries_no_parameters() {
+    assert_eq!(ZoneEffectParams::Disabled.effect_id(), EffectId::Disabled);
+    assert_eq!(ZoneEffectParams::Disabled.to_params(), [0; 10]);
+}
+
+#[test]
+fn full_intensity_is_sent_as_the_firmware_default() {
+    let cycling = |intensity| ZoneEffectParams::Cycling {
+        period_ms: 0,
+        intensity,
+    };
+    assert_eq!(cycling(EffectIntensity::FULL).to_params()[7], 0);
+    assert_eq!(
+        cycling(EffectIntensity::from_percent(100)).to_params()[7],
+        0
+    );
+    assert_eq!(
+        cycling(EffectIntensity::from_percent(99)).to_params()[7],
+        99
+    );
+}
+
+#[test]
+fn intensity_is_clamped_to_one_through_one_hundred() {
+    assert_eq!(EffectIntensity::from_percent(0).percent(), 1);
+    assert_eq!(EffectIntensity::from_percent(250).percent(), 100);
 }

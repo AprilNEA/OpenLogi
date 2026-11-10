@@ -743,6 +743,11 @@ applying_light_setting = "Aplicando el ajuste de luz…"
 auto_on_with_camera = "Encendido automático con la cámara"
 camera_light_auto_description = "Enciende la luz mientras se usa alguna cámara y la apaga cuando ninguna está activa."
 keyboard_lighting_description = "OpenLogi la aplica mientras se ejecuta; no se guarda en el teclado."
+effect = "Efecto"
+effect_static = "Estático"
+effect_breathing = "Respiración"
+effect_color_cycle = "Ciclo de colores"
+effect_period = "Duración del ciclo"
 
 [action_ring]
 actions_ring = "Anillo de acciones"

@@ -743,6 +743,11 @@ applying_light_setting = "Beleuchtungseinstellung wird angewendet…"
 auto_on_with_camera = "Automatisch mit Kamera einschalten"
 camera_light_auto_description = "Beleuchtung einschalten, sobald eine Kamera verwendet wird, und ausschalten, wenn keine Kamera aktiv ist."
 keyboard_lighting_description = "Wird von OpenLogi angewendet, solange es läuft, und nicht auf der Tastatur gespeichert."
+effect = "Effekt"
+effect_static = "Statisch"
+effect_breathing = "Atmen"
+effect_color_cycle = "Farbwechsel"
+effect_period = "Zykluslänge"
 
 [action_ring]
 actions_ring = "Aktionsring"
