@@ -283,7 +283,7 @@ fn device_card_element(
         glow,
         light_enabled,
         light_settings,
-        battery_estimate,
+        battery_estimate.as_ref(),
         pal,
     );
     device_entry_interaction(card, record, connectivity, active, enabled, view, pal)
@@ -339,6 +339,7 @@ fn device_list_row(
     let glow = keyboard_glow(state, record);
 
     let row = BaseButton::new((ElementId::from("device-list-row"), record.record_key()))
+        .debug_selector(|| "device-list-row".into())
         .w_full()
         .min_h(px(96.))
         .flex()
@@ -401,37 +402,51 @@ fn device_list_row(
                     state.offline_connection(record),
                 )),
         )
-        .child(
-            v_flex()
-                .min_w(rems(8.25))
-                .flex_none()
-                .items_end()
-                .gap_1()
-                .when_some(record.battery.as_ref(), |this, battery| {
-                    this.child(battery_reading(
-                        BatteryIndicator::status(battery, record.is_online()),
-                        connectivity,
-                    ))
-                })
-                .when_some(
-                    crate::ui::battery_estimate::estimate_for_device(state, record),
-                    |this, estimate| {
-                        this.child(
-                            div()
-                                .text_caption()
-                                .text_color(pal.text_muted)
-                                .when(connectivity == Connectivity::Reconnecting, |dimmed| {
-                                    dimmed.opacity(0.5)
-                                })
-                                .child(estimate.home_label()),
-                        )
-                    },
-                )
-                .when(record.persistent, |this| {
-                    this.child(device_menu_button(record, pal))
-                }),
-        );
+        .child(device_list_battery_column(state, record, connectivity, pal));
     device_entry_interaction(row, record, connectivity, active, enabled, view, pal)
+}
+
+fn device_list_battery_column(
+    state: &AppState,
+    record: &DeviceRecord,
+    connectivity: Connectivity,
+    pal: Palette,
+) -> impl IntoElement {
+    v_flex()
+        .min_w(rems(8.25))
+        .max_w(rems(16.5))
+        .flex_none()
+        .items_end()
+        .gap_1()
+        .when_some(record.battery.as_ref(), |this, battery| {
+            this.child(battery_reading(
+                BatteryIndicator::status(battery, record.is_online()),
+                connectivity,
+            ))
+        })
+        .when_some(
+            crate::ui::battery_estimate::estimate_for_device(state, record),
+            |this, estimate| {
+                this.child(
+                    div()
+                        .max_w_full()
+                        .truncate()
+                        .text_caption()
+                        .text_color(pal.text_muted)
+                        .when(connectivity == Connectivity::Reconnecting, |dimmed| {
+                            dimmed.opacity(0.5)
+                        })
+                        .child(estimate.home_label()),
+                )
+            },
+        )
+        .when(record.persistent, |this| {
+            this.child(
+                div()
+                    .debug_selector(|| "device-menu".into())
+                    .child(device_menu_button(record, pal)),
+            )
+        })
 }
 
 fn device_accessibility_description(

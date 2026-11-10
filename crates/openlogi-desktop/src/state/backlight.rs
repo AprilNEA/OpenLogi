@@ -167,6 +167,7 @@ impl AppState {
             key: device_key,
             write,
         });
+        self.observe_battery_telemetry();
         events
     }
 
@@ -201,6 +202,7 @@ impl AppState {
         if let Some(error) = refusal {
             warn!(%error, key = %key, "backlight write did not land — re-reading the keyboard");
         }
+        self.observe_battery_telemetry();
         StateEvent::BacklightChanged(key.clone()).into()
     }
 

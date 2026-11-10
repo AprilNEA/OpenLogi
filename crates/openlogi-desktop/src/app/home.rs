@@ -175,7 +175,7 @@ fn device_card(
     glow: Option<(Arc<GlowGeometry>, Hsla)>,
     light_enabled: bool,
     light_settings: LightSettings,
-    battery_estimate: Option<crate::ui::battery_estimate::BatteryEstimate>,
+    battery_estimate: Option<&crate::ui::battery_estimate::BatteryEstimate>,
     pal: Palette,
 ) -> BaseButton {
     BaseButton::new((ElementId::from("device-card"), record.record_key()))
@@ -232,7 +232,7 @@ fn device_card(
                                 battery,
                                 record,
                                 connectivity,
-                                battery_estimate.as_ref(),
+                                battery_estimate,
                                 pal,
                             )),
                     )

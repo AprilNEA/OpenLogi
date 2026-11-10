@@ -105,6 +105,7 @@ impl AppState {
             rate,
             key: device_key,
         });
+        self.observe_battery_telemetry();
         events
     }
 
@@ -137,6 +138,7 @@ impl AppState {
             debug!(key = %key, "report-rate answer for a connection no read is on — dropping it");
             return StateEvents::none();
         }
+        self.observe_battery_telemetry();
         StateEvent::ReportRateChanged(key.clone()).into()
     }
 
@@ -162,6 +164,28 @@ impl AppState {
         self.pointer
             .reads
             .ensure_report_rate(key, route, self.ipc_sender(), cx);
+    }
+
+    /// Ensure report-rate state is queried for all online report-rate-capable mice
+    /// so Home and Detail battery duration estimates reflect the live polling rate.
+    pub(super) fn load_all_report_rates(&mut self, cx: &mut gpui::Context<Self>) {
+        let targets: Vec<(DeviceKey, DeviceRoute)> = self
+            .devices
+            .records
+            .iter()
+            .filter(|record| {
+                record
+                    .capabilities
+                    .is_some_and(|capabilities| capabilities.report_rate)
+            })
+            .filter_map(|record| Some((record.device_key(), record.route.clone()?)))
+            .collect();
+        let sender = self.ipc_sender();
+        for (key, route) in targets {
+            self.pointer
+                .reads
+                .ensure_report_rate(key, route, sender.clone(), cx);
+        }
     }
 }
 

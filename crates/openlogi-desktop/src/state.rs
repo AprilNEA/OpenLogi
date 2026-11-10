@@ -213,6 +213,8 @@ pub struct AppState {
     /// keyboard setting: the keyboard keeps whatever duration was last
     /// written, and switching this writes nothing.
     duration_steps: DurationSteps,
+    /// Historical discharge rate & battery health telemetry owned by AppState.
+    battery_telemetry: crate::ui::battery_estimate::BatteryTelemetry,
     /// Sender to the IPC client thread. The agent owns the hook and device I/O.
     ipc_commands: mpsc::UnboundedSender<crate::services::ipc::Command>,
     /// Camera-consent poll started by an in-app macOS prompt. The app-state
@@ -258,6 +260,7 @@ impl AppState {
             state.confirm_current_smartshift(cx);
             state.load_current_fn_lock(cx);
             state.load_current_report_rate(cx);
+            state.load_all_report_rates(cx);
             state.load_current_pointer_speed(cx);
             state.load_current_sidetone(cx);
             state.load_current_force_sensing(cx);
@@ -289,6 +292,7 @@ impl AppState {
             persistence,
             ipc_commands,
         } = sources;
+        let persist_telemetry = matches!(&persistence, ConfigPersistence::UserFile(_));
         let mut config = ConfigState::new(config, persistence);
         let device_list = build_device_list(inventories, standalone, resolver, &config, cameras);
         // Fold each online device's route into its canonical entry before
@@ -323,6 +327,9 @@ impl AppState {
             pointer: PointerState::default(),
             lights: LightSession::default(),
             duration_steps: DurationSteps::Short,
+            battery_telemetry: crate::ui::battery_estimate::BatteryTelemetry::load(
+                persist_telemetry,
+            ),
             disable_keys_reads: DisableKeysReads::default(),
             next_disable_keys_request_id: 0,
             ipc_commands,
@@ -343,6 +350,7 @@ impl AppState {
         if state.config.should_reload_agent() {
             state.send_ipc(crate::services::ipc::LoadConfig);
         }
+        state.observe_battery_telemetry();
         state
     }
     /// Send a device command to the agent over IPC, logging a dropped channel
@@ -486,6 +494,20 @@ impl AppState {
 
     pub(crate) fn device_reads_mut(&mut self) -> &mut DeviceReads {
         &mut self.pointer.reads
+    }
+
+    pub(crate) fn battery_telemetry(&self) -> &crate::ui::battery_estimate::BatteryTelemetry {
+        &self.battery_telemetry
+    }
+
+    pub(crate) fn battery_telemetry_mut(
+        &mut self,
+    ) -> &mut crate::ui::battery_estimate::BatteryTelemetry {
+        &mut self.battery_telemetry
+    }
+
+    pub(crate) fn observe_battery_telemetry(&mut self) {
+        crate::ui::battery_estimate::observe_state_telemetry(self);
     }
     /// Config schema version and the number of devices with saved configuration.
     #[must_use]

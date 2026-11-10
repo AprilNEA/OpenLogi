@@ -384,13 +384,12 @@ impl AppView {
             }
             StateEvent::DpiChanged(key)
             | StateEvent::FnLockChanged(key)
-            | StateEvent::BacklightChanged(key)
             | StateEvent::EasySwitchChanged(key) => {
                 !on_home && self.active_tab == DetailTab::Device && is_current(key)
             }
-            StateEvent::LightingChanged(key) => {
-                on_home || (self.active_tab == DetailTab::Light && is_current(key))
-            }
+            StateEvent::BacklightChanged(key)
+            | StateEvent::ReportRateChanged(key)
+            | StateEvent::LightingChanged(key) => on_home || is_current(key),
             StateEvent::DeviceConfigChanged(key) => {
                 on_home
                     || (matches!(self.active_tab, DetailTab::Pointer | DetailTab::Device)
@@ -408,7 +407,6 @@ impl AppView {
             // opened through `removal_obs`.
             StateEvent::SmartShiftChanged(_)
             | StateEvent::DisableKeysChanged(_)
-            | StateEvent::ReportRateChanged(_)
             | StateEvent::PointerSpeedChanged(_)
             | StateEvent::SidetoneChanged(_)
             | StateEvent::ForceSensingChanged(_)
