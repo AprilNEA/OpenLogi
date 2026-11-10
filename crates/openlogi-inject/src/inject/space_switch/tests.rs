@@ -213,6 +213,10 @@ fn every_phase_decides_every_request() {
         display: 5,
         deadline,
     };
+    let posting = Phase::Posting {
+        flight: 1,
+        display: 5,
+    };
     let confirming = Phase::Confirming {
         flight: 1,
         display: 5,
@@ -221,9 +225,12 @@ fn every_phase_decides_every_request() {
     for (phase, display, chain, step) in [
         (Phase::Idle, 5, false, Step::Lead),
         (Phase::Idle, 5, true, Step::Lead),
-        (preparing, 5, true, Step::Wait(deadline)),
+        (preparing, 5, true, Step::WaitUntil(deadline)),
         (preparing, 5, false, Step::Refuse),
         (preparing, 6, true, Step::Refuse),
+        (posting, 5, true, Step::WaitForPost),
+        (posting, 5, false, Step::Refuse),
+        (posting, 6, true, Step::Refuse),
         (confirming, 5, true, Step::Follow(1)),
         (confirming, 5, false, Step::Refuse),
         (confirming, 6, true, Step::Refuse),
@@ -249,12 +256,44 @@ fn follow_up_waits_for_first_post() {
     std::thread::scope(|scope| {
         let waiting = scope.spawn(|| follower(&flight.admit(5, true, Instant::now())));
         // Only this post can let the waiting request through as a follow-up.
+        assert!(ticket.begin_posting(Instant::now()));
         ticket.posted();
         let follower = waiting.join().unwrap();
         assert!(!ticket.followed());
         flight.followed(follower);
         assert!(ticket.followed());
     });
+}
+
+#[test]
+fn follower_waits_for_committed_post_past_preparation_deadline() {
+    let flight = Flight::new();
+    let ticket = lead(flight.admit(5, true, Instant::now()));
+    assert!(ticket.begin_posting(Instant::now()));
+    // A slide that began just before the deadline is still posting after it.
+    let late = ticket.deadline() + PREPARATION_TIMEOUT;
+    std::thread::scope(|scope| {
+        let waiting = scope.spawn(|| follower(&flight.admit(5, true, late)));
+        ticket.posted();
+        let follower = waiting.join().unwrap();
+        flight.followed(follower);
+        assert!(ticket.followed());
+    });
+}
+
+#[test]
+fn a_post_claimed_too_late_or_refused_by_its_gate_lets_no_follow_up_through() {
+    let flight = Flight::new();
+    let ticket = lead(flight.admit(5, true, Instant::now()));
+    assert!(
+        !ticket.begin_posting(ticket.deadline()),
+        "a claim at the deadline is too late"
+    );
+    assert!(refused(&flight.admit(5, true, ticket.deadline())));
+    assert!(ticket.begin_posting(Instant::now()));
+    // The gate refused the claimed post after all.
+    ticket.abandon_post();
+    assert!(refused(&flight.admit(5, true, ticket.deadline())));
 }
 
 #[test]
@@ -280,10 +319,12 @@ fn a_follow_up_of_a_switch_that_never_posted_is_refused() {
 fn a_stale_follow_up_never_marks_the_next_switch() {
     let flight = Flight::new();
     let first = lead(flight.admit(5, true, Instant::now()));
+    assert!(first.begin_posting(Instant::now()));
     first.posted();
     let stale = follower(&flight.admit(5, true, Instant::now()));
     drop(first);
     let second = lead(flight.admit(5, true, Instant::now()));
+    assert!(second.begin_posting(Instant::now()));
     second.posted();
     flight.followed(stale);
     assert!(
