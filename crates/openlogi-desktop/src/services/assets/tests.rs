@@ -1373,17 +1373,59 @@ fn scaled_render_image_preserves_aspect_ratio_and_never_poisons_missing_files() 
         "expected micro-contrast shoulder R >= 241, got {shoulder_r}"
     );
 
-    // 3. Subsequent call returns the cached Arc<RenderImage> pointer.
-    let (second_arc, cached_w, cached_h) =
-        scaled_render_image(&png_path, 240, 136).expect("cached scaled image");
+    // 3. Subsequent call on an isolated cache returns the cached Arc<RenderImage> pointer.
+    let isolated_cache = super::images::ScaledImageCache::new();
+    let (cached_first, _, _) = isolated_cache
+        .get_or_build(&png_path, 240, 136)
+        .expect("isolated first lookup");
+    let (cached_second, cached_w, cached_h) = isolated_cache
+        .get_or_build(&png_path, 240, 136)
+        .expect("isolated second lookup");
     assert_eq!((cached_w, cached_h), (240, 120));
-    assert!(Arc::ptr_eq(&first_arc, &second_arc));
+    assert!(Arc::ptr_eq(&cached_first, &cached_second));
 
-    // 4. Clearing the cache evicts the entry so the next lookup rebuilds a fresh Arc.
-    super::images::clear_scaled_image_cache();
-    let (third_arc, _, _) =
-        scaled_render_image(&png_path, 240, 136).expect("rebuilt after cache clear");
-    assert!(!Arc::ptr_eq(&first_arc, &third_arc));
+    // 4. Clearing the isolated cache evicts the entry so the next lookup rebuilds a fresh Arc.
+    isolated_cache.clear();
+    let (cached_third, _, _) = isolated_cache
+        .get_or_build(&png_path, 240, 136)
+        .expect("rebuilt after cache clear");
+    assert!(!Arc::ptr_eq(&cached_first, &cached_third));
+}
+
+#[test]
+fn scaled_image_cache_survives_resolver_creation_and_reuses_decoded_source_across_resizes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let png_path = dir.path().join("resize_reuse.png");
+    let img = image::RgbaImage::from_pixel(400, 200, image::Rgba([200, 100, 50, 255]));
+    img.save(&png_path).expect("save resize test png");
+
+    // 1. Creating a new AssetResolver between lookups must not evict cached entries
+    // in the process-wide cache.
+    let (first_global, _, _) =
+        scaled_render_image(&png_path, 240, 136).expect("first global lookup");
+    let _concurrent_resolver = AssetResolver::new();
+    let (second_global, _, _) =
+        scaled_render_image(&png_path, 240, 136).expect("second global lookup after resolver");
+    assert!(
+        Arc::ptr_eq(&first_global, &second_global),
+        "AssetResolver::new() must not evict process-wide scaled image cache entries"
+    );
+
+    // 2. Resizing the same image to multiple target dimensions (e.g. dragging the
+    // Keys view window height) must decode the source image file only once and reuse
+    // the cached premultiplied RGBA source for every subsequent size.
+    let cache = super::images::ScaledImageCache::new();
+    let (_, w1, h1) = cache.get_or_build(&png_path, 200, 120).expect("size 1");
+    let (_, w2, h2) = cache.get_or_build(&png_path, 300, 180).expect("size 2");
+    let (_, w3, h3) = cache.get_or_build(&png_path, 360, 200).expect("size 3");
+    assert_eq!((w1, h1), (200, 100));
+    assert_eq!((w2, h2), (300, 150));
+    assert_eq!((w3, h3), (360, 180));
+    assert_eq!(
+        cache.decode_count(&png_path),
+        1,
+        "changing target size must reuse the cached decoded source instead of decoding again"
+    );
 }
 
 #[test]

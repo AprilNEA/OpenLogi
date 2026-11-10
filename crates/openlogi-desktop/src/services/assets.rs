@@ -236,7 +236,6 @@ pub struct AssetResolver {
 
 impl AssetResolver {
     pub fn new() -> Self {
-        clear_scaled_image_cache();
         let write_root = user_cache_root();
         let bundle = bundle_assets_root();
         let has_bundle = bundle.is_some();

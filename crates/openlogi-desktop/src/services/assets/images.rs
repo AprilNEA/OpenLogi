@@ -1,8 +1,9 @@
 //! Device image and depot-manifest helpers.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::SystemTime;
 
 use gpui::{
     App, Bounds, Corners, IntoElement, Pixels, RenderImage, RenderOnce, Styled as _, Window,
@@ -261,20 +262,176 @@ pub(super) fn load_manifest(dir: &Path) -> Option<DepotManifest> {
 }
 
 const MAX_SCALED_CACHE_ENTRIES: usize = 128;
+const MAX_DECODED_SOURCES: usize = 64;
 
 type ScaledImageEntry = (Arc<RenderImage>, u32, u32);
-type ScaledImageMap = HashMap<(PathBuf, u32, u32), ScaledImageEntry>;
 
-static SCALED_IMAGE_CACHE: OnceLock<Mutex<ScaledImageMap>> = OnceLock::new();
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct FileStamp {
+    len: u64,
+    modified: Option<SystemTime>,
+}
 
-/// Evict all cached Lanczos-3 [`RenderImage`] textures when [`super::AssetResolver::new`]
-/// or [`super::clear_cache`] runs so freshly downloaded or cleared assets take effect
-/// immediately.
+impl FileStamp {
+    fn of(path: &Path) -> Option<Self> {
+        let meta = std::fs::metadata(path).ok()?;
+        Some(Self {
+            len: meta.len(),
+            modified: meta.modified().ok(),
+        })
+    }
+}
+
+struct DecodedSource {
+    stamp: FileStamp,
+    premul_rgba: image::RgbaImage,
+}
+
+#[derive(Default)]
+struct ScaledCacheState {
+    sources: HashMap<PathBuf, Arc<DecodedSource>>,
+    renders: HashMap<(PathBuf, u32, u32), (FileStamp, ScaledImageEntry)>,
+    latest_by_path: HashMap<PathBuf, (FileStamp, ScaledImageEntry)>,
+    in_flight: HashSet<(PathBuf, u32, u32)>,
+    decode_counts: HashMap<PathBuf, usize>,
+}
+
+/// Thread-safe cache of decoded premultiplied-alpha sources and downscaled
+/// Lanczos-3 [`RenderImage`] textures.
+///
+/// Keying decoded sources separately from target `(max_w, max_h)` sizes means
+/// interactive window resizing in the Keys view reuses the already-decoded
+/// source buffer on GPUI's background executor without decoding the PNG/WebP
+/// file again.
+#[derive(Default)]
+pub(crate) struct ScaledImageCache {
+    inner: Mutex<ScaledCacheState>,
+}
+
+impl ScaledImageCache {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn clear(&self) {
+        if let Ok(mut guard) = self.inner.lock() {
+            guard.sources.clear();
+            guard.renders.clear();
+            guard.latest_by_path.clear();
+            guard.in_flight.clear();
+        }
+    }
+
+    /// Fast in-memory lookup for the UI render thread (zero disk I/O or resizing).
+    #[must_use]
+    pub fn get_cached(&self, path: &Path, max_w: u32, max_h: u32) -> Option<ScaledImageEntry> {
+        let key = (path.to_path_buf(), max_w.max(1), max_h.max(1));
+        let guard = self.inner.lock().ok()?;
+        guard.renders.get(&key).map(|(_, entry)| entry.clone())
+    }
+
+    /// Returns the most recently built [`RenderImage`] for `path` at any size,
+    /// used as an immediate zero-blocking fallback on the UI thread while a new
+    /// target size is being resized on the background executor.
+    #[must_use]
+    pub fn latest_for_path(&self, path: &Path) -> Option<ScaledImageEntry> {
+        let guard = self.inner.lock().ok()?;
+        guard
+            .latest_by_path
+            .get(path)
+            .map(|(_, entry)| entry.clone())
+    }
+
+    fn begin_in_flight(&self, path: &Path, max_w: u32, max_h: u32) -> bool {
+        let key = (path.to_path_buf(), max_w.max(1), max_h.max(1));
+        self.inner
+            .lock()
+            .is_ok_and(|mut guard| guard.in_flight.insert(key))
+    }
+
+    fn finish_in_flight(&self, path: &Path, max_w: u32, max_h: u32) {
+        let key = (path.to_path_buf(), max_w.max(1), max_h.max(1));
+        if let Ok(mut guard) = self.inner.lock() {
+            guard.in_flight.remove(&key);
+        }
+    }
+
+    /// Synchronous lookup-or-build used by background worker tasks and unit tests.
+    /// Reuses the cached [`DecodedSource`] when resizing `path` to new dimensions.
+    #[must_use]
+    pub fn get_or_build(&self, path: &Path, max_w: u32, max_h: u32) -> Option<ScaledImageEntry> {
+        let max_w = max_w.max(1);
+        let max_h = max_h.max(1);
+        let stamp = FileStamp::of(path)?;
+        let key = (path.to_path_buf(), max_w, max_h);
+
+        let cached_source = {
+            let guard = self.inner.lock().ok()?;
+            if let Some((cached_stamp, entry)) = guard.renders.get(&key)
+                && *cached_stamp == stamp
+            {
+                return Some(entry.clone());
+            }
+            guard
+                .sources
+                .get(path)
+                .filter(|src| src.stamp == stamp)
+                .cloned()
+        };
+
+        let source = if let Some(src) = cached_source {
+            src
+        } else {
+            let decoded = Arc::new(decode_premultiplied_source(path, stamp)?);
+            if let Ok(mut guard) = self.inner.lock() {
+                if guard.sources.len() >= MAX_DECODED_SOURCES {
+                    guard.sources.clear();
+                }
+                guard
+                    .sources
+                    .insert(path.to_path_buf(), Arc::clone(&decoded));
+                let count = guard.decode_counts.entry(path.to_path_buf()).or_insert(0);
+                *count = count.saturating_add(1);
+            }
+            decoded
+        };
+
+        let built = resize_decoded_source(&source, max_w, max_h)?;
+        if let Ok(mut guard) = self.inner.lock() {
+            if guard.renders.len() >= MAX_SCALED_CACHE_ENTRIES {
+                guard.renders.clear();
+            }
+            guard.renders.insert(key, (stamp, built.clone()));
+            guard
+                .latest_by_path
+                .insert(path.to_path_buf(), (stamp, built.clone()));
+        }
+        Some(built)
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub fn decode_count(&self, path: &Path) -> usize {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|guard| guard.decode_counts.get(path).copied())
+            .unwrap_or(0)
+    }
+}
+
+static SCALED_IMAGE_CACHE: OnceLock<ScaledImageCache> = OnceLock::new();
+
+fn global_scaled_cache() -> &'static ScaledImageCache {
+    SCALED_IMAGE_CACHE.get_or_init(ScaledImageCache::new)
+}
+
+/// Evict all cached decoded sources and Lanczos-3 [`RenderImage`] textures when
+/// [`super::clear_cache`] wipes the on-disk asset cache.
 pub(crate) fn clear_scaled_image_cache() {
-    if let Some(cache) = SCALED_IMAGE_CACHE.get()
-        && let Ok(mut guard) = cache.lock()
-    {
-        guard.clear();
+    if let Some(cache) = SCALED_IMAGE_CACHE.get() {
+        cache.clear();
     }
 }
 
@@ -367,35 +524,36 @@ impl RenderOnce for ScaledImage {
         clippy::cast_sign_loss,
         reason = "bounded logical and physical pixel dimensions fit within f32/u32"
     )]
-    fn render(self, window: &mut Window, _cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         match self.fit {
             ScaledFit::StageContain => {
                 let path = self.path;
                 canvas(
-                    move |_, _, _| path,
-                    move |bounds, path, window, _| {
+                    move |bounds, window, cx| {
                         let bw = f32::from(bounds.size.width);
                         let bh = f32::from(bounds.size.height);
                         if bw <= 0.0 || bh <= 0.0 {
-                            return;
+                            return None;
                         }
                         let scale_factor = window.scale_factor().clamp(1.0, 4.0);
                         let phys_max_w = (bw * scale_factor).round().max(1.0) as u32;
                         let phys_max_h = (bh * scale_factor).round().max(1.0) as u32;
-                        if let Some((render_img, dst_w, dst_h)) =
-                            scaled_render_image(&path, phys_max_w, phys_max_h)
-                        {
-                            let aspect = (dst_w as f32) / (dst_h.max(1) as f32);
-                            let image_bounds = contain_fit_bounds(bounds, aspect);
-                            let _ = window.paint_image(
-                                bounds,
-                                image_bounds,
-                                Corners::default(),
-                                render_img,
-                                0,
-                                false,
-                            );
-                        }
+                        request_scaled_render_image(&path, phys_max_w, phys_max_h, cx)
+                    },
+                    move |bounds, cached_entry, window, _| {
+                        let Some((render_img, dst_w, dst_h)) = cached_entry else {
+                            return;
+                        };
+                        let aspect = (dst_w as f32) / (dst_h.max(1) as f32);
+                        let image_bounds = contain_fit_bounds(bounds, aspect);
+                        let _ = window.paint_image(
+                            bounds,
+                            image_bounds,
+                            Corners::default(),
+                            render_img,
+                            0,
+                            false,
+                        );
                     },
                 )
                 .size_full()
@@ -406,10 +564,14 @@ impl RenderOnce for ScaledImage {
                 let phys_max_w = (max_w * scale_factor).round().max(1.0) as u32;
                 let phys_max_h = (max_h * scale_factor).round().max(1.0) as u32;
                 if let Some((render_img, phys_dst_w, phys_dst_h)) =
-                    scaled_render_image(&self.path, phys_max_w, phys_max_h)
+                    request_scaled_render_image(&self.path, phys_max_w, phys_max_h, cx)
                 {
-                    let logical_w = (phys_dst_w as f32) / scale_factor;
-                    let logical_h = (phys_dst_h as f32) / scale_factor;
+                    let aspect = (phys_dst_w as f32) / (phys_dst_h.max(1) as f32);
+                    let (logical_w, logical_h) = if max_w / max_h > aspect {
+                        (max_h * aspect, max_h)
+                    } else {
+                        (max_w, max_w / aspect)
+                    };
                     return img(render_img)
                         .w(px(logical_w))
                         .h(px(logical_h))
@@ -422,7 +584,7 @@ impl RenderOnce for ScaledImage {
                 let phys_max_w = (width * scale_factor).round().max(1.0) as u32;
                 let phys_max_h = (height * scale_factor).round().max(1.0) as u32;
                 if let Some((render_img, _, _)) =
-                    scaled_render_image(&self.path, phys_max_w, phys_max_h)
+                    request_scaled_render_image(&self.path, phys_max_w, phys_max_h, cx)
                 {
                     return img(render_img)
                         .w(px(width))
@@ -435,6 +597,41 @@ impl RenderOnce for ScaledImage {
     }
 }
 
+/// Request a scaled [`RenderImage`] without blocking the UI thread:
+/// - Returns immediately on an exact `(path, max_w, max_h)` cache hit.
+/// - On a cache miss, schedules decoding/Lanczos-3 resizing on GPUI's background
+///   executor and returns the most recent cached [`RenderImage`] for `path` (if any)
+///   so interactive window resizing stays smooth and non-blocking.
+fn request_scaled_render_image(
+    path: &Path,
+    max_w: u32,
+    max_h: u32,
+    cx: &mut App,
+) -> Option<ScaledImageEntry> {
+    let cache = global_scaled_cache();
+    if let Some(hit) = cache.get_cached(path, max_w, max_h) {
+        return Some(hit);
+    }
+    if cache.begin_in_flight(path, max_w, max_h) {
+        let bg_path = path.to_path_buf();
+        cx.spawn(async move |cx| {
+            let built = cx
+                .background_executor()
+                .spawn(async move {
+                    let res = global_scaled_cache().get_or_build(&bg_path, max_w, max_h);
+                    global_scaled_cache().finish_in_flight(&bg_path, max_w, max_h);
+                    res
+                })
+                .await;
+            if built.is_some() {
+                cx.update(App::refresh_windows);
+            }
+        })
+        .detach();
+    }
+    cache.latest_for_path(path)
+}
+
 /// Decode `path` once and downscale with premultiplied-alpha Lanczos-3 to fit
 /// within `(max_w, max_h)` physical pixels, returning a cached `(RenderImage, dst_w, dst_h)`
 /// so GPUI maps 1 texel to 1 physical screen pixel without single-pass bilinear aliasing.
@@ -444,22 +641,37 @@ pub(crate) fn scaled_render_image(
     max_w: u32,
     max_h: u32,
 ) -> Option<(Arc<RenderImage>, u32, u32)> {
-    let key = (path.to_path_buf(), max_w.max(1), max_h.max(1));
-    let cache = SCALED_IMAGE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Ok(guard) = cache.lock()
-        && let Some(cached) = guard.get(&key)
-    {
-        return Some(cached.clone());
+    global_scaled_cache().get_or_build(path, max_w, max_h)
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "premultiplied RGBA channel math is bounded within 0..=255"
+)]
+fn decode_premultiplied_source(path: &Path, stamp: FileStamp) -> Option<DecodedSource> {
+    let mut premul_rgba = image::ImageReader::open(path)
+        .ok()?
+        .with_guessed_format()
+        .ok()?
+        .decode()
+        .ok()?
+        .into_rgba8();
+    let (src_w, src_h) = premul_rgba.dimensions();
+    if src_w == 0 || src_h == 0 {
+        return None;
     }
 
-    let built = build_scaled_render_image(path, key.1, key.2)?;
-    if let Ok(mut guard) = cache.lock() {
-        if guard.len() >= MAX_SCALED_CACHE_ENTRIES {
-            guard.clear();
-        }
-        guard.insert(key, built.clone());
+    // Premultiply RGB by alpha once at decode time so transparent (0,0,0,0)
+    // exterior pixels never bleed dark fringes into light silhouette edges
+    // during subsequent Lanczos-3 resizes.
+    for p in premul_rgba.pixels_mut() {
+        let a = u16::from(p[3]);
+        p[0] = ((u16::from(p[0]) * a + 127) / 255) as u8;
+        p[1] = ((u16::from(p[1]) * a + 127) / 255) as u8;
+        p[2] = ((u16::from(p[2]) * a + 127) / 255) as u8;
     }
-    Some(built)
+
+    Some(DecodedSource { stamp, premul_rgba })
 }
 
 #[expect(
@@ -468,19 +680,12 @@ pub(crate) fn scaled_render_image(
     clippy::cast_sign_loss,
     reason = "bounded image dimensions and RGBA channel math fit within f32/u32/u8"
 )]
-fn build_scaled_render_image(
-    path: &Path,
+fn resize_decoded_source(
+    source: &DecodedSource,
     max_w: u32,
     max_h: u32,
 ) -> Option<(Arc<RenderImage>, u32, u32)> {
-    let mut rgba = image::ImageReader::open(path)
-        .ok()?
-        .with_guessed_format()
-        .ok()?
-        .decode()
-        .ok()?
-        .into_rgba8();
-    let (src_w, src_h) = rgba.dimensions();
+    let (src_w, src_h) = source.premul_rgba.dimensions();
     if src_w == 0 || src_h == 0 {
         return None;
     }
@@ -491,19 +696,10 @@ fn build_scaled_render_image(
     let dst_w = ((src_w as f32 * scale).round() as u32).max(1);
     let dst_h = ((src_h as f32 * scale).round() as u32).max(1);
 
-    // 1. Premultiply RGB by alpha so transparent (0,0,0,0) exterior pixels never
-    // bleed dark fringes into light silhouette edges during Lanczos-3 resampling.
-    for p in rgba.pixels_mut() {
-        let a = u16::from(p[3]);
-        p[0] = ((u16::from(p[0]) * a + 127) / 255) as u8;
-        p[1] = ((u16::from(p[1]) * a + 127) / 255) as u8;
-        p[2] = ((u16::from(p[2]) * a + 127) / 255) as u8;
-    }
-
     let mut resized = if dst_w == src_w && dst_h == src_h {
-        rgba
+        source.premul_rgba.clone()
     } else {
-        image::imageops::resize(&rgba, dst_w, dst_h, FilterType::Lanczos3)
+        image::imageops::resize(&source.premul_rgba, dst_w, dst_h, FilterType::Lanczos3)
     };
 
     // 2. Un-premultiply back to straight alpha.
