@@ -1,0 +1,20 @@
+# Owner: openlogi_device::write::unit_id — the `0x0003` unit ID read that
+# tells two devices on one route apart, its "no DeviceInformation" answer,
+# and its error classification. A write's preflight reads it through
+# get_unit_id_on.
+id: device-unit-id-owner
+language: rust
+severity: error
+message: Read a device's 0x0003 unit ID through openlogi-device's write::unit_id (or get_unit_id_on); it owns the missing-feature answer and the error classification.
+note: |
+  The RGB control lease and the haptic restore each read the unit ID on their
+  own, differing in how they classified a timeout. See "Single source of
+  truth" in AGENTS.md. The firmware-entity diagnostics dump reads the whole
+  DeviceInformation record for a report, not an identity, and is exempt.
+files:
+  - crates/openlogi-device/src/write/**/*.rs
+ignores:
+  - crates/openlogi-device/src/write/unit_id.rs
+  - crates/openlogi-device/src/write/diagnostics.rs
+rule:
+  pattern: open_feature::<DeviceInformationFeature>($$$ARGS)
