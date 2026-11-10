@@ -73,7 +73,60 @@ pub(crate) fn helper_install_command(
     )
 }
 
-/// Backend de actualizaciones para instalaciones Linux gestionadas por paquetes.
+/// Why the Linux package path stopped, rendered through the locale catalog.
+///
+/// `Other` carries an error raised by `gpui_updater` or the OS, which the
+/// macOS and Windows drivers also surface untranslated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LinuxUpdateFailure {
+    UnsupportedInstallation,
+    UnsupportedArchitecture,
+    PackageMismatch,
+    StateUnavailable,
+    NoUpdateSelected,
+    MissingSigningKey,
+    HelperMissing,
+    MissingSignature,
+    InvalidChecksum,
+    SignatureDownload(String),
+    PolkitStart(String),
+    InstallFailed(String),
+    Relaunch(String),
+    Other(String),
+}
+
+impl LinuxUpdateFailure {
+    /// The message in the active locale, shown inside `updates.update_failed_message`.
+    pub(crate) fn message(&self) -> String {
+        match self {
+            Self::UnsupportedInstallation => tr!("updates.linux_unsupported_installation"),
+            Self::UnsupportedArchitecture => tr!("updates.linux_unsupported_architecture"),
+            Self::PackageMismatch => tr!("updates.linux_package_mismatch"),
+            Self::StateUnavailable => tr!("updates.linux_state_unavailable"),
+            Self::NoUpdateSelected => tr!("updates.linux_no_update_selected"),
+            Self::MissingSigningKey => tr!("updates.linux_missing_signing_key"),
+            Self::HelperMissing => tr!("updates.linux_helper_missing"),
+            Self::MissingSignature => tr!("updates.linux_missing_signature"),
+            Self::InvalidChecksum => tr!("updates.linux_invalid_checksum"),
+            Self::SignatureDownload(error) => {
+                tr!("updates.linux_signature_download_failed", error => error)
+            }
+            Self::PolkitStart(error) => tr!("updates.linux_polkit_start_failed", error => error),
+            Self::InstallFailed(error) => tr!("updates.linux_install_failed", error => error),
+            Self::Relaunch(error) => tr!("updates.linux_relaunch_failed", error => error),
+            Self::Other(error) => return error.clone(),
+        }
+        .to_string()
+    }
+}
+
+/// Report `failure` and close the current check or install.
+fn fail(events: &DriverEvents, failure: &LinuxUpdateFailure) {
+    events.emit(DriverEvent::Failed(failure.message()));
+    events.emit(DriverEvent::Settled);
+}
+
+/// Update driver for Linux installations managed by a package manager.
 pub(crate) struct LinuxPackageDriver {
     manifest_url: String,
     public_key: Option<String>,
@@ -118,19 +171,12 @@ impl UpdateDriver for LinuxPackageDriver {
         std::thread::spawn(move || {
             let installation = InstallationSource::detect();
             let Some(format) = package_format(installation) else {
-                events.emit(DriverEvent::Failed(
-                    "This Linux installation is not managed by a supported package manager"
-                        .to_owned(),
-                ));
-                events.emit(DriverEvent::Settled);
+                fail(&events, &LinuxUpdateFailure::UnsupportedInstallation);
                 return;
             };
 
             let Some(arch) = manifest_arch() else {
-                events.emit(DriverEvent::Failed(
-                    "Unsupported Linux architecture".to_owned(),
-                ));
-                events.emit(DriverEvent::Settled);
+                fail(&events, &LinuxUpdateFailure::UnsupportedArchitecture);
                 return;
             };
 
@@ -151,18 +197,12 @@ impl UpdateDriver for LinuxPackageDriver {
                 Ok(Some(release)) => {
                     let Some(expected) = expected_package_name(installation, &release.version)
                     else {
-                        events.emit(DriverEvent::Failed(
-                            "Unsupported Linux architecture".to_owned(),
-                        ));
-                        events.emit(DriverEvent::Settled);
+                        fail(&events, &LinuxUpdateFailure::UnsupportedArchitecture);
                         return;
                     };
 
                     if release.asset.name != expected {
-                        events.emit(DriverEvent::Failed(
-                            "Update package name or architecture does not match".to_owned(),
-                        ));
-                        events.emit(DriverEvent::Settled);
+                        fail(&events, &LinuxUpdateFailure::PackageMismatch);
                         return;
                     }
 
@@ -194,14 +234,12 @@ impl UpdateDriver for LinuxPackageDriver {
         let release = if let Ok(available) = self.available.lock() {
             available.clone()
         } else {
-            events.emit(DriverEvent::Failed("Update state unavailable".into()));
-            events.emit(DriverEvent::Settled);
+            fail(&events, &LinuxUpdateFailure::StateUnavailable);
             return;
         };
 
         let Some(release) = release else {
-            events.emit(DriverEvent::Failed("No update selected".into()));
-            events.emit(DriverEvent::Settled);
+            fail(&events, &LinuxUpdateFailure::NoUpdateSelected);
             return;
         };
 
@@ -213,7 +251,7 @@ impl UpdateDriver for LinuxPackageDriver {
             let result = install_verified_package(release, url, key, version, &events);
             match result {
                 Ok(version) => events.emit(DriverEvent::ReadyToRelaunch(version)),
-                Err(error) => events.emit(DriverEvent::Failed(error)),
+                Err(failure) => events.emit(DriverEvent::Failed(failure.message())),
             }
             events.emit(DriverEvent::Settled);
         });
@@ -229,10 +267,7 @@ impl UpdateDriver for LinuxPackageDriver {
         let error = std::process::Command::new(executable).exec();
 
         if let Some(events) = &self.events {
-            events.emit(DriverEvent::Failed(format!(
-                "Could not relaunch updated OpenLogi: {error}"
-            )));
-            events.emit(DriverEvent::Settled);
+            fail(events, &LinuxUpdateFailure::Relaunch(error.to_string()));
         }
     }
 }
@@ -244,31 +279,26 @@ fn install_verified_package(
     key: Option<String>,
     version: Version,
     events: &DriverEvents,
-) -> Result<Version, String> {
+) -> Result<Version, LinuxUpdateFailure> {
     let installation = InstallationSource::detect();
     let Some(format) = package_format(installation) else {
-        return Err(
-            "In-app installation supports Debian, RPM, and Arch Linux packages only".into(),
-        );
+        return Err(LinuxUpdateFailure::UnsupportedInstallation);
     };
 
     let Some(arch) = manifest_arch() else {
-        return Err("Unsupported architecture".into());
+        return Err(LinuxUpdateFailure::UnsupportedArchitecture);
     };
 
-    let expected_name =
-        expected_package_name(installation, &release.version).ok_or("Unsupported architecture")?;
+    let expected_name = expected_package_name(installation, &release.version)
+        .ok_or(LinuxUpdateFailure::UnsupportedArchitecture)?;
 
-    if release.asset.name != expected_name {
-        return Err("Unexpected package name, version or architecture".into());
+    if release.asset.name != expected_name || !matches_package(installation, &release.asset.name) {
+        return Err(LinuxUpdateFailure::PackageMismatch);
     }
 
-    if !matches_package(installation, &release.asset.name) {
-        return Err("Package format mismatch".into());
-    }
-
-    let key = key.ok_or("No trusted update signing key embedded")?;
-    let temporary = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let key = key.ok_or(LinuxUpdateFailure::MissingSigningKey)?;
+    let temporary =
+        tempfile::tempdir().map_err(|error| LinuxUpdateFailure::Other(error.to_string()))?;
 
     let source = StaticManifestSource::new(url)
         .os("linux")
@@ -292,30 +322,27 @@ fn install_verified_package(
         .download(&release, |downloaded, total| {
             events.emit(DriverEvent::Downloading { downloaded, total });
         })
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| LinuxUpdateFailure::Other(error.to_string()))?;
 
     events.emit(DriverEvent::Installing);
 
     // A privileged helper is shipped with newer OpenLogi packages.
     // Older installations must be upgraded manually once.
     if !Path::new(UPDATE_INSTALL_HELPER).is_file() {
-        return Err(
-            "The secure update helper is not installed. Update OpenLogi manually once to enable in-app installation."
-                .to_owned(),
-        );
+        return Err(LinuxUpdateFailure::HelperMissing);
     }
 
     let signature_url = release
         .signature_url
         .as_deref()
         .filter(|url| url.starts_with("https://"))
-        .ok_or("No HTTPS minisign signature URL in the release")?;
+        .ok_or(LinuxUpdateFailure::MissingSignature)?;
 
     let checksum = release
         .sha256
         .as_deref()
         .filter(|hash| hash.len() == 64 && hash.as_bytes().iter().all(u8::is_ascii_hexdigit))
-        .ok_or("Missing or invalid SHA-256 checksum")?;
+        .ok_or(LinuxUpdateFailure::InvalidChecksum)?;
 
     let signature: PathBuf = temporary.path().join(format!("{expected_name}.minisig"));
 
@@ -335,11 +362,11 @@ fn install_verified_package(
         .arg("--")
         .arg(signature_url)
         .status()
-        .map_err(|error| format!("Could not download signature: {error}"))?;
+        .map_err(|error| LinuxUpdateFailure::SignatureDownload(error.to_string()))?;
 
     if !download_status.success() {
-        return Err(format!(
-            "Could not download package signature: {download_status}"
+        return Err(LinuxUpdateFailure::SignatureDownload(
+            download_status.to_string(),
         ));
     }
 
@@ -351,12 +378,10 @@ fn install_verified_package(
     let status = std::process::Command::new(program)
         .args(&args)
         .status()
-        .map_err(|error| format!("Could not start polkit: {error}"))?;
+        .map_err(|error| LinuxUpdateFailure::PolkitStart(error.to_string()))?;
 
     if !status.success() {
-        return Err(format!(
-            "Package installation failed or authorization was denied: {status}"
-        ));
+        return Err(LinuxUpdateFailure::InstallFailed(status.to_string()));
     }
 
     Ok(release.version)
@@ -412,6 +437,61 @@ mod tests {
         assert!(
             name == "openlogi-v0.9.1-linux-amd64.deb" || name == "openlogi-v0.9.1-linux-arm64.deb"
         );
+    }
+
+    #[test]
+    fn failures_render_in_the_active_locale() {
+        let detail = "exit status: 126";
+        let failures = [
+            LinuxUpdateFailure::UnsupportedInstallation,
+            LinuxUpdateFailure::UnsupportedArchitecture,
+            LinuxUpdateFailure::PackageMismatch,
+            LinuxUpdateFailure::StateUnavailable,
+            LinuxUpdateFailure::NoUpdateSelected,
+            LinuxUpdateFailure::MissingSigningKey,
+            LinuxUpdateFailure::HelperMissing,
+            LinuxUpdateFailure::MissingSignature,
+            LinuxUpdateFailure::InvalidChecksum,
+            LinuxUpdateFailure::SignatureDownload(detail.to_owned()),
+            LinuxUpdateFailure::PolkitStart(detail.to_owned()),
+            LinuxUpdateFailure::InstallFailed(detail.to_owned()),
+            LinuxUpdateFailure::Relaunch(detail.to_owned()),
+        ];
+
+        let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+        rust_i18n::set_locale("en");
+        let english: Vec<String> = failures.iter().map(LinuxUpdateFailure::message).collect();
+        rust_i18n::set_locale("de");
+        let german: Vec<String> = failures.iter().map(LinuxUpdateFailure::message).collect();
+        rust_i18n::set_locale("en");
+
+        for ((failure, en), de) in failures.iter().zip(&english).zip(&german) {
+            // A missing key renders as its own path.
+            assert!(
+                !en.contains("updates.linux_"),
+                "{failure:?} has no English entry"
+            );
+            assert!(
+                !de.contains("updates.linux_"),
+                "{failure:?} has no German entry"
+            );
+            assert_ne!(en, de, "{failure:?} is not translated");
+            if matches!(
+                failure,
+                LinuxUpdateFailure::SignatureDownload(_)
+                    | LinuxUpdateFailure::PolkitStart(_)
+                    | LinuxUpdateFailure::InstallFailed(_)
+                    | LinuxUpdateFailure::Relaunch(_)
+            ) {
+                assert!(de.contains(detail), "{failure:?} drops its detail: {de}");
+            }
+        }
+    }
+
+    #[test]
+    fn engine_failures_pass_through_unchanged() {
+        let failure = LinuxUpdateFailure::Other("no release asset matched".to_owned());
+        assert_eq!(failure.message(), "no release asset matched");
     }
 
     #[test]
