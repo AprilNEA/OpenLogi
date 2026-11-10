@@ -33,6 +33,12 @@ const MIN_LEARN_WINDOW_SECS: u64 = 1_800;
 /// Maximum elapsed discharging window (14 days) before an anchor is considered
 /// expired and re-anchored to the current reading.
 const MAX_LEARN_WINDOW_SECS: u64 = 14 * 86_400;
+/// Minimum elapsed charging window (1 minute) and upward step (`>= 1%`) before
+/// confirming that a battery probe supplies live charging progress rather than
+/// a frozen pre-charge reading (`hold_percentage_while_charging`).
+const MIN_CHARGE_WINDOW_SECS: u64 = 60;
+/// Maximum elapsed charging window (6 hours) before re-anchoring a charging session.
+const MAX_CHARGE_WINDOW_SECS: u64 = 6 * 3_600;
 /// Minimum cumulative observed discharge percentage points (~1.5–2 full cycles)
 /// before reporting a calibrated battery health percentage.
 const MIN_HEALTH_DROP_PCT: u32 = 150;
@@ -43,6 +49,27 @@ const MIN_HEALTH_SAMPLES: u32 = 5;
 struct TelemetryStore {
     #[serde(default)]
     devices: BTreeMap<String, DeviceBatteryHistory>,
+}
+
+/// Explicit state machine tracking whether an active charging session supplies
+/// live upward percentage progress (`0x1004` Unified Battery) or a frozen
+/// pre-charge percentage held by `hold_percentage_while_charging` (`0x1000`,
+/// voltage `0x1001`, and ADC `0x1F20`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub(crate) enum ChargingProgress {
+    #[default]
+    Inactive,
+    /// Initial charging reading recorded; waiting for a live upward percentage
+    /// step (`percentage > anchor`) to prove the probe reports live progress.
+    AwaitingLiveStep { percentage: u8, timestamp_secs: u64 },
+    /// Live upward progress confirmed during the current charge session, with
+    /// measured pace in `minutes_per_pct`.
+    Live {
+        percentage: u8,
+        timestamp_secs: u64,
+        minutes_per_pct: f32,
+    },
 }
 
 /// Explicit state machine tracking the discharge observation anchor for a device.
@@ -69,6 +96,9 @@ struct DeviceBatteryHistory {
     /// Current discharge tracking phase and anchor.
     #[serde(default)]
     phase: DischargePhase,
+    /// Current charging session progress and measured charging rate.
+    #[serde(default)]
+    charging_progress: ChargingProgress,
     /// Learned drain rate (`% per day`) per configuration signature.
     #[serde(default)]
     learned_drain_per_day: BTreeMap<String, LearnedDrain>,
@@ -84,6 +114,7 @@ impl Default for DeviceBatteryHistory {
     fn default() -> Self {
         Self {
             phase: DischargePhase::Unanchored,
+            charging_progress: ChargingProgress::Inactive,
             learned_drain_per_day: BTreeMap::new(),
             estimated_health_pct: default_health(),
             total_observed_drop_pct: 0,
@@ -188,6 +219,19 @@ impl BatteryTelemetry {
         (health_pct, learned, learned_samples)
     }
 
+    /// Returns the measured charging pace (`minutes per 1%`) for `config_key`
+    /// only when the current charging session has demonstrated live upward
+    /// percentage progress. Frozen pre-charge readings return `None`.
+    #[must_use]
+    pub fn live_charging_rate(&self, config_key: &str) -> Option<f32> {
+        match self.store.devices.get(config_key)?.charging_progress {
+            ChargingProgress::Live {
+                minutes_per_pct, ..
+            } => Some(minutes_per_pct),
+            ChargingProgress::Inactive | ChargingProgress::AwaitingLiveStep { .. } => None,
+        }
+    }
+
     /// Observe a single device's current battery and configuration state at `now_secs`.
     ///
     /// When `signature` is `None`, the device's power-affecting hardware settings
@@ -230,7 +274,20 @@ impl BatteryTelemetry {
                 entry.phase = DischargePhase::Charging;
                 self.dirty = true;
             }
+            if advance_charging_progress(
+                &mut entry.charging_progress,
+                battery.percentage,
+                signature.is_some(),
+                now_secs,
+            ) {
+                self.dirty = true;
+            }
             return;
+        }
+
+        if entry.charging_progress != ChargingProgress::Inactive {
+            entry.charging_progress = ChargingProgress::Inactive;
+            self.dirty = true;
         }
 
         if matches!(battery.status, BatteryStatus::Error) {
@@ -295,6 +352,106 @@ impl BatteryTelemetry {
     #[must_use]
     pub fn phase_for(&self, config_key: &str) -> Option<&DischargePhase> {
         self.store.devices.get(config_key).map(|d| &d.phase)
+    }
+}
+
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "bounded charging elapsed seconds fit in f32"
+)]
+fn advance_charging_progress(
+    progress: &mut ChargingProgress,
+    raw_percentage: Option<u8>,
+    has_measured_support: bool,
+    now_secs: u64,
+) -> bool {
+    if !has_measured_support {
+        if *progress != ChargingProgress::Inactive {
+            *progress = ChargingProgress::Inactive;
+            return true;
+        }
+        return false;
+    }
+    let Some(raw_pct) = raw_percentage else {
+        if *progress != ChargingProgress::Inactive {
+            *progress = ChargingProgress::Inactive;
+            return true;
+        }
+        return false;
+    };
+    let percentage = raw_pct.min(100);
+    if percentage == 0 || percentage >= 100 {
+        if *progress != ChargingProgress::Inactive {
+            *progress = ChargingProgress::Inactive;
+            return true;
+        }
+        return false;
+    }
+
+    match *progress {
+        ChargingProgress::Inactive => {
+            *progress = ChargingProgress::AwaitingLiveStep {
+                percentage,
+                timestamp_secs: now_secs,
+            };
+            true
+        }
+        ChargingProgress::AwaitingLiveStep {
+            percentage: last_pct,
+            timestamp_secs: last_ts,
+        } => {
+            if percentage < last_pct
+                || now_secs <= last_ts
+                || now_secs.saturating_sub(last_ts) > MAX_CHARGE_WINDOW_SECS
+            {
+                *progress = ChargingProgress::AwaitingLiveStep {
+                    percentage,
+                    timestamp_secs: now_secs,
+                };
+                return true;
+            }
+            let dt_secs = now_secs.saturating_sub(last_ts);
+            if percentage > last_pct && dt_secs >= MIN_CHARGE_WINDOW_SECS {
+                let rise_pct = f32::from(percentage - last_pct);
+                let observed_min_per_pct = ((dt_secs as f32) / 60.0 / rise_pct).clamp(0.25, 10.0);
+                *progress = ChargingProgress::Live {
+                    percentage,
+                    timestamp_secs: now_secs,
+                    minutes_per_pct: observed_min_per_pct,
+                };
+                return true;
+            }
+            false
+        }
+        ChargingProgress::Live {
+            percentage: last_pct,
+            timestamp_secs: last_ts,
+            minutes_per_pct: prev_rate,
+        } => {
+            if percentage < last_pct
+                || now_secs <= last_ts
+                || now_secs.saturating_sub(last_ts) > MAX_CHARGE_WINDOW_SECS
+            {
+                *progress = ChargingProgress::AwaitingLiveStep {
+                    percentage,
+                    timestamp_secs: now_secs,
+                };
+                return true;
+            }
+            let dt_secs = now_secs.saturating_sub(last_ts);
+            if percentage > last_pct && dt_secs >= MIN_CHARGE_WINDOW_SECS {
+                let rise_pct = f32::from(percentage - last_pct);
+                let observed_min_per_pct = ((dt_secs as f32) / 60.0 / rise_pct).clamp(0.25, 10.0);
+                let blended = (prev_rate * 0.6 + observed_min_per_pct * 0.4).clamp(0.25, 10.0);
+                *progress = ChargingProgress::Live {
+                    percentage,
+                    timestamp_secs: now_secs,
+                    minutes_per_pct: blended,
+                };
+                return true;
+            }
+            false
+        }
     }
 }
 
@@ -430,21 +587,79 @@ fn write_telemetry_atomic(path: &Path, store: &TelemetryStore) -> std::io::Resul
     Ok(())
 }
 
-/// Explicit operating mode of a [`BatteryEstimate`] so charging vs. discharging
-/// formatting never relies on implicit optional fields.
+/// Explicit operating mode of a [`BatteryEstimate`] so charging stages vs.
+/// discharging autonomy never rely on optional fields or implicit rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EstimatePhase {
     /// Device is discharging or full; displays remaining autonomy (`remaining_hours`).
     Discharging,
-    /// Device is charging below 100%; models the Li-Po CC/CV curve (`0..80%` fast
-    /// Constant-Current phase and `80..100%` slower Constant-Voltage trickle phase).
-    Charging {
-        /// Remaining minutes to reach 80% when `percentage < 80`, or `None` when
-        /// already in the 80–99% trickle phase.
-        minutes_to_80: Option<u32>,
-        /// Remaining minutes to reach 100% (`>= 1`).
+    /// Device is charging below 80% in the fast Constant-Current phase, reporting
+    /// both the 80% milestone and the 100% full-charge ETA (`minutes_to_100 > minutes_to_80 >= 1`).
+    ChargingTo80 {
+        minutes_to_80: u32,
         minutes_to_100: u32,
     },
+    /// Device is charging in the 80–99% Constant-Voltage trickle phase, reporting
+    /// the remaining minutes to 100% (`minutes_to_100 >= 1`).
+    ChargingTo100 { minutes_to_100: u32 },
+}
+
+impl EstimatePhase {
+    fn charging_to_80(minutes_to_80: u32, minutes_to_100: u32) -> Option<Self> {
+        if minutes_to_80 == 0 || minutes_to_100 <= minutes_to_80 {
+            return None;
+        }
+        Some(Self::ChargingTo80 {
+            minutes_to_80,
+            minutes_to_100,
+        })
+    }
+
+    fn charging_to_100(minutes_to_100: u32) -> Option<Self> {
+        if minutes_to_100 == 0 {
+            return None;
+        }
+        Some(Self::ChargingTo100 { minutes_to_100 })
+    }
+
+    /// Build a validated charging stage from the device's live measured charging pace
+    /// (`measured_min_per_pct`), without using any `DeviceKind` or unmeasured defaults.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "clamped positive minutes round into u32"
+    )]
+    fn from_live_charge_rate(
+        percentage: u8,
+        measured_min_per_pct: f32,
+        status: BatteryStatus,
+    ) -> Option<Self> {
+        if percentage == 0 || percentage >= 100 || !measured_min_per_pct.is_finite() {
+            return None;
+        }
+        let base_rate = measured_min_per_pct.clamp(0.25, 10.0);
+        let slow_mult = if status == BatteryStatus::ChargingSlow {
+            1.5_f32
+        } else {
+            1.0_f32
+        };
+        let effective_rate = base_rate * slow_mult;
+
+        if percentage < 80 {
+            let fast_phase_mins = f32::from(80 - percentage) * effective_rate;
+            // Above 80%, Li-Po Constant-Voltage taper averages ~1.75x slower per percent
+            // than the Constant-Current phase.
+            let trickle_phase_mins = 20.0 * effective_rate * 1.75;
+            let m80 = (fast_phase_mins.round() as u32).max(1);
+            let m100 = ((fast_phase_mins + trickle_phase_mins).round() as u32).max(m80 + 5);
+            Self::charging_to_80(m80, m100)
+        } else {
+            let rem_pct = f32::from(100 - percentage);
+            let trickle_phase_mins = rem_pct * effective_rate;
+            let m100 = (trickle_phase_mins.round() as u32).max(1);
+            Self::charging_to_100(m100)
+        }
+    }
 }
 
 /// Complete battery duration, charging ETA, and health estimate for a single device.
@@ -473,11 +688,11 @@ impl BatteryEstimate {
     #[must_use]
     pub fn home_label(&self) -> String {
         match self.phase {
-            EstimatePhase::Charging {
-                minutes_to_80: Some(m80),
+            EstimatePhase::ChargingTo80 {
+                minutes_to_80,
                 minutes_to_100,
             } => {
-                let to_80 = format_charge_minutes(m80);
+                let to_80 = format_charge_minutes(minutes_to_80);
                 let to_100 = format_charge_minutes(minutes_to_100);
                 tr!(
                     "device.battery_charge_home_two_stage",
@@ -486,10 +701,7 @@ impl BatteryEstimate {
                 )
                 .into()
             }
-            EstimatePhase::Charging {
-                minutes_to_80: None,
-                minutes_to_100,
-            } => {
+            EstimatePhase::ChargingTo100 { minutes_to_100 } => {
                 let to_100 = format_charge_minutes(minutes_to_100);
                 tr!("device.battery_charge_home_final", to_100 => to_100).into()
             }
@@ -512,17 +724,11 @@ impl BatteryEstimate {
     #[must_use]
     pub fn inline_label(&self) -> String {
         match self.phase {
-            EstimatePhase::Charging {
-                minutes_to_80: Some(m80),
-                ..
-            } => {
-                let to_80 = format_charge_minutes(m80);
+            EstimatePhase::ChargingTo80 { minutes_to_80, .. } => {
+                let to_80 = format_charge_minutes(minutes_to_80);
                 tr!("device.battery_charge_inline_80", to_80 => to_80).into()
             }
-            EstimatePhase::Charging {
-                minutes_to_80: None,
-                minutes_to_100,
-            } => {
+            EstimatePhase::ChargingTo100 { minutes_to_100 } => {
                 let to_100 = format_charge_minutes(minutes_to_100);
                 tr!("device.battery_charge_inline_100", to_100 => to_100).into()
             }
@@ -537,11 +743,11 @@ impl BatteryEstimate {
     #[must_use]
     pub fn detail_headline(&self) -> String {
         match self.phase {
-            EstimatePhase::Charging {
-                minutes_to_80: Some(m80),
+            EstimatePhase::ChargingTo80 {
+                minutes_to_80,
                 minutes_to_100,
             } => {
-                let to_80 = format_charge_minutes(m80);
+                let to_80 = format_charge_minutes(minutes_to_80);
                 let to_100 = format_charge_minutes(minutes_to_100);
                 tr!(
                     "device.battery_charge_headline_two_stage",
@@ -550,10 +756,7 @@ impl BatteryEstimate {
                 )
                 .into()
             }
-            EstimatePhase::Charging {
-                minutes_to_80: None,
-                minutes_to_100,
-            } => {
+            EstimatePhase::ChargingTo100 { minutes_to_100 } => {
                 let to_100 = format_charge_minutes(minutes_to_100);
                 tr!("device.battery_charge_headline_final", to_100 => to_100).into()
             }
@@ -689,7 +892,17 @@ pub(crate) fn observe_state_telemetry_at(state: &mut AppState, now_secs: u64) {
         .filter(|record| record.persistent)
         .map(|record| {
             let (nominal_full_hours, signature, _) = nominal_profile_for_device(state, record);
-            let known_sig = (!device_has_pending_power_read(state, record)).then_some(signature);
+            let is_charging = record.battery.as_ref().is_some_and(|b| {
+                matches!(
+                    b.status,
+                    BatteryStatus::Charging | BatteryStatus::ChargingSlow
+                )
+            });
+            let known_sig = if is_charging && record.capabilities.is_none() {
+                None
+            } else {
+                (!device_has_pending_power_read(state, record)).then_some(signature)
+            };
             DeviceObservation {
                 config_key: record.config_key.clone(),
                 online: record.is_online(),
@@ -762,9 +975,9 @@ pub(crate) fn estimate_for_device(
         BatteryStatus::Charging | BatteryStatus::ChargingSlow
     );
     let percentage = if is_charging {
-        // Offline devices cannot report live charging progress, and 0% while charging
-        // is treated by `BatteryIndicator` as a cold-start `NoReading`.
-        if !record.is_online() {
+        // Offline devices, devices with unknown capabilities (`None`), and 0% cold-start
+        // `NoReading` states never produce charging estimates.
+        if !record.is_online() || record.capabilities.is_none() {
             return None;
         }
         let pct = battery.percentage?.min(100);
@@ -815,12 +1028,10 @@ pub(crate) fn estimate_for_device(
     let remaining_hours = (remaining_days * 24.0).round().max(1.0) as u32;
 
     let phase = if is_charging {
-        let (minutes_to_80, minutes_to_100) =
-            estimate_charging_minutes(record.kind, percentage, battery.status);
-        EstimatePhase::Charging {
-            minutes_to_80,
-            minutes_to_100,
-        }
+        let live_rate = state
+            .battery_telemetry()
+            .live_charging_rate(&record.config_key)?;
+        EstimatePhase::from_live_charge_rate(percentage, live_rate, battery.status)?
     } else {
         EstimatePhase::Discharging
     };
@@ -833,49 +1044,6 @@ pub(crate) fn estimate_for_device(
         learned_samples,
         config_note,
     })
-}
-
-/// Models two-stage Li-Po CC/CV charging minutes (`(minutes_to_80, minutes_to_100)`):
-/// - Constant-Current fast phase (`0..80%`): linear charge rate (`~1.25 min/%` on ~1500mAh
-///   keyboards like MX Keys Mini; `~0.75 min/%` on ~500mAh mice like MX Master 3S).
-/// - Constant-Voltage taper/trickle phase (`80..100%`): current tapers (`~2.0 min/%` for
-///   `80..90%` and `~2.5 min/%` for `90..100%` on keyboards; `~1.3` / `~1.7 min/%` on mice).
-#[expect(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "positive bounded minutes round into u32"
-)]
-fn estimate_charging_minutes(
-    kind: DeviceKind,
-    percentage: u8,
-    status: BatteryStatus,
-) -> (Option<u32>, u32) {
-    let (cc_min_per_pct, cv_early_min_per_pct, cv_late_min_per_pct) = match kind {
-        DeviceKind::Keyboard => (1.25_f32, 2.0_f32, 2.5_f32),
-        _ => (0.75_f32, 1.3_f32, 1.7_f32),
-    };
-    let slow_mult = if status == BatteryStatus::ChargingSlow {
-        1.6_f32
-    } else {
-        1.0_f32
-    };
-
-    if percentage < 80 {
-        let fast_phase_mins = f32::from(80 - percentage) * cc_min_per_pct * slow_mult;
-        let trickle_phase_mins =
-            (10.0 * cv_early_min_per_pct + 10.0 * cv_late_min_per_pct) * slow_mult;
-        let m80 = (fast_phase_mins.round() as u32).max(1);
-        let m100 = ((fast_phase_mins + trickle_phase_mins).round() as u32).max(m80 + 5);
-        (Some(m80), m100)
-    } else {
-        let early_pct = 90u8.saturating_sub(percentage);
-        let late_pct = 100u8.saturating_sub(percentage.max(90));
-        let trickle_phase_mins = (f32::from(early_pct) * cv_early_min_per_pct
-            + f32::from(late_pct) * cv_late_min_per_pct)
-            * slow_mult;
-        let m100 = (trickle_phase_mins.round() as u32).max(2);
-        (None, m100)
-    }
 }
 
 fn effective_percentage(battery: &BatteryInfo) -> Option<u8> {
@@ -1294,6 +1462,21 @@ mod tests {
                 .contains("Saúde estim.: calculando…")
         );
         assert!(pt_est.detail_subline().contains("Baseado na config atual"));
+
+        rust_i18n::set_locale("de");
+        let de_est = estimate_for_device(&state, &record).expect("estimate in de");
+        assert!(!de_est.home_label().contains("Zustand"));
+        assert!(de_est.detail_headline().contains("verbleibend"));
+        assert!(
+            de_est
+                .detail_subline()
+                .contains("Gesch. Zustand: wird kalibriert…")
+        );
+        assert!(
+            de_est
+                .detail_subline()
+                .contains("Basierend auf aktiver Konfiguration")
+        );
         rust_i18n::set_locale("en");
     }
 
@@ -1972,47 +2155,59 @@ mod tests {
     }
 
     #[test]
-    fn charging_estimate_models_two_stage_curve_and_rejects_cold_start_or_offline() {
+    fn charging_phase_constructors_validate_milestones_and_reject_invalid_states() {
         let _lock = LOCALE_LOCK.lock().unwrap();
         rust_i18n::set_locale("en");
 
-        // 1. Below 80% (e.g. 50% Charging): returns both 80% fast milestone and 100% full ETA.
-        let charging_50 = BatteryInfo {
-            percentage: Some(50),
+        // 1. Private EstimatePhase constructors refuse zero or reversed milestones,
+        // and split 79% vs 80% cleanly between ChargingTo80 and ChargingTo100.
+        assert_eq!(EstimatePhase::charging_to_80(0, 20), None);
+        assert_eq!(EstimatePhase::charging_to_80(20, 20), None);
+        assert_eq!(EstimatePhase::charging_to_80(25, 15), None);
+        assert_eq!(EstimatePhase::charging_to_100(0), None);
+        assert!(matches!(
+            EstimatePhase::from_live_charge_rate(79, 1.0, BatteryStatus::Charging),
+            Some(EstimatePhase::ChargingTo80 {
+                minutes_to_80: 1,
+                minutes_to_100: 36,
+            })
+        ));
+        assert!(matches!(
+            EstimatePhase::from_live_charge_rate(80, 2.0, BatteryStatus::Charging),
+            Some(EstimatePhase::ChargingTo100 { minutes_to_100: 40 })
+        ));
+
+        let caps = Capabilities::default();
+        let t0 = 4_000_000_000_u64;
+
+        // 2. Frozen pre-charge reading (`hold_percentage_while_charging` on 0x1000, voltage,
+        // and ADC sources): percentage stays at 65% across multiple polls -> never produces
+        // a charging estimate, keeping the plain charging label.
+        let frozen_65 = BatteryInfo {
+            percentage: Some(65),
             level: BatteryLevel::Good,
             status: BatteryStatus::Charging,
         };
-        let state_50 = test_state_with_devices(vec![mx_keys_mini_device(None, Some(charging_50))]);
-        let est_50 = estimate_for_device(&state_50, &state_50.devices()[0]).unwrap();
-        assert!(matches!(
-            est_50.phase,
-            EstimatePhase::Charging {
-                minutes_to_80: Some(m80),
-                minutes_to_100: m100,
-            } if m80 > 0 && m100 > m80
-        ));
-        assert!(est_50.home_label().contains("to 80%"));
-        assert!(est_50.home_label().contains("to 100%"));
-        assert!(est_50.inline_label().contains("→ 80%"));
-
-        // 2. Between 80% and 99% (e.g. 90% Charging): in CV slow phase, minutes_to_80 is None.
-        let charging_90 = BatteryInfo {
-            percentage: Some(90),
-            level: BatteryLevel::Full,
-            status: BatteryStatus::Charging,
-        };
-        let state_90 = test_state_with_devices(vec![mx_keys_mini_device(None, Some(charging_90))]);
-        let est_90 = estimate_for_device(&state_90, &state_90.devices()[0]).unwrap();
-        assert_eq!(
-            est_90.phase,
-            EstimatePhase::Charging {
-                minutes_to_80: None,
-                minutes_to_100: 25,
-            }
-        );
-        assert_eq!(est_90.home_label(), "~25m to 100%");
-        assert_eq!(est_90.inline_label(), "~25m → 100%");
-        assert!(est_90.detail_headline().contains("80–100% slow phase"));
+        let mut state_frozen = test_state_with_devices(vec![mx_keys_mini_device(
+            Some(caps),
+            Some(frozen_65.clone()),
+        )]);
+        let frozen_key = state_frozen.devices()[0].config_key.clone();
+        for dt in [0_u64, 600, 1_800, 3_600] {
+            state_frozen.battery_telemetry_mut().observe_device(
+                &frozen_key,
+                true,
+                Some(&frozen_65),
+                Some("kbd:standard"),
+                120 * 24,
+                t0 + dt,
+            );
+            assert_eq!(
+                estimate_for_device(&state_frozen, &state_frozen.devices()[0]),
+                None,
+                "frozen pre-charge percentage must never produce a charging ETA (dt={dt})"
+            );
+        }
 
         // 3. Cold-start 0% while charging, 100% while charging, coarse-level charging,
         // and offline cached charging all return None.
@@ -2033,12 +2228,12 @@ mod tests {
                 status: BatteryStatus::Charging,
             },
         ] {
-            let st = test_state_with_devices(vec![mx_keys_mini_device(None, Some(invalid))]);
+            let st = test_state_with_devices(vec![mx_keys_mini_device(Some(caps), Some(invalid))]);
             assert_eq!(estimate_for_device(&st, &st.devices()[0]), None);
         }
 
         let mut offline_dev = mx_keys_mini_device(
-            None,
+            Some(caps),
             Some(BatteryInfo {
                 percentage: Some(60),
                 level: BatteryLevel::Good,
@@ -2051,6 +2246,147 @@ mod tests {
             estimate_for_device(&st_offline, &st_offline.devices()[0]),
             None
         );
+    }
+
+    #[test]
+    fn charging_estimate_requires_live_progress_and_measured_capabilities() {
+        let _lock = LOCALE_LOCK.lock().unwrap();
+        rust_i18n::set_locale("en");
+
+        let caps = Capabilities::default();
+        let t0 = 4_000_000_000_u64;
+
+        // 1. Unknown capabilities (`None`): even if percentage rises from 50% to 55%,
+        // no charging estimate is produced.
+        let charging_50 = BatteryInfo {
+            percentage: Some(50),
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Charging,
+        };
+        let charging_55 = BatteryInfo {
+            percentage: Some(55),
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Charging,
+        };
+        let mut state_unknown_caps =
+            test_state_with_devices(vec![mx_keys_mini_device(None, Some(charging_55.clone()))]);
+        observe_state_telemetry_at(&mut state_unknown_caps, t0);
+        observe_state_telemetry_at(&mut state_unknown_caps, t0 + 300);
+        assert_eq!(
+            estimate_for_device(&state_unknown_caps, &state_unknown_caps.devices()[0]),
+            None,
+            "unknown capabilities (None) must not produce charging estimates"
+        );
+
+        // 2. Live charging progress (50% -> 55% over 5 minutes = 1.0 min/%) with measured
+        // capabilities produces ChargingTo80, and is independent of DeviceKind.
+        let mut state_50 = test_state_with_devices(vec![mx_keys_mini_device(
+            Some(caps),
+            Some(charging_55.clone()),
+        )]);
+        let key_50 = state_50.devices()[0].config_key.clone();
+        state_50.battery_telemetry_mut().observe_device(
+            &key_50,
+            true,
+            Some(&charging_50),
+            Some("kbd:standard"),
+            120 * 24,
+            t0,
+        );
+        state_50.battery_telemetry_mut().observe_device(
+            &key_50,
+            true,
+            Some(&charging_55),
+            Some("kbd:standard"),
+            120 * 24,
+            t0 + 300,
+        );
+        let est_55 = estimate_for_device(&state_50, &state_50.devices()[0]).unwrap();
+        assert_eq!(
+            est_55.phase,
+            EstimatePhase::ChargingTo80 {
+                minutes_to_80: 25,
+                minutes_to_100: 60,
+            }
+        );
+        assert!(est_55.home_label().contains("to 80%"));
+        assert!(est_55.home_label().contains("to 100%"));
+        assert!(est_55.inline_label().contains("→ 80%"));
+
+        // Verify DeviceKind independence: a Trackball with the same live charging step
+        // produces the exact same charging phase as a Keyboard.
+        let mut trackball = mx_keys_mini_device(Some(caps), Some(charging_55.clone()));
+        trackball.kind = DeviceKind::Trackball;
+        let mut state_tb = test_state_with_devices(vec![trackball]);
+        let tb_key = state_tb.devices()[0].config_key.clone();
+        state_tb.battery_telemetry_mut().observe_device(
+            &tb_key,
+            true,
+            Some(&charging_50),
+            Some("other:standard"),
+            90 * 24,
+            t0,
+        );
+        state_tb.battery_telemetry_mut().observe_device(
+            &tb_key,
+            true,
+            Some(&charging_55),
+            Some("other:standard"),
+            90 * 24,
+            t0 + 300,
+        );
+        let est_tb = estimate_for_device(&state_tb, &state_tb.devices()[0]).unwrap();
+        assert_eq!(est_tb.phase, est_55.phase);
+    }
+
+    #[test]
+    fn charging_estimate_above_80_uses_single_stage_100_target() {
+        let _lock = LOCALE_LOCK.lock().unwrap();
+        rust_i18n::set_locale("en");
+
+        let caps = Capabilities::default();
+        let t0 = 4_000_000_000_u64;
+
+        // Between 80% and 99% (85% -> 90% over 12.5 minutes = 2.5 min/%): ChargingTo100.
+        let charging_85 = BatteryInfo {
+            percentage: Some(85),
+            level: BatteryLevel::Full,
+            status: BatteryStatus::Charging,
+        };
+        let charging_90 = BatteryInfo {
+            percentage: Some(90),
+            level: BatteryLevel::Full,
+            status: BatteryStatus::Charging,
+        };
+        let mut state_90 = test_state_with_devices(vec![mx_keys_mini_device(
+            Some(caps),
+            Some(charging_90.clone()),
+        )]);
+        let key_90 = state_90.devices()[0].config_key.clone();
+        state_90.battery_telemetry_mut().observe_device(
+            &key_90,
+            true,
+            Some(&charging_85),
+            Some("kbd:standard"),
+            120 * 24,
+            t0,
+        );
+        state_90.battery_telemetry_mut().observe_device(
+            &key_90,
+            true,
+            Some(&charging_90),
+            Some("kbd:standard"),
+            120 * 24,
+            t0 + 750,
+        );
+        let est_90 = estimate_for_device(&state_90, &state_90.devices()[0]).unwrap();
+        assert_eq!(
+            est_90.phase,
+            EstimatePhase::ChargingTo100 { minutes_to_100: 25 }
+        );
+        assert_eq!(est_90.home_label(), "~25m to 100%");
+        assert_eq!(est_90.inline_label(), "~25m → 100%");
+        assert!(est_90.detail_headline().contains("80–100% slow phase"));
     }
 
     #[test]
