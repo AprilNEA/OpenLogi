@@ -90,7 +90,7 @@ impl Save {
             model.unit_id,
         );
         let key = config
-            .resolve_device_key(&stable, Some(&identity))
+            .resolve_device_key(&stable, Some(&identity), model.unit_id)
             .ok_or_else(|| {
                 ApiError::new(
                     "identity_unavailable",
