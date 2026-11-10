@@ -25,15 +25,21 @@ saved, its DPI presets included.
   what it leaves unset.
 - **A v0 answer is a whole answer.** DeviceInformation v0 reports the entity
   count and nothing else. That is the device's complete answer, not a lost
-  reply: the probe keeps its model info and does not flag the identity as
-  incomplete.
+  reply: the probe records it as a known identity (`ProbedIdentity::Known`).
 - **Unread is not an identity.** A device whose probe never got a
   DeviceInformation answer carries no identity at all
   (`DeviceStableId` holds `Option<DeviceIdentity>`), and stays transient
   until it does. Folding that case into `Model` would save settings for a
-  device we have not identified. A probe that lost the serial read of a
-  device whose unit id is all-zero reports no identity either: its model
-  info would otherwise read as a model identity.
+  device we have not identified. A probe that lost the serial read reports
+  no identity either, whatever the unit id: its model info would otherwise
+  read as a unit or model identity, a key the device stops answering to once
+  its serial is read (#2025). This holds on a receiver too: a device that
+  reports a serial number it never manages to send keeps no identity for as
+  long as the read fails, so the GUI lists it under its receiver slot and the
+  agent does not manage it.
+  The probe cache may answer for a lost read, but only when the unit id and
+  model the read did get are the cached identity's: a cache key does not
+  prove which device it read, since a Unifying slot can be paired anew.
 - **No branch on the device.** Such a device takes the same paths as any
   other through IPC, inventory and GUI, with no precedence rules of its own:
   only its key differs.

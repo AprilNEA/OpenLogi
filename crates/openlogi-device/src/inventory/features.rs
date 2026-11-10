@@ -28,7 +28,6 @@ use hidpp::{
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, Capabilities, DeviceKind, DeviceModelInfo, DeviceTransports,
 };
-use openlogi_core::device_order::UnitId;
 use serde::{Deserialize, Serialize};
 use tokio::time::timeout;
 use tracing::debug;
@@ -38,6 +37,7 @@ use crate::reprog_controls::{BACK_CIDS, DPI_MODE_SHIFT_CIDS, FORWARD_CIDS};
 use crate::write::{force_button_is_changeable, panel_button};
 
 use super::events::{EventFeatureIndices, EventSubscriptionHandle};
+use super::identity::{ProbedIdentity, SerialRead};
 use super::mappings::{
     charge_register_battery_info, legacy_battery_info, legacy_battery_level_from_percentage,
     map_adc_battery_status, map_battery_level, map_battery_status, map_device_type,
@@ -50,7 +50,8 @@ use super::mappings::{
 #[derive(Default, Clone, Serialize, Deserialize)]
 pub(super) struct ProbedFeatures {
     pub(super) battery: Option<BatteryInfo>,
-    pub(super) model_info: Option<DeviceModelInfo>,
+    /// The device's own identity, from DeviceInformation.
+    pub(super) identity: ProbedIdentity,
     /// Marketing type from HID++ `0x0005` — an identity hint only.
     pub(super) kind: Option<DeviceKind>,
     /// Marketing name from HID++ `0x0005`; preferred over generic OS HID names
@@ -59,13 +60,6 @@ pub(super) struct ProbedFeatures {
     /// Which protocol the device answered in, and with it the configuration
     /// capabilities derived from its feature table.
     pub(super) protocol: ProbedProtocol,
-    /// A `DeviceInformation` read *failed* (vs. the feature being absent), so
-    /// the identity fields above may be missing data the device does have.
-    /// This is intentionally independent of `model_info`: `true` with `Some`
-    /// means only the serial-number read failed, while `true` with `None` means
-    /// the whole device-information read failed, or the serial-number read of a
-    /// device whose unit id is all-zero, which leaves nothing identifying it.
-    pub(super) identity_incomplete: bool,
     /// The battery feature answered that the battery-powered end is not
     /// linked: a headset dongle whose headset is switched off. Volatile like
     /// `battery`, so never persisted. The cache resolves both fields from
@@ -532,32 +526,25 @@ async fn probe_hidpp20(
     let (battery_probe, battery_capability_unknown) =
         resolve_battery_capability(channel, slot, battery_probe).await;
     capabilities_incomplete |= battery_capability_unknown;
-    let mut identity_incomplete = false;
-    let model_info = match device.get_feature::<DeviceInformationFeature>() {
+    let identity = match device.get_feature::<DeviceInformationFeature>() {
         Some(feature) => match feature.get_device_info().await {
             Ok(info) => {
-                let serial_number = if info.capabilities.serial_number {
+                let serial = if info.capabilities.serial_number {
                     match feature.get_serial_number().await {
-                        Ok(serial) => normalize_serial_number(&serial),
+                        Ok(serial) => normalize_serial_number(&serial)
+                            .map_or(SerialRead::Unreported, SerialRead::Read),
                         Err(e) => {
                             debug!(slot, error = ?e, "DeviceInformation serial read failed");
-                            identity_incomplete = true;
-                            None
+                            SerialRead::Lost
                         }
                     }
                 } else {
-                    None
+                    SerialRead::Unreported
                 };
-                // With its serial lost and an all-zero unit id, the model info
-                // would read as a model identity and key the device by its
-                // route alone, which is not what the device said. No identity
-                // until the serial read succeeds or the cache backfills it.
-                if identity_incomplete && UnitId::new(info.unit_id).is_none() {
-                    None
-                } else {
-                    Some(DeviceModelInfo {
+                ProbedIdentity::answered(
+                    DeviceModelInfo {
                         entity_count: info.entity_count,
-                        serial_number,
+                        serial_number: None,
                         unit_id: info.unit_id,
                         transports: DeviceTransports {
                             usb: info.transport.contains(DeviceTransport::USB),
@@ -567,16 +554,16 @@ async fn probe_hidpp20(
                         },
                         model_ids: info.model_id,
                         extended_model_id: info.extended_model_id,
-                    })
-                }
+                    },
+                    serial,
+                )
             }
             Err(e) => {
                 debug!(slot, error = ?e, "DeviceInformation read failed");
-                identity_incomplete = true;
-                None
+                ProbedIdentity::ReadFailed
             }
         },
-        None => None,
+        None => ProbedIdentity::Unavailable,
     };
 
     // `0x0005` reports the device's own marketing type and name. The type is
@@ -587,7 +574,7 @@ async fn probe_hidpp20(
     (
         ProbedFeatures {
             battery: None,
-            model_info,
+            identity,
             kind,
             marketing_name,
             protocol: capabilities.map_or(ProbedProtocol::Unanswered, |capabilities| {
@@ -596,7 +583,6 @@ async fn probe_hidpp20(
                     incomplete: capabilities_incomplete,
                 }
             }),
-            identity_incomplete,
             unlinked: false,
             refresh: Refresh::Answered,
         },
@@ -865,8 +851,8 @@ mod tests {
     };
 
     use super::{
-        BatteryProbe, BatteryRead, ProbedFeatures, ProbedProtocol, Refreshed,
-        battery_feature_index, probe_features, read_battery, refresh_features,
+        BatteryProbe, BatteryRead, ProbedFeatures, ProbedIdentity, ProbedProtocol, Refreshed,
+        SerialRead, battery_feature_index, probe_features, read_battery, refresh_features,
     };
     use crate::channel::scripted::{
         ScriptedRawHidChannel, feature_error, ping_reply, register_error, scripted_channel,
@@ -1025,14 +1011,12 @@ mod tests {
         let (probe, _, _) =
             within_deadline("the probe", probe_features(&channel, 0xff, None, None)).await;
 
+        // Known, not merely read: nothing was lost, the device has no more to
+        // say.
         assert_eq!(
-            probe.model_info,
-            Some(answered_model([0; 4])),
-            "a v0 answer is still an answer"
-        );
-        assert!(
-            !probe.identity_incomplete,
-            "nothing was lost, the device has no more to say"
+            probe.identity,
+            ProbedIdentity::Known(answered_model([0; 4])),
+            "a v0 answer is a complete answer"
         );
         assert!(probe.capabilities().is_some());
     }
@@ -1079,11 +1063,12 @@ mod tests {
         // its route alone, which is not what the device said.
         let probe = probe_with_a_lost_serial_read([0; 4]).await;
 
-        assert_eq!(probe.model_info, None, "no identity was read");
-        assert!(
-            probe.identity_incomplete,
+        assert_eq!(
+            probe.identity,
+            ProbedIdentity::answered(answered_model([0; 4]), SerialRead::Lost),
             "the device has an identity the probe failed to read"
         );
+        assert_eq!(probe.identity.model(), None, "no identity was read");
         assert!(probe.capabilities().is_some());
     }
 
@@ -1094,11 +1079,12 @@ mod tests {
         // once the serial is read (#2025).
         let probe = probe_with_a_lost_serial_read([0xa3, 0x93, 0xca, 0xe0]).await;
 
-        assert_eq!(probe.model_info, None, "no identity was read");
-        assert!(
-            probe.identity_incomplete,
+        assert_eq!(
+            probe.identity,
+            ProbedIdentity::answered(answered_model([0xa3, 0x93, 0xca, 0xe0]), SerialRead::Lost),
             "the device has an identity the probe failed to read"
         );
+        assert_eq!(probe.identity.model(), None, "no identity was read");
         assert!(probe.capabilities().is_some());
     }
 
