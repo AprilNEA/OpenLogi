@@ -6,7 +6,6 @@ use hidpp::{
     device::Device,
     feature::{
         CreatableFeature,
-        device_information::DeviceInformationFeature,
         haptic_feedback::{
             HapticConfigFlags, HapticConfiguration, HapticFeedbackFeature, HapticStatus,
             HapticWaveform, SupportedWaveforms,
@@ -19,7 +18,8 @@ use crate::SharedChannel;
 use crate::backend::HidBackend;
 use crate::channel::route::DeviceRoute;
 
-use super::{HidppOperation, WriteError, classify_hidpp_error, open_feature, with_route};
+use super::unit_id::unit_id;
+use super::{HidppOperation, WriteError, classify_hidpp_error, with_route};
 
 /// How long the advisory haptic-status read may take.
 ///
@@ -83,26 +83,6 @@ async fn resolve_feature(
         device.add_feature::<HapticFeedbackFeature>(info.index),
         info.index,
     ))
-}
-
-/// The unit ID `device` reports through `0x0003`, which tells apart two
-/// devices on one receiver slot, or two units of one model on a direct
-/// route. `None` when the device has no `DeviceInformation` feature. The
-/// RGB control hand-back checks the same identity.
-async fn unit_id(device: &mut Device) -> Result<Option<[u8; 4]>, WriteError> {
-    let feature = match open_feature::<DeviceInformationFeature>(device).await {
-        Ok(feature) => feature,
-        Err(WriteError::FeatureUnsupported { .. }) => return Ok(None),
-        Err(error) => return Err(error),
-    };
-    let info = feature.get_device_info().await.map_err(|error| {
-        classify_hidpp_error(
-            error,
-            HidppOperation::PlayHaptic,
-            DeviceInformationFeature::ID,
-        )
-    })?;
-    Ok(Some(info.unit_id))
 }
 
 /// Resolve the haptic feature on `channel`, read which waveforms it
@@ -323,7 +303,7 @@ pub async fn ensure_haptics_armed_on(
     let mut device = open_device(channel, index)
         .await
         .inspect_err(|_| clear_cached_location())?;
-    let unit = unit_id(&mut device)
+    let unit = unit_id(&mut device, HidppOperation::PlayHaptic)
         .await
         .inspect_err(|_| clear_cached_location())?;
     let applied = feature
@@ -368,7 +348,7 @@ pub async fn restore_haptics_on(
     let classify =
         |error| classify_hidpp_error(error, HidppOperation::PlayHaptic, HapticFeedbackFeature::ID);
     let mut device = open_device(shared.channel(), shared.device_index()).await?;
-    if unit_id(&mut device).await? != restore.unit {
+    if unit_id(&mut device, HidppOperation::PlayHaptic).await? != restore.unit {
         return Ok(HapticRestoreOutcome::OtherDevice);
     }
     let (feature, _) = resolve_feature(&mut device).await?;
@@ -450,6 +430,8 @@ pub async fn play_haptic(
 mod tests {
     use std::assert_matches;
     use std::sync::Mutex as StdMutex;
+
+    use hidpp::feature::device_information::DeviceInformationFeature;
 
     use super::*;
     use crate::channel::scripted::{ScriptedRawHidChannel, scripted_channel};
