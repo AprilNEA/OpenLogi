@@ -352,14 +352,19 @@ pub(super) fn run(
 enum Phase {
     /// No switch in flight.
     Idle,
-    /// Switch `flight` on `display` reads its Spaces and builds and posts its
-    /// events. Until it has posted, nothing may follow it. Its preparation
-    /// ends at `deadline`, which its post gate enforces.
+    /// Switch `flight` on `display` reads its Spaces and builds its events.
+    /// Nothing may follow it yet. Its preparation ends at `deadline`, which
+    /// its post gate enforces.
     Preparing {
         flight: u64,
         display: u32,
         deadline: Instant,
     },
+    /// Switch `flight` on `display` claimed its post before its deadline and
+    /// is posting. Nothing may follow it until it has posted, however long
+    /// that takes: native posting can't be canceled, so its caller waits for
+    /// it too.
+    Posting { flight: u64, display: u32 },
     /// Switch `flight` on `display` has posted and waits for its Space.
     /// `followed` once a follow-up was posted after it.
     Confirming {
@@ -376,8 +381,10 @@ enum Step {
     Lead,
     /// Post at once after switch `flight`, which has posted.
     Follow(u64),
-    /// Wait for the switch in flight to post, until `deadline`.
-    Wait(Instant),
+    /// Wait for the switch in flight to claim its post, until `deadline`.
+    WaitUntil(Instant),
+    /// Wait for the switch in flight to finish posting.
+    WaitForPost,
     /// Drop the request.
     Refuse,
 }
@@ -392,20 +399,23 @@ impl Phase {
                 display: busy,
                 deadline,
                 ..
-            } if chain && busy == display => Step::Wait(deadline),
+            } if chain && busy == display => Step::WaitUntil(deadline),
+            Self::Posting { display: busy, .. } if chain && busy == display => Step::WaitForPost,
             Self::Confirming {
                 flight,
                 display: busy,
                 ..
             } if chain && busy == display => Step::Follow(flight),
-            Self::Preparing { .. } | Self::Confirming { .. } => Step::Refuse,
+            Self::Preparing { .. } | Self::Posting { .. } | Self::Confirming { .. } => Step::Refuse,
         }
     }
 
     fn flight(self) -> Option<u64> {
         match self {
             Self::Idle => None,
-            Self::Preparing { flight, .. } | Self::Confirming { flight, .. } => Some(flight),
+            Self::Preparing { flight, .. }
+            | Self::Posting { flight, .. }
+            | Self::Confirming { flight, .. } => Some(flight),
         }
     }
 }
@@ -461,9 +471,10 @@ impl Flight {
     }
 
     /// Admit a request on `display` arriving at `now`. One that may follow a
-    /// switch still preparing waits for it to post, but never past that
-    /// switch's preparation deadline, so a stuck switch holds no caller
-    /// longer than it holds its own.
+    /// switch still preparing waits for it to claim its post, but never past
+    /// that switch's preparation deadline, so a stuck switch holds no caller
+    /// longer than it holds its own. Once the post is claimed, it waits for
+    /// the post to finish.
     pub(super) fn admit(&self, display: u32, chain: bool, mut now: Instant) -> Admission<'_> {
         let mut state = self.lock();
         loop {
@@ -485,7 +496,14 @@ impl Flight {
                 }
                 Step::Follow(flight) => return Admission::Follow(Follower { flight }),
                 Step::Refuse => return Admission::Refused,
-                Step::Wait(deadline) => {
+                Step::WaitForPost => {
+                    state = self
+                        .changed
+                        .wait(state)
+                        .unwrap_or_else(PoisonError::into_inner);
+                    now = Instant::now();
+                }
+                Step::WaitUntil(deadline) => {
                     let remaining = deadline.saturating_duration_since(now);
                     if remaining.is_zero() {
                         return Admission::Refused;
@@ -529,14 +547,47 @@ impl Ticket<'_> {
         self.deadline
     }
 
+    /// Claim this switch's post, if its preparation has not ended by `now`.
+    /// Decided under the flight's lock against the same deadline a waiting
+    /// follow-up checks, so a follow-up is refused exactly when no post was
+    /// claimed in time. Once claimed, follow-ups wait for the post itself.
+    pub(super) fn begin_posting(&self, now: Instant) -> bool {
+        let mut state = self.owner.lock();
+        match state.phase {
+            Phase::Preparing {
+                flight,
+                display,
+                deadline,
+            } if flight == self.flight && now < deadline => {
+                state.phase = Phase::Posting { flight, display };
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Give up a claimed post its gate refused, so waiting follow-ups see
+    /// the preparation deadline again.
+    pub(super) fn abandon_post(&self) {
+        let mut state = self.owner.lock();
+        if let Phase::Posting { flight, display } = state.phase
+            && flight == self.flight
+        {
+            state.phase = Phase::Preparing {
+                flight,
+                display,
+                deadline: self.deadline,
+            };
+            self.owner.changed.notify_all();
+        }
+    }
+
     /// Record that this switch has posted, letting follow-ups on its display
     /// post. Call it after the posting lock is released: a follow-up takes
     /// that lock next.
     pub(super) fn posted(&self) {
         let mut state = self.owner.lock();
-        if let Phase::Preparing {
-            flight, display, ..
-        } = state.phase
+        if let Phase::Posting { flight, display } = state.phase
             && flight == self.flight
         {
             state.phase = Phase::Confirming {

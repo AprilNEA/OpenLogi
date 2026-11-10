@@ -331,8 +331,16 @@ impl Backend for Native {
 
     fn post(&mut self, direction: Direction, gate: PostGate) -> Result<(), Failure> {
         let output = Output::prepare(self.switch, direction).ok_or(Failure::PostFailed)?;
+        let ticket = &self.ticket;
         space_switch::post_on_display(&POSTING, self.display, cursor_display, || {
-            gate.commit(|| output.post())
+            if !ticket.begin_posting(Instant::now()) {
+                return Err(Failure::TimedOut);
+            }
+            let posted = gate.commit(|| output.post());
+            if posted.is_err() {
+                ticket.abandon_post();
+            }
+            posted
         })
         .unwrap_or(Err(Failure::ContextChanged))?;
         // The posting lock is released by now, so a follow-up let through
