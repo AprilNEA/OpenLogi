@@ -280,50 +280,54 @@ async fn an_offline_keyboards_fn_lock_and_disabled_keys_are_only_saved() {
 /// device itself still takes the change.
 #[tokio::test]
 async fn a_replaced_receiver_slot_refuses_an_old_menu_action() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join(openlogi_core::paths::CONFIG_FILE);
-    let agent = Agent::new(&path, true);
-    let unit = publish_dpi_mouse(
-        &agent.shared().await.channel_registry,
-        agent.route.clone(),
-        || true,
-    )
-    .await;
-    let before = std::fs::read_to_string(&path).unwrap();
-    let other = [0x87, 0x65, 0x43, 0x21];
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(openlogi_core::paths::CONFIG_FILE);
+        let agent = Agent::new(&path, true);
+        let unit = publish_dpi_mouse(
+            &agent.shared().await.channel_registry,
+            agent.route.clone(),
+            || true,
+        )
+        .await;
+        let before = std::fs::read_to_string(&path).unwrap();
+        let other = [0x87, 0x65, 0x43, 0x21];
 
-    *unit.lock().unwrap() = other;
-    let error = agent
-        .settings
-        .set_dpi(&agent.device, Dpi::new(1600))
-        .await
-        .unwrap_err();
-    assert!(
-        matches!(error, SettingError::Write(WriteError::DeviceNotFound)),
-        "{error:?}"
-    );
-    assert_eq!(agent.device_dpi().await, Dpi::new(800));
+        *unit.lock().unwrap() = other;
+        let error = agent
+            .settings
+            .set_dpi(&agent.device, Dpi::new(1600))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, SettingError::Write(WriteError::DeviceNotFound)),
+            "{error:?}"
+        );
+        assert_eq!(agent.device_dpi().await, Dpi::new(800));
 
-    let replaced = RoutedDevice {
-        route: agent.route.clone(),
-        unit: other,
-    };
-    let error = agent
-        .settings
-        .set_enabled(&replaced, false)
-        .await
-        .unwrap_err();
-    assert!(matches!(error, SettingError::UnknownDevice(_)), "{error:?}");
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
-    assert_eq!(agent.reloads.load(Ordering::SeqCst), 0);
+        let replaced = RoutedDevice {
+            route: agent.route.clone(),
+            unit: other,
+        };
+        let error = agent
+            .settings
+            .set_enabled(&replaced, false)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, SettingError::UnknownDevice(_)), "{error:?}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        assert_eq!(agent.reloads.load(Ordering::SeqCst), 0);
 
-    *unit.lock().unwrap() = UNIT;
-    agent
-        .settings
-        .set_dpi(&agent.device, Dpi::new(1600))
-        .await
-        .unwrap();
-    assert_eq!(agent.device_dpi().await, Dpi::new(1600));
+        *unit.lock().unwrap() = UNIT;
+        agent
+            .settings
+            .set_dpi(&agent.device, Dpi::new(1600))
+            .await
+            .unwrap();
+        assert_eq!(agent.device_dpi().await, Dpi::new(1600));
+    })
+    .await
+    .expect("every change finishes");
 }
 
 /// A key toggled from a keyboard's disabled keys as it read them reaches a

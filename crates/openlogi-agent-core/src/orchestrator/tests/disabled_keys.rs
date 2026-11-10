@@ -519,23 +519,27 @@ async fn retired_policy_cannot_be_recovered_by_late_manual_cancellation() {
 /// slot, and reaches the keyboard it names.
 #[tokio::test]
 async fn a_manual_write_for_another_keyboard_writes_nothing() {
-    let shared = orchestrator(Config::default()).shared();
-    let keyboard = Keyboard::publish(&shared).await;
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let shared = orchestrator(Config::default()).shared();
+        let keyboard = Keyboard::publish(&shared).await;
 
-    let error = shared
-        .reaching([0x87, 0x65, 0x43, 0x21])
-        .set_disable_keys(&keyboard.route, DisableKeysMask::EMPTY)
-        .await
-        .expect_err("another keyboard answers on the route");
-    assert!(matches!(error, WriteError::DeviceNotFound), "{error:?}");
-    keyboard.assert_writes(&[]);
+        let error = shared
+            .reaching([0x87, 0x65, 0x43, 0x21])
+            .set_disable_keys(&keyboard.route, DisableKeysMask::EMPTY)
+            .await
+            .expect_err("another keyboard answers on the route");
+        assert!(matches!(error, WriteError::DeviceNotFound), "{error:?}");
+        keyboard.assert_writes(&[]);
 
-    shared
-        .reaching(crate::test_support::UNIT)
-        .set_disable_keys(&keyboard.route, DisableKeysMask::EMPTY)
-        .await
-        .expect("the keyboard it names");
-    keyboard.assert_writes(&[0x80]);
+        shared
+            .reaching(crate::test_support::UNIT)
+            .set_disable_keys(&keyboard.route, DisableKeysMask::EMPTY)
+            .await
+            .expect("the keyboard it names");
+        keyboard.assert_writes(&[0x80]);
+    })
+    .await
+    .expect("both writes finish");
 }
 
 /// Confirming which keyboard a bound write reaches is device I/O inside the
