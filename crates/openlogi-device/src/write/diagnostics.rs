@@ -20,7 +20,8 @@ use hidpp::{
 
 use crate::backend::HidBackend;
 use crate::channel::route::DeviceRoute;
-use crate::reprog_controls::{self, CidFlags, CidInfo, ReprogControlsV4};
+use crate::reprog_controls::{self, CidFlags, CidInfo, CidReporting, CtrlIdInfo, ReprogControlsV4};
+use crate::session::capture_restore::release_change;
 use crate::write::{HidppOperation, WriteError, classify_hidpp_error, open_feature, with_route};
 
 /// Snapshot of one HID++ feature exposed by a device: protocol ID +
@@ -59,6 +60,35 @@ impl From<CidInfo> for ReprogControlEntry {
             flags: info.flags,
         }
     }
+}
+
+impl ReprogControlEntry {
+    fn identity(self) -> CtrlIdInfo {
+        CtrlIdInfo {
+            cid: self.cid,
+            task_id: self.task_id,
+            flags: self.flags.raw(),
+        }
+    }
+}
+
+/// One `0x1b04` control together with the reporting state read back from the
+/// device: the volatile diversion bits a capture session writes and a process
+/// that never tore down leaks. Returned by [`dump_reprog_reporting`] and
+/// [`release_reprog_controls`] so a dead pointer can be traced to the control
+/// holding it rather than guessed at.
+///
+/// Kept apart from [`ReprogControlEntry`] because the identity dump is a
+/// recorded fixture operation whose wire exchanges must stay exactly the
+/// `getCidInfo` walk the cassettes hold; the extra `getCidReporting` round
+/// trips belong to this read alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReprogControlReporting {
+    /// The control's identity and capabilities.
+    pub control: ReprogControlEntry,
+    /// Its current reporting state, or `None` when the device refused
+    /// `getCidReporting` for this control.
+    pub reporting: Option<CidReporting>,
 }
 
 /// Enumerate every HID++ feature the device on `route` reports — used by
@@ -284,31 +314,8 @@ pub async fn dump_reprog_controls(
 ) -> Result<Vec<ReprogControlEntry>, WriteError> {
     let index = route.device_index();
     with_route(backend, route, move |channel| async move {
-        let device = Device::new(Arc::clone(&channel), index)
-            .await
-            .map_err(|_| WriteError::DeviceUnreachable { index })?;
-        let info = device
-            .root()
-            .get_feature(reprog_controls::FEATURE_ID)
-            .await
-            .map_err(|e| {
-                classify_hidpp_error(e, HidppOperation::DumpFeatures, reprog_controls::FEATURE_ID)
-            })?
-            .ok_or(WriteError::FeatureUnsupported {
-                feature_hex: reprog_controls::FEATURE_ID,
-            })?;
-        let rc = ReprogControlsV4::new(Arc::clone(&channel), index, info.index);
-        let count = rc.get_count().await.map_err(|e| {
-            classify_hidpp_error(e, HidppOperation::DumpFeatures, reprog_controls::FEATURE_ID)
-        })?;
-        let mut entries = Vec::with_capacity(usize::from(count));
-        for i in 0..count {
-            let control = rc.get_cid_info(i).await.map_err(|e| {
-                classify_hidpp_error(e, HidppOperation::DumpFeatures, reprog_controls::FEATURE_ID)
-            })?;
-            entries.push(control.into());
-        }
-        Ok(entries)
+        let rc = open_reprog_controls(&channel, index).await?;
+        read_control_identities(&rc).await
     })
     .await
 }
@@ -322,6 +329,149 @@ pub const RAW_BATTERY_FEATURES: [u16; 4] = [
     BatteryVoltageFeature::ID,
     AdcMeasurementFeature::ID,
 ];
+
+/// Read every `0x1b04` control of the device on `route` together with its
+/// current reporting state — [`dump_reprog_controls`] plus one
+/// `getCidReporting` per control. For `openlogi diag controls`: a diversion a
+/// dead process left in device RAM is seen in the table, not inferred from a
+/// pointer that stopped moving.
+pub async fn dump_reprog_reporting(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+) -> Result<Vec<ReprogControlReporting>, WriteError> {
+    let index = route.device_index();
+    with_route(backend, route, move |channel| async move {
+        dump_reprog_reporting_on_channel(&channel, index).await
+    })
+    .await
+}
+
+/// [`dump_reprog_reporting`] against an already-open channel, the shape the
+/// tests drive a scripted device through.
+pub(crate) async fn dump_reprog_reporting_on_channel(
+    channel: &Arc<HidppChannel>,
+    index: u8,
+) -> Result<Vec<ReprogControlReporting>, WriteError> {
+    let rc = open_reprog_controls(channel, index).await?;
+    read_control_table(&rc).await
+}
+
+/// Land every `0x1b04` control of the device on `route` on native reporting:
+/// temporary diversion and raw-XY off, a set `forceRawXY` cleared where the
+/// control advertises it, the remap target and every other bit kept as found.
+///
+/// The recovery for a device some process left captured — an agent that was
+/// killed or uninstalled, an older OpenLogi, another Logitech client on
+/// another host — without waiting for an OpenLogi session to arm and
+/// release it. The same `release_change` the sessions use decides each
+/// write, so a control already native costs no write and a refused write is
+/// an error, not a shrug: the caller asked for the device to be fixed. Returns
+/// the controls that were released, in the state they were found, so the
+/// caller can say what was wrong.
+///
+/// A control whose reporting the device would not read is left alone; the
+/// dump reports it as unreadable.
+pub async fn release_reprog_controls(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+) -> Result<Vec<ReprogControlReporting>, WriteError> {
+    let index = route.device_index();
+    with_route(backend, route, move |channel| async move {
+        release_reprog_controls_on_channel(&channel, index).await
+    })
+    .await
+}
+
+/// [`release_reprog_controls`] against an already-open channel, the shape the
+/// tests drive a scripted device through.
+pub(crate) async fn release_reprog_controls_on_channel(
+    channel: &Arc<HidppChannel>,
+    index: u8,
+) -> Result<Vec<ReprogControlReporting>, WriteError> {
+    let rc = open_reprog_controls(channel, index).await?;
+    let mut released = Vec::new();
+    for found in read_control_table(&rc).await? {
+        let Some(current) = found.reporting else {
+            continue;
+        };
+        let Some(change) = release_change(found.control.identity(), current) else {
+            continue;
+        };
+        let cid = found.control.cid;
+        rc.set_cid_reporting_full(cid, change)
+            .await
+            .map_err(|e| WriteError::Hidpp(format!("setCidReporting {cid:#06x}: {e:?}")))?;
+        released.push(found);
+    }
+    Ok(released)
+}
+
+/// Bind `0x1b04` on the device `channel` reaches.
+async fn open_reprog_controls(
+    channel: &Arc<HidppChannel>,
+    index: u8,
+) -> Result<ReprogControlsV4, WriteError> {
+    let device = Device::new(Arc::clone(channel), index)
+        .await
+        .map_err(|_| WriteError::DeviceUnreachable { index })?;
+    let info = device
+        .root()
+        .get_feature(reprog_controls::FEATURE_ID)
+        .await
+        .map_err(|e| {
+            classify_hidpp_error(e, HidppOperation::DumpFeatures, reprog_controls::FEATURE_ID)
+        })?
+        .ok_or(WriteError::FeatureUnsupported {
+            feature_hex: reprog_controls::FEATURE_ID,
+        })?;
+    Ok(ReprogControlsV4::new(
+        Arc::clone(channel),
+        index,
+        info.index,
+    ))
+}
+
+/// Walk the control table: `getCount`, then `getCidInfo` for each index. The
+/// exact exchange sequence the recorded `reprogrammable-controls` fixtures
+/// replay, so nothing else may be read in between.
+async fn read_control_identities(
+    rc: &ReprogControlsV4,
+) -> Result<Vec<ReprogControlEntry>, WriteError> {
+    let classify =
+        |e| classify_hidpp_error(e, HidppOperation::DumpFeatures, reprog_controls::FEATURE_ID);
+    let count = rc.get_count().await.map_err(classify)?;
+    let mut entries = Vec::with_capacity(usize::from(count));
+    for i in 0..count {
+        entries.push(rc.get_cid_info(i).await.map_err(classify)?.into());
+    }
+    Ok(entries)
+}
+
+/// Read every control's identity, then each one's current reporting state.
+///
+/// A `getCidReporting` the device declines is one control's `None`, not a
+/// failed table: the identity row is still evidence. A channel failure ends
+/// the read — the route is gone, not the control.
+async fn read_control_table(
+    rc: &ReprogControlsV4,
+) -> Result<Vec<ReprogControlReporting>, WriteError> {
+    let mut table = Vec::new();
+    for control in read_control_identities(rc).await? {
+        let reporting = match rc.get_cid_reporting(control.cid).await {
+            Ok(reporting) => Some(reporting),
+            Err(Hidpp20Error::Feature(_) | Hidpp20Error::UnsupportedResponse) => None,
+            Err(e) => {
+                return Err(classify_hidpp_error(
+                    e,
+                    HidppOperation::DumpFeatures,
+                    reprog_controls::FEATURE_ID,
+                ));
+            }
+        };
+        table.push(ReprogControlReporting { control, reporting });
+    }
+    Ok(table)
+}
 
 /// Diagnostic read of the device's raw battery report — the unified `0x1004`
 /// fields, the legacy `0x1000` `discharge_level`/`next_level`/`status`, the
@@ -446,10 +596,10 @@ fn unified_battery_line(version: u8, info: UnifiedBatteryInfo) -> String {
 /// parser decoded.
 ///
 /// Owned, constructible data converted from `hidpp`'s
-/// `DeviceEntityFirmwareInfo`, the same way [`ReprogControlEntry`] is
-/// converted from `CidInfo`: consumers get the structured record and decide
-/// how to render it, rather than being handed a pre-formatted string with the
-/// rest of the fields dropped.
+/// `DeviceEntityFirmwareInfo`, the same way [`ReprogControlEntry`] is built
+/// from `getCtrlIdInfo` + `getCidReporting`: consumers get the structured
+/// record and decide how to render it, rather than being handed a
+/// pre-formatted string with the rest of the fields dropped.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FirmwareEntityInfo {
     /// What the entity is: main application, bootloader, radio stack, and so

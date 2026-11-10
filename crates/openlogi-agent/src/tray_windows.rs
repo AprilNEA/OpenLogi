@@ -508,23 +508,29 @@ fn spawn_gui() {
     }
 }
 
-/// Quit the whole app: GUI first (its IPC retry loop would otherwise respawn
-/// the agent we are about to exit), then the icon, then the agent. Mirrors
-/// the macOS Quit semantics; the GUI holds no unsaved state (config writes
-/// are immediate).
-fn quit(hwnd: HWND) {
+/// Terminate every running GUI process of this user. Called before the agent
+/// leaves for good — tray Quit, uninstall — because a surviving GUI's IPC
+/// retry loop would respawn the agent that is exiting. The GUI holds no
+/// unsaved state (config writes are immediate), so a hard kill is fine.
+pub(crate) fn quit_gui() {
     use sysinfo::{Pid, ProcessesToUpdate, System};
     let mut system = System::new();
     system.refresh_processes(ProcessesToUpdate::All, true);
     for pid in gui_pids() {
         if let Some(process) = system.process(Pid::from_u32(pid)) {
             if process.kill() {
-                info!(pid, "tray Quit — terminated the GUI");
+                info!(pid, "terminated the GUI");
             } else {
-                warn!(pid, "tray Quit — could not terminate the GUI");
+                warn!(pid, "could not terminate the GUI");
             }
         }
     }
+}
+
+/// Quit the whole app: GUI first ([`quit_gui`]), then the icon, then the
+/// agent. Mirrors the macOS Quit semantics.
+fn quit(hwnd: HWND) {
+    quit_gui();
     let nid = notify_data(hwnd);
     // SAFETY: removing the icon this thread added; `nid` outlives the call.
     unsafe {

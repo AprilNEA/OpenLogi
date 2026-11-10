@@ -103,9 +103,16 @@ async fn arm_gesture46() -> ArmedGesture46 {
     let shared = SharedChannel::new(channel.clone(), route());
     let device = Device::new(channel.clone(), 0xff).await.unwrap();
     let mut armed = ArmedControls::default();
-    arm_controls_into(&device, &channel, 0xff, &thumbwheel_spec(), &mut armed)
-        .await
-        .unwrap();
+    arm_controls_into(
+        &device,
+        &channel,
+        0xff,
+        &route(),
+        &thumbwheel_spec(),
+        &mut armed,
+    )
+    .await
+    .unwrap();
     ArmedGesture46 {
         armed,
         shared,
@@ -220,9 +227,16 @@ async fn a_failed_gesture46_divert_still_owes_a_restore() {
     let channel = scripted_channel(raw).await;
     let device = Device::new(channel.clone(), 0xff).await.unwrap();
     let mut armed = ArmedControls::default();
-    arm_controls_into(&device, &channel, 0xff, &thumbwheel_spec(), &mut armed)
-        .await
-        .unwrap_err();
+    arm_controls_into(
+        &device,
+        &channel,
+        0xff,
+        &route(),
+        &thumbwheel_spec(),
+        &mut armed,
+    )
+    .await
+    .unwrap_err();
     assert!(
         matches!(armed.thumb, Some(ArmedThumb::Gesture46(_))),
         "the wheel must stay owned"

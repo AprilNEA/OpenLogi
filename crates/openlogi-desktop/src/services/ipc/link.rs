@@ -38,8 +38,8 @@ pub(super) enum Outage {
     /// fires at once.
     Cold,
     /// An established connection dropped. Launchd's respawn, the agent's
-    /// self-exec, and the tray-Quit deep link all announce themselves within
-    /// [`super::reflex::SPAWN_AFTER_LOSS`], so the reflex waits them out.
+    /// self-exec, and the agent's quit of this GUI all announce themselves
+    /// within [`super::reflex::SPAWN_AFTER_LOSS`], so the reflex waits them out.
     Lost,
 }
 

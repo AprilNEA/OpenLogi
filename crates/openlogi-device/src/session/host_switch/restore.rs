@@ -295,7 +295,7 @@ mod tests {
                 2 * owed.len(),
                 "two failed bounded restores for each owed key"
             );
-            assert_eq!(&restores[0][4..7], &[0, 0xd1, 0x32]);
+            assert_eq!(&restores[0][4..7], &[0, 0xd1, 0x22]);
 
             registry.remove_node(&node);
             assert!(
@@ -316,7 +316,7 @@ mod tests {
             let reporting = fresh.written_reports();
             assert_eq!(reporting.len(), owed.len());
             for (restore, &cid) in reporting.iter().zip(owed) {
-                assert_eq!(&restore[4..10], &[0, cid, 0x32, 0, 0, 0]);
+                assert_eq!(&restore[4..10], &[0, cid, 0x22, 0, 0, 0]);
             }
         }
     }
@@ -389,7 +389,7 @@ mod tests {
                 ),
                 "returning to the unchanged receiver must release host-switch cleanup"
             );
-            assert_eq!(&reporting()[1][4..10], &[0, 0xd1, 0x32, 0, 0, 0]);
+            assert_eq!(&reporting()[1][4..10], &[0, 0xd1, 0x22, 0, 0, 0]);
 
             let (stop, stopped) = tokio::sync::oneshot::channel();
             stop.send(HostSwitchStopReason::Graceful).unwrap();

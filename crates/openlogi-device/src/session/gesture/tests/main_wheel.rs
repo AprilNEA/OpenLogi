@@ -151,7 +151,7 @@ async fn arm(flags: u8, mode: u8, reply: SetReply, spec: &CaptureSpec) -> Armed 
     let channel = scripted_channel(raw).await;
     let device = Device::new(channel.clone(), 0xff).await.unwrap();
     let mut armed = ArmedControls::default();
-    let result = arm_controls_into(&device, &channel, 0xff, spec, &mut armed).await;
+    let result = arm_controls_into(&device, &channel, 0xff, &TEST_ROUTE, spec, &mut armed).await;
     Armed {
         result,
         controls: armed,

@@ -208,7 +208,7 @@ impl ArmedReporting {
 /// Whether the host kernel diverts `cid` on `route` itself and turns its
 /// diverted reports into input events: the Bluetooth Signature M650's
 /// Back/Forward under `HIDPP_QUIRK_HIDPP_REPROG_CONTROLS_BTNS` (Linux 7.3+).
-fn kernel_diverts(route: &DeviceRoute, cid: u16) -> bool {
+pub(crate) fn kernel_diverts(route: &DeviceRoute, cid: u16) -> bool {
     cfg!(target_os = "linux")
         && *route
             == (DeviceRoute::Direct {
@@ -560,6 +560,76 @@ pub(crate) async fn drop_listener_after<T, R>(listener: T, teardown: impl Future
     let result = teardown.await;
     drop(listener);
     result
+}
+
+/// The `setCidReporting` write that lands a control on native reporting, or
+/// `None` when it is already there.
+///
+/// This is how arming heals what a previous process left in device RAM
+/// instead of trusting it: a diversion from a killed agent, an older version,
+/// or another Logitech client. Only the volatile bits capture ever writes are
+/// compared and cleared — `diverted`, `raw_xy`, and `force_raw_xy`, which
+/// nothing in OpenLogi turns on and is therefore always someone else's leak,
+/// but only where the control advertises the capability, so firmware without
+/// it never sees the valid bit. The remap target is carried like every other
+/// restore write; persistent diversion, analytics, and raw wheel are never
+/// touched.
+pub(crate) fn release_change(
+    info: reprog_controls::CtrlIdInfo,
+    current: reprog_controls::CidReporting,
+) -> Option<reprog_controls::CidReportingChange> {
+    let clear_force_raw_xy = current.force_raw_xy && info.supports_force_raw_xy();
+    if !current.diverted && !current.raw_xy && !clear_force_raw_xy {
+        return None;
+    }
+    Some(reprog_controls::CidReportingChange {
+        force_raw_xy: clear_force_raw_xy.then_some(false),
+        ..undivert_change(current)
+    })
+}
+
+/// Land a divertable control the session did not arm on native reporting,
+/// best effort.
+///
+/// The half of arming that heals what a process that never tore down left in
+/// device RAM — the state that used to leave a button, or with raw-XY the
+/// pointer, dead until the device power-cycled. Best effort by design: the
+/// control is not part of the session's capture, so a failure here must not
+/// cost the session the controls it does own. Reading first keeps this a
+/// no-op on the common, already-native control.
+pub(crate) async fn release_unarmed_control(
+    controls: &ReprogControlsV4,
+    control: reprog_controls::CtrlIdInfo,
+) {
+    let cid = control.cid;
+    let current = match controls.get_cid_reporting(cid).await {
+        Ok(current) => current,
+        Err(error) => {
+            tracing::warn!(
+                cid = format_args!("{cid:#06x}"),
+                ?error,
+                "could not read control reporting"
+            );
+            return;
+        }
+    };
+    let Some(change) = release_change(control, current) else {
+        return;
+    };
+    tracing::info!(
+        cid = format_args!("{cid:#06x}"),
+        diverted = current.diverted,
+        raw_xy = current.raw_xy,
+        force_raw_xy = current.force_raw_xy,
+        "releasing a diversion no session owns"
+    );
+    if let Err(error) = controls.set_cid_reporting_full(cid, change).await {
+        tracing::warn!(
+            cid = format_args!("{cid:#06x}"),
+            ?error,
+            "could not release the diversion — control stays as found"
+        );
+    }
 }
 
 /// Divert a control in the requested mode while preserving its remap target.

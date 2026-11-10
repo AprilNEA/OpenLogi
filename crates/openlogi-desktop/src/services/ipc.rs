@@ -63,7 +63,6 @@ mod request;
 
 #[cfg(target_os = "macos")]
 pub(crate) use launch::agent_binary_path;
-pub use launch::mark_suite_quitting;
 use launch::spawn_agent;
 use link::Link;
 use reflex::SpawnReflex;

@@ -1220,9 +1220,13 @@ async fn restore_host_control(
 
 fn restoration_change(control: ArmedControl) -> reprog_controls::CidReportingChange {
     match control.mode {
+        // Native, not `original`: the bits read before arming are whatever a
+        // killed process left in device RAM, and nothing but a host-switch
+        // session ever wants a host key diverted. Replaying them would hand a
+        // stale diversion on to the next session.
         ReportingMode::Diverted => reprog_controls::CidReportingChange {
-            diverted: Some(control.original.diverted),
-            raw_xy: Some(control.original.raw_xy),
+            diverted: Some(false),
+            raw_xy: Some(false),
             ..reprog_controls::CidReportingChange::default()
         },
         ReportingMode::Analytics => reprog_controls::CidReportingChange {
@@ -1427,7 +1431,7 @@ fn hidpp_error(operation: &'static str, error: impl std::fmt::Debug) -> HostSwit
     HostSwitchError::Hidpp(format!("{operation}: {error:?}"))
 }
 
-fn host_channel(info: reprog_controls::CtrlIdInfo) -> Option<u8> {
+pub(super) fn host_channel(info: reprog_controls::CtrlIdInfo) -> Option<u8> {
     HOST_CONTROL_IDS
         .iter()
         .find_map(|(cid, host)| (info.cid == cid.0).then_some(*host))

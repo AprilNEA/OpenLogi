@@ -4,7 +4,9 @@
 //! Shared because more than one module needs a device with a feature table of
 //! its choosing — `write` drives DPI and lighting against one, `host_switch`
 //! needs a keyboard whose host slots it can dictate. Each module keeps its own
-//! responder; only the plumbing lives here.
+//! responder; only the plumbing lives here, plus the one device two modules
+//! drive: the `scripted_mouse` whose `0x1b04` table capture arming and the
+//! diagnostics both reconcile.
 
 use std::sync::Arc;
 
@@ -96,6 +98,84 @@ pub async fn publish_scripted_channel(
         Arc::clone(shared.channel()),
     );
     (shared, handle)
+}
+
+/// One scripted `0x1b04` control row: identity, capability flags, and the
+/// volatile reporting byte a dead process may have left behind.
+#[cfg(test)]
+#[derive(Clone, Copy)]
+pub(crate) struct ScriptedControl {
+    pub(crate) cid: u16,
+    pub(crate) task_id: u16,
+    pub(crate) flags: u16,
+    pub(crate) reporting: u8,
+}
+
+/// A HID++ 2.0 mouse whose `0x1b04` (at feature index `0x22`) exposes
+/// `controls`; every `setCidReporting` is echoed back, except that writes to
+/// `reject` fail with a feature error.
+#[cfg(test)]
+pub(crate) fn scripted_mouse(
+    controls: Vec<ScriptedControl>,
+    reject: Option<u16>,
+) -> impl Fn(&[u8]) -> Option<Vec<u8>> + Send + Sync + 'static {
+    move |request| {
+        let mut response = vec![0u8; 20];
+        response[0] = 0x11;
+        response[1..4].copy_from_slice(&request[1..4]);
+        match (request[2], request[3] >> 4) {
+            (0, 1) => response[4] = 4,
+            (0, 0) => response[4] = 0x22,
+            (0x22, 0) => response[4] = u8::try_from(controls.len()).expect("small table"),
+            (0x22, 1) => {
+                let row = controls[usize::from(request[4])];
+                response[4..6].copy_from_slice(&row.cid.to_be_bytes());
+                response[6..8].copy_from_slice(&row.task_id.to_be_bytes());
+                let [additional, primary] = row.flags.to_be_bytes();
+                response[8] = primary;
+                response[12] = additional;
+            }
+            (0x22, 2) => {
+                let cid = u16::from_be_bytes([request[4], request[5]]);
+                let row = controls
+                    .iter()
+                    .find(|row| row.cid == cid)
+                    .expect("reporting is only read for exposed controls");
+                response[4..6].copy_from_slice(&request[4..6]);
+                response[6] = row.reporting;
+            }
+            (0x22, 3) => {
+                let cid = u16::from_be_bytes([request[4], request[5]]);
+                if reject == Some(cid) {
+                    return Some(feature_error(request, 0x08));
+                }
+                return Some(request.to_vec());
+            }
+            _ => return None,
+        }
+        Some(response)
+    }
+}
+
+/// True for a `getCidReporting` request on the [`scripted_mouse`] for `cid`.
+#[cfg(test)]
+pub(crate) fn is_reporting_read_for(request: &[u8], cid: u16) -> bool {
+    request.len() >= 6
+        && request[2] == 0x22
+        && request[3] >> 4 == 2
+        && u16::from_be_bytes([request[4], request[5]]) == cid
+}
+
+/// `(cid, reporting byte)` of every `setCidReporting` the [`scripted_mouse`]
+/// received, in order.
+#[cfg(test)]
+pub(crate) fn reporting_writes(handle: &crate::replay::ReplayChannelHandle) -> Vec<(u16, u8)> {
+    handle
+        .written_reports()
+        .into_iter()
+        .filter(|request| request[2] == 0x22 && request[3] >> 4 == 3)
+        .map(|request| (u16::from_be_bytes([request[4], request[5]]), request[6]))
+        .collect()
 }
 
 /// Outcome produced when the scripted backend opens a listed node.

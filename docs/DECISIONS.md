@@ -4,6 +4,97 @@ Durable "why we did it this way" records that are not obvious from the code.
 Add a dated entry when a non-obvious architectural or dependency decision is
 made or revisited.
 
+## 2026-11: Every deliberate exit of the agent quits the GUI
+
+The agent is OpenLogi's lifetime: it is the always-on process, the GUI is
+on-demand, and the menu-bar item can be hidden by preference. So a quit
+addressed to the agent — the menu's Quit, an Apple-Event `quit` from
+`osascript`, Activity Monitor, or a cask `uninstall`, and the binary
+watcher's "the app was removed" — is the user quitting OpenLogi, and a GUI
+left behind is not a harmless leftover: its unreachable→spawn reflex answers
+the lost socket by kickstarting the agent again, undoing the quit — or, after
+an uninstall, retrying a service whose binary is gone every 30 s. Until now
+only the menu's Quit took the GUI along; `terminate:` and the uninstall exit
+left it behind.
+
+- **One call, three exits.** `tray::quit_gui` (macOS) and
+  `tray_windows::quit_gui` (Windows) run before the agent requests its own
+  graceful exit: from the menu's Quit, from `applicationShouldTerminate:`, and
+  from the binary watcher's uninstall tick. Signals (`SIGTERM` from launchd,
+  logout, or the stale-agent takeover) and the self-restart on update do not
+  cascade: those have their own owner, and the GUI must survive a replacement.
+- **A quit Apple Event to the running process, not a deep link.** macOS asks
+  each running GUI (release and dev bundle id) through
+  `NSRunningApplication::terminate`, as `osascript`'s `quit app` would. It
+  addresses running instances only, so nothing is cold-launched just to be
+  quit; it does not consult LaunchServices, so it reaches a GUI whose bundle
+  is already in the Trash — which the `open openlogi://quit` dispatch the menu
+  used could not promise; and `NSRunningApplication` is `Send + Sync`, so the
+  binary watcher's thread can call it. Windows keeps its by-PID kill.
+- **The `openlogi://quit` command and the GUI's `SUITE_QUITTING` flag are
+  gone.** The flag was added (2026-08-26) after the reflex resurrected a quit
+  agent mid-teardown; the loss grace `SPAWN_AFTER_LOSS` that landed the next
+  day is the structural guard — the reflex waits 2 s after a lost connection —
+  and the agent quits the GUI before it drops the socket, so the GUI is gone
+  before the reflex may fire. Linux has no GUI quit: it has no tray, and the
+  GUI's spawn of a removed binary fails harmlessly.
+
+## 2026-11: `0x1b04` reporting is released at arm, not remembered across runs
+
+The temporary diversion bits a capture session writes (`divert`, `rawXY`,
+`forceRawXY`) live in device RAM, survive any process that dies without
+restoring them, and cross hosts with a Bluetooth or Bolt device. A leaked
+raw-XY diversion is what #917 and #1281 report: a button — or, with raw-XY on
+a gesture source, the pointer — dead until the device power-cycles, on any
+machine it is paired with. Until now only a session's in-memory
+`ArmedReporting` knew what it had written, so every exit that skipped
+restore (crash, `kill -9`, an Apple-Event quit the agent never handled,
+shutdown while device I/O was suspended) leaked for good: the next session
+only ever wrote the controls its own spec listed, so a leak on any other
+control — a button the user had since unbound, a control a different
+OpenLogi version or another client diverted — was never touched again, and
+the host-switch session replayed the leaked bits as the key's "original".
+
+The fix reads the device and asserts the wanted state; it persists nothing:
+
+- **Arming writes the spec's controls, then releases the rest of the table.**
+  Every control the spec wants is diverted with a write whatever reporting
+  was found — a found diversion is recorded as the pre-arm state and logged,
+  never trusted as "already armed". Every other divertable control the device
+  lists is then read and, if diverted, written to native (`release_change`),
+  including controls OpenLogi never models: another client's leftovers, the
+  virtual gesture control `0x00d7`. Spec writes stay fatal to arming (rollback
+  follows); release writes are best effort — a control the session does not
+  capture must not cost it the ones it does. An already-native table costs one
+  read per control and no write.
+- **What another owner diverts is left alone, by identity.** The release skips
+  the host-switch session's keys (`host_channel`), the controls a sibling
+  keyboard session on the same device arms (`CaptureSpec::sibling_controls`,
+  filled by the agent's plan), and a diversion the host kernel made on that
+  route (`kernel_diverts`). There is no ownership table beyond these three
+  checks: everything else divertable is capture's to release.
+- **Restore lands on native, never on "original".** The pre-arm snapshot is
+  still recorded (a transport failure cannot prove the write was rejected),
+  but the restore write clears `divert` and `rawXY` in every session including
+  host switch; only the kernel's own diversion is handed back as found.
+- **No on-disk record of what was written.** A persisted ledger would be one
+  more owner that can go stale (other host, other client, older version); the
+  device is the single source of truth, and reading it works for a device that
+  arrives already broken.
+- **The same write is the recovery tool.** `openlogi diag controls` reads
+  every control's reporting back so a leak is seen, not inferred from a dead
+  pointer, and `--reset` drives `release_change` over the whole table for a
+  device no agent will arm again (uninstalled, other machine). It does not use
+  `0x1b04` v6 `resetAllCidReportSettings`: that also drops persistent remaps
+  the user set, and only some firmware has it.
+
+`forceRawXY` is cleared wherever it is found set and the control advertises
+the capability — in a spec control's divert write as much as in a release;
+nothing in OpenLogi ever sets it, so a set bit is always someone else's leak.
+Where the control lacks the capability the valid bit is never sent.
+Coexisting with Options+ on the same device is not a supported configuration —
+capture would release its diversions at arm.
+
 ## 2026-11: The agent saves a paired Flow computer in `config.toml`
 
 Until now the agent only read `config.toml`; the GUI and `openlogi api` wrote
@@ -919,10 +1010,6 @@ mature crates (`tempfile`, `which`, `plist`, `walkdir`, `xshell`, `sysinfo`,
   backends (for example abstract Unix sockets on Linux) and does not preserve
   OpenLogi's data-dir lock-file path, per-role names, and error classification
   closely enough to be a safe deletion.
-- Agent tray Quit's `openlogi://quit` dispatch keeps
-  `std::process::Command::output()` intentionally: it blocks until
-  LaunchServices accepts the Apple Event, while generic opener crates only
-  guarantee process spawn.
 - GUI helper launch keeps `/usr/bin/open -g -n` intentionally: it needs
   LaunchServices-specific flags to start the packaged agent under its own TCC
   identity, which generic opener crates do not expose. (Since 2026-08 it is

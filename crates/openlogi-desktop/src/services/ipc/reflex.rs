@@ -16,9 +16,10 @@ pub(super) const SPAWN_RETRY_PERIOD: Duration = Duration::from_secs(30);
 
 /// How long a *lost* connection must stay down before the reflex may fire.
 /// Every cause of a warm loss has a better first responder — launchd's crash
-/// respawn, the agent's self-exec on update, the tray-Quit deep link — and the
-/// reflex waits them out (~8 reconnect attempts). A connection that never
-/// existed has no first responder; the cold path fires on the first failure.
+/// respawn, the agent's self-exec on update, the quit the agent sends this GUI
+/// before it leaves for good — and the reflex waits them out (~8 reconnect
+/// attempts). A connection that never existed has no first responder; the
+/// cold path fires on the first failure.
 pub(super) const SPAWN_AFTER_LOSS: Duration = Duration::from_secs(2);
 
 /// What the reflex remembers between turns: only when it last fired. Everything
@@ -72,8 +73,9 @@ mod tests {
 
     #[test]
     fn a_lost_connection_waits_out_the_first_responders() {
-        // A supervised restart, a self-exec, or the quit deep link announce
-        // themselves within the grace window; the reflex must not race them.
+        // A supervised restart, a self-exec, or the agent's quit of this GUI
+        // announce themselves within the grace window; the reflex must not
+        // race them.
         let lost_at = Instant::now();
         let link = Link::Down(Down::new(Outage::Lost, lost_at));
         let reflex = SpawnReflex::new();

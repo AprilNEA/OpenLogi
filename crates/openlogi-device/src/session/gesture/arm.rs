@@ -21,13 +21,14 @@ use crate::reprog_controls::{self, ReprogControlsV4};
 use crate::session::capture::{ReportingChangeStream, open_device, subscribe_reporting_changes};
 use crate::session::capture_restore::{
     ArmedReporting, CaptureError, CaptureSessionFailure, HiResWheelRestore, PendingCaptureRestore,
-    PointerDivert, ReprogRestore, ThumbwheelRestore,
+    PointerDivert, ReprogRestore, ThumbwheelRestore, kernel_diverts, release_unarmed_control,
 };
+use crate::session::host_switch::host_channel;
 use crate::session::restore::rollback_start;
 use crate::thumbwheel::{
     self, ReportingMode, Thumbwheel, ThumbwheelInfo, WheelDirection, WheelResolution,
 };
-use crate::{ChannelRegistry, SharedChannel};
+use crate::{ChannelRegistry, DeviceRoute, SharedChannel};
 
 /// The set of controls a session has diverted, kept so they can be handed back
 /// to the firmware on teardown.
@@ -256,7 +257,9 @@ pub(super) async fn arm_controls(
     let chan = shared.channel();
     let slot = shared.device_index();
     let mut armed = ArmedControls::default();
-    if let Err(error) = arm_controls_into(&device, chan, slot, spec, &mut armed).await {
+    if let Err(error) =
+        arm_controls_into(&device, chan, slot, shared.route(), spec, &mut armed).await
+    {
         let pending = armed.into_pending(shared);
         return Err(rollback_start(error, pending, registry).await);
     }
@@ -277,10 +280,16 @@ pub(super) async fn arm_controls(
 /// The fallible arming steps of [`arm_controls`], recording ownership before
 /// each write. A transport failure cannot prove whether firmware applied that
 /// write, so rollback deliberately includes the uncertain current control.
+///
+/// Once the `0x1b04` controls `spec` wants are diverted, the rest of the
+/// device's table is handed back to the firmware
+/// ([`release_unarmed_controls`]); `route` says which diversions there are
+/// the host kernel's to keep.
 pub(super) async fn arm_controls_into(
     device: &Device,
     chan: &Arc<HidppChannel>,
     slot: u8,
+    route: &DeviceRoute,
     spec: &CaptureSpec,
     armed: &mut ArmedControls,
 ) -> Result<(), CaptureError> {
@@ -316,7 +325,7 @@ pub(super) async fn arm_controls_into(
                 );
                 PointerDivert::Plain
             };
-            arm_reprog_control(&rc, cid, divert, &mut armed.reporting).await?;
+            arm_reprog_control(&rc, *control, divert, &mut armed.reporting).await?;
             armed.gesture_cids.push(cid);
         }
         for &(cid, button) in &spec.divert_gesture_buttons {
@@ -324,7 +333,8 @@ pub(super) async fn arm_controls_into(
                 && control.is_divertable()
                 && control.supports_raw_xy()
             {
-                arm_reprog_control(&rc, cid, PointerDivert::RawXy, &mut armed.reporting).await?;
+                arm_reprog_control(&rc, *control, PointerDivert::RawXy, &mut armed.reporting)
+                    .await?;
                 armed.gesture_button_cids.push((cid, button));
             }
         }
@@ -340,8 +350,9 @@ pub(super) async fn arm_controls_into(
                 // the configured click and the firmware action.
                 continue;
             }
-            if controls.iter().any(|c| c.cid == cid && c.is_divertable()) {
-                arm_reprog_control(&rc, cid, PointerDivert::Plain, &mut armed.reporting).await?;
+            if let Some(&control) = controls.iter().find(|c| c.cid == cid && c.is_divertable()) {
+                arm_reprog_control(&rc, control, PointerDivert::Plain, &mut armed.reporting)
+                    .await?;
                 armed.dpi_cids.push(cid);
             }
         }
@@ -357,12 +368,14 @@ pub(super) async fn arm_controls_into(
             {
                 continue;
             }
-            if controls.iter().any(|c| c.cid == cid && c.is_divertable()) {
-                arm_reprog_control(&rc, cid, PointerDivert::Plain, &mut armed.reporting).await?;
+            if let Some(&control) = controls.iter().find(|c| c.cid == cid && c.is_divertable()) {
+                arm_reprog_control(&rc, control, PointerDivert::Plain, &mut armed.reporting)
+                    .await?;
                 armed.button_cids.push((cid, button));
             }
         }
         arm_wheel_hold_controls(device, chan, slot, &rc, &controls, spec, armed).await?;
+        release_unarmed_controls(route, &rc, &controls, spec, &armed.reporting).await;
     }
 
     if spec.capture_thumbwheel
@@ -509,10 +522,11 @@ async fn arm_main_wheel(
 
 async fn arm_reprog_control(
     rc: &ReprogControlsV4,
-    cid: u16,
+    control: reprog_controls::CtrlIdInfo,
     divert: PointerDivert,
     reporting: &mut Vec<ArmedReporting>,
 ) -> Result<(), CaptureError> {
+    let cid = control.cid;
     let original = rc.get_cid_reporting(cid).await?;
     if original.diverted {
         // Left over from a session that never tore down (agent killed, or
@@ -524,9 +538,42 @@ async fn arm_reprog_control(
     // Record ownership before the write: a transport error does not prove the
     // firmware rejected the command, so rollback must cover this CID too.
     reporting.push(armed);
-    rc.set_cid_reporting_full(cid, armed.divert_change())
-        .await?;
+    let change = reprog_controls::CidReportingChange {
+        // Nothing in OpenLogi sets force raw-XY, the bit that takes the
+        // pointer with the diversion: a set bit is another process's leak,
+        // cleared here where the control advertises the capability. Firmware
+        // without it must never see the valid bit.
+        force_raw_xy: (original.force_raw_xy && control.supports_force_raw_xy()).then_some(false),
+        ..armed.divert_change()
+    };
+    rc.set_cid_reporting_full(cid, change).await?;
     Ok(())
+}
+
+/// Hand every divertable `0x1b04` control the session did not arm back to the
+/// firmware, best effort, except what is another owner's: a sibling session's
+/// controls ([`CaptureSpec::sibling_controls`]), the host keys the host-switch
+/// session arms, and a diversion the host kernel made on `route`. A leaked
+/// diversion on any other control — a button the user has since unbound, one
+/// another OpenLogi version or another client diverted, one OpenLogi never
+/// models — would otherwise outlive every process that could clear it.
+async fn release_unarmed_controls(
+    route: &DeviceRoute,
+    rc: &ReprogControlsV4,
+    controls: &[reprog_controls::CtrlIdInfo],
+    spec: &CaptureSpec,
+    armed: &[ArmedReporting],
+) {
+    for &control in controls {
+        let cid = control.cid;
+        let owned = armed.iter().any(|reporting| reporting.cid == cid)
+            || spec.sibling_controls.contains(&cid)
+            || host_channel(control).is_some()
+            || kernel_diverts(route, cid);
+        if control.is_divertable() && !owned {
+            release_unarmed_control(rc, control).await;
+        }
+    }
 }
 
 /// Divert the wheel-hold buttons `spec` lists, with raw-wheel reporting where
@@ -552,7 +599,7 @@ async fn arm_wheel_hold_controls(
             continue;
         };
         if control.supports_raw_wheel() {
-            arm_reprog_control(rc, cid, PointerDivert::RawWheel, &mut armed.reporting).await?;
+            arm_reprog_control(rc, *control, PointerDivert::RawWheel, &mut armed.reporting).await?;
             armed.wheel_button_cids.push((cid, button));
         } else {
             // Without raw-wheel reporting the button cannot scroll, but its
@@ -561,7 +608,7 @@ async fn arm_wheel_hold_controls(
                 cid,
                 "control lacks raw-wheel reporting — wheel-hold armed as a click"
             );
-            arm_reprog_control(rc, cid, PointerDivert::Plain, &mut armed.reporting).await?;
+            arm_reprog_control(rc, *control, PointerDivert::Plain, &mut armed.reporting).await?;
             armed.button_cids.push((cid, button));
         }
     }

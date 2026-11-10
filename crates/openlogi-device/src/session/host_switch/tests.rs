@@ -687,8 +687,11 @@ fn host_switch_errors_cross_ipc_as_the_easy_switch_vocabulary() {
     }
 }
 
+/// The bits read before arming are whatever a process that never tore down
+/// left in device RAM, and nothing but a host-switch session ever wants a
+/// host key diverted: cleanup lands on native instead of replaying them.
 #[test]
-fn diverted_cleanup_restores_only_the_original_temporary_bits() {
+fn diverted_cleanup_lands_on_native_even_when_found_diverted() {
     let change = restoration_change(ArmedControl {
         cid: 0x00d3,
         host: 2,
@@ -700,8 +703,8 @@ fn diverted_cleanup_restores_only_the_original_temporary_bits() {
         },
     });
 
-    assert_eq!(change.diverted, Some(true));
-    assert_eq!(change.raw_xy, Some(true));
+    assert_eq!(change.diverted, Some(false));
+    assert_eq!(change.raw_xy, Some(false));
     assert_eq!(change.analytics_key_events, None);
     assert_eq!(change.persistently_diverted, None);
     assert_eq!(change.remap, None);

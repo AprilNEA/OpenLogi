@@ -8,7 +8,7 @@
 //! cannot finish leaves any of them as a [`restore::PendingRestore`] token.
 
 mod capture;
-mod capture_restore;
+pub(crate) mod capture_restore;
 pub mod gesture;
 pub mod host_switch;
 pub mod keyboard;

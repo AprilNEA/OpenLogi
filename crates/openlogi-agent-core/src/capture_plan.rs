@@ -141,11 +141,12 @@ impl DeviceCapturePlan {
     }
 
     /// Hand the `0x1b04` controls in `owned` to another session on the same
-    /// device: they leave every divert set of this plan, and the dispatch map
-    /// keeps resolving them so a press the other session forwards still finds
-    /// its action.
+    /// device: they leave every divert set of this plan, arming leaves their
+    /// reporting to that session, and the dispatch map keeps resolving them
+    /// so a press the other session forwards still finds its action.
     pub(crate) fn release_controls(&mut self, owned: &BTreeMap<u16, ButtonId>) {
         let spec = &mut self.target.spec;
+        spec.sibling_controls.extend(owned.keys().copied());
         let before = spec.divert_buttons.len()
             + spec.divert_gesture_buttons.len()
             + spec.divert_gesture_sources.len()
@@ -428,6 +429,7 @@ pub fn plan_for_device(
                 // its current link, so the orchestrator fills it in.
                 divert_main_wheel: None,
                 onboard: None,
+                sibling_controls: BTreeSet::new(),
             },
             rearm_generation,
         },
@@ -850,6 +852,11 @@ mod tests {
         plan.release_controls(&owned);
         assert!(!wheel_diverts(&plan, ButtonId::Back));
         assert!(wheel_diverts(&plan, ButtonId::Forward));
+        assert_eq!(
+            plan.target.spec.sibling_controls,
+            owned.keys().copied().collect(),
+            "the released controls are the other session's to arm and release"
+        );
     }
 
     #[test]

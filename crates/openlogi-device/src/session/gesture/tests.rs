@@ -19,10 +19,18 @@ mod accumulator;
 mod foreign_change;
 mod gesture46;
 mod main_wheel;
+mod release;
 mod restore;
 mod session;
 mod thumb_wheel;
 mod wheel_hold;
+
+/// The route every scripted device in these tests sits on: a direct
+/// connection the host kernel diverts nothing on.
+const TEST_ROUTE: DeviceRoute = DeviceRoute::Direct {
+    vendor_id: 0x046d,
+    product_id: 0xb35b,
+};
 
 fn reporting(
     diverted: bool,
