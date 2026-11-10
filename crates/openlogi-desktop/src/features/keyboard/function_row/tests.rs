@@ -1119,7 +1119,7 @@ fn open_application_editor_binds_the_selected_key(cx: &mut gpui::TestAppContext)
     // A blank path is rejected in place and binds nothing.
     click(cx, "key-editor-custom-application-add");
     view.read_with(cx, |view, _| {
-        assert!(view.application_invalid);
+        assert!(view.editor_invalid);
         assert_eq!(view.active_editor, Some(PowerUserKind::OpenApplication));
     });
     assert!(
@@ -1137,7 +1137,7 @@ fn open_application_editor_binds_the_selected_key(cx: &mut gpui::TestAppContext)
     assert_eq!(f1_binding(cx, &f1), Some(expected));
     view.read_with(cx, |view, _| {
         assert_eq!(view.active_editor, None);
-        assert!(!view.application_invalid);
+        assert!(!view.editor_invalid);
     });
 
     // Reopening the editor seeds the bound path.
@@ -1163,6 +1163,67 @@ fn open_application_editor_binds_the_selected_key(cx: &mut gpui::TestAppContext)
     });
     click(cx, "key-editor-custom-application-add");
     assert_eq!(f1_binding(cx, &f1), Some(named));
+
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn custom_shortcut_editor_binds_the_selected_key(cx: &mut gpui::TestAppContext) {
+    use crate::services::i18n::LOCALE_LOCK;
+    use gpui::{Modifiers, VisualTestContext};
+
+    fn click(cx: &mut VisualTestContext, selector: &'static str) {
+        let bounds = cx.debug_bounds(selector).expect(selector);
+        cx.simulate_click(bounds.center(), Modifiers::default());
+        redraw(cx);
+    }
+    fn f1_binding(cx: &mut VisualTestContext, trigger: &KeyTarget) -> Option<Action> {
+        cx.update(|_, cx| bound_action(AppState::try_read(cx).unwrap(), trigger))
+    }
+
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    let (view, cx) = keys_tab(cx);
+    // Slot 1 of the fallback F-row is F1.
+    let f1 = key_slots(None, None)[1].target.clone();
+    view.update(cx, |view, cx| {
+        view.select_key(Some(1), cx);
+        view.open_editor(PowerUserKind::CustomShortcut, cx);
+    });
+    redraw(cx);
+
+    // A blank chord is rejected in place and binds nothing.
+    click(cx, "key-editor-save");
+    view.read_with(cx, |view, _| {
+        assert!(view.editor_invalid);
+        assert_eq!(view.active_editor, Some(PowerUserKind::CustomShortcut));
+    });
+    assert!(cx.debug_bounds("key-editor-text-error").is_some());
+    assert_eq!(f1_binding(cx, &f1), None);
+
+    click(cx, "key-editor-text-input");
+    cx.simulate_input("Ctrl+Alt+T");
+    click(cx, "key-editor-save");
+    let expected = Action::CustomShortcut("Ctrl+Alt+T".parse().expect("a valid chord"));
+    assert_eq!(f1_binding(cx, &f1), Some(expected));
+    view.read_with(cx, |view, _| {
+        assert_eq!(view.active_editor, None);
+        assert!(!view.editor_invalid);
+    });
+
+    // Reopening the editor seeds the bound chord.
+    view.update(cx, |view, cx| {
+        view.open_editor(PowerUserKind::CustomShortcut, cx);
+    });
+    redraw(cx);
+    view.read_with(cx, |view, cx| {
+        assert_eq!(
+            view.text_state().expect("editor input").read(cx).value(),
+            "Ctrl+Alt+T"
+        );
+    });
 
     drop(view);
     cx.update(|window, _| window.remove_window());

@@ -24,8 +24,8 @@ use crate::state::AppState;
 use crate::ui::components::{MenuRow, control_input};
 use crate::ui::theme::{self, Palette, Typography as _};
 use gpui::{
-    App, Entity, FontWeight, IntoElement, ParentElement, RenderOnce,
-    StatefulInteractiveElement as _, Styled, Window, div, px, svg,
+    App, Entity, FontWeight, InteractiveElement as _, IntoElement, ParentElement, RenderOnce,
+    StatefulInteractiveElement as _, Styled, Window, div, prelude::FluentBuilder as _, px, svg,
 };
 use gpui_kit::component::{
     Icon, IconName, Sizable as _,
@@ -94,12 +94,14 @@ pub(crate) fn workflow_editor_seed(action: Option<&Action>) -> Vec<WorkflowStep>
 }
 
 /// Render the editor card for `kind`, replacing the panel's action list.
+/// `invalid` shows the single-field editor's error after it rejected its
+/// input.
 pub fn editor_card(
     target: KeyTarget,
     kind: PowerUserKind,
     text_state: Option<Entity<InputState>>,
     workflow_draft: Vec<WorkflowStep>,
-    application_invalid: bool,
+    invalid: bool,
     view: &Entity<FunctionRowView>,
     pal: Palette,
 ) -> gpui::Div {
@@ -107,9 +109,9 @@ pub fn editor_card(
         PowerUserKind::Workflow => workflow_editor_card(target, workflow_draft, view, pal),
         _ => match text_state {
             Some(state) if kind == PowerUserKind::OpenApplication => {
-                application_editor_card(target, state, application_invalid, view, pal)
+                application_editor_card(target, state, invalid, view, pal)
             }
-            Some(state) => text_editor_card(target, kind, state, view, pal),
+            Some(state) => text_editor_card(target, kind, state, invalid, view, pal),
             None => compact_panel(pal)
                 .w(px(300.))
                 .child(title(tr!("keyboard.editor_unavailable"), pal)),
@@ -117,12 +119,14 @@ pub fn editor_card(
     }
 }
 
-/// The TypeText / RunAppleScript / RunShellCommand editors share a single text
-/// field; only the commit wrapping differs.
+/// The Custom Shortcut / TypeText / RunAppleScript / RunShellCommand editors
+/// share a single text field; only the commit wrapping differs. Save rejects a
+/// shortcut that does not parse, and `invalid` then shows the field's error.
 fn text_editor_card(
     target: KeyTarget,
     kind: PowerUserKind,
     text_state: Entity<InputState>,
+    invalid: bool,
     view: &Entity<FunctionRowView>,
     pal: Palette,
 ) -> gpui::Div {
@@ -140,7 +144,20 @@ fn text_editor_card(
             v_flex()
                 .p_2()
                 .gap_2()
-                .child(div().child(control_input(&text_state).cleanable(true)))
+                .child(
+                    div()
+                        .debug_selector(|| "key-editor-text-input".into())
+                        .child(control_input(&text_state).cleanable(true)),
+                )
+                .when(invalid, |editor| {
+                    editor.child(
+                        div()
+                            .debug_selector(|| "key-editor-text-error".into())
+                            .text_caption()
+                            .text_color(pal.text_danger)
+                            .child(tr!("action_ring.custom_action_invalid_input")),
+                    )
+                })
                 .child(editor_action_row(target, kind, view)),
         )
 }
@@ -166,7 +183,7 @@ fn application_editor_card(
     });
     let view_invalid = view.clone();
     let on_invalid = Rc::new(move |cx: &mut App| {
-        view_invalid.update(cx, |v, vcx| v.mark_application_invalid(vcx));
+        view_invalid.update(cx, |v, vcx| v.mark_editor_invalid(vcx));
     });
     let view_cancel = view.clone();
 
@@ -237,6 +254,7 @@ fn editor_action_row(
         )
         .child(
             Button::new("editor-save")
+                .debug_selector(|| "key-editor-save".into())
                 .primary()
                 .label(tr!("common.save"))
                 .on_click(move |_e, _window, cx| {
@@ -246,9 +264,12 @@ fn editor_action_row(
                         .map(|s| s.read(cx).value().to_string())
                         .unwrap_or_default();
                     let action = match kind {
-                        PowerUserKind::CustomShortcut => match text.trim().parse::<KeyCombo>() {
+                        PowerUserKind::CustomShortcut => match text.parse::<KeyCombo>() {
                             Ok(combo) => Action::CustomShortcut(combo),
-                            Err(_) => return,
+                            Err(_) => {
+                                view_save.update(cx, |v, vcx| v.mark_editor_invalid(vcx));
+                                return;
+                            }
                         },
                         PowerUserKind::TypeText => Action::TypeText(text),
                         PowerUserKind::RunAppleScript => Action::RunAppleScript(text),

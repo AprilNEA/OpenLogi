@@ -170,8 +170,9 @@ pub struct FunctionRowView {
     text_state: Option<Entity<InputState>>,
     /// Draft copy of the Workflow steps under edit.
     workflow_draft: Vec<WorkflowStep>,
-    /// Whether the Open Application editor rejected a blank path.
-    application_invalid: bool,
+    /// Whether the open single-field editor rejected its input: a blank Open
+    /// Application path, or a Custom Shortcut that does not parse.
+    editor_invalid: bool,
     /// The keypad binding page the grid keys are being edited on — this
     /// editor's own choice, independent of the page the keypad is showing.
     keypad_page: KeypadPage,
@@ -217,7 +218,7 @@ impl FunctionRowView {
             active_editor: None,
             text_state: None,
             workflow_draft: Vec::new(),
-            application_invalid: false,
+            editor_invalid: false,
             keypad_page: KeypadPage::FIRST,
             g_profile: GKeyProfile::M1,
             selected_profile_card: false,
@@ -247,7 +248,7 @@ impl FunctionRowView {
         self.active_editor = None;
         self.text_state = None;
         self.workflow_draft.clear();
-        self.application_invalid = false;
+        self.editor_invalid = false;
     }
 
     /// Edit the grid keys on `page`, dropping any open editor when it moves.
@@ -427,7 +428,7 @@ impl FunctionRowView {
         self.active_editor = Some(kind);
         self.text_state = None;
         self.workflow_draft.clear();
-        self.application_invalid = false;
+        self.editor_invalid = false;
         cx.notify();
     }
 
@@ -436,8 +437,8 @@ impl FunctionRowView {
         cx.notify();
     }
 
-    pub(crate) fn mark_application_invalid(&mut self, cx: &mut Context<Self>) {
-        self.application_invalid = true;
+    pub(crate) fn mark_editor_invalid(&mut self, cx: &mut Context<Self>) {
+        self.editor_invalid = true;
         cx.notify();
     }
 
@@ -1513,7 +1514,7 @@ impl FunctionRowView {
                 kind,
                 self.text_state.clone(),
                 self.workflow_draft.clone(),
-                self.application_invalid,
+                self.editor_invalid,
                 view,
                 pal,
             );
