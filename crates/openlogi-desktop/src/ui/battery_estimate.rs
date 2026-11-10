@@ -33,6 +33,11 @@ const MIN_LEARN_WINDOW_SECS: u64 = 1_800;
 /// Maximum elapsed discharging window (14 days) before an anchor is considered
 /// expired and re-anchored to the current reading.
 const MAX_LEARN_WINDOW_SECS: u64 = 14 * 86_400;
+/// Minimum cumulative observed discharge percentage points (~1.5–2 full cycles)
+/// before reporting a calibrated battery health percentage.
+const MIN_HEALTH_DROP_PCT: u32 = 150;
+/// Minimum number of valid discharge intervals before reporting battery health.
+const MIN_HEALTH_SAMPLES: u32 = 5;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct TelemetryStore {
@@ -82,6 +87,23 @@ impl Default for DeviceBatteryHistory {
             learned_drain_per_day: BTreeMap::new(),
             estimated_health_pct: default_health(),
             total_observed_drop_pct: 0,
+        }
+    }
+}
+
+impl DeviceBatteryHistory {
+    fn calibrated_health(&self) -> Option<u8> {
+        let total_samples = self
+            .learned_drain_per_day
+            .values()
+            .map(|d| d.samples)
+            .fold(0u32, u32::saturating_add);
+        if self.total_observed_drop_pct >= MIN_HEALTH_DROP_PCT
+            && total_samples >= MIN_HEALTH_SAMPLES
+        {
+            Some(self.estimated_health_pct.clamp(50, 100))
+        } else {
+            None
         }
     }
 }
@@ -145,14 +167,22 @@ impl BatteryTelemetry {
         }
     }
 
-    /// Pure read of `(health_pct, learned_drain_for_signature, profile_samples)`
+    /// Pure read of `(calibrated_health_pct, learned_drain_for_signature, profile_samples)`
     /// for `config_key` and `signature`. Performs zero mutations and zero I/O.
+    ///
+    /// `calibrated_health_pct` is `None` until the device has accumulated at least
+    /// [`MIN_HEALTH_DROP_PCT`] percentage points across [`MIN_HEALTH_SAMPLES`] valid
+    /// discharge intervals (~1.5–2 cycles), avoiding premature `100%` claims.
     #[must_use]
-    pub fn query(&self, config_key: &str, signature: &str) -> (u8, Option<LearnedDrain>, u32) {
+    pub fn query(
+        &self,
+        config_key: &str,
+        signature: &str,
+    ) -> (Option<u8>, Option<LearnedDrain>, u32) {
         let Some(entry) = self.store.devices.get(config_key) else {
-            return (100, None, 0);
+            return (None, None, 0);
         };
-        let health_pct = entry.estimated_health_pct.clamp(50, 100);
+        let health_pct = entry.calibrated_health();
         let learned = entry.learned_drain_per_day.get(signature).copied();
         let learned_samples = learned.map_or(0, |d| d.samples);
         (health_pct, learned, learned_samples)
@@ -340,9 +370,12 @@ fn advance_discharging_entry(
                     .total_observed_drop_pct
                     .saturating_add(u32::from(drop_pct));
 
-                if entry.total_observed_drop_pct >= 10 {
+                if entry.total_observed_drop_pct >= 20 {
                     let nominal_pct_per_day = (100.0 * 24.0) / (nominal_full_hours.max(1) as f32);
-                    let ratio = (nominal_pct_per_day / drain.pct_per_day).clamp(0.50, 1.05);
+                    let plausible_drain = drain
+                        .pct_per_day
+                        .clamp(nominal_pct_per_day * 0.35, nominal_pct_per_day * 2.2);
+                    let ratio = (nominal_pct_per_day / plausible_drain).clamp(0.50, 1.05);
                     let implied_health = (ratio * 100.0).round().clamp(50.0, 100.0) as u8;
                     entry.estimated_health_pct = ((u16::from(entry.estimated_health_pct) * 4
                         + u16::from(implied_health))
@@ -397,15 +430,35 @@ fn write_telemetry_atomic(path: &Path, store: &TelemetryStore) -> std::io::Resul
     Ok(())
 }
 
-/// Complete battery duration and health estimate for a single device.
+/// Explicit operating mode of a [`BatteryEstimate`] so charging vs. discharging
+/// formatting never relies on implicit optional fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EstimatePhase {
+    /// Device is discharging or full; displays remaining autonomy (`remaining_hours`).
+    Discharging,
+    /// Device is charging below 100%; models the Li-Po CC/CV curve (`0..80%` fast
+    /// Constant-Current phase and `80..100%` slower Constant-Voltage trickle phase).
+    Charging {
+        /// Remaining minutes to reach 80% when `percentage < 80`, or `None` when
+        /// already in the 80–99% trickle phase.
+        minutes_to_80: Option<u32>,
+        /// Remaining minutes to reach 100% (`>= 1`).
+        minutes_to_100: u32,
+    },
+}
+
+/// Complete battery duration, charging ETA, and health estimate for a single device.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BatteryEstimate {
+    /// Active phase (discharging autonomy vs. two-stage charging ETA).
+    pub phase: EstimatePhase,
     /// Estimated remaining hours of autonomy (`>= 1`).
     pub remaining_hours: u32,
     /// Estimated full-charge (100%) hours under the active configuration.
     pub full_charge_hours: u32,
-    /// Estimated battery health (`50..=100%`).
-    pub health_pct: u8,
+    /// Calibrated battery health (`50..=100%`), or `None` while still accumulating
+    /// multi-cycle discharge intervals (`< 150%` cumulative drop or `< 5` samples).
+    pub health_pct: Option<u8>,
     /// Number of historical discharge intervals learned for the active configuration signature.
     pub learned_samples: u32,
     /// Short localized summary of the active power profile (e.g. `"Brightness 4/7 · 15s"`).
@@ -414,49 +467,112 @@ pub(crate) struct BatteryEstimate {
 
 impl BatteryEstimate {
     /// Compact label for the Home screen list row & grid card.
+    ///
+    /// Never includes battery health on the Home view; estimated health is
+    /// displayed exclusively inside the Device Details battery section.
     #[must_use]
     pub fn home_label(&self) -> String {
-        let duration = format_duration_short(self.remaining_hours);
-        match &self.config_note {
-            Some(note) => tr!(
-                "device.battery_estimate_home_with_note",
-                duration => duration,
-                note => note.clone(),
-                health => self.health_pct
-            )
-            .into(),
-            None => tr!(
-                "device.battery_estimate_home",
-                duration => duration,
-                health => self.health_pct
-            )
-            .into(),
+        match self.phase {
+            EstimatePhase::Charging {
+                minutes_to_80: Some(m80),
+                minutes_to_100,
+            } => {
+                let to_80 = format_charge_minutes(m80);
+                let to_100 = format_charge_minutes(minutes_to_100);
+                tr!(
+                    "device.battery_charge_home_two_stage",
+                    to_80 => to_80,
+                    to_100 => to_100
+                )
+                .into()
+            }
+            EstimatePhase::Charging {
+                minutes_to_80: None,
+                minutes_to_100,
+            } => {
+                let to_100 = format_charge_minutes(minutes_to_100);
+                tr!("device.battery_charge_home_final", to_100 => to_100).into()
+            }
+            EstimatePhase::Discharging => {
+                let duration = format_duration_short(self.remaining_hours);
+                match &self.config_note {
+                    Some(note) => tr!(
+                        "device.battery_estimate_home_with_note",
+                        duration => duration,
+                        note => note.clone()
+                    )
+                    .into(),
+                    None => tr!("device.battery_estimate_home", duration => duration).into(),
+                }
+            }
         }
     }
 
     /// Ultra-compact pill for the detail header bar or grid corner.
     #[must_use]
     pub fn inline_label(&self) -> String {
-        let duration = format_duration_compact(self.remaining_hours);
-        tr!("device.battery_estimate_inline", duration => duration).into()
+        match self.phase {
+            EstimatePhase::Charging {
+                minutes_to_80: Some(m80),
+                ..
+            } => {
+                let to_80 = format_charge_minutes(m80);
+                tr!("device.battery_charge_inline_80", to_80 => to_80).into()
+            }
+            EstimatePhase::Charging {
+                minutes_to_80: None,
+                minutes_to_100,
+            } => {
+                let to_100 = format_charge_minutes(minutes_to_100);
+                tr!("device.battery_charge_inline_100", to_100 => to_100).into()
+            }
+            EstimatePhase::Discharging => {
+                let duration = format_duration_compact(self.remaining_hours);
+                tr!("device.battery_estimate_inline", duration => duration).into()
+            }
+        }
     }
 
     /// Detailed multi-part summary for the Device Details card.
     #[must_use]
     pub fn detail_headline(&self) -> String {
-        let duration = format_duration_short(self.remaining_hours);
-        match &self.config_note {
-            Some(note) => tr!(
-                "device.battery_estimate_headline_with_note",
-                duration => duration,
-                note => note.clone()
-            )
-            .into(),
-            None => tr!("device.battery_estimate_headline", duration => duration).into(),
+        match self.phase {
+            EstimatePhase::Charging {
+                minutes_to_80: Some(m80),
+                minutes_to_100,
+            } => {
+                let to_80 = format_charge_minutes(m80);
+                let to_100 = format_charge_minutes(minutes_to_100);
+                tr!(
+                    "device.battery_charge_headline_two_stage",
+                    to_80 => to_80,
+                    to_100 => to_100
+                )
+                .into()
+            }
+            EstimatePhase::Charging {
+                minutes_to_80: None,
+                minutes_to_100,
+            } => {
+                let to_100 = format_charge_minutes(minutes_to_100);
+                tr!("device.battery_charge_headline_final", to_100 => to_100).into()
+            }
+            EstimatePhase::Discharging => {
+                let duration = format_duration_short(self.remaining_hours);
+                match &self.config_note {
+                    Some(note) => tr!(
+                        "device.battery_estimate_headline_with_note",
+                        duration => duration,
+                        note => note.clone()
+                    )
+                    .into(),
+                    None => tr!("device.battery_estimate_headline", duration => duration).into(),
+                }
+            }
         }
     }
 
-    /// Secondary caption showing full-charge expectation, health, and learning state.
+    /// Secondary caption showing full-charge expectation, health (or calibrating state), and learning state.
     #[must_use]
     pub fn detail_subline(&self) -> String {
         let full = format_duration_short(self.full_charge_hours);
@@ -469,13 +585,42 @@ impl BatteryEstimate {
         } else {
             tr!("device.battery_estimate_source_config").into()
         };
-        tr!(
-            "device.battery_estimate_subline",
-            health => self.health_pct,
-            full => full,
-            source => source
-        )
-        .into()
+        match self.health_pct {
+            Some(health) => tr!(
+                "device.battery_estimate_subline",
+                health => health,
+                full => full,
+                source => source
+            )
+            .into(),
+            None => tr!(
+                "device.battery_estimate_subline_calibrating",
+                full => full,
+                source => source
+            )
+            .into(),
+        }
+    }
+}
+
+fn format_charge_minutes(mins: u32) -> String {
+    let mins = mins.max(1);
+    if mins < 60 {
+        tr!("device.battery_charge_minutes", minutes => mins).into()
+    } else {
+        let hours = mins / 60;
+        let rem_mins = ((mins % 60 + 2) / 5) * 5;
+        if rem_mins == 0 || rem_mins >= 60 {
+            let adj_hours = if rem_mins >= 60 { hours + 1 } else { hours };
+            tr!("device.battery_duration_hours", hours => adj_hours).into()
+        } else {
+            tr!(
+                "device.battery_charge_hours_minutes",
+                hours => hours,
+                minutes => rem_mins
+            )
+            .into()
+        }
     }
 }
 
@@ -609,16 +754,31 @@ pub(crate) fn estimate_for_device(
     record: &DeviceRecord,
 ) -> Option<BatteryEstimate> {
     let battery = record.battery.as_ref()?;
-    if matches!(
+    if matches!(battery.status, BatteryStatus::Error) {
+        return None;
+    }
+    let is_charging = matches!(
         battery.status,
-        BatteryStatus::Charging | BatteryStatus::ChargingSlow | BatteryStatus::Error
-    ) {
-        return None;
-    }
-    let percentage = effective_percentage(battery)?;
-    if percentage == 0 {
-        return None;
-    }
+        BatteryStatus::Charging | BatteryStatus::ChargingSlow
+    );
+    let percentage = if is_charging {
+        // Offline devices cannot report live charging progress, and 0% while charging
+        // is treated by `BatteryIndicator` as a cold-start `NoReading`.
+        if !record.is_online() {
+            return None;
+        }
+        let pct = battery.percentage?.min(100);
+        if pct == 0 || pct >= 100 {
+            return None;
+        }
+        pct
+    } else {
+        let pct = effective_percentage(battery)?;
+        if pct == 0 {
+            return None;
+        }
+        pct
+    };
 
     let (nominal_full_hours, signature, config_note) = nominal_profile_for_device(state, record);
 
@@ -628,15 +788,21 @@ pub(crate) fn estimate_for_device(
 
     // Nominal % per day at 100% health:
     let nominal_pct_per_day = (100.0 * 24.0) / (nominal_full_hours.max(1) as f32);
-    // Adjust nominal drain by battery health (lower health -> faster drain):
-    let health_factor = f32::from(health_pct.clamp(50, 100)) / 100.0;
+    // Adjust nominal drain by calibrated battery health (or 100% baseline while calibrating):
+    let health_factor = f32::from(health_pct.unwrap_or(100).clamp(50, 100)) / 100.0;
     let model_pct_per_day = nominal_pct_per_day / health_factor;
 
-    // Blend physics/config model with historical learned drain for this exact signature:
+    // Blend physics/config model with historical learned drain for this exact signature.
+    // Clamp learned drain around the profile's nominal duty-cycle rate (0.35x..2.2x) so a
+    // single 5% firmware quantization step right after changing settings cannot skew the
+    // estimate to an unrealistic multi-day drop.
     let effective_pct_per_day = match learned_drain {
         Some(learned) if learned.samples > 0 => {
+            let plausible_learned = learned
+                .pct_per_day
+                .clamp(model_pct_per_day * 0.35, model_pct_per_day * 2.2);
             let weight = ((learned.samples as f32) * 0.20).clamp(0.20, 0.75);
-            model_pct_per_day * (1.0 - weight) + learned.pct_per_day * weight
+            model_pct_per_day * (1.0 - weight) + plausible_learned * weight
         }
         _ => model_pct_per_day,
     }
@@ -648,13 +814,68 @@ pub(crate) fn estimate_for_device(
     let full_charge_hours = (full_charge_days * 24.0).round().max(1.0) as u32;
     let remaining_hours = (remaining_days * 24.0).round().max(1.0) as u32;
 
+    let phase = if is_charging {
+        let (minutes_to_80, minutes_to_100) =
+            estimate_charging_minutes(record.kind, percentage, battery.status);
+        EstimatePhase::Charging {
+            minutes_to_80,
+            minutes_to_100,
+        }
+    } else {
+        EstimatePhase::Discharging
+    };
+
     Some(BatteryEstimate {
+        phase,
         remaining_hours,
         full_charge_hours,
         health_pct,
         learned_samples,
         config_note,
     })
+}
+
+/// Models two-stage Li-Po CC/CV charging minutes (`(minutes_to_80, minutes_to_100)`):
+/// - Constant-Current fast phase (`0..80%`): linear charge rate (`~1.25 min/%` on ~1500mAh
+///   keyboards like MX Keys Mini; `~0.75 min/%` on ~500mAh mice like MX Master 3S).
+/// - Constant-Voltage taper/trickle phase (`80..100%`): current tapers (`~2.0 min/%` for
+///   `80..90%` and `~2.5 min/%` for `90..100%` on keyboards; `~1.3` / `~1.7 min/%` on mice).
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "positive bounded minutes round into u32"
+)]
+fn estimate_charging_minutes(
+    kind: DeviceKind,
+    percentage: u8,
+    status: BatteryStatus,
+) -> (Option<u32>, u32) {
+    let (cc_min_per_pct, cv_early_min_per_pct, cv_late_min_per_pct) = match kind {
+        DeviceKind::Keyboard => (1.25_f32, 2.0_f32, 2.5_f32),
+        _ => (0.75_f32, 1.3_f32, 1.7_f32),
+    };
+    let slow_mult = if status == BatteryStatus::ChargingSlow {
+        1.6_f32
+    } else {
+        1.0_f32
+    };
+
+    if percentage < 80 {
+        let fast_phase_mins = f32::from(80 - percentage) * cc_min_per_pct * slow_mult;
+        let trickle_phase_mins =
+            (10.0 * cv_early_min_per_pct + 10.0 * cv_late_min_per_pct) * slow_mult;
+        let m80 = (fast_phase_mins.round() as u32).max(1);
+        let m100 = ((fast_phase_mins + trickle_phase_mins).round() as u32).max(m80 + 5);
+        (Some(m80), m100)
+    } else {
+        let early_pct = 90u8.saturating_sub(percentage);
+        let late_pct = 100u8.saturating_sub(percentage.max(90));
+        let trickle_phase_mins = (f32::from(early_pct) * cv_early_min_per_pct
+            + f32::from(late_pct) * cv_late_min_per_pct)
+            * slow_mult;
+        let m100 = (trickle_phase_mins.round() as u32).max(2);
+        (None, m100)
+    }
 }
 
 fn effective_percentage(battery: &BatteryInfo) -> Option<u8> {
@@ -920,7 +1141,8 @@ mod tests {
     };
 
     use super::{
-        BatteryTelemetry, DischargePhase, MAX_LEARN_WINDOW_SECS, MIN_LEARN_WINDOW_SECS, Ordering,
+        BatteryTelemetry, DischargePhase, EstimatePhase, MAX_LEARN_WINDOW_SECS,
+        MIN_HEALTH_DROP_PCT, MIN_HEALTH_SAMPLES, MIN_LEARN_WINDOW_SECS, Ordering,
         TELEMETRY_STAGED_SEQ, estimate_for_device, next_staged_telemetry_path_for_seq,
         nominal_profile_for_device, observe_state_telemetry_at, staged_telemetry_path,
     };
@@ -1043,8 +1265,14 @@ mod tests {
             "unexpected en note: {:?}",
             en_est.config_note
         );
-        assert!(en_est.home_label().contains("Health 100%"));
+        assert!(!en_est.home_label().contains("Health"));
+        assert!(en_est.home_label().contains("left"));
         assert!(en_est.detail_headline().contains("remaining"));
+        assert!(
+            en_est
+                .detail_subline()
+                .contains("Est. health: calibrating…")
+        );
         assert!(en_est.detail_subline().contains("Based on active config"));
 
         rust_i18n::set_locale("pt-BR");
@@ -1058,8 +1286,13 @@ mod tests {
             "unexpected pt-BR note: {:?}",
             pt_est.config_note
         );
-        assert!(pt_est.home_label().contains("Saúde 100%"));
+        assert!(!pt_est.home_label().contains("Saúde"));
         assert!(pt_est.detail_headline().contains("restantes"));
+        assert!(
+            pt_est
+                .detail_subline()
+                .contains("Saúde estim.: calculando…")
+        );
         assert!(pt_est.detail_subline().contains("Baseado na config atual"));
         rust_i18n::set_locale("en");
     }
@@ -1274,7 +1507,7 @@ mod tests {
             t0 + 2 * 86_400,
         );
         let (health, learned, samples) = state.battery_telemetry().query(&key, "kbd:standard");
-        assert_eq!(health, 100);
+        assert_eq!(health, None);
         assert_eq!(learned, None);
         assert_eq!(samples, 0);
 
@@ -1736,5 +1969,162 @@ mod tests {
             "RGB mouse without report_rate capability must learn discharge intervals (nominal_hours={nominal_hours})"
         );
         assert!(learned.is_some());
+    }
+
+    #[test]
+    fn charging_estimate_models_two_stage_curve_and_rejects_cold_start_or_offline() {
+        let _lock = LOCALE_LOCK.lock().unwrap();
+        rust_i18n::set_locale("en");
+
+        // 1. Below 80% (e.g. 50% Charging): returns both 80% fast milestone and 100% full ETA.
+        let charging_50 = BatteryInfo {
+            percentage: Some(50),
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Charging,
+        };
+        let state_50 = test_state_with_devices(vec![mx_keys_mini_device(None, Some(charging_50))]);
+        let est_50 = estimate_for_device(&state_50, &state_50.devices()[0]).unwrap();
+        assert!(matches!(
+            est_50.phase,
+            EstimatePhase::Charging {
+                minutes_to_80: Some(m80),
+                minutes_to_100: m100,
+            } if m80 > 0 && m100 > m80
+        ));
+        assert!(est_50.home_label().contains("to 80%"));
+        assert!(est_50.home_label().contains("to 100%"));
+        assert!(est_50.inline_label().contains("→ 80%"));
+
+        // 2. Between 80% and 99% (e.g. 90% Charging): in CV slow phase, minutes_to_80 is None.
+        let charging_90 = BatteryInfo {
+            percentage: Some(90),
+            level: BatteryLevel::Full,
+            status: BatteryStatus::Charging,
+        };
+        let state_90 = test_state_with_devices(vec![mx_keys_mini_device(None, Some(charging_90))]);
+        let est_90 = estimate_for_device(&state_90, &state_90.devices()[0]).unwrap();
+        assert_eq!(
+            est_90.phase,
+            EstimatePhase::Charging {
+                minutes_to_80: None,
+                minutes_to_100: 25,
+            }
+        );
+        assert_eq!(est_90.home_label(), "~25m to 100%");
+        assert_eq!(est_90.inline_label(), "~25m → 100%");
+        assert!(est_90.detail_headline().contains("80–100% slow phase"));
+
+        // 3. Cold-start 0% while charging, 100% while charging, coarse-level charging,
+        // and offline cached charging all return None.
+        for invalid in [
+            BatteryInfo {
+                percentage: Some(0),
+                level: BatteryLevel::Unknown,
+                status: BatteryStatus::Charging,
+            },
+            BatteryInfo {
+                percentage: Some(100),
+                level: BatteryLevel::Full,
+                status: BatteryStatus::Charging,
+            },
+            BatteryInfo {
+                percentage: None,
+                level: BatteryLevel::Good,
+                status: BatteryStatus::Charging,
+            },
+        ] {
+            let st = test_state_with_devices(vec![mx_keys_mini_device(None, Some(invalid))]);
+            assert_eq!(estimate_for_device(&st, &st.devices()[0]), None);
+        }
+
+        let mut offline_dev = mx_keys_mini_device(
+            None,
+            Some(BatteryInfo {
+                percentage: Some(60),
+                level: BatteryLevel::Good,
+                status: BatteryStatus::Charging,
+            }),
+        );
+        offline_dev.online = false;
+        let st_offline = test_state_with_devices(vec![offline_dev]);
+        assert_eq!(
+            estimate_for_device(&st_offline, &st_offline.devices()[0]),
+            None
+        );
+    }
+
+    #[test]
+    fn multi_cycle_health_calibration_omits_home_health_and_shows_calibrating_until_ready() {
+        let _lock = LOCALE_LOCK.lock().unwrap();
+        rust_i18n::set_locale("en");
+
+        let battery_90 = BatteryInfo {
+            percentage: Some(90),
+            level: BatteryLevel::Full,
+            status: BatteryStatus::Discharging,
+        };
+        let mut state = test_state_with_devices(vec![mx_keys_mini_device(None, Some(battery_90))]);
+        let cfg_key = state.devices()[0].config_key.clone();
+        let sig = "kbd:standard";
+        let nominal_hours = 120 * 24;
+        let mut now = 4_000_000_000_u64;
+
+        // Before MIN_HEALTH_DROP_PCT (150%) and MIN_HEALTH_SAMPLES (5), health_pct is None.
+        let est_initial = estimate_for_device(&state, &state.devices()[0]).unwrap();
+        assert_eq!(est_initial.health_pct, None);
+        assert!(
+            est_initial
+                .detail_subline()
+                .contains("Est. health: calibrating…")
+        );
+
+        // Feed 5 discharge intervals totaling 150% drop (30% drop each over 10 days).
+        for _ in 0..MIN_HEALTH_SAMPLES {
+            state.battery_telemetry_mut().observe_device(
+                &cfg_key,
+                true,
+                Some(&BatteryInfo {
+                    percentage: Some(90),
+                    level: BatteryLevel::Full,
+                    status: BatteryStatus::Discharging,
+                }),
+                Some(sig),
+                nominal_hours,
+                now,
+            );
+            now += 10 * 86_400;
+            state.battery_telemetry_mut().observe_device(
+                &cfg_key,
+                true,
+                Some(&BatteryInfo {
+                    percentage: Some(60),
+                    level: BatteryLevel::Good,
+                    status: BatteryStatus::Discharging,
+                }),
+                Some(sig),
+                nominal_hours,
+                now,
+            );
+            now += 3_600;
+        }
+
+        let (calibrated, _, samples) = state.battery_telemetry().query(&cfg_key, sig);
+        assert_eq!(samples, MIN_HEALTH_SAMPLES);
+        assert!(
+            calibrated.is_some(),
+            "expected calibrated health after >= {MIN_HEALTH_DROP_PCT}% drop and {MIN_HEALTH_SAMPLES} samples"
+        );
+
+        let est_calibrated = estimate_for_device(&state, &state.devices()[0]).unwrap();
+        assert!(est_calibrated.health_pct.is_some());
+        assert!(
+            !est_calibrated.home_label().contains("Health"),
+            "Home label must never display health"
+        );
+        assert!(
+            est_calibrated.detail_subline().contains("Est. health: ~"),
+            "Detail subline must display Est. health once calibrated: {}",
+            est_calibrated.detail_subline()
+        );
     }
 }
