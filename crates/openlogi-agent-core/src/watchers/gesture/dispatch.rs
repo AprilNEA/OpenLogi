@@ -18,7 +18,7 @@ use tracing::debug;
 
 use openlogi_inject::SpaceSwipePhase;
 
-use self::space_swipe::{Frame, SpaceProbe, SpaceSwipes};
+use self::space_swipe::{Frame, SpaceProbe, SpaceSwipes, Timing};
 use self::wheel::{ScrollScale, WheelAccumulators, WheelOutput, WheelRotation};
 use super::GestureOutputs;
 use crate::capture_plan::DispatchPlan;
@@ -117,6 +117,15 @@ const SPACE_PROBE: SpaceProbe = SpaceProbe {
     position: || None,
     changes: || None,
 };
+
+/// The timing of an input that `arrived` at that instant and whose frames
+/// go out now.
+fn posting(arrived: Instant) -> Timing {
+    Timing {
+        arrived,
+        now: Instant::now(),
+    }
+}
 
 /// The swipe that reverses `direction`, for the opposite desktop binding.
 fn reverse(direction: GestureDirection) -> GestureDirection {
@@ -312,8 +321,8 @@ impl InputDispatcher {
 
     /// Route one captured input from `session` to its bound action or
     /// re-synthesised scroll output. `at` is when the input arrived from the
-    /// device: it times a live Space transition, so a batch drained late keeps
-    /// the gaps between its reports.
+    /// device: it times the hand in a live Space transition, so a batch
+    /// drained late keeps the gaps between its reports.
     pub(super) fn dispatch(
         &mut self,
         session: &HidppSessionId,
@@ -377,7 +386,7 @@ impl InputDispatcher {
                     if let Some(action) = self.spaces.unstarted(session, button) {
                         self.dispatch_while_held(session, button, &action);
                     }
-                    self.spaces.end(session, button, at)
+                    self.spaces.end(session, button, posting(at))
                 } else {
                     self.spaces.cancel(session, button)
                 };
@@ -498,9 +507,9 @@ impl InputDispatcher {
         };
         debug!(key, %button, ?direction, action = %action.label(), "gesture → action");
         let opposite = map.and_then(|map| map.get(&reverse(direction)));
-        if let Some(opened) = self
-            .spaces
-            .begin(session, button, direction, action, opposite, at)
+        if let Some(opened) =
+            self.spaces
+                .begin(session, button, direction, action, opposite, posting(at))
         {
             let Some(frame) = opened.frame() else {
                 debug!(key, %button, ?direction, "live Space transition waits for the last switch to land");
@@ -544,7 +553,7 @@ impl InputDispatcher {
     ) {
         let unstarted = self.spaces.unstarted(session, button);
         let frames = if self.press_is_live(session, button) {
-            self.spaces.motion(session, button, dx, at)
+            self.spaces.motion(session, button, dx, posting(at))
         } else {
             self.spaces.cancel(session, button)
         };

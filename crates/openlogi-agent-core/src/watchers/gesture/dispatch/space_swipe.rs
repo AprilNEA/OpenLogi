@@ -75,6 +75,17 @@ impl SpaceProbe {
     };
 }
 
+/// When one hold event happened. `arrived` is when its report came off the
+/// device, and times the hand: a batch drained late keeps the gaps between
+/// its reports. `now` is when its frames go out, and times the Dock: a
+/// switch lands some time after its Ended is posted, however old the reports
+/// that finished it.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Timing {
+    pub(super) arrived: Instant,
+    pub(super) now: Instant,
+}
+
 /// One frame for the Dock: cumulative progress in desktop widths (positive
 /// toward the next desktop) and its lifecycle phase.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -241,7 +252,7 @@ struct Transition {
 /// Move a leg to `progress`: follow the hand below a full desktop, hold at the
 /// edge of the last desktop, or finish the switch at a full width and settle.
 /// `velocity` is the hand's speed along the transition, which a finish
-/// carries toward its desktop.
+/// carries toward its desktop; `now` is when the frame goes out.
 fn step(
     progress: f64,
     velocity: f64,
@@ -321,7 +332,7 @@ impl SpaceSwipes {
         direction: GestureDirection,
         action: &Action,
         opposite: Option<&Action>,
-        now: Instant,
+        at: Timing,
     ) -> Option<Opened> {
         // Live transitions are off without a travel per desktop.
         self.travel?;
@@ -333,7 +344,7 @@ impl SpaceSwipes {
         let stage = match self
             .landing
             .take()
-            .filter(|landing| !landing.is_over(self.probe, now))
+            .filter(|landing| !landing.is_over(self.probe, at.now))
         {
             Some(landing) => Stage::WaitingFirst {
                 landing,
@@ -353,7 +364,7 @@ impl SpaceSwipes {
                 stage,
                 fresh: true,
                 velocity: 0.0,
-                moved_at: now,
+                moved_at: at.arrived,
             },
         );
         Some(if waits {
@@ -396,7 +407,7 @@ impl SpaceSwipes {
         session: &HidppSessionId,
         button: ButtonId,
         dx: i32,
-        now: Instant,
+        at: Timing,
     ) -> Vec<Frame> {
         let (Some(travel), probe) = (self.travel, self.probe) else {
             return Vec::new();
@@ -406,7 +417,7 @@ impl SpaceSwipes {
         };
         let commit_travel = std::mem::replace(&mut t.fresh, false);
         let delta = t.polarity * f64::from(dx) / travel;
-        let elapsed = now.saturating_duration_since(t.moved_at);
+        let elapsed = at.arrived.saturating_duration_since(t.moved_at);
         if elapsed >= STALE_MOTION {
             t.velocity = 0.0;
         }
@@ -416,7 +427,7 @@ impl SpaceSwipes {
         if !commit_travel && elapsed >= MIN_SPEED_SAMPLE {
             t.velocity = 0.5 * t.velocity + 0.5 * delta / elapsed.as_secs_f64();
         }
-        t.moved_at = now;
+        t.moved_at = at.arrived;
         let velocity = t.velocity;
         let keep_sign = t.keep_sign;
         let hold_sign = |progress: f64| match keep_sign {
@@ -426,7 +437,7 @@ impl SpaceSwipes {
 
         match &t.stage {
             Stage::WaitingFirst { landing, .. } | Stage::WaitingNext(landing) => {
-                if !landing.is_over(probe, now) {
+                if !landing.is_over(probe, at.now) {
                     return Vec::new();
                 }
                 // The switch landed: the next transition starts from this
@@ -435,7 +446,8 @@ impl SpaceSwipes {
                 // other (a full desktop's worth finishes at once, with no
                 // speed sample yet).
                 t.velocity = 0.0;
-                let (stage, frame) = step(hold_sign(delta), 0.0, Bounds::read(probe), probe, now);
+                let (stage, frame) =
+                    step(hold_sign(delta), 0.0, Bounds::read(probe), probe, at.now);
                 t.stage = stage;
                 match frame.phase {
                     SpaceSwipePhase::Ended { .. } => {
@@ -446,7 +458,7 @@ impl SpaceSwipes {
             }
             &Stage::InFlight { progress, bounds } => {
                 let (stage, frame) =
-                    step(hold_sign(progress + delta), velocity, bounds, probe, now);
+                    step(hold_sign(progress + delta), velocity, bounds, probe, at.now);
                 t.stage = stage;
                 vec![frame]
             }
@@ -462,7 +474,7 @@ impl SpaceSwipes {
         &mut self,
         session: &HidppSessionId,
         button: ButtonId,
-        now: Instant,
+        at: Timing,
     ) -> Vec<Frame> {
         let Some(t) = self.active.remove(&(session.clone(), button)) else {
             return Vec::new();
@@ -472,7 +484,7 @@ impl SpaceSwipes {
             return Vec::new();
         };
         let sign = progress.signum();
-        let speed = if now.saturating_duration_since(t.moved_at) >= STALE_MOTION {
+        let speed = if at.arrived.saturating_duration_since(t.moved_at) >= STALE_MOTION {
             0.0
         } else {
             t.velocity * sign
@@ -480,7 +492,7 @@ impl SpaceSwipes {
         let past_halfway = progress.abs() >= COMPLETE_AT && speed > -FLICK_SPEED;
         let flicked = progress.abs() >= FLICK_MIN && speed >= FLICK_SPEED;
         if bounds.allows(sign) && (past_halfway || flicked) {
-            self.landing = Some(Landing::at(self.probe, now));
+            self.landing = Some(Landing::at(self.probe, at.now));
             vec![Frame::new(progress, SpaceSwipePhase::Ended { speed })]
         } else {
             vec![Frame::new(progress, SpaceSwipePhase::Cancelled)]

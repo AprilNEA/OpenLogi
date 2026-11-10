@@ -67,6 +67,14 @@ const SILENT_UNTIL_LAST: SpaceProbe = SpaceProbe {
     changes: || Some(0),
 };
 
+/// The timing of a report dispatched the moment it arrived.
+fn live(at: Instant) -> Timing {
+    Timing {
+        arrived: at,
+        now: at,
+    }
+}
+
 fn session() -> HidppSessionId {
     HidppSessionId::with_epoch("mouse", 1)
 }
@@ -84,7 +92,7 @@ fn begin_right(swipes: &mut SpaceSwipes, now: Instant) -> Frame {
             GestureDirection::Right,
             &Action::NextDesktop,
             Some(&Action::PreviousDesktop),
-            now,
+            live(now),
         )
         .expect("a desktop swipe opens a transition")
         .frame()
@@ -109,7 +117,7 @@ fn sweep(swipes: &mut SpaceSwipes, start: Instant, reports: u32, dx: i32) -> (Ve
     let mut now = start;
     for _ in 0..reports {
         now += Duration::from_millis(8);
-        frames.extend(swipes.motion(&session(), BUTTON, dx, now));
+        frames.extend(swipes.motion(&session(), BUTTON, dx, live(now)));
     }
     (frames, now)
 }
@@ -124,7 +132,7 @@ fn only_horizontal_desktop_swipes_open_a_transition() {
         (GestureDirection::Right, Action::MissionControl),
     ] {
         assert_eq!(
-            swipes.begin(&session(), BUTTON, direction, &action, None, now),
+            swipes.begin(&session(), BUTTON, direction, &action, None, live(now)),
             None
         );
     }
@@ -137,7 +145,7 @@ fn only_horizontal_desktop_swipes_open_a_transition() {
                 GestureDirection::Right,
                 &Action::NextDesktop,
                 None,
-                now,
+                live(now),
             )
             .is_none(),
         "live transitions off means the one-shot switch"
@@ -151,7 +159,7 @@ fn a_transition_opens_at_zero_and_the_commit_travel_moves_it() {
     let frame = begin_right(&mut opened, now);
     assert_eq!(frame, Frame::new(0.0, SpaceSwipePhase::Began));
     // The commit's own travel arrives as the hold's first motion.
-    let frames = opened.motion(&session(), BUTTON, 60, now);
+    let frames = opened.motion(&session(), BUTTON, 60, live(now));
     assert_eq!(phases(&frames), vec![SpaceSwipePhase::Changed]);
     assert!((frames[0].progress - 60.0 / TRAVEL).abs() < 1e-9);
 
@@ -164,10 +172,10 @@ fn a_transition_opens_at_zero_and_the_commit_travel_moves_it() {
             GestureDirection::Right,
             &Action::PreviousDesktop,
             Some(&Action::NextDesktop),
-            now,
+            live(now),
         )
         .expect("opened");
-    let frames = swapped.motion(&session(), BUTTON, 80, now + Duration::from_millis(8));
+    let frames = swapped.motion(&session(), BUTTON, 80, live(now + Duration::from_millis(8)));
     assert!(frames[0].progress < 0.0, "moving right heads previous");
 }
 
@@ -178,8 +186,8 @@ fn the_commit_travel_is_no_speed_sample() {
     begin_right(&mut swipes, start);
     // The commit's travel lands in the same instant the transition opens:
     // it moves the Space but must not read as an instant flick.
-    let _ = swipes.motion(&session(), BUTTON, 60, start);
-    let frames = swipes.end(&session(), BUTTON, start + Duration::from_millis(4));
+    let _ = swipes.motion(&session(), BUTTON, 60, live(start));
+    let frames = swipes.end(&session(), BUTTON, live(start + Duration::from_millis(4)));
     assert_eq!(phases(&frames), vec![SpaceSwipePhase::Cancelled]);
 }
 
@@ -191,8 +199,13 @@ fn a_late_commit_travel_is_no_speed_sample_either() {
     // Reading the Space and posting `Began` took 10 ms, so the commit's travel
     // arrives well past the speed-sample gap. It was accumulated at the hand's
     // own pace, not in this gap: 100 units over 10 ms would read as a flick.
-    let _ = swipes.motion(&session(), BUTTON, 100, start + Duration::from_millis(10));
-    let frames = swipes.end(&session(), BUTTON, start + Duration::from_millis(14));
+    let _ = swipes.motion(
+        &session(),
+        BUTTON,
+        100,
+        live(start + Duration::from_millis(10)),
+    );
+    let frames = swipes.end(&session(), BUTTON, live(start + Duration::from_millis(14)));
     assert_eq!(phases(&frames), vec![SpaceSwipePhase::Cancelled]);
 }
 
@@ -231,12 +244,12 @@ fn motion_waits_for_the_switch_to_land_then_restarts() {
     assert!(frames.is_empty(), "no frames while the switch lands");
     // Past the timeout the next transition starts from this report alone.
     let later = now + SETTLE_TIMEOUT;
-    let frames = swipes.motion(&session(), BUTTON, 40, later);
+    let frames = swipes.motion(&session(), BUTTON, 40, live(later));
     assert_eq!(phases(&frames), vec![SpaceSwipePhase::Began]);
     assert!((frames[0].progress - 40.0 / TRAVEL).abs() < 1e-9);
     // A release while settling has nothing in flight.
     let mut settling = swipes_settling(start);
-    assert!(settling.end(&session(), BUTTON, start).is_empty());
+    assert!(settling.end(&session(), BUTTON, live(start)).is_empty());
 }
 
 #[test]
@@ -248,7 +261,7 @@ fn a_full_desktop_report_after_landing_finishes_at_once() {
     // A single report worth more than a desktop opens the next leg and
     // finishes it, rather than leaving a Began past full width. The leg has
     // no speed sample yet.
-    let frames = swipes.motion(&session(), BUTTON, 900, now + SETTLE_TIMEOUT);
+    let frames = swipes.motion(&session(), BUTTON, 900, live(now + SETTLE_TIMEOUT));
     assert_eq!(
         frames,
         vec![
@@ -268,10 +281,15 @@ fn a_full_desktop_report_after_landing_on_the_last_desktop_holds_at_the_edge() {
     // The switch landed on the last desktop.
     HAS_NEXT.set(false);
     let later = now + SETTLE_TIMEOUT;
-    let frames = swipes.motion(&session(), BUTTON, 900, later);
+    let frames = swipes.motion(&session(), BUTTON, 900, live(later));
     assert_eq!(frames, vec![Frame::new(1.0, SpaceSwipePhase::Began)]);
     // Pulling back responds at once: there is no excess travel to undo.
-    let frames = swipes.motion(&session(), BUTTON, -100, later + Duration::from_millis(8));
+    let frames = swipes.motion(
+        &session(),
+        BUTTON,
+        -100,
+        live(later + Duration::from_millis(8)),
+    );
     assert_eq!(phases(&frames), vec![SpaceSwipePhase::Changed]);
     assert!((frames[0].progress - (1.0 - 100.0 / TRAVEL)).abs() < 1e-9);
 }
@@ -284,7 +302,7 @@ fn begin_again(swipes: &mut SpaceSwipes, now: Instant) -> Option<Frame> {
             GestureDirection::Right,
             &Action::NextDesktop,
             Some(&Action::PreviousDesktop),
-            now,
+            live(now),
         )
         .expect("a desktop swipe opens a transition")
         .frame()
@@ -296,7 +314,7 @@ fn a_hold_right_after_a_finished_switch_waits_for_it_to_land() {
     let start = Instant::now();
     begin_right(&mut swipes, start);
     let (_, now) = sweep(&mut swipes, start, 45, 10);
-    let frames = swipes.end(&session(), BUTTON, now + Duration::from_millis(300));
+    let frames = swipes.end(&session(), BUTTON, live(now + Duration::from_millis(300)));
     assert!(frames.first().and_then(end_speed).is_some(), "{frames:?}");
     // The next hold opens without a Began while the Dock still animates.
     let now = now + Duration::from_millis(400);
@@ -304,7 +322,7 @@ fn a_hold_right_after_a_finished_switch_waits_for_it_to_land() {
     let (frames, now) = sweep(&mut swipes, now, 10, 10);
     assert!(frames.is_empty(), "no frames while the last switch lands");
     // Once it has landed (here: timed out), the leg begins from the hand.
-    let frames = swipes.motion(&session(), BUTTON, 40, now + SETTLE_TIMEOUT);
+    let frames = swipes.motion(&session(), BUTTON, 40, live(now + SETTLE_TIMEOUT));
     assert_eq!(phases(&frames), vec![SpaceSwipePhase::Began]);
 }
 
@@ -312,7 +330,7 @@ fn a_hold_right_after_a_finished_switch_waits_for_it_to_land() {
 fn a_hold_waiting_on_a_landing_keeps_its_action_until_it_begins() {
     let start = Instant::now();
     let mut swipes = swipes_settling(start);
-    let _ = swipes.end(&session(), BUTTON, start);
+    let _ = swipes.end(&session(), BUTTON, live(start));
     let now = start + Duration::from_millis(100);
     assert_eq!(begin_again(&mut swipes, now), None);
     // Released or refused before it begins, the hold falls back on this.
@@ -320,7 +338,7 @@ fn a_hold_waiting_on_a_landing_keeps_its_action_until_it_begins() {
         swipes.unstarted(&session(), BUTTON),
         Some(Action::NextDesktop)
     );
-    let frames = swipes.motion(&session(), BUTTON, 40, now + SETTLE_TIMEOUT);
+    let frames = swipes.motion(&session(), BUTTON, 40, live(now + SETTLE_TIMEOUT));
     assert_eq!(phases(&frames), vec![SpaceSwipePhase::Began]);
     assert_eq!(swipes.unstarted(&session(), BUTTON), None);
 }
@@ -336,13 +354,13 @@ fn a_hold_that_begins_at_once_has_no_fallback_to_keep() {
 fn a_hold_has_no_fallback_action_once_its_first_leg_began() {
     let start = Instant::now();
     let mut swipes = swipes_settling(start);
-    let _ = swipes.end(&session(), BUTTON, start);
+    let _ = swipes.end(&session(), BUTTON, live(start));
     let now = start + Duration::from_millis(100);
     assert_eq!(begin_again(&mut swipes, now), None);
     // The landing over, the first leg begins and completes a switch: the
     // hold now waits on its own switch, with nothing to switch one-shot.
     let now = now + SETTLE_TIMEOUT;
-    let frames = swipes.motion(&session(), BUTTON, 40, now);
+    let frames = swipes.motion(&session(), BUTTON, 40, live(now));
     assert_eq!(phases(&frames), vec![SpaceSwipePhase::Began]);
     let (frames, _) = sweep(&mut swipes, now, 20, 40);
     assert!(
@@ -356,17 +374,45 @@ fn a_hold_has_no_fallback_action_once_its_first_leg_began() {
 fn a_hold_waiting_on_a_landing_moves_nothing_before_it_begins() {
     let start = Instant::now();
     let mut swipes = swipes_settling(start);
-    let _ = swipes.end(&session(), BUTTON, start);
+    let _ = swipes.end(&session(), BUTTON, live(start));
     let now = start + Duration::from_millis(100);
     assert_eq!(begin_again(&mut swipes, now), None);
     let (frames, now) = sweep(&mut swipes, now, 10, 10);
     assert!(frames.is_empty(), "{frames:?}");
     // The leg begins from the report after the landing alone, not from the
     // travel dropped while it waited.
-    let frames = swipes.motion(&session(), BUTTON, 40, now + SETTLE_TIMEOUT);
+    let frames = swipes.motion(&session(), BUTTON, 40, live(now + SETTLE_TIMEOUT));
     assert_eq!(
         frames,
         vec![Frame::new(40.0 / TRAVEL, SpaceSwipePhase::Began)]
+    );
+}
+
+#[test]
+fn a_landing_is_timed_from_when_its_switch_went_out() {
+    let mut swipes = swipes(SILENT);
+    let start = Instant::now();
+    begin_right(&mut swipes, start);
+    // A full desktop finishes the switch; its Ended goes out at `start`.
+    let frames = swipes.motion(&session(), BUTTON, 800, live(start));
+    assert!(
+        frames.iter().any(|frame| end_speed(frame).is_some()),
+        "{frames:?}"
+    );
+    // Reports drained in one late batch arrived long after it, but the
+    // Dock has only just started landing: the next leg still waits.
+    let late = Timing {
+        arrived: start + SETTLE_TIMEOUT + Duration::from_millis(100),
+        now: start + Duration::from_millis(10),
+    };
+    assert!(swipes.motion(&session(), BUTTON, 40, late).is_empty());
+    let landed = Timing {
+        arrived: late.arrived,
+        now: start + SETTLE_TIMEOUT,
+    };
+    assert_eq!(
+        phases(&swipes.motion(&session(), BUTTON, 40, landed)),
+        vec![SpaceSwipePhase::Began]
     );
 }
 
@@ -394,7 +440,7 @@ fn a_hold_after_the_last_switch_landed_begins_at_once() {
     let start = Instant::now();
     begin_right(&mut swipes, start);
     let (_, now) = sweep(&mut swipes, start, 45, 10);
-    let _ = swipes.end(&session(), BUTTON, now + Duration::from_millis(300));
+    let _ = swipes.end(&session(), BUTTON, live(now + Duration::from_millis(300)));
     assert_eq!(
         begin_again(&mut swipes, now + Duration::from_millis(400)).map(|f| f.phase),
         Some(SpaceSwipePhase::Began)
@@ -405,7 +451,7 @@ fn a_hold_after_the_last_switch_landed_begins_at_once() {
 fn a_release_while_settling_still_holds_off_the_next_hold() {
     let start = Instant::now();
     let mut swipes = swipes_settling(start);
-    assert!(swipes.end(&session(), BUTTON, start).is_empty());
+    assert!(swipes.end(&session(), BUTTON, live(start)).is_empty());
     assert_eq!(
         begin_again(&mut swipes, start + Duration::from_millis(100)),
         None
@@ -445,7 +491,12 @@ fn canceling_one_hold_springs_back_only_a_transition_in_flight() {
     let start = Instant::now();
     let mut in_flight = swipes(PROMPT);
     begin_right(&mut in_flight, start);
-    let _ = in_flight.motion(&session(), BUTTON, 200, start + Duration::from_millis(8));
+    let _ = in_flight.motion(
+        &session(),
+        BUTTON,
+        200,
+        live(start + Duration::from_millis(8)),
+    );
     let frames = in_flight.cancel(&session(), BUTTON);
     assert_eq!(phases(&frames), vec![SpaceSwipePhase::Cancelled]);
     assert!(!in_flight.is_active(&session(), BUTTON));
@@ -479,9 +530,14 @@ fn the_last_desktop_holds_at_the_edge_and_springs_back() {
     );
     assert!((frames.last().expect("frames").progress - 1.0).abs() < 1e-9);
     // Pulling back responds at once from the edge.
-    let back = swipes.motion(&session(), BUTTON, -80, now + Duration::from_millis(8));
+    let back = swipes.motion(
+        &session(),
+        BUTTON,
+        -80,
+        live(now + Duration::from_millis(8)),
+    );
     assert!((back[0].progress - 0.9).abs() < 1e-9);
-    let frames = swipes.end(&session(), BUTTON, now + Duration::from_millis(300));
+    let frames = swipes.end(&session(), BUTTON, live(now + Duration::from_millis(300)));
     assert_eq!(phases(&frames), vec![SpaceSwipePhase::Cancelled]);
 }
 
@@ -491,7 +547,7 @@ fn a_short_slow_drag_springs_back_on_release() {
     let start = Instant::now();
     begin_right(&mut swipes, start);
     let (_, now) = sweep(&mut swipes, start, 10, 10);
-    let frames = swipes.end(&session(), BUTTON, now + Duration::from_millis(300));
+    let frames = swipes.end(&session(), BUTTON, live(now + Duration::from_millis(300)));
     assert_eq!(phases(&frames), vec![SpaceSwipePhase::Cancelled]);
     assert!(!swipes.is_active(&session(), BUTTON));
 }
@@ -503,7 +559,7 @@ fn a_drag_past_halfway_finishes_on_release() {
     begin_right(&mut swipes, start);
     let (_, now) = sweep(&mut swipes, start, 45, 10);
     // Released 300 ms after the hand stopped: the switch finishes from rest.
-    let frames = swipes.end(&session(), BUTTON, now + Duration::from_millis(300));
+    let frames = swipes.end(&session(), BUTTON, live(now + Duration::from_millis(300)));
     assert_eq!(phases(&frames), vec![SpaceSwipePhase::Ended { speed: 0.0 }]);
     assert!(frames[0].progress >= COMPLETE_AT);
 }
@@ -515,7 +571,7 @@ fn a_short_flick_finishes_where_the_hand_let_go_at_its_speed() {
     begin_right(&mut swipes, start);
     // 5 × 30 = 150 units (about 0.19 desktop) in 40 ms, released at speed.
     let (_, now) = sweep(&mut swipes, start, 5, 30);
-    let frames = swipes.end(&session(), BUTTON, now + Duration::from_millis(4));
+    let frames = swipes.end(&session(), BUTTON, live(now + Duration::from_millis(4)));
     let [frame] = frames.as_slice() else {
         panic!("one Ended: {frames:?}");
     };
@@ -545,7 +601,7 @@ fn dragging_back_swings_to_the_other_neighbour_only_when_it_is_bound() {
             GestureDirection::Right,
             &Action::NextDesktop,
             Some(&Action::MissionControl),
-            start,
+            live(start),
         )
         .expect("opened");
     let (frames, _) = sweep(&mut one_way, start, 10, -20);
@@ -568,7 +624,7 @@ fn canceling_the_session_springs_back_its_transitions_only() {
             GestureDirection::Left,
             &Action::PreviousDesktop,
             None,
-            start,
+            live(start),
         )
         .expect("opened");
     assert_eq!(

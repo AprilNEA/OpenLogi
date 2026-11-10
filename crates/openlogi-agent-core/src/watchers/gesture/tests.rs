@@ -1529,3 +1529,94 @@ async fn queued_motion_preserves_release_speed() {
     scroll.shutdown();
     actions.shutdown();
 }
+
+#[tokio::test]
+async fn queued_motion_waits_for_actual_landing() {
+    use std::cell::RefCell;
+
+    use crate::runtime::scroll::{ScrollPreferences, ScrollRuntime};
+    use openlogi_inject::SpaceSwipePhase;
+
+    thread_local! {
+        static POSTED: RefCell<Vec<SpaceSwipePhase>> = const { RefCell::new(Vec::new()) };
+    }
+    fn record(_progress: f64, phase: SpaceSwipePhase) -> bool {
+        POSTED.with_borrow_mut(|posted| posted.push(phase));
+        true
+    }
+
+    let (_signal, device_io) = openlogi_hid::device_io_channel();
+    let (ring, _ring_rx) = mpsc::unbounded_channel();
+    let device_access = DeviceAccess {
+        channel: CaptureChannelSlot::default(),
+        registry: openlogi_hid::ChannelRegistry::default(),
+        receiver_access: ReceiverAccess::default(),
+        device_io,
+        transport_turns: crate::hardware::TransportTurns::default(),
+    };
+    let mut actions =
+        crate::runtime::ActionRuntime::new(Arc::default(), Arc::default(), device_access, ring)
+            .unwrap();
+    let mut scroll = ScrollRuntime::spawn(Arc::new(ScrollPreferences::new(
+        false,
+        VerticalScrollSensitivity::default(),
+    )))
+    .unwrap();
+    // The test desktop never reports a change, so a switch lands only when
+    // the settle times out.
+    let mut dispatcher = InputDispatcher::new(GestureOutputs::new(
+        actions.dispatcher(),
+        scroll.input(),
+        Arc::default(),
+    ))
+    .with_space_output(800.0, record);
+    let button = ButtonId::GestureButton;
+    let mut held = plan();
+    held.dispatch.gesture_bindings.insert(
+        button,
+        [
+            (GestureDirection::Left, Action::PreviousDesktop),
+            (GestureDirection::Right, Action::NextDesktop),
+        ]
+        .into(),
+    );
+    let session = live_session_from_plan(7, held);
+    let id = session.id().clone();
+
+    // A hold that queued behind other work for over two seconds, drained in
+    // one batch now: its first desktop's worth finishes a switch, and its
+    // later reports arrived more than the settle timeout after that.
+    let start = std::time::Instant::now()
+        .checked_sub(Duration::from_millis(2500))
+        .expect("the clock reaches back 2.5 s");
+    let motion = |dx| CapturedInput::GestureMotion { button, dx, dy: 0 };
+    for (input, after) in [
+        (CapturedInput::ButtonDown(button), 0),
+        (CapturedInput::Gesture(button, GestureDirection::Right), 0),
+        (
+            CapturedInput::GestureCommitTravel {
+                button,
+                dx: 800,
+                dy: 0,
+            },
+            0,
+        ),
+        (motion(40), 1700),
+        (motion(40), 1708),
+    ] {
+        let at = start + Duration::from_millis(after);
+        dispatcher.dispatch(&id, session.dispatch(), input, at);
+    }
+
+    let posted = POSTED.with_borrow(Clone::clone);
+    assert!(
+        matches!(
+            posted.as_slice(),
+            [SpaceSwipePhase::Began, SpaceSwipePhase::Ended { .. }]
+        ),
+        "the switch just went out, so the next leg waits for it to land: {posted:?}"
+    );
+
+    scroll.shutdown();
+    actions.shutdown();
+}
