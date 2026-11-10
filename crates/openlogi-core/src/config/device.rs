@@ -243,11 +243,21 @@ pub struct DeviceConfig {
     /// Per-application binding overlays (P1.4). Keyed by the application
     /// identifier defined by [`ForegroundApp::id`](crate::app::ForegroundApp::id).
     /// When the foreground app's id matches a key here, these bindings take
-    /// precedence. Other buttons use `bindings`. Deliberately `Action`-valued
-    /// (not `Binding`): a per-app override replaces the whole button with one
-    /// action, never a per-direction gesture overlay.
+    /// precedence. Other buttons use `bindings`. Each override replaces the
+    /// whole button with a [`Binding`] of any shape, as `bindings` does; a
+    /// [`Binding::Single`] serializes as the bare [`Action`] that schema
+    /// 11 and older stored here.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub per_app_bindings: BTreeMap<String, BTreeMap<ButtonId, Action>>,
+    pub per_app_bindings: BTreeMap<String, BTreeMap<ButtonId, Binding>>,
+    /// Direction maps of per-app overrides whose gesture mode is currently
+    /// OFF, keyed like `per_app_bindings` and then by button: the per-app
+    /// counterpart of `disabled_gestures`
+    /// (see [`Config::disable_per_app_gestures`](crate::config::Config::disable_per_app_gestures)).
+    /// Never dispatched: the runtime reads only `per_app_bindings`, where a
+    /// demoted button is a [`Binding::Single`].
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub per_app_disabled_gestures:
+        BTreeMap<String, BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>>,
     /// Host-rendered Actions Ring settings and complete per-application layouts.
     #[serde(default, skip_serializing_if = "ActionRingConfig::is_default")]
     pub action_ring: ActionRingConfig,
@@ -489,6 +499,7 @@ impl Default for DeviceConfig {
             bindings: BTreeMap::new(),
             disabled_gestures: BTreeMap::new(),
             per_app_bindings: BTreeMap::new(),
+            per_app_disabled_gestures: BTreeMap::new(),
             action_ring: ActionRingConfig::default(),
             dpi_presets: Vec::new(),
             dpi: None,
@@ -638,7 +649,11 @@ struct RawDeviceConfig {
     #[serde(default)]
     gesture_bindings: BTreeMap<GestureDirection, Action>,
     #[serde(default, deserialize_with = "deserialize_button_maps_by_app")]
-    per_app_bindings: BTreeMap<String, BTreeMap<ButtonId, Action>>,
+    per_app_bindings: BTreeMap<String, BTreeMap<ButtonId, Binding>>,
+    /// v12 stash (see [`DeviceConfig::per_app_disabled_gestures`]).
+    #[serde(default, deserialize_with = "deserialize_button_maps_by_app")]
+    per_app_disabled_gestures:
+        BTreeMap<String, BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>>,
     #[serde(default)]
     action_ring: ActionRingConfig,
     #[serde(default, deserialize_with = "deserialize_dpi_presets")]
@@ -739,6 +754,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             bindings,
             disabled_gestures: raw.disabled_gestures,
             per_app_bindings: raw.per_app_bindings,
+            per_app_disabled_gestures: raw.per_app_disabled_gestures,
             action_ring: raw.action_ring,
             dpi_presets: raw.dpi_presets,
             dpi: raw.dpi,

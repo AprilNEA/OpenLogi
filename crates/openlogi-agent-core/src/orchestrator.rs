@@ -2587,22 +2587,15 @@ fn gaming_wanted(config: &Config, dev: &AgentDevice) -> GamingWanted {
 /// its device-wide profile or in any of its per-app profiles. The
 /// device-wide profile is read with the defaults the session dispatches, so
 /// a keypad with more than one page captures its paging keys even with
-/// nothing else bound. A per-app override replaces the whole button with a
-/// single action, so its presence captures the key exactly as the same
-/// device-wide binding does.
+/// nothing else bound. A per-app override replaces the whole button, so its
+/// presence captures the key exactly as the same device-wide binding does.
 fn binds_keys_in_some_profile(config: &Config, config_key: &str) -> bool {
     let device_wide = button_bindings_for(config, Some(config_key), None, None);
     !keyboard_divert_set(&device_wide).captures_nothing()
         || config
             .app_profiles(config_key)
             .filter_map(|app| config.per_app_overrides(config_key, app))
-            .any(|overrides| {
-                let overrides = overrides
-                    .iter()
-                    .map(|(button, action)| (*button, Binding::Single(action.clone())))
-                    .collect();
-                !keyboard_divert_set(&overrides).captures_nothing()
-            })
+            .any(|overrides| !keyboard_divert_set(overrides).captures_nothing())
 }
 
 fn publish_arc_if_changed<T: PartialEq>(publication: &watch::Sender<Arc<T>>, value: T) {

@@ -319,7 +319,9 @@ pub(crate) fn profile_canvas_status(cx: &App) -> Option<gpui::Div> {
         return None;
     }
     let editing_app = state.editing_app().map(|app| profile_name(state, app));
-    let override_count = state.editing_app_overrides().map_or(0, BTreeMap::len);
+    let override_count = state
+        .editing_app_overrides()
+        .map_or(0, |overrides| overrides.len());
     let summary = profile_summary(editing_app.as_deref(), override_count);
     let active = state
         .active_profile_name()
