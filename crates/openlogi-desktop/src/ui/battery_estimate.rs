@@ -56,10 +56,12 @@ struct TelemetryStore {
 /// pre-charge percentage held by `hold_percentage_while_charging` (`0x1000`,
 /// voltage `0x1001`, and ADC `0x1F20`).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
-#[serde(tag = "state", rename_all = "snake_case")]
+#[serde(tag = "progress_state", rename_all = "snake_case")]
 pub(crate) enum ChargingProgress {
+    /// Charging is active, but the device lacks measured capabilities or an exact
+    /// `1..=99%` reading, so no live step anchor is active.
     #[default]
-    Inactive,
+    Unmeasured,
     /// Initial charging reading recorded; waiting for a live upward percentage
     /// step (`percentage > anchor`) to prove the probe reports live progress.
     AwaitingLiveStep { percentage: u8, timestamp_secs: u64 },
@@ -72,17 +74,24 @@ pub(crate) enum ChargingProgress {
     },
 }
 
-/// Explicit state machine tracking the discharge observation anchor for a device.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+/// Unified battery lifecycle state machine for a device.
+///
+/// Owns both discharging anchors and charging progress inside one enum with one
+/// transition owner (`impl BatteryPhase`), so `Unanchored` or `Discharging` can
+/// never coexist with live or waiting charging progress.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(tag = "state", rename_all = "snake_case")]
-pub(crate) enum DischargePhase {
+pub(crate) enum BatteryPhase {
     /// No valid exact-percentage discharging anchor is active (e.g., coarse
     /// level-only device or newly created entry before first online reading).
     #[default]
     Unanchored,
-    /// Device was observed charging; any prior discharging anchor is invalidated
-    /// until the device transitions back to discharging.
-    Charging,
+    /// Device is charging; any prior discharging anchor is invalidated and
+    /// charging progress is owned exclusively by this variant.
+    Charging {
+        #[serde(default)]
+        progress: ChargingProgress,
+    },
     /// Device is actively discharging from an exact percentage anchor under `signature`.
     Discharging {
         percentage: u8,
@@ -93,12 +102,9 @@ pub(crate) enum DischargePhase {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DeviceBatteryHistory {
-    /// Current discharge tracking phase and anchor.
+    /// Unified discharge/charging phase and active anchor.
     #[serde(default)]
-    phase: DischargePhase,
-    /// Current charging session progress and measured charging rate.
-    #[serde(default)]
-    charging_progress: ChargingProgress,
+    phase: BatteryPhase,
     /// Learned drain rate (`% per day`) per configuration signature.
     #[serde(default)]
     learned_drain_per_day: BTreeMap<String, LearnedDrain>,
@@ -113,8 +119,7 @@ struct DeviceBatteryHistory {
 impl Default for DeviceBatteryHistory {
     fn default() -> Self {
         Self {
-            phase: DischargePhase::Unanchored,
-            charging_progress: ChargingProgress::Inactive,
+            phase: BatteryPhase::Unanchored,
             learned_drain_per_day: BTreeMap::new(),
             estimated_health_pct: default_health(),
             total_observed_drop_pct: 0,
@@ -224,12 +229,11 @@ impl BatteryTelemetry {
     /// percentage progress. Frozen pre-charge readings return `None`.
     #[must_use]
     pub fn live_charging_rate(&self, config_key: &str) -> Option<f32> {
-        match self.store.devices.get(config_key)?.charging_progress {
-            ChargingProgress::Live {
-                minutes_per_pct, ..
-            } => Some(minutes_per_pct),
-            ChargingProgress::Inactive | ChargingProgress::AwaitingLiveStep { .. } => None,
-        }
+        self.store
+            .devices
+            .get(config_key)?
+            .phase
+            .live_charging_rate()
     }
 
     /// Observe a single device's current battery and configuration state at `now_secs`.
@@ -270,24 +274,13 @@ impl BatteryTelemetry {
 
         // 1. Charging transitions always invalidate any prior discharging anchor immediately.
         if is_charging {
-            if entry.phase != DischargePhase::Charging {
-                entry.phase = DischargePhase::Charging;
-                self.dirty = true;
-            }
-            if advance_charging_progress(
-                &mut entry.charging_progress,
-                battery.percentage,
-                signature.is_some(),
-                now_secs,
-            ) {
+            if entry
+                .phase
+                .observe_charging(battery.percentage, signature.is_some(), now_secs)
+            {
                 self.dirty = true;
             }
             return;
-        }
-
-        if entry.charging_progress != ChargingProgress::Inactive {
-            entry.charging_progress = ChargingProgress::Inactive;
-            self.dirty = true;
         }
 
         if matches!(battery.status, BatteryStatus::Error) {
@@ -297,8 +290,7 @@ impl BatteryTelemetry {
         // 2. Coarse level-only devices (no exact 0..=100 percentage) never feed
         // guessed percentages into discharge learning or health calculation.
         let Some(raw_pct) = battery.percentage else {
-            if entry.phase != DischargePhase::Unanchored {
-                entry.phase = DischargePhase::Unanchored;
+            if entry.phase.observe_unanchored() {
                 self.dirty = true;
             }
             return;
@@ -350,107 +342,205 @@ impl BatteryTelemetry {
 
     #[cfg(test)]
     #[must_use]
-    pub fn phase_for(&self, config_key: &str) -> Option<&DischargePhase> {
+    pub fn phase_for(&self, config_key: &str) -> Option<&BatteryPhase> {
         self.store.devices.get(config_key).map(|d| &d.phase)
     }
 }
 
-#[expect(
-    clippy::cast_precision_loss,
-    reason = "bounded charging elapsed seconds fit in f32"
-)]
-fn advance_charging_progress(
-    progress: &mut ChargingProgress,
-    raw_percentage: Option<u8>,
-    has_measured_support: bool,
-    now_secs: u64,
-) -> bool {
-    if !has_measured_support {
-        if *progress != ChargingProgress::Inactive {
-            *progress = ChargingProgress::Inactive;
-            return true;
+impl BatteryPhase {
+    /// Returns the measured charging pace (`minutes per 1%`) only when the device
+    /// is in `BatteryPhase::Charging` with confirmed `ChargingProgress::Live`.
+    #[must_use]
+    pub fn live_charging_rate(&self) -> Option<f32> {
+        match self {
+            Self::Charging {
+                progress:
+                    ChargingProgress::Live {
+                        minutes_per_pct, ..
+                    },
+            } => Some(*minutes_per_pct),
+            Self::Unanchored
+            | Self::Discharging { .. }
+            | Self::Charging {
+                progress: ChargingProgress::Unmeasured | ChargingProgress::AwaitingLiveStep { .. },
+            } => None,
         }
-        return false;
-    }
-    let Some(raw_pct) = raw_percentage else {
-        if *progress != ChargingProgress::Inactive {
-            *progress = ChargingProgress::Inactive;
-            return true;
-        }
-        return false;
-    };
-    let percentage = raw_pct.min(100);
-    if percentage == 0 || percentage >= 100 {
-        if *progress != ChargingProgress::Inactive {
-            *progress = ChargingProgress::Inactive;
-            return true;
-        }
-        return false;
     }
 
-    match *progress {
-        ChargingProgress::Inactive => {
-            *progress = ChargingProgress::AwaitingLiveStep {
-                percentage,
-                timestamp_secs: now_secs,
-            };
+    /// Transition to `Unanchored` (e.g. coarse battery reading), dropping any
+    /// prior discharging or charging progress state.
+    fn observe_unanchored(&mut self) -> bool {
+        if *self == Self::Unanchored {
+            false
+        } else {
+            *self = Self::Unanchored;
             true
         }
-        ChargingProgress::AwaitingLiveStep {
-            percentage: last_pct,
-            timestamp_secs: last_ts,
-        } => {
-            if percentage < last_pct
-                || now_secs <= last_ts
-                || now_secs.saturating_sub(last_ts) > MAX_CHARGE_WINDOW_SECS
-            {
-                *progress = ChargingProgress::AwaitingLiveStep {
-                    percentage,
-                    timestamp_secs: now_secs,
-                };
+    }
+
+    /// Advance the charging state machine inside `BatteryPhase::Charging`.
+    /// Equal timestamps (`now_secs == last_ts`) are treated as repeated
+    /// observations in the same second rather than broken sessions.
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "bounded charging elapsed seconds fit in f32"
+    )]
+    fn observe_charging(
+        &mut self,
+        raw_percentage: Option<u8>,
+        has_measured_support: bool,
+        now_secs: u64,
+    ) -> bool {
+        let valid_pct = has_measured_support
+            .then_some(raw_percentage)
+            .flatten()
+            .map(|p| p.min(100))
+            .filter(|&p| p > 0 && p < 100);
+
+        let Some(percentage) = valid_pct else {
+            let next = Self::Charging {
+                progress: ChargingProgress::Unmeasured,
+            };
+            if *self == next {
+                return false;
+            }
+            *self = next;
+            return true;
+        };
+
+        let current_progress = match *self {
+            Self::Charging { progress } => progress,
+            Self::Unanchored | Self::Discharging { .. } => {
+                *self = Self::charging_awaiting(percentage, now_secs);
                 return true;
             }
-            let dt_secs = now_secs.saturating_sub(last_ts);
-            if percentage > last_pct && dt_secs >= MIN_CHARGE_WINDOW_SECS {
-                let rise_pct = f32::from(percentage - last_pct);
-                let observed_min_per_pct = ((dt_secs as f32) / 60.0 / rise_pct).clamp(0.25, 10.0);
-                *progress = ChargingProgress::Live {
-                    percentage,
-                    timestamp_secs: now_secs,
-                    minutes_per_pct: observed_min_per_pct,
-                };
-                return true;
+        };
+
+        match current_progress {
+            ChargingProgress::Unmeasured => {
+                *self = Self::charging_awaiting(percentage, now_secs);
+                true
             }
-            false
+            ChargingProgress::AwaitingLiveStep {
+                percentage: last_pct,
+                timestamp_secs: last_ts,
+            } => {
+                if now_secs == last_ts && percentage == last_pct {
+                    return false;
+                }
+                let dt_secs = now_secs.saturating_sub(last_ts);
+                if percentage < last_pct || now_secs <= last_ts || dt_secs > MAX_CHARGE_WINDOW_SECS
+                {
+                    *self = Self::charging_awaiting(percentage, now_secs);
+                    return true;
+                }
+                if percentage > last_pct && dt_secs >= MIN_CHARGE_WINDOW_SECS {
+                    let rise = f32::from(percentage - last_pct);
+                    let pace = ((dt_secs as f32) / 60.0 / rise).clamp(0.25, 10.0);
+                    *self = Self::charging_live(percentage, now_secs, pace);
+                    return true;
+                }
+                false
+            }
+            ChargingProgress::Live {
+                percentage: last_pct,
+                timestamp_secs: last_ts,
+                minutes_per_pct: prev_rate,
+            } => {
+                if now_secs == last_ts && percentage >= last_pct {
+                    return false;
+                }
+                let dt_secs = now_secs.saturating_sub(last_ts);
+                if percentage < last_pct || now_secs < last_ts || dt_secs > MAX_CHARGE_WINDOW_SECS {
+                    *self = Self::charging_awaiting(percentage, now_secs);
+                    return true;
+                }
+                if percentage > last_pct && dt_secs >= MIN_CHARGE_WINDOW_SECS {
+                    let rise = f32::from(percentage - last_pct);
+                    let pace = ((dt_secs as f32) / 60.0 / rise).clamp(0.25, 10.0);
+                    let blended = (prev_rate * 0.6 + pace * 0.4).clamp(0.25, 10.0);
+                    *self = Self::charging_live(percentage, now_secs, blended);
+                    return true;
+                }
+                false
+            }
         }
-        ChargingProgress::Live {
-            percentage: last_pct,
-            timestamp_secs: last_ts,
-            minutes_per_pct: prev_rate,
-        } => {
-            if percentage < last_pct
-                || now_secs <= last_ts
-                || now_secs.saturating_sub(last_ts) > MAX_CHARGE_WINDOW_SECS
-            {
-                *progress = ChargingProgress::AwaitingLiveStep {
+    }
+
+    const fn charging_awaiting(percentage: u8, timestamp_secs: u64) -> Self {
+        Self::Charging {
+            progress: ChargingProgress::AwaitingLiveStep {
+                percentage,
+                timestamp_secs,
+            },
+        }
+    }
+
+    const fn charging_live(percentage: u8, timestamp_secs: u64, minutes_per_pct: f32) -> Self {
+        Self::Charging {
+            progress: ChargingProgress::Live {
+                percentage,
+                timestamp_secs,
+                minutes_per_pct,
+            },
+        }
+    }
+
+    /// Advance the discharging anchor inside `BatteryPhase`, returning `(phase_changed, completed_interval)`
+    /// where `completed_interval` is `Some((drop_pct, dt_secs))` when a qualifying discharge drop completes.
+    fn observe_discharging(
+        &mut self,
+        percentage: u8,
+        signature: &str,
+        now_secs: u64,
+    ) -> (bool, Option<(u8, u64)>) {
+        match self {
+            Self::Unanchored | Self::Charging { .. } => {
+                *self = Self::Discharging {
                     percentage,
                     timestamp_secs: now_secs,
+                    signature: signature.to_owned(),
                 };
-                return true;
+                (true, None)
             }
-            let dt_secs = now_secs.saturating_sub(last_ts);
-            if percentage > last_pct && dt_secs >= MIN_CHARGE_WINDOW_SECS {
-                let rise_pct = f32::from(percentage - last_pct);
-                let observed_min_per_pct = ((dt_secs as f32) / 60.0 / rise_pct).clamp(0.25, 10.0);
-                let blended = (prev_rate * 0.6 + observed_min_per_pct * 0.4).clamp(0.25, 10.0);
-                *progress = ChargingProgress::Live {
-                    percentage,
-                    timestamp_secs: now_secs,
-                    minutes_per_pct: blended,
-                };
-                return true;
+            Self::Discharging {
+                percentage: last_pct,
+                timestamp_secs: last_ts,
+                signature: last_sig,
+            } => {
+                let last_pct = *last_pct;
+                let last_ts = *last_ts;
+                if last_sig != signature || percentage > last_pct {
+                    *self = Self::Discharging {
+                        percentage,
+                        timestamp_secs: now_secs,
+                        signature: signature.to_owned(),
+                    };
+                    return (true, None);
+                }
+                if now_secs <= last_ts {
+                    return (false, None);
+                }
+                let dt_secs = now_secs.saturating_sub(last_ts);
+                if dt_secs > MAX_LEARN_WINDOW_SECS {
+                    *self = Self::Discharging {
+                        percentage,
+                        timestamp_secs: now_secs,
+                        signature: signature.to_owned(),
+                    };
+                    return (true, None);
+                }
+                if percentage < last_pct && dt_secs >= MIN_LEARN_WINDOW_SECS {
+                    let drop_pct = last_pct - percentage;
+                    *self = Self::Discharging {
+                        percentage,
+                        timestamp_secs: now_secs,
+                        signature: signature.to_owned(),
+                    };
+                    return (true, Some((drop_pct, dt_secs)));
+                }
+                (false, None)
             }
-            false
         }
     }
 }
@@ -468,87 +558,46 @@ fn advance_discharging_entry(
     nominal_full_hours: u32,
     now_secs: u64,
 ) -> bool {
-    match &entry.phase {
-        DischargePhase::Unanchored | DischargePhase::Charging => {
-            entry.phase = DischargePhase::Discharging {
-                percentage,
-                timestamp_secs: now_secs,
-                signature: signature.to_owned(),
-            };
-            true
-        }
-        DischargePhase::Discharging {
-            percentage: last_pct,
-            timestamp_secs: last_ts,
-            signature: last_sig,
-        } => {
-            let last_pct = *last_pct;
-            let last_ts = *last_ts;
-            if last_sig != signature || percentage > last_pct {
-                entry.phase = DischargePhase::Discharging {
-                    percentage,
-                    timestamp_secs: now_secs,
-                    signature: signature.to_owned(),
-                };
-                return true;
-            }
-            if now_secs <= last_ts {
-                return false;
-            }
-            let dt_secs = now_secs.saturating_sub(last_ts);
-            if dt_secs > MAX_LEARN_WINDOW_SECS {
-                entry.phase = DischargePhase::Discharging {
-                    percentage,
-                    timestamp_secs: now_secs,
-                    signature: signature.to_owned(),
-                };
-                return true;
-            }
-            if percentage < last_pct && dt_secs >= MIN_LEARN_WINDOW_SECS {
-                let drop_pct = last_pct - percentage;
-                let dt_days = (dt_secs as f32) / 86_400.0;
-                let observed_pct_per_day = (f32::from(drop_pct) / dt_days).clamp(0.15, 120.0);
+    let (phase_changed, completed) = entry
+        .phase
+        .observe_discharging(percentage, signature, now_secs);
+    let Some((drop_pct, dt_secs)) = completed else {
+        return phase_changed;
+    };
 
-                let drain = entry
-                    .learned_drain_per_day
-                    .entry(signature.to_owned())
-                    .or_insert(LearnedDrain {
-                        pct_per_day: observed_pct_per_day,
-                        samples: 0,
-                    });
-                if drain.samples == 0 {
-                    drain.pct_per_day = observed_pct_per_day;
-                } else {
-                    drain.pct_per_day = drain.pct_per_day * 0.70 + observed_pct_per_day * 0.30;
-                }
-                drain.samples = drain.samples.saturating_add(1);
+    let dt_days = (dt_secs as f32) / 86_400.0;
+    let observed_pct_per_day = (f32::from(drop_pct) / dt_days).clamp(0.15, 120.0);
 
-                entry.total_observed_drop_pct = entry
-                    .total_observed_drop_pct
-                    .saturating_add(u32::from(drop_pct));
-
-                if entry.total_observed_drop_pct >= 20 {
-                    let nominal_pct_per_day = (100.0 * 24.0) / (nominal_full_hours.max(1) as f32);
-                    let plausible_drain = drain
-                        .pct_per_day
-                        .clamp(nominal_pct_per_day * 0.35, nominal_pct_per_day * 2.2);
-                    let ratio = (nominal_pct_per_day / plausible_drain).clamp(0.50, 1.05);
-                    let implied_health = (ratio * 100.0).round().clamp(50.0, 100.0) as u8;
-                    entry.estimated_health_pct = ((u16::from(entry.estimated_health_pct) * 4
-                        + u16::from(implied_health))
-                        / 5) as u8;
-                }
-
-                entry.phase = DischargePhase::Discharging {
-                    percentage,
-                    timestamp_secs: now_secs,
-                    signature: signature.to_owned(),
-                };
-                return true;
-            }
-            false
-        }
+    let drain = entry
+        .learned_drain_per_day
+        .entry(signature.to_owned())
+        .or_insert(LearnedDrain {
+            pct_per_day: observed_pct_per_day,
+            samples: 0,
+        });
+    if drain.samples == 0 {
+        drain.pct_per_day = observed_pct_per_day;
+    } else {
+        drain.pct_per_day = drain.pct_per_day * 0.70 + observed_pct_per_day * 0.30;
     }
+    drain.samples = drain.samples.saturating_add(1);
+
+    entry.total_observed_drop_pct = entry
+        .total_observed_drop_pct
+        .saturating_add(u32::from(drop_pct));
+
+    if entry.total_observed_drop_pct >= 20 {
+        let nominal_pct_per_day = (100.0 * 24.0) / (nominal_full_hours.max(1) as f32);
+        let plausible_drain = drain
+            .pct_per_day
+            .clamp(nominal_pct_per_day * 0.35, nominal_pct_per_day * 2.2);
+        let ratio = (nominal_pct_per_day / plausible_drain).clamp(0.50, 1.05);
+        let implied_health = (ratio * 100.0).round().clamp(50.0, 100.0) as u8;
+        entry.estimated_health_pct =
+            ((u16::from(entry.estimated_health_pct) * 4 + u16::from(implied_health)) / 5) as u8;
+    }
+
+    true
 }
 
 /// Numbers this process's telemetry staging files so two saves never share one.
@@ -624,26 +673,20 @@ impl EstimatePhase {
 
     /// Build a validated charging stage from the device's live measured charging pace
     /// (`measured_min_per_pct`), without using any `DeviceKind` or unmeasured defaults.
+    ///
+    /// Because `measured_min_per_pct` is computed from real elapsed time per percentage
+    /// point during the active session, slow charging (`ChargingSlow`) is already
+    /// reflected in `measured_min_per_pct` and is never multiplied a second time.
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
         reason = "clamped positive minutes round into u32"
     )]
-    fn from_live_charge_rate(
-        percentage: u8,
-        measured_min_per_pct: f32,
-        status: BatteryStatus,
-    ) -> Option<Self> {
+    fn from_live_charge_rate(percentage: u8, measured_min_per_pct: f32) -> Option<Self> {
         if percentage == 0 || percentage >= 100 || !measured_min_per_pct.is_finite() {
             return None;
         }
-        let base_rate = measured_min_per_pct.clamp(0.25, 10.0);
-        let slow_mult = if status == BatteryStatus::ChargingSlow {
-            1.5_f32
-        } else {
-            1.0_f32
-        };
-        let effective_rate = base_rate * slow_mult;
+        let effective_rate = measured_min_per_pct.clamp(0.25, 10.0);
 
         if percentage < 80 {
             let fast_phase_mins = f32::from(80 - percentage) * effective_rate;
@@ -1031,7 +1074,7 @@ pub(crate) fn estimate_for_device(
         let live_rate = state
             .battery_telemetry()
             .live_charging_rate(&record.config_key)?;
-        EstimatePhase::from_live_charge_rate(percentage, live_rate, battery.status)?
+        EstimatePhase::from_live_charge_rate(percentage, live_rate)?
     } else {
         EstimatePhase::Discharging
     };
@@ -1309,7 +1352,7 @@ mod tests {
     };
 
     use super::{
-        BatteryTelemetry, DischargePhase, EstimatePhase, MAX_LEARN_WINDOW_SECS,
+        BatteryPhase, BatteryTelemetry, ChargingProgress, EstimatePhase, MAX_LEARN_WINDOW_SECS,
         MIN_HEALTH_DROP_PCT, MIN_HEALTH_SAMPLES, MIN_LEARN_WINDOW_SECS, Ordering,
         TELEMETRY_STAGED_SEQ, estimate_for_device, next_staged_telemetry_path_for_seq,
         nominal_profile_for_device, observe_state_telemetry_at, staged_telemetry_path,
@@ -1543,7 +1586,7 @@ mod tests {
         );
         assert_eq!(
             telemetry.phase_for(key),
-            Some(&DischargePhase::Discharging {
+            Some(&BatteryPhase::Discharging {
                 percentage: 80,
                 timestamp_secs: t0,
                 signature: sig.to_owned(),
@@ -1553,7 +1596,15 @@ mod tests {
         // 2. Partial charge observed at 75% -> must transition phase to Charging
         let t1 = t0 + 3_600;
         telemetry.observe_device(key, true, Some(&charging(75)), Some(sig), nominal_hours, t1);
-        assert_eq!(telemetry.phase_for(key), Some(&DischargePhase::Charging));
+        assert_eq!(
+            telemetry.phase_for(key),
+            Some(&BatteryPhase::Charging {
+                progress: ChargingProgress::AwaitingLiveStep {
+                    percentage: 75,
+                    timestamp_secs: t1,
+                },
+            })
+        );
 
         // 3. Unplugged at 75% discharging -> re-anchors at 75% without learning 80% -> 75%
         let t2 = t1 + 600;
@@ -1572,7 +1623,7 @@ mod tests {
         );
         assert_eq!(
             telemetry.phase_for(key),
-            Some(&DischargePhase::Discharging {
+            Some(&BatteryPhase::Discharging {
                 percentage: 75,
                 timestamp_secs: t2,
                 signature: sig.to_owned(),
@@ -1635,7 +1686,7 @@ mod tests {
         assert_eq!(telemetry.query(key, sig).2, 0);
         assert_eq!(
             telemetry.phase_for(key),
-            Some(&DischargePhase::Discharging {
+            Some(&BatteryPhase::Discharging {
                 percentage: 60,
                 timestamp_secs: t_gap,
                 signature: sig.to_owned(),
@@ -1677,7 +1728,7 @@ mod tests {
         observe_state_telemetry_at(&mut state, t0);
         assert_eq!(
             state.battery_telemetry().phase_for(&key),
-            Some(&DischargePhase::Unanchored)
+            Some(&BatteryPhase::Unanchored)
         );
 
         // Simulate drop to Low 2 days later: still Unanchored, 0 learned samples, 100% health
@@ -1848,7 +1899,7 @@ mod tests {
         let preserved = BatteryTelemetry::with_path(file_path.clone());
         assert_eq!(
             preserved.phase_for("serial:test"),
-            Some(&DischargePhase::Discharging {
+            Some(&BatteryPhase::Discharging {
                 percentage: 75,
                 timestamp_secs: 4_600,
                 signature: "kbd:standard".into(),
@@ -1865,7 +1916,7 @@ mod tests {
         let reloaded = BatteryTelemetry::with_path(file_path);
         assert_eq!(
             reloaded.phase_for("serial:test"),
-            Some(&DischargePhase::Discharging {
+            Some(&BatteryPhase::Discharging {
                 percentage: 65,
                 timestamp_secs: 8_200,
                 signature: "kbd:standard".into(),
@@ -1902,7 +1953,7 @@ mod tests {
         let (_, expected_sig, _) = nominal_profile_for_device(&state, &state.devices()[0]);
         assert_eq!(
             state.battery_telemetry().phase_for(&cfg_key),
-            Some(&DischargePhase::Discharging {
+            Some(&BatteryPhase::Discharging {
                 percentage: 80,
                 timestamp_secs: t0,
                 signature: expected_sig.clone(),
@@ -1936,7 +1987,7 @@ mod tests {
         // Anchor must STILL be the 80% @ t0 reading (not overwritten by kbd:unmeasured)!
         assert_eq!(
             state.battery_telemetry().phase_for(&cfg_key),
-            Some(&DischargePhase::Discharging {
+            Some(&BatteryPhase::Discharging {
                 percentage: 80,
                 timestamp_secs: t0,
                 signature: expected_sig.clone(),
@@ -2006,7 +2057,7 @@ mod tests {
         observe_state_telemetry_at(&mut state, t0 + 600);
         assert_eq!(
             state.battery_telemetry().phase_for(&cfg_key),
-            Some(&DischargePhase::Discharging {
+            Some(&BatteryPhase::Discharging {
                 percentage: 90,
                 timestamp_secs: t0,
                 signature: sig_lvl2.clone(),
@@ -2118,7 +2169,7 @@ mod tests {
         // learning must NOT be blocked and the device immediately enters Discharging phase!
         let (nominal_hours, sig, _) = nominal_profile_for_device(&state, &state.devices()[0]);
         assert_eq!(sig, "mouse:gaming:rgb=unknown:hz=fixed");
-        let Some(DischargePhase::Discharging {
+        let Some(BatteryPhase::Discharging {
             percentage: 80,
             timestamp_secs: t0,
             signature: anchored_sig,
@@ -2166,14 +2217,14 @@ mod tests {
         assert_eq!(EstimatePhase::charging_to_80(25, 15), None);
         assert_eq!(EstimatePhase::charging_to_100(0), None);
         assert!(matches!(
-            EstimatePhase::from_live_charge_rate(79, 1.0, BatteryStatus::Charging),
+            EstimatePhase::from_live_charge_rate(79, 1.0),
             Some(EstimatePhase::ChargingTo80 {
                 minutes_to_80: 1,
                 minutes_to_100: 36,
             })
         ));
         assert!(matches!(
-            EstimatePhase::from_live_charge_rate(80, 2.0, BatteryStatus::Charging),
+            EstimatePhase::from_live_charge_rate(80, 2.0),
             Some(EstimatePhase::ChargingTo100 { minutes_to_100: 40 })
         ));
 
@@ -2387,6 +2438,137 @@ mod tests {
         assert_eq!(est_90.home_label(), "~25m to 100%");
         assert_eq!(est_90.inline_label(), "~25m → 100%");
         assert!(est_90.detail_headline().contains("80–100% slow phase"));
+    }
+
+    #[test]
+    fn charging_slow_uses_measured_pace_once() {
+        let _lock = LOCALE_LOCK.lock().unwrap();
+        rust_i18n::set_locale("en");
+
+        let caps = Capabilities::default();
+        let t0 = 4_000_000_000_u64;
+
+        // Rising from 85% to 90% in 10 minutes (600s) under ChargingSlow is 2.0 min/%.
+        // With 10% remaining (90% -> 100%), the measured pace yields 20 minutes, not 30.
+        let slow_85 = BatteryInfo {
+            percentage: Some(85),
+            level: BatteryLevel::Full,
+            status: BatteryStatus::ChargingSlow,
+        };
+        let slow_90 = BatteryInfo {
+            percentage: Some(90),
+            level: BatteryLevel::Full,
+            status: BatteryStatus::ChargingSlow,
+        };
+        let mut state =
+            test_state_with_devices(vec![mx_keys_mini_device(Some(caps), Some(slow_90.clone()))]);
+        let key = state.devices()[0].config_key.clone();
+        state.battery_telemetry_mut().observe_device(
+            &key,
+            true,
+            Some(&slow_85),
+            Some("kbd:standard"),
+            120 * 24,
+            t0,
+        );
+        state.battery_telemetry_mut().observe_device(
+            &key,
+            true,
+            Some(&slow_90),
+            Some("kbd:standard"),
+            120 * 24,
+            t0 + 600,
+        );
+
+        let est = estimate_for_device(&state, &state.devices()[0]).expect("ChargingSlow estimate");
+        assert_eq!(
+            est.phase,
+            EstimatePhase::ChargingTo100 { minutes_to_100: 20 }
+        );
+        assert_eq!(est.home_label(), "~20m to 100%");
+    }
+
+    #[test]
+    fn same_second_observation_preserves_live_charge_rate() {
+        let _lock = LOCALE_LOCK.lock().unwrap();
+        rust_i18n::set_locale("en");
+
+        let caps = Capabilities::default();
+        let t0 = 4_000_000_000_u64;
+        let charging_50 = BatteryInfo {
+            percentage: Some(50),
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Charging,
+        };
+        let charging_55 = BatteryInfo {
+            percentage: Some(55),
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Charging,
+        };
+        let mut state = test_state_with_devices(vec![mx_keys_mini_device(
+            Some(caps),
+            Some(charging_55.clone()),
+        )]);
+        let key = state.devices()[0].config_key.clone();
+
+        state.battery_telemetry_mut().observe_device(
+            &key,
+            true,
+            Some(&charging_50),
+            Some("kbd:standard"),
+            120 * 24,
+            t0,
+        );
+        state.battery_telemetry_mut().observe_device(
+            &key,
+            true,
+            Some(&charging_55),
+            Some("kbd:standard"),
+            120 * 24,
+            t0 + 300,
+        );
+        assert_eq!(
+            state.battery_telemetry().live_charging_rate(&key),
+            Some(1.0)
+        );
+
+        // A setting reply arriving in the same second (`t0 + 300`) re-observes the device:
+        // the live charging rate and estimate must remain intact.
+        observe_state_telemetry_at(&mut state, t0 + 300);
+        assert_eq!(
+            state.battery_telemetry().live_charging_rate(&key),
+            Some(1.0)
+        );
+        let est = estimate_for_device(&state, &state.devices()[0])
+            .expect("estimate preserved after same-second observation");
+        assert_eq!(
+            est.phase,
+            EstimatePhase::ChargingTo80 {
+                minutes_to_80: 25,
+                minutes_to_100: 60,
+            }
+        );
+
+        //Leaving charging (to Discharging or coarse Unanchored) inside the single
+        // BatteryPhase enum drops all live or waiting charging progress.
+        let discharging_55 = BatteryInfo {
+            percentage: Some(55),
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Discharging,
+        };
+        state.battery_telemetry_mut().observe_device(
+            &key,
+            true,
+            Some(&discharging_55),
+            Some("kbd:standard"),
+            120 * 24,
+            t0 + 360,
+        );
+        assert_eq!(state.battery_telemetry().live_charging_rate(&key), None);
+        assert!(matches!(
+            state.battery_telemetry().phase_for(&key),
+            Some(BatteryPhase::Discharging { percentage: 55, .. })
+        ));
     }
 
     #[test]
