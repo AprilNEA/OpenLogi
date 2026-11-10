@@ -19,11 +19,14 @@
 //!
 //! *Where* a snapshot is kept is the host's business, not this module's: the
 //! enumerator writes through a [`ProbeCacheStore`]; `openlogi-hid` supplies
-//! the file-backed one every native build uses.
+//! the file-backed one every native build uses. So is the encoding it is kept
+//! in. What a stored snapshot means is this module's: a store decodes one only
+//! through [`ProbeCacheSnapshot::read`].
 
 use std::collections::HashMap;
 use std::time::Instant;
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -99,10 +102,70 @@ pub trait ProbeCacheStore: Send + Sync {
     fn save(&self, snapshot: &ProbeCacheSnapshot) -> Result<(), ProbeCacheError>;
 }
 
+/// A snapshot as a store keeps it, still in the store's encoding.
+///
+/// The store picks the encoding; [`ProbeCacheSnapshot::read`] picks what to
+/// decode from it, and in which order.
+pub trait EncodedSnapshot {
+    /// Why the stored content does not decode as the type asked for.
+    type Error: std::fmt::Display;
+
+    /// The stored content, decoded as `T`.
+    ///
+    /// The encoding must be self-describing, so that a `T` naming only some
+    /// of the stored fields skips the others: [`ProbeCacheSnapshot::read`]
+    /// decodes the schema version alone before anything else.
+    fn decode<T: DeserializeOwned>(&self) -> Result<T, Self::Error>;
+}
+
+/// Why a stored snapshot gives this build nothing to warm-start from. Either
+/// way the enumerator starts cold and re-probes every device.
+#[derive(Debug, Error)]
+pub enum SnapshotRejected {
+    /// A build with another schema wrote it: the cold start expected once
+    /// after an upgrade or a downgrade across a schema change.
+    #[error("the probe cache was written with schema version {version}")]
+    ForeignSchema {
+        /// The schema version the snapshot was written with.
+        version: u32,
+    },
+    /// It does not decode as a snapshot of this build's schema, or of any:
+    /// a torn write, a damaged file, or a hand edit.
+    #[error("the probe cache does not decode: {reason}")]
+    Unreadable {
+        /// What the encoding reported.
+        reason: String,
+    },
+}
+
+impl SnapshotRejected {
+    fn unreadable(reason: impl std::fmt::Display) -> Self {
+        Self::Unreadable {
+            reason: reason.to_string(),
+        }
+    }
+}
+
 /// The persistable subset of the probe cache, in the shape a store keeps.
-#[derive(Serialize, Deserialize)]
+///
+/// It does not implement `Deserialize`: decoding it whole would report a
+/// snapshot from another schema as damaged. [`Self::read`] is the way back.
+#[derive(Serialize)]
 pub struct ProbeCacheSnapshot {
     version: u32,
+    entries: Vec<PersistedEntry>,
+}
+
+/// The one field every schema has kept, decoded before the entries whose
+/// shape depends on it.
+#[derive(Deserialize)]
+struct SchemaHeader {
+    version: u32,
+}
+
+/// The rest of a snapshot whose [`SchemaHeader`] names this build's schema.
+#[derive(Deserialize)]
+struct SchemaBody {
     entries: Vec<PersistedEntry>,
 }
 
@@ -184,19 +247,23 @@ impl ProbeCacheSnapshot {
         }
     }
 
-    /// Fold this snapshot back into runtime cache entries.
+    /// Decode a snapshot a store kept, if this build's schema wrote it.
     ///
-    /// A snapshot written by another schema version yields nothing: the shape
-    /// it describes is not the one this build reads, and re-probing is always
-    /// correct.
-    pub(super) fn into_entries(self) -> HashMap<CacheKey, Cached> {
-        if self.version != SCHEMA_VERSION {
-            tracing::debug!(
-                version = self.version,
-                "probe cache from another schema — starting cold"
-            );
-            return HashMap::new();
+    /// # Errors
+    ///
+    /// [`SnapshotRejected::ForeignSchema`] when another schema wrote it, and
+    /// [`SnapshotRejected::Unreadable`] when it does not decode.
+    pub fn read(stored: &impl EncodedSnapshot) -> Result<Self, SnapshotRejected> {
+        let SchemaHeader { version } = stored.decode().map_err(SnapshotRejected::unreadable)?;
+        if version != SCHEMA_VERSION {
+            return Err(SnapshotRejected::ForeignSchema { version });
         }
+        let SchemaBody { entries } = stored.decode().map_err(SnapshotRejected::unreadable)?;
+        Ok(Self { version, entries })
+    }
+
+    /// Fold this snapshot back into runtime cache entries.
+    pub(super) fn into_entries(self) -> HashMap<CacheKey, Cached> {
         self.entries
             .into_iter()
             .map(|entry| {
@@ -226,11 +293,12 @@ mod tests {
     use openlogi_core::device::{
         BatteryInfo, BatteryLevel, BatteryStatus, DeviceModelInfo, DeviceTransports,
     };
+    use serde::de::DeserializeOwned;
 
     use super::super::cache::{CacheKey, Cached};
     use super::super::events::EventFeatureIndices;
     use super::super::features::{BatteryProbe, ProbedFeatures};
-    use super::{ProbeCacheSnapshot, SCHEMA_VERSION};
+    use super::{EncodedSnapshot, ProbeCacheSnapshot, SCHEMA_VERSION, SnapshotRejected};
 
     /// A device fully probed once keeps its identity across restarts — that is
     /// the whole point of the snapshot — but only the parts that are actually
@@ -338,13 +406,126 @@ mod tests {
         );
     }
 
-    /// A snapshot written by another schema describes a shape this build does
-    /// not read. Re-probing is always correct; guessing is not.
-    #[test]
-    fn a_foreign_schema_yields_a_cold_start() {
-        let mut snapshot = ProbeCacheSnapshot::of(&HashMap::new());
-        snapshot.version = SCHEMA_VERSION + 1;
+    /// A snapshot kept as JSON, the encoding the file store uses.
+    struct Json<'a>(&'a str);
 
-        assert!(snapshot.into_entries().is_empty());
+    impl EncodedSnapshot for Json<'_> {
+        type Error = serde_json::Error;
+
+        fn decode<T: DeserializeOwned>(&self) -> Result<T, serde_json::Error> {
+            serde_json::from_str(self.0)
+        }
+    }
+
+    /// How many entries a store's JSON gives this build, or why it gives none.
+    fn read_json(json: &str) -> Result<usize, SnapshotRejected> {
+        ProbeCacheSnapshot::read(&Json(json)).map(|snapshot| snapshot.into_entries().len())
+    }
+
+    /// This build's JSON for one Bolt device.
+    fn one_bolt_device() -> String {
+        let cache = HashMap::from([(
+            CacheKey::Bolt {
+                unit_id: [0xaa, 0xbb, 0xcc, 0xdd],
+            },
+            Cached {
+                probe: ProbedFeatures::default(),
+                battery: None,
+                events: EventFeatureIndices::default(),
+                probed_at: Instant::now(),
+            },
+        )]);
+        serde_json::to_string(&ProbeCacheSnapshot::of(&cache)).expect("a snapshot encodes")
+    }
+
+    #[test]
+    fn a_snapshot_this_build_wrote_reads_back() {
+        let read = read_json(&one_bolt_device());
+
+        assert!(matches!(read, Ok(1)), "{read:?}");
+    }
+
+    /// What v0.9.0 wrote for a Bolt mouse. Its users meet this snapshot on
+    /// their first launch after an upgrade, which must start cold as the
+    /// expected outcome it is, not as a damaged file.
+    #[test]
+    fn a_snapshot_the_v0_9_0_release_wrote_is_another_schema() {
+        const V19: &str = r#"{"version":19,"entries":[{
+            "key":{"Bolt":{"unit_id":[170,187,204,221]}},
+            "probe":{
+                "battery":null,
+                "model_info":{"entity_count":1,"serial_number":"TESTSERIAL01",
+                    "unit_id":[170,187,204,221],
+                    "transports":{"usb":false,"equad":false,"btle":false,"bluetooth":false},
+                    "model_ids":[45122,0,0],"extended_model_id":0},
+                "kind":null,"marketing_name":null,
+                "protocol":{"Hidpp20":{"capabilities":{"buttons":false,"pointer":false,
+                    "lighting":false,"scroll_inversion":false,"hires_wheel":false,
+                    "thumbwheel":false,"haptic_feedback":false,"haptic_panel":false,
+                    "dpi_gestures":false,"fn_lock":false,"os_layout":false,
+                    "report_rate":false,"backlight":false,"easy_switch":false,
+                    "virtual_thumbwheel":false,"pointer_scaling":false,
+                    "force_sensing":false,"disable_keys":false,"onboard_profiles":false,
+                    "button_spy":false,"sidetone":false},"incomplete":false}},
+                "identity_incomplete":false},
+            "battery":null,
+            "events":{"wireless_status":null,"unified_battery":null,"battery_status":null,
+                "battery_voltage":null,"adc_measurement":null,"fn_inversion":null,
+                "fn_inversion_multi_host":null,"extended_dpi":null,"multi_platform":null,
+                "disable_keys":null,"extended_report_rate":null,"backlight":null,
+                "lock_key_state":null,"hires_wheel":null}}]}"#;
+
+        let read = read_json(V19);
+
+        assert!(
+            matches!(read, Err(SnapshotRejected::ForeignSchema { version: 19 })),
+            "{read:?}"
+        );
+    }
+
+    /// What a newer build wrote, met after a downgrade. Its entries do not
+    /// decode here, and that must not make the snapshot read as damaged: the
+    /// schema decides first.
+    #[test]
+    fn a_snapshot_a_newer_build_wrote_is_another_schema() {
+        let newer = SCHEMA_VERSION + 1;
+        let json = format!(r#"{{"version":{newer},"entries":[{{"shape":"unknown here"}}]}}"#);
+
+        let read = read_json(&json);
+
+        assert!(
+            matches!(read, Err(SnapshotRejected::ForeignSchema { version }) if version == newer),
+            "{read:?}"
+        );
+    }
+
+    /// Entries this build's schema does not decode are damage, not another
+    /// schema: the version claims they are this build's.
+    #[test]
+    fn this_schema_with_entries_that_do_not_decode_is_unreadable() {
+        let json =
+            format!(r#"{{"version":{SCHEMA_VERSION},"entries":[{{"shape":"unknown here"}}]}}"#);
+
+        let read = read_json(&json);
+
+        assert!(
+            matches!(read, Err(SnapshotRejected::Unreadable { .. })),
+            "{read:?}"
+        );
+    }
+
+    #[test]
+    fn a_torn_or_foreign_file_is_unreadable() {
+        let written = one_bolt_device();
+        let torn = &written[..written.len() / 2];
+
+        for stored in [torn, "not json at all", "{}"] {
+            let read = read_json(stored);
+
+            assert!(
+                matches!(read, Err(SnapshotRejected::Unreadable { .. })),
+                "{stored}: {read:?}"
+            );
+        }
     }
 }
