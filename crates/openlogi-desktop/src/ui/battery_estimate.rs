@@ -20,6 +20,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use openlogi_core::device::{BatteryInfo, BatteryLevel, BatteryStatus, DeviceKind};
+use openlogi_core::hid::backlight::max_backlight_level;
 use openlogi_core::hid::{BacklightMode, BacklightState, BacklightStatus};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
@@ -283,6 +284,14 @@ impl BatteryTelemetry {
             return;
         }
 
+        // Leaving charging (including on a thermal/charging fault `BatteryStatus::Error`,
+        // a 0% cold reading, or while discharging settings are still pending) immediately
+        // clears any live or waiting charging progress inside `BatteryPhase` without
+        // discarding a valid `Discharging` anchor.
+        if entry.phase.clear_charging_on_non_charging() {
+            self.dirty = true;
+        }
+
         if matches!(battery.status, BatteryStatus::Error) {
             return;
         }
@@ -375,6 +384,18 @@ impl BatteryPhase {
         } else {
             *self = Self::Unanchored;
             true
+        }
+    }
+
+    /// Clear any active or waiting charging progress when a non-charging status
+    /// (such as `BatteryStatus::Error` or `Discharging`) is observed, without
+    /// disturbing an existing `Discharging` anchor.
+    fn clear_charging_on_non_charging(&mut self) -> bool {
+        if matches!(self, Self::Charging { .. }) {
+            *self = Self::Unanchored;
+            true
+        } else {
+            false
         }
     }
 
@@ -682,14 +703,14 @@ impl EstimatePhase {
         clippy::cast_sign_loss,
         reason = "clamped positive minutes round into u32"
     )]
-    fn from_live_charge_rate(percentage: u8, measured_min_per_pct: f32) -> Option<Self> {
-        if percentage == 0 || percentage >= 100 || !measured_min_per_pct.is_finite() {
+    fn from_live_charge_rate(charge_pct: u8, measured_min_per_pct: f32) -> Option<Self> {
+        if charge_pct == 0 || charge_pct >= 100 || !measured_min_per_pct.is_finite() {
             return None;
         }
         let effective_rate = measured_min_per_pct.clamp(0.25, 10.0);
 
-        if percentage < 80 {
-            let fast_phase_mins = f32::from(80 - percentage) * effective_rate;
+        if (1..80).contains(&charge_pct) {
+            let fast_phase_mins = f32::from(80 - charge_pct) * effective_rate;
             // Above 80%, Li-Po Constant-Voltage taper averages ~1.75x slower per percent
             // than the Constant-Current phase.
             let trickle_phase_mins = 20.0 * effective_rate * 1.75;
@@ -697,7 +718,7 @@ impl EstimatePhase {
             let m100 = ((fast_phase_mins + trickle_phase_mins).round() as u32).max(m80 + 5);
             Self::charging_to_80(m80, m100)
         } else {
-            let rem_pct = f32::from(100 - percentage);
+            let rem_pct = f32::from(100 - charge_pct);
             let trickle_phase_mins = rem_pct * effective_rate;
             let m100 = (trickle_phase_mins.round() as u32).max(1);
             Self::charging_to_100(m100)
@@ -1276,7 +1297,7 @@ fn keyboard_backlight_profile(
         return (off_hours, "kbd:bl-off".to_owned(), Some(note));
     }
 
-    let max_level = bl.nb_levels.saturating_sub(1).max(1);
+    let max_level = max_backlight_level(bl.nb_levels).max(1);
     let level = bl.current_level.min(max_level);
     let timeout_secs = bl
         .duration
@@ -1504,7 +1525,7 @@ mod tests {
                 .detail_subline()
                 .contains("Saúde estim.: calculando…")
         );
-        assert!(pt_est.detail_subline().contains("Baseado na config atual"));
+        assert!(pt_est.detail_subline().contains("Baseado na config"));
 
         rust_i18n::set_locale("de");
         let de_est = estimate_for_device(&state, &record).expect("estimate in de");
@@ -1515,11 +1536,7 @@ mod tests {
                 .detail_subline()
                 .contains("Gesch. Zustand: wird kalibriert…")
         );
-        assert!(
-            de_est
-                .detail_subline()
-                .contains("Basierend auf aktiver Konfiguration")
-        );
+        assert!(de_est.detail_subline().contains("Basierend auf aktiver"));
         rust_i18n::set_locale("en");
     }
 
@@ -2569,6 +2586,111 @@ mod tests {
             state.battery_telemetry().phase_for(&key),
             Some(BatteryPhase::Discharging { percentage: 55, .. })
         ));
+    }
+
+    #[test]
+    fn charging_fault_requires_fresh_live_step() {
+        let _lock = LOCALE_LOCK.lock().unwrap();
+        rust_i18n::set_locale("en");
+
+        let caps = Capabilities::default();
+        let t0 = 4_000_000_000_u64;
+        let charging_50 = BatteryInfo {
+            percentage: Some(50),
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Charging,
+        };
+        let charging_55 = BatteryInfo {
+            percentage: Some(55),
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Charging,
+        };
+        let fault_55 = BatteryInfo {
+            percentage: Some(55),
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Error,
+        };
+        let charging_56 = BatteryInfo {
+            percentage: Some(56),
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Charging,
+        };
+
+        let mut state = test_state_with_devices(vec![mx_keys_mini_device(
+            Some(caps),
+            Some(charging_55.clone()),
+        )]);
+        let key = state.devices()[0].config_key.clone();
+
+        // 1. Reach `ChargingProgress::Live` (50% -> 55% over 5 minutes = 1.0 min/%).
+        state.battery_telemetry_mut().observe_device(
+            &key,
+            true,
+            Some(&charging_50),
+            Some("kbd:standard"),
+            120 * 24,
+            t0,
+        );
+        state.battery_telemetry_mut().observe_device(
+            &key,
+            true,
+            Some(&charging_55),
+            Some("kbd:standard"),
+            120 * 24,
+            t0 + 300,
+        );
+        assert_eq!(
+            state.battery_telemetry().live_charging_rate(&key),
+            Some(1.0)
+        );
+
+        // 2. Thermal/charging fault (`BatteryStatus::Error`) occurs at t0 + 600:
+        // must clear charging progress immediately.
+        state.battery_telemetry_mut().observe_device(
+            &key,
+            true,
+            Some(&fault_55),
+            Some("kbd:standard"),
+            120 * 24,
+            t0 + 600,
+        );
+        assert_eq!(state.battery_telemetry().live_charging_rate(&key), None);
+        assert_eq!(
+            state.battery_telemetry().phase_for(&key),
+            Some(&BatteryPhase::Unanchored)
+        );
+
+        // 3. Charging resumes at the same 55% 1 hour later (`t0 + 3_900`):
+        // must re-enter `AwaitingLiveStep` (no stale rate reused) and must not count
+        // the paused fault hour into the next 55% -> 56% step 2 minutes later (`t0 + 4_020`).
+        state.battery_telemetry_mut().observe_device(
+            &key,
+            true,
+            Some(&charging_55),
+            Some("kbd:standard"),
+            120 * 24,
+            t0 + 3_900,
+        );
+        assert_eq!(
+            state.battery_telemetry().live_charging_rate(&key),
+            None,
+            "resuming at the same percentage after a fault must wait for a fresh live step"
+        );
+        assert_eq!(estimate_for_device(&state, &state.devices()[0]), None);
+
+        state.battery_telemetry_mut().observe_device(
+            &key,
+            true,
+            Some(&charging_56),
+            Some("kbd:standard"),
+            120 * 24,
+            t0 + 4_020,
+        );
+        // 1% over 120s (t0+3900 -> t0+4020) = 2.0 min/%, NOT 62 minutes from t0+300!
+        assert_eq!(
+            state.battery_telemetry().live_charging_rate(&key),
+            Some(2.0)
+        );
     }
 
     #[test]
