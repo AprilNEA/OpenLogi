@@ -110,52 +110,93 @@ pub fn detect_swipe(dx: i32, dy: i32) -> Option<GestureDirection> {
 /// (one resolved a swipe only on release), which mis-fired the click.
 #[derive(Debug, Default)]
 pub struct SwipeAccumulator {
-    /// When the current hold began, or `None` when not holding. Gates a
-    /// deliberate swipe against a quick click whose cursor happened to move.
-    held_since: Option<Instant>,
-    /// Accumulated raw-XY travel since the hold began (saturating, so an
-    /// arbitrarily long hold can never overflow).
-    dx: i32,
-    dy: i32,
-    /// Set once a direction has committed this hold, so the release isn't
-    /// then also read as a click.
-    fired: bool,
-    /// The direction committed by the current stroke. Travel restarts from
-    /// zero after each commit, so one hold can chain swipes (left, right,
-    /// left...) the way Options+ does.
-    last: Option<GestureDirection>,
-    /// Net travel continuing `last` since it committed; fires `last` again at
-    /// [`GESTURE_REPEAT_DISTANCE`].
-    repeat: i32,
-    /// Signed sideways drift accompanying `repeat`, held to the same
-    /// straightness rule as a fresh swipe so a diagonal can't repeat.
-    repeat_cross: i32,
+    hold: Hold,
+}
+
+/// One gesture-button hold, from press to release.
+#[derive(Debug, Default)]
+enum Hold {
+    /// No gesture button is held, so motion is ignored.
+    #[default]
+    Idle,
+    /// A gesture button is held.
+    Held(Press),
+}
+
+/// A hold in progress.
+#[derive(Debug)]
+struct Press {
+    /// When the hold began. Gates a deliberate swipe against a quick click
+    /// whose cursor happened to move.
+    since: Instant,
     /// When the last motion arrived, to detect the pause that ends a stroke.
     moved_at: Option<Instant>,
-    /// Whether this hold commits at most one swipe, read from
-    /// [`set_one_swipe_per_press`] when the hold begins.
-    one_per_press: bool,
+    /// Where the hold's swipes stand.
+    stroke: Stroke,
+}
+
+/// How many swipes one hold may commit, read from [`set_one_swipe_per_press`]
+/// when the hold begins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Swipes {
+    /// One, however far the hand travels.
+    One,
+    /// Any number: reversals and repeats chain within the hold (#1652).
+    Chained,
+}
+
+/// Where a hold's swipes stand. Travel is raw-XY units summed since the last
+/// commit, saturating, so an arbitrarily long hold can never overflow.
+#[derive(Debug, Clone, Copy)]
+enum Stroke {
+    /// Nothing committed yet: travel sums toward the first swipe, and the
+    /// release is a click.
+    Tracking { dx: i32, dy: i32, swipes: Swipes },
+    /// `last` committed and its stroke goes on. Travel restarts from zero
+    /// after each commit, so one hold can chain swipes (left, right, left...)
+    /// the way Options+ does. `repeat` is the net travel continuing `last`
+    /// since it committed, which fires `last` again at
+    /// [`GESTURE_REPEAT_DISTANCE`]; `repeat_cross` is the sideways drift
+    /// accompanying it, held to the same straightness rule as a fresh swipe
+    /// so a diagonal can't repeat.
+    Stroking {
+        last: GestureDirection,
+        dx: i32,
+        dy: i32,
+        repeat: i32,
+        repeat_cross: i32,
+    },
+    /// A swipe fired and the pointer then rested: the next swipe starts fresh
+    /// and may repeat the last direction.
+    Rested { dx: i32, dy: i32 },
+    /// The hold's one swipe fired: the rest of its travel is ignored.
+    Consumed,
 }
 
 impl SwipeAccumulator {
     /// Begin a fresh hold, resetting the travel accumulator and commit state.
     pub fn begin(&mut self) {
-        self.held_since = Some(Instant::now());
-        self.dx = 0;
-        self.dy = 0;
-        self.fired = false;
-        self.last = None;
-        self.repeat = 0;
-        self.repeat_cross = 0;
-        self.moved_at = None;
-        self.one_per_press = ONE_SWIPE_PER_PRESS.load(Ordering::Relaxed);
+        let swipes = if ONE_SWIPE_PER_PRESS.load(Ordering::Relaxed) {
+            Swipes::One
+        } else {
+            Swipes::Chained
+        };
+        self.hold = Hold::Held(Press {
+            since: Instant::now(),
+            moved_at: None,
+            stroke: Stroke::Tracking {
+                dx: 0,
+                dy: 0,
+                swipes,
+            },
+        });
     }
 
     /// Whether a hold is in progress (between [`Self::begin`] and [`Self::end`]),
     /// so callers can do rising/falling-edge detection without a second flag.
     #[must_use]
     pub fn is_holding(&self) -> bool {
-        self.held_since.is_some()
+        matches!(self.hold, Hold::Held(_))
     }
 
     /// Feed a pointer-move / raw-XY delta into the current hold. Returns
@@ -165,106 +206,10 @@ impl SwipeAccumulator {
     /// began under [`set_one_swipe_per_press`] commits once and then ignores
     /// the rest of its travel.
     pub fn accumulate(&mut self, dx: i32, dy: i32) -> Option<GestureDirection> {
-        self.held_since?;
-        if self.one_per_press && self.fired {
-            return None;
+        match &mut self.hold {
+            Hold::Idle => None,
+            Hold::Held(press) => press.accumulate(dx, dy),
         }
-        let now = Instant::now();
-        if self
-            .moved_at
-            .is_some_and(|t| now.saturating_duration_since(t) >= GESTURE_REARM_PAUSE)
-        {
-            // A rest ends the stroke: the next swipe may repeat the last
-            // direction. Summed travel the new report heads against is an
-            // abandoned partial swipe and is dropped; travel it continues is
-            // kept, so a reversal paused halfway still completes.
-            if i64::from(self.dx) * i64::from(dx) + i64::from(self.dy) * i64::from(dy) < 0 {
-                self.dx = 0;
-                self.dy = 0;
-            }
-            self.last = None;
-            self.repeat = 0;
-            self.repeat_cross = 0;
-        }
-        self.moved_at = Some(now);
-        if let Some(dir) = self.last {
-            // Net travel continuing the committed way fires it again every
-            // GESTURE_REPEAT_DISTANCE, so a continuous motion keeps stepping.
-            // Backtracking takes back that progress and its drift alike, so a
-            // wobble never repeats and a corrected stroke isn't held to drift
-            // it has undone.
-            let (a, c) = (along(dir, dx, dy), across(dir, dx, dy));
-            let earlier = self.repeat;
-            let total = earlier.saturating_add(a);
-            // Only backtracking to the start clears drift: a purely
-            // sideways report at zero progress is still part of the stroke.
-            self.repeat_cross = if a < 0 && total <= 0 {
-                0
-            } else {
-                self.repeat_cross.saturating_add(c)
-            };
-            self.repeat = total.max(0);
-            if continues(dir, dx, dy) {
-                // The same straightness rule as a fresh swipe, seen in the
-                // committed direction's frame (`Right` = along it).
-                let straight =
-                    detect_swipe(self.repeat, self.repeat_cross) == Some(GestureDirection::Right);
-                if self.repeat >= GESTURE_REPEAT_DISTANCE && straight {
-                    // Carry the excess, so a report spanning two repeat
-                    // distances fires again on the next report. The excess is
-                    // the stroke's tail, so it keeps the tail's drift: this
-                    // report's share first, then earlier travel's.
-                    let excess = self.repeat - GESTURE_REPEAT_DISTANCE;
-                    let tail = excess.min(a);
-                    let mut carried = i64::from(c) * i64::from(tail) / i64::from(a);
-                    if excess > a && earlier > 0 {
-                        carried += i64::from(self.repeat_cross.saturating_sub(c))
-                            * i64::from(excess - a)
-                            / i64::from(earlier);
-                    }
-                    self.repeat = excess;
-                    self.repeat_cross = i32::try_from(carried).unwrap_or(if carried < 0 {
-                        i32::MIN
-                    } else {
-                        i32::MAX
-                    });
-                    // The stroke went back past any partial reversal.
-                    self.dx = 0;
-                    self.dy = 0;
-                    return Some(dir);
-                }
-                // Before any reversal this is the same stroke: drop it from
-                // the reversal travel below.
-                if reversal(dir, self.dx, self.dy) == 0 {
-                    return None;
-                }
-            }
-        }
-        self.dx = self.dx.saturating_add(dx);
-        self.dy = self.dy.saturating_add(dy);
-        // Once reversing, backtracking subtracts, but travel never banks past
-        // the turning point: a reversal counts from there at the normal
-        // threshold, and a net-zero wobble never fires.
-        match self.last {
-            Some(GestureDirection::Right) => self.dx = self.dx.min(0),
-            Some(GestureDirection::Left) => self.dx = self.dx.max(0),
-            Some(GestureDirection::Down) => self.dy = self.dy.min(0),
-            Some(GestureDirection::Up) => self.dy = self.dy.max(0),
-            Some(GestureDirection::Click) | None => {}
-        }
-        let held_long_enough = self
-            .held_since
-            .is_some_and(|t| t.elapsed() >= GESTURE_HOLD_FOR_SWIPE);
-        if held_long_enough && let Some(dir) = detect_swipe(self.dx, self.dy) {
-            self.fired = true;
-            self.last = Some(dir);
-            self.repeat = 0;
-            self.repeat_cross = 0;
-            self.dx = 0;
-            self.dy = 0;
-            return Some(dir);
-        }
-        None
     }
 
     /// End the current hold. Returns `true` when an in-progress hold ended
@@ -272,8 +217,14 @@ impl SwipeAccumulator {
     /// action — and `false` when a swipe already fired mid-motion, or when there
     /// was no hold to end (a stray release reports no click).
     pub fn end(&mut self) -> bool {
-        let was_click = self.held_since.is_some() && !self.fired;
-        self.held_since = None;
+        let was_click = matches!(
+            self.hold,
+            Hold::Held(Press {
+                stroke: Stroke::Tracking { .. },
+                ..
+            })
+        );
+        self.hold = Hold::Idle;
         was_click
     }
 
@@ -283,25 +234,220 @@ impl SwipeAccumulator {
     /// true start instant. A no-op when not currently holding.
     #[doc(hidden)]
     pub fn backdate_hold_for_test(&mut self) {
-        if self.held_since.is_some() {
-            self.held_since = Instant::now().checked_sub(GESTURE_HOLD_FOR_SWIPE * 2);
+        if let Hold::Held(press) = &mut self.hold
+            && let Some(since) = Instant::now().checked_sub(GESTURE_HOLD_FOR_SWIPE * 2)
+        {
+            press.since = since;
         }
-    }
-
-    /// Test-only seam: make the current hold commit at most one swipe, as
-    /// [`set_one_swipe_per_press`] does, without touching the process-wide
-    /// setting other tests read.
-    #[doc(hidden)]
-    pub fn one_swipe_per_press_for_test(&mut self) {
-        self.one_per_press = true;
     }
 
     /// Test-only seam: age the last motion past [`GESTURE_REARM_PAUSE`], as if
     /// the pointer had rested, without sleeping.
     #[doc(hidden)]
     pub fn rest_for_test(&mut self) {
-        if let Some(moved_at) = self.moved_at {
-            self.moved_at = moved_at.checked_sub(GESTURE_REARM_PAUSE * 2);
+        if let Hold::Held(press) = &mut self.hold
+            && let Some(moved_at) = press.moved_at
+        {
+            press.moved_at = moved_at.checked_sub(GESTURE_REARM_PAUSE * 2);
+        }
+    }
+}
+
+impl Press {
+    fn accumulate(&mut self, dx: i32, dy: i32) -> Option<GestureDirection> {
+        if matches!(self.stroke, Stroke::Consumed) {
+            return None;
+        }
+        let now = Instant::now();
+        if self
+            .moved_at
+            .is_some_and(|t| now.saturating_duration_since(t) >= GESTURE_REARM_PAUSE)
+        {
+            self.stroke = self.stroke.rest(dx, dy);
+        }
+        self.moved_at = Some(now);
+        if let Stroke::Stroking {
+            last,
+            dx: sum_x,
+            dy: sum_y,
+            repeat,
+            repeat_cross,
+        } = &mut self.stroke
+        {
+            // Net travel continuing the committed way fires it again every
+            // GESTURE_REPEAT_DISTANCE, so a continuous motion keeps stepping.
+            // Backtracking takes back that progress and its drift alike, so a
+            // wobble never repeats and a corrected stroke isn't held to drift
+            // it has undone.
+            let dir = *last;
+            let (a, c) = (along(dir, dx, dy), across(dir, dx, dy));
+            let earlier = *repeat;
+            let total = earlier.saturating_add(a);
+            // Only backtracking to the start clears drift: a purely
+            // sideways report at zero progress is still part of the stroke.
+            *repeat_cross = if a < 0 && total <= 0 {
+                0
+            } else {
+                repeat_cross.saturating_add(c)
+            };
+            *repeat = total.max(0);
+            if continues(dir, dx, dy) {
+                // The same straightness rule as a fresh swipe, seen in the
+                // committed direction's frame (`Right` = along it).
+                let straight =
+                    detect_swipe(*repeat, *repeat_cross) == Some(GestureDirection::Right);
+                if *repeat >= GESTURE_REPEAT_DISTANCE && straight {
+                    // Carry the excess, so a report spanning two repeat
+                    // distances fires again on the next report. The excess is
+                    // the stroke's tail, so it keeps the tail's drift: this
+                    // report's share first, then earlier travel's.
+                    let excess = *repeat - GESTURE_REPEAT_DISTANCE;
+                    let tail = excess.min(a);
+                    let mut carried = i64::from(c) * i64::from(tail) / i64::from(a);
+                    if excess > a && earlier > 0 {
+                        carried += i64::from(repeat_cross.saturating_sub(c))
+                            * i64::from(excess - a)
+                            / i64::from(earlier);
+                    }
+                    *repeat = excess;
+                    *repeat_cross = i32::try_from(carried).unwrap_or(if carried < 0 {
+                        i32::MIN
+                    } else {
+                        i32::MAX
+                    });
+                    // The stroke went back past any partial reversal.
+                    *sum_x = 0;
+                    *sum_y = 0;
+                    return Some(dir);
+                }
+                // Before any reversal this is the same stroke: drop it from
+                // the reversal travel below.
+                if reversal(dir, *sum_x, *sum_y) == 0 {
+                    return None;
+                }
+            }
+        }
+        self.stroke = self.stroke.travel(dx, dy);
+        if self.since.elapsed() < GESTURE_HOLD_FOR_SWIPE {
+            return None;
+        }
+        let (sum_x, sum_y) = self.stroke.summed()?;
+        let dir = detect_swipe(sum_x, sum_y)?;
+        self.stroke = self.stroke.commit(dir);
+        Some(dir)
+    }
+}
+
+impl Stroke {
+    /// The travel summed toward the next swipe; `None` once the hold's one
+    /// swipe has fired.
+    fn summed(self) -> Option<(i32, i32)> {
+        match self {
+            Self::Tracking { dx, dy, .. }
+            | Self::Stroking { dx, dy, .. }
+            | Self::Rested { dx, dy } => Some((dx, dy)),
+            Self::Consumed => None,
+        }
+    }
+
+    /// The stroke after a rest. Summed travel the new report heads against is
+    /// an abandoned partial swipe and is dropped; travel it continues is
+    /// kept, so a reversal paused halfway still completes. A committed
+    /// stroke ends, so the next swipe may repeat its direction.
+    fn rest(self, dx: i32, dy: i32) -> Self {
+        let Some((sum_x, sum_y)) = self.summed() else {
+            return self;
+        };
+        let (sum_x, sum_y) =
+            if i64::from(sum_x) * i64::from(dx) + i64::from(sum_y) * i64::from(dy) < 0 {
+                (0, 0)
+            } else {
+                (sum_x, sum_y)
+            };
+        match self {
+            Self::Tracking { swipes, .. } => Self::Tracking {
+                dx: sum_x,
+                dy: sum_y,
+                swipes,
+            },
+            Self::Stroking { .. } | Self::Rested { .. } => Self::Rested {
+                dx: sum_x,
+                dy: sum_y,
+            },
+            Self::Consumed => Self::Consumed,
+        }
+    }
+
+    /// The stroke with one report's travel added. Once reversing,
+    /// backtracking subtracts, but travel never banks past the turning
+    /// point: a reversal counts from there at the normal threshold, and a
+    /// net-zero wobble never fires.
+    fn travel(self, dx: i32, dy: i32) -> Self {
+        match self {
+            Self::Tracking {
+                dx: sum_x,
+                dy: sum_y,
+                swipes,
+            } => Self::Tracking {
+                dx: sum_x.saturating_add(dx),
+                dy: sum_y.saturating_add(dy),
+                swipes,
+            },
+            Self::Rested {
+                dx: sum_x,
+                dy: sum_y,
+            } => Self::Rested {
+                dx: sum_x.saturating_add(dx),
+                dy: sum_y.saturating_add(dy),
+            },
+            Self::Stroking {
+                last,
+                dx: sum_x,
+                dy: sum_y,
+                repeat,
+                repeat_cross,
+            } => {
+                let (mut sum_x, mut sum_y) = (sum_x.saturating_add(dx), sum_y.saturating_add(dy));
+                match last {
+                    GestureDirection::Right => sum_x = sum_x.min(0),
+                    GestureDirection::Left => sum_x = sum_x.max(0),
+                    GestureDirection::Down => sum_y = sum_y.min(0),
+                    GestureDirection::Up => sum_y = sum_y.max(0),
+                    GestureDirection::Click => {}
+                }
+                Self::Stroking {
+                    last,
+                    dx: sum_x,
+                    dy: sum_y,
+                    repeat,
+                    repeat_cross,
+                }
+            }
+            Self::Consumed => Self::Consumed,
+        }
+    }
+
+    /// The stroke once `direction` commits: the hold's one swipe is spent,
+    /// or a new stroke in `direction` begins.
+    fn commit(self, direction: GestureDirection) -> Self {
+        match self {
+            Self::Tracking {
+                swipes: Swipes::One,
+                ..
+            }
+            | Self::Consumed => Self::Consumed,
+            Self::Tracking {
+                swipes: Swipes::Chained,
+                ..
+            }
+            | Self::Stroking { .. }
+            | Self::Rested { .. } => Self::Stroking {
+                last: direction,
+                dx: 0,
+                dy: 0,
+                repeat: 0,
+                repeat_cross: 0,
+            },
         }
     }
 }
@@ -424,33 +570,6 @@ mod tests {
         );
         // Continuing the same swipe must not re-fire.
         assert_eq!(acc.accumulate(50, 0), None);
-    }
-
-    #[test]
-    fn one_swipe_per_press_commits_once_however_far_the_hand_goes() {
-        let mut acc = SwipeAccumulator::default();
-        acc.begin();
-        acc.one_swipe_per_press_for_test();
-        acc.backdate_hold_for_test();
-        let t = GESTURE_SWIPE_THRESHOLD + 10;
-        assert_eq!(acc.accumulate(t, 0), Some(GestureDirection::Right));
-        // A long continuous sweep, a reversal, and a rest then a fresh swipe
-        // all stay inside the same press.
-        let mut fired = Vec::new();
-        for _ in 0..(3 * GESTURE_REPEAT_DISTANCE / 10) {
-            fired.extend(acc.accumulate(10, 0));
-        }
-        fired.extend(acc.accumulate(-t, 0));
-        fired.extend(acc.accumulate(-t, 0));
-        acc.rest_for_test();
-        fired.extend(acc.accumulate(t, 0));
-        assert!(fired.is_empty(), "one press is one swipe, got {fired:?}");
-        assert!(!acc.end(), "the press swiped, so it is not a click");
-        // The next press swipes again.
-        acc.begin();
-        acc.one_swipe_per_press_for_test();
-        acc.backdate_hold_for_test();
-        assert_eq!(acc.accumulate(t, 0), Some(GestureDirection::Right));
     }
 
     #[test]
@@ -697,7 +816,7 @@ mod tests {
     #[test]
     fn accumulator_does_not_commit_before_the_hold_gate() {
         let mut acc = SwipeAccumulator::default();
-        acc.begin(); // held_since = now, so the gate is not yet satisfied
+        acc.begin(); // the hold begins now, so the gate is not yet satisfied
         // A big delta arriving immediately (a quick click whose cursor drifted)
         // must not commit.
         assert_eq!(acc.accumulate(GESTURE_SWIPE_THRESHOLD + 100, 0), None);
