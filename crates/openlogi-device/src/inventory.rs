@@ -25,6 +25,7 @@ pub mod events;
 mod features;
 pub mod hid_only;
 pub mod hotplug;
+mod identity;
 mod ledger;
 mod mappings;
 pub mod persist;

@@ -294,7 +294,7 @@ async fn probe_or_reuse_registered(
             // memoized: caching it would pin a wrong (all-zero unit or
             // serial-less) config key for `REFRESH_INTERVAL` (#482). The next
             // reconciliation re-probes instead.
-            if fresh.identity_incomplete && cached.is_none() {
+            if fresh.identity.is_incomplete() && cached.is_none() {
                 return (fresh, seen(id));
             }
             // Same reasoning for a capability read that failed part-way: the
@@ -396,22 +396,7 @@ pub(super) fn backfill_identity(fresh: &mut ProbedFeatures, cached: &ProbedFeatu
     if fresh.marketing_name.is_none() {
         fresh.marketing_name.clone_from(&cached.marketing_name);
     }
-    if !fresh.identity_incomplete {
-        return;
-    }
-    match (fresh.model_info.as_mut(), cached.model_info.as_ref()) {
-        (None, Some(previous)) => {
-            fresh.model_info = Some(previous.clone());
-            fresh.identity_incomplete = false;
-        }
-        (Some(now), Some(previous))
-            if now.serial_number.is_none() && previous.serial_number.is_some() =>
-        {
-            now.serial_number.clone_from(&previous.serial_number);
-            fresh.identity_incomplete = false;
-        }
-        _ => {}
-    }
+    fresh.identity.backfill(&cached.identity);
 }
 
 #[cfg(test)]

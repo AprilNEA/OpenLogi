@@ -63,7 +63,9 @@ use super::features::{BatteryProbe, ProbedFeatures};
 /// which also records HID++ 1.0, and adds the HID++ 1.0 battery registers to
 /// `BatteryProbe`.
 /// v20 adds the `Capabilities::change_host` flag (`0x1814` host switching).
-const SCHEMA_VERSION: u32 = 20;
+/// v21 folds `model_info` and `identity_incomplete` into `identity`, one state
+/// per DeviceInformation outcome.
+const SCHEMA_VERSION: u32 = 21;
 
 impl ProbeCacheError {
     /// Report why a store could not keep a snapshot.
@@ -298,7 +300,10 @@ mod tests {
     use super::super::cache::{CacheKey, Cached};
     use super::super::events::EventFeatureIndices;
     use super::super::features::{BatteryProbe, ProbedFeatures};
-    use super::{EncodedSnapshot, ProbeCacheSnapshot, SCHEMA_VERSION, SnapshotRejected};
+    use super::super::identity::ProbedIdentity;
+    use super::{
+        EncodedSnapshot, ProbeCacheSnapshot, SCHEMA_VERSION, SchemaBody, SnapshotRejected,
+    };
 
     /// A device fully probed once keeps its identity across restarts — that is
     /// the whole point of the snapshot — but only the parts that are actually
@@ -336,7 +341,7 @@ mod tests {
             },
             Cached {
                 probe: ProbedFeatures {
-                    model_info: Some(model.clone()),
+                    identity: ProbedIdentity::Known(model.clone()),
                     // A live reading at snapshot time.
                     battery: Some(BatteryInfo {
                         percentage: Some(55),
@@ -375,7 +380,7 @@ mod tests {
                 unit_id: [0xaa, 0xbb, 0xcc, 0xdd],
             })
             .expect("a Bolt entry survives");
-        assert_eq!(bolt.probe.model_info.as_ref(), Some(&model));
+        assert_eq!(bolt.probe.identity, ProbedIdentity::Known(model));
         assert_eq!(
             bolt.battery,
             Some(BatteryProbe::Unified {
@@ -527,5 +532,60 @@ mod tests {
                 "{stored}: {read:?}"
             );
         }
+    }
+
+    /// What a v20 build wrote for a Bolt mouse: its identity as `model_info`
+    /// beside an `identity_incomplete` flag. It is valid v20 in every other
+    /// field, so its entries fail to decode here for that change alone.
+    const V20: &str = r#"{"version":20,"entries":[{
+        "key":{"Bolt":{"unit_id":[170,187,204,221]}},
+        "probe":{
+            "battery":null,
+            "model_info":{"entity_count":1,"serial_number":"TESTSERIAL01",
+                "unit_id":[170,187,204,221],
+                "transports":{"usb":false,"equad":false,"btle":false,"bluetooth":false},
+                "model_ids":[45122,0,0],"extended_model_id":0},
+            "kind":null,"marketing_name":null,
+            "protocol":{"Hidpp20":{"capabilities":{"buttons":false,"pointer":false,
+                "lighting":false,"scroll_inversion":false,"hires_wheel":false,
+                "thumbwheel":false,"haptic_feedback":false,"haptic_panel":false,
+                "dpi_gestures":false,"fn_lock":false,"os_layout":false,
+                "report_rate":false,"backlight":false,"easy_switch":false,
+                "virtual_thumbwheel":false,"pointer_scaling":false,
+                "force_sensing":false,"disable_keys":false,"onboard_profiles":false,
+                "button_spy":false,"sidetone":false,"g_keys":false,"m_keys":false,
+                "macro_record":false,"change_host":false},"incomplete":false}},
+            "identity_incomplete":false},
+        "battery":null,
+        "events":{"wireless_status":null,"unified_battery":null,"battery_status":null,
+            "battery_voltage":null,"adc_measurement":null,"fn_inversion":null,
+            "fn_inversion_multi_host":null,"extended_dpi":null,"multi_platform":null,
+            "disable_keys":null,"extended_report_rate":null,"backlight":null,
+            "lock_key_state":null,"hires_wheel":null}}]}"#;
+
+    /// The first launch after an upgrade from a v20 build meets this
+    /// snapshot. Its entries no longer decode, and it must still start cold
+    /// as another schema rather than as a damaged file.
+    #[test]
+    fn a_snapshot_a_v20_build_wrote_is_another_schema() {
+        let read = read_json(V20);
+
+        assert!(
+            matches!(read, Err(SnapshotRejected::ForeignSchema { version: 20 })),
+            "{read:?}"
+        );
+    }
+
+    /// The two fields are not guessed into one of the states they meant,
+    /// whatever version the snapshot claims.
+    #[test]
+    fn a_two_field_identity_does_not_decode() {
+        let Err(error) = serde_json::from_str::<SchemaBody>(V20) else {
+            panic!("v20 entries must not decode as this schema's");
+        };
+        assert!(
+            error.to_string().contains("missing field `identity`"),
+            "v20 entries must fail on their missing `identity`, not on: {error}"
+        );
     }
 }
