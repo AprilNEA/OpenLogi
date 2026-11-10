@@ -521,7 +521,7 @@ pub(crate) fn observe_state_telemetry_at(state: &mut AppState, now_secs: u64) {
         .filter(|record| record.persistent)
         .map(|record| {
             let (nominal_full_hours, signature, _) = nominal_profile_for_device(state, record);
-            let known_sig = (!signature_has_pending_read(&signature)).then_some(signature);
+            let known_sig = (!device_has_pending_power_read(state, record)).then_some(signature);
             DeviceObservation {
                 config_key: record.config_key.clone(),
                 online: record.is_online(),
@@ -546,8 +546,30 @@ pub(crate) fn observe_state_telemetry_at(state: &mut AppState, now_secs: u64) {
     telemetry.flush();
 }
 
-fn signature_has_pending_read(signature: &str) -> bool {
-    signature == "kbd:unmeasured" || signature.ends_with(":hz=unknown")
+/// Returns `true` only when `record` is online, advertises a power-affecting
+/// capability (`backlight` or `report_rate`), and that read is still pending
+/// (`Unknown` or `Loading`). Devices that do not support the capability or
+/// whose read already resolved (`Ready`, `Failed`, or `Unsupported`) are not
+/// blocked from learning.
+fn device_has_pending_power_read(state: &AppState, record: &DeviceRecord) -> bool {
+    if !record.is_online() {
+        return false;
+    }
+    let Some(caps) = record.capabilities else {
+        return false;
+    };
+    let key = record.device_key();
+    let backlight_pending = caps.backlight
+        && matches!(
+            state.backlight_load_for(&key),
+            None | Some(BacklightLoad::Unknown | BacklightLoad::Loading)
+        );
+    let report_rate_pending = caps.report_rate
+        && matches!(
+            state.report_rate_load_for(&key),
+            None | Some(ReportRateLoad::Unknown | ReportRateLoad::Loading)
+        );
+    backlight_pending || report_rate_pending
 }
 
 /// Compute the battery duration & health estimate for `record` given current `AppState`.
@@ -755,7 +777,11 @@ pub(crate) fn nominal_profile_for_device(
                     (RgbPowerState::Unknown | RgbPowerState::Unsupported, None) => None,
                 };
                 let rgb_token = rgb_state.token();
-                let hz_token = rate_hz.map_or_else(|| "unknown".to_owned(), |hz| hz.to_string());
+                let hz_token = if has_report_rate {
+                    rate_hz.map_or_else(|| "unknown".to_owned(), |hz| hz.to_string())
+                } else {
+                    "fixed".to_owned()
+                };
                 let sig = format!("mouse:gaming:rgb={rgb_token}:hz={hz_token}");
                 return (base_hours.round().max(10.0) as u32, sig, note);
             }
@@ -1576,5 +1602,64 @@ mod tests {
         assert_eq!(hours_black, 180 * 24);
         assert_eq!(sig_black, "kbd:rgb-off");
         assert_eq!(note_black.as_deref(), Some("RGB off"));
+    }
+
+    #[test]
+    fn rgb_mouse_without_report_rate_capability_learns_discharge_interval() {
+        let battery_80 = BatteryInfo {
+            percentage: Some(80),
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Discharging,
+        };
+        // RGB gaming mouse that supports lighting (`lighting: true`) but NOT adjustable report rate (`report_rate: false`)
+        let rgb_only_mouse_caps = Capabilities {
+            lighting: true,
+            report_rate: false,
+            ..Default::default()
+        };
+        let mut state = test_state_with_devices(vec![gaming_mouse_device(
+            Some(rgb_only_mouse_caps),
+            Some(battery_80),
+        )]);
+        let cfg_key = state.devices()[0].config_key.clone();
+
+        // 1. Anchor at 80% on initial state creation — even though report_rate is unsupported,
+        // learning must NOT be blocked and the device immediately enters Discharging phase!
+        let (nominal_hours, sig, _) = nominal_profile_for_device(&state, &state.devices()[0]);
+        assert_eq!(sig, "mouse:gaming:rgb=unknown:hz=fixed");
+        let Some(DischargePhase::Discharging {
+            percentage: 80,
+            timestamp_secs: t0,
+            signature: anchored_sig,
+        }) = state.battery_telemetry().phase_for(&cfg_key).cloned()
+        else {
+            panic!(
+                "expected Discharging anchor at 80%, got {:?}",
+                state.battery_telemetry().phase_for(&cfg_key)
+            );
+        };
+        assert_eq!(anchored_sig, sig);
+
+        // 2. Observe a valid discharge interval (80% -> 74% over 3 hours) -> learns 1 sample!
+        let battery_74 = BatteryInfo {
+            percentage: Some(74),
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Discharging,
+        };
+        state.battery_telemetry_mut().observe_device(
+            &cfg_key,
+            true,
+            Some(&battery_74),
+            Some(&sig),
+            nominal_hours,
+            t0 + 3 * 3_600,
+        );
+
+        let (_, learned, samples) = state.battery_telemetry().query(&cfg_key, &sig);
+        assert_eq!(
+            samples, 1,
+            "RGB mouse without report_rate capability must learn discharge intervals (nominal_hours={nominal_hours})"
+        );
+        assert!(learned.is_some());
     }
 }
