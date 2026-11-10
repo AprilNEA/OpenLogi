@@ -1429,6 +1429,156 @@ fn scaled_image_cache_survives_resolver_creation_and_reuses_decoded_source_acros
 }
 
 #[test]
+fn clear_rejects_old_worker() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let png_path = dir.path().join("worker_race.png");
+    let img_v1 = image::RgbaImage::from_pixel(200, 100, image::Rgba([240, 20, 40, 255]));
+    img_v1.save(&png_path).expect("save v1 png");
+
+    let cache = super::images::ScaledImageCache::new();
+
+    // 1. Start old worker before cache clear and hold its ticket paused.
+    let super::images::RequestStep::Spawn {
+        ticket: old_ticket,
+        display: initial_display,
+    } = cache.begin_request(&png_path, 100, 50)
+    else {
+        panic!("expected Spawn for cold cache");
+    };
+    assert!(initial_display.is_none());
+    assert!(cache.is_building_with_ticket(&png_path, 100, 50, old_ticket));
+
+    // 2. Clear the cache (Settings -> Assets -> Clear) and start a replacement request.
+    cache.clear();
+    let super::images::RequestStep::Spawn {
+        ticket: replacement_ticket,
+        ..
+    } = cache.begin_request(&png_path, 100, 50)
+    else {
+        panic!("expected Spawn for replacement after clear");
+    };
+    assert_ne!(old_ticket, replacement_ticket);
+
+    // 3. The paused old worker now finishes: it must be rejected, neither publishing
+    // its image nor finishing/removing the replacement's Building state.
+    assert!(
+        cache.run_ticket(&png_path, 100, 50, old_ticket).is_none(),
+        "old worker from previous cache generation must be rejected"
+    );
+    assert!(
+        cache.is_building_with_ticket(&png_path, 100, 50, replacement_ticket),
+        "old worker must not finish or overwrite the active replacement request"
+    );
+    assert!(matches!(
+        cache.begin_request(&png_path, 100, 50),
+        super::images::RequestStep::InFlight { .. }
+    ));
+
+    // 4. The replacement worker completes and publishes cleanly.
+    let (published_arc, w, h) = cache
+        .run_ticket(&png_path, 100, 50, replacement_ticket)
+        .expect("replacement worker publishes");
+    assert_eq!((w, h), (100, 50));
+    let super::images::RequestStep::Ready((ready_arc, _, _)) =
+        cache.begin_request(&png_path, 100, 50)
+    else {
+        panic!("expected Ready after replacement finishes");
+    };
+    assert!(Arc::ptr_eq(&published_arc, &ready_arc));
+}
+
+#[test]
+fn refresh_replaces_same_path_artwork() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let png_path = dir.path().join("same_path_refresh.png");
+
+    // 1. Write red artwork [R=240, G=20, B=40, A=255] -> BGRA [40, 20, 240, 255].
+    let red_img = image::RgbaImage::from_pixel(200, 100, image::Rgba([240, 20, 40, 255]));
+    red_img.save(&png_path).expect("save red png");
+
+    let cache = super::images::ScaledImageCache::new();
+    let super::images::RequestStep::Spawn { ticket: t1, .. } =
+        cache.begin_request(&png_path, 100, 50)
+    else {
+        panic!("expected initial Spawn");
+    };
+    let (red_arc, _, _) = cache
+        .run_ticket(&png_path, 100, 50, t1)
+        .expect("build red image");
+    let red_bgra = red_arc.as_bytes(0).expect("red bytes");
+    assert_eq!(&red_bgra[0..4], &[40, 20, 240, 255]);
+
+    // Confirm request path returns Ready while file is unchanged.
+    assert!(matches!(
+        cache.begin_request(&png_path, 100, 50),
+        super::images::RequestStep::Ready(_)
+    ));
+
+    // 2. Settings -> Assets -> Refresh downloads new blue artwork [R=40, G=20, B=240, A=255]
+    // to the exact same path -> BGRA [240, 20, 40, 255].
+    let blue_img = image::RgbaImage::from_pixel(200, 100, image::Rgba([40, 20, 240, 255]));
+    blue_img.save(&png_path).expect("overwrite with blue png");
+
+    // 3. Requesting the already-cached (100, 50) size through the request path detects
+    // the updated file, returns the old texture as non-blocking fallback, and spawns a refresh ticket.
+    let super::images::RequestStep::Spawn {
+        ticket: t2,
+        display: fallback,
+    } = cache.begin_request(&png_path, 100, 50)
+    else {
+        panic!("expected Spawn when same-path artwork changes on disk");
+    };
+    let (fb_arc, _, _) = fallback.expect("previous texture provided as non-blocking fallback");
+    assert!(Arc::ptr_eq(&fb_arc, &red_arc));
+
+    let (blue_arc, _, _) = cache
+        .run_ticket(&png_path, 100, 50, t2)
+        .expect("build refreshed blue image");
+    assert!(!Arc::ptr_eq(&red_arc, &blue_arc));
+
+    let super::images::RequestStep::Ready((ready_blue, _, _)) =
+        cache.begin_request(&png_path, 100, 50)
+    else {
+        panic!("expected Ready after refresh ticket completes");
+    };
+    let blue_bgra = ready_blue.as_bytes(0).expect("blue bytes");
+    assert_eq!(&blue_bgra[0..4], &[240, 20, 40, 255]);
+}
+
+#[test]
+fn fallback_cache_respects_capacity() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cache = super::images::ScaledImageCache::new();
+    let total = super::images::MAX_FALLBACK_ENTRIES + 6;
+    let mut paths = Vec::with_capacity(total);
+
+    for idx in 0..total {
+        let p = dir.path().join(format!("dev_{idx}.png"));
+        let color = u8::try_from(idx % 250).unwrap_or(0);
+        let img = image::RgbaImage::from_pixel(64, 64, image::Rgba([color, 100, 200, 255]));
+        img.save(&p).expect("save fallback test png");
+        let _ = cache.get_or_build(&p, 32, 32).expect("build entry");
+        paths.push(p);
+    }
+
+    assert_eq!(cache.fallback_count(), super::images::MAX_FALLBACK_ENTRIES);
+    for evicted in &paths[..6] {
+        assert!(
+            !cache.has_fallback_for(evicted),
+            "expected oldest fallback entry {} to be evicted",
+            evicted.display()
+        );
+    }
+    for retained in &paths[6..] {
+        assert!(
+            cache.has_fallback_for(retained),
+            "expected recent fallback entry {} to be retained",
+            retained.display()
+        );
+    }
+}
+
+#[test]
 #[expect(
     clippy::cast_precision_loss,
     reason = "test stage dimensions fit cleanly in f32"

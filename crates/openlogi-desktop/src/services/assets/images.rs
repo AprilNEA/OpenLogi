@@ -1,6 +1,6 @@
 //! Device image and depot-manifest helpers.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
@@ -263,21 +263,30 @@ pub(super) fn load_manifest(dir: &Path) -> Option<DepotManifest> {
 
 const MAX_SCALED_CACHE_ENTRIES: usize = 128;
 const MAX_DECODED_SOURCES: usize = 64;
+pub(crate) const MAX_FALLBACK_ENTRIES: usize = 32;
 
 type ScaledImageEntry = (Arc<RenderImage>, u32, u32);
+type ScaledKey = (PathBuf, u32, u32);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-struct FileStamp {
+pub(crate) struct FileStamp {
     len: u64,
     modified: Option<SystemTime>,
+    content_hash: u64,
 }
 
 impl FileStamp {
-    fn of(path: &Path) -> Option<Self> {
+    #[must_use]
+    pub fn of(path: &Path) -> Option<Self> {
+        use std::hash::{Hash as _, Hasher as _};
+        let bytes = std::fs::read(path).ok()?;
         let meta = std::fs::metadata(path).ok()?;
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        bytes.hash(&mut hasher);
         Some(Self {
             len: meta.len(),
             modified: meta.modified().ok(),
+            content_hash: hasher.finish(),
         })
     }
 }
@@ -287,22 +296,211 @@ struct DecodedSource {
     premul_rgba: image::RgbaImage,
 }
 
+/// Identity token for an in-flight background image build, binding the request
+/// to the cache epoch in which it was created.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct WorkTicket {
+    epoch: u64,
+    id: u64,
+}
+
+/// Explicit per-key lifecycle state so in-flight work and ready textures are
+/// never tracked through independent maps that could disagree.
+#[derive(Clone)]
+enum SlotState {
+    Building {
+        ticket: WorkTicket,
+        fallback: Option<ScaledImageEntry>,
+    },
+    Ready {
+        stamp: FileStamp,
+        image: ScaledImageEntry,
+    },
+}
+
+/// Result of requesting a scaled render through [`ScaledImageCache::begin_request`].
+pub(crate) enum RequestStep {
+    /// Fresh cached texture matching the current on-disk [`FileStamp`].
+    Ready(ScaledImageEntry),
+    /// Build already in flight for this key; draw `display` while waiting.
+    InFlight { display: Option<ScaledImageEntry> },
+    /// Caller should spawn a background worker for `ticket` and draw `display` meanwhile.
+    Spawn {
+        ticket: WorkTicket,
+        display: Option<ScaledImageEntry>,
+    },
+}
+
+enum CacheTransition {
+    BeginRequest {
+        key: ScaledKey,
+        current_stamp: Option<FileStamp>,
+    },
+    StoreDecodedSource {
+        epoch: u64,
+        path: PathBuf,
+        source: Arc<DecodedSource>,
+    },
+    FinishBuild {
+        key: ScaledKey,
+        ticket: WorkTicket,
+        built: Option<(FileStamp, ScaledImageEntry)>,
+    },
+    Clear,
+}
+
+enum TransitionOutcome {
+    Step(RequestStep),
+    Published(bool),
+    Cleared,
+}
+
 #[derive(Default)]
 struct ScaledCacheState {
+    epoch: u64,
+    next_ticket_id: u64,
     sources: HashMap<PathBuf, Arc<DecodedSource>>,
-    renders: HashMap<(PathBuf, u32, u32), (FileStamp, ScaledImageEntry)>,
-    latest_by_path: HashMap<PathBuf, (FileStamp, ScaledImageEntry)>,
-    in_flight: HashSet<(PathBuf, u32, u32)>,
+    slots: HashMap<ScaledKey, SlotState>,
+    slot_order: VecDeque<ScaledKey>,
+    fallbacks: VecDeque<(PathBuf, ScaledImageEntry)>,
     decode_counts: HashMap<PathBuf, usize>,
+}
+
+impl ScaledCacheState {
+    fn fallback_for(&self, path: &Path) -> Option<ScaledImageEntry> {
+        self.fallbacks
+            .iter()
+            .rev()
+            .find(|(p, _)| p == path)
+            .map(|(_, entry)| entry.clone())
+    }
+
+    fn record_fallback(&mut self, path: PathBuf, entry: ScaledImageEntry) {
+        self.fallbacks.retain(|(p, _)| p != &path);
+        if self.fallbacks.len() >= MAX_FALLBACK_ENTRIES {
+            self.fallbacks.pop_front();
+        }
+        self.fallbacks.push_back((path, entry));
+    }
+
+    fn insert_slot(&mut self, key: ScaledKey, state: SlotState) {
+        if !self.slots.contains_key(&key) {
+            if self.slots.len() >= MAX_SCALED_CACHE_ENTRIES
+                && let Some(oldest) = self.slot_order.pop_front()
+            {
+                self.slots.remove(&oldest);
+            }
+            self.slot_order.push_back(key.clone());
+        }
+        self.slots.insert(key, state);
+    }
+
+    /// Single transition owner for all state mutations in [`ScaledCacheState`].
+    fn transition(&mut self, op: CacheTransition) -> TransitionOutcome {
+        match op {
+            CacheTransition::Clear => {
+                self.epoch = self.epoch.wrapping_add(1);
+                self.sources.clear();
+                self.slots.clear();
+                self.slot_order.clear();
+                self.fallbacks.clear();
+                TransitionOutcome::Cleared
+            }
+            CacheTransition::BeginRequest { key, current_stamp } => {
+                if let Some(existing) = self.slots.get(&key).cloned() {
+                    match existing {
+                        SlotState::Ready { stamp, image } => {
+                            if current_stamp == Some(stamp) {
+                                return TransitionOutcome::Step(RequestStep::Ready(image));
+                            }
+                            self.next_ticket_id = self.next_ticket_id.wrapping_add(1);
+                            let ticket = WorkTicket {
+                                epoch: self.epoch,
+                                id: self.next_ticket_id,
+                            };
+                            self.slots.insert(
+                                key,
+                                SlotState::Building {
+                                    ticket,
+                                    fallback: Some(image.clone()),
+                                },
+                            );
+                            return TransitionOutcome::Step(RequestStep::Spawn {
+                                ticket,
+                                display: Some(image),
+                            });
+                        }
+                        SlotState::Building { fallback, .. } => {
+                            return TransitionOutcome::Step(RequestStep::InFlight {
+                                display: fallback,
+                            });
+                        }
+                    }
+                }
+                let fallback = self.fallback_for(&key.0);
+                self.next_ticket_id = self.next_ticket_id.wrapping_add(1);
+                let ticket = WorkTicket {
+                    epoch: self.epoch,
+                    id: self.next_ticket_id,
+                };
+                self.insert_slot(
+                    key,
+                    SlotState::Building {
+                        ticket,
+                        fallback: fallback.clone(),
+                    },
+                );
+                TransitionOutcome::Step(RequestStep::Spawn {
+                    ticket,
+                    display: fallback,
+                })
+            }
+            CacheTransition::StoreDecodedSource {
+                epoch,
+                path,
+                source,
+            } => {
+                if epoch != self.epoch {
+                    return TransitionOutcome::Published(false);
+                }
+                if self.sources.len() >= MAX_DECODED_SOURCES && !self.sources.contains_key(&path) {
+                    self.sources.clear();
+                }
+                self.sources.insert(path.clone(), source);
+                let count = self.decode_counts.entry(path).or_insert(0);
+                *count = count.saturating_add(1);
+                TransitionOutcome::Published(true)
+            }
+            CacheTransition::FinishBuild { key, ticket, built } => {
+                if ticket.epoch != self.epoch {
+                    return TransitionOutcome::Published(false);
+                }
+                let owns_slot = matches!(
+                    self.slots.get(&key),
+                    Some(SlotState::Building {
+                        ticket: active,
+                        ..
+                    }) if *active == ticket
+                );
+                if !owns_slot {
+                    return TransitionOutcome::Published(false);
+                }
+                if let Some((stamp, image)) = built {
+                    self.record_fallback(key.0.clone(), image.clone());
+                    self.slots.insert(key, SlotState::Ready { stamp, image });
+                    TransitionOutcome::Published(true)
+                } else {
+                    self.slots.remove(&key);
+                    self.slot_order.retain(|k| k != &key);
+                    TransitionOutcome::Published(false)
+                }
+            }
+        }
+    }
 }
 
 /// Thread-safe cache of decoded premultiplied-alpha sources and downscaled
 /// Lanczos-3 [`RenderImage`] textures.
-///
-/// Keying decoded sources separately from target `(max_w, max_h)` sizes means
-/// interactive window resizing in the Keys view reuses the already-decoded
-/// source buffer on GPUI's background executor without decoding the PNG/WebP
-/// file again.
 #[derive(Default)]
 pub(crate) struct ScaledImageCache {
     inner: Mutex<ScaledCacheState>,
@@ -316,62 +514,62 @@ impl ScaledImageCache {
 
     pub fn clear(&self) {
         if let Ok(mut guard) = self.inner.lock() {
-            guard.sources.clear();
-            guard.renders.clear();
-            guard.latest_by_path.clear();
-            guard.in_flight.clear();
+            let _ = guard.transition(CacheTransition::Clear);
         }
     }
 
-    /// Fast in-memory lookup for the UI render thread (zero disk I/O or resizing).
+    /// Evaluate the request path for `(path, max_w, max_h)`:
+    /// - Returns [`RequestStep::Ready`] when a cached texture matches the file's current [`FileStamp`].
+    /// - Transitions to `SlotState::Building` with an epoch-bound [`WorkTicket`] on a miss
+    ///   or when on-disk artwork at `path` was refreshed, returning any bounded fallback texture
+    ///   for immediate non-blocking drawing.
     #[must_use]
-    pub fn get_cached(&self, path: &Path, max_w: u32, max_h: u32) -> Option<ScaledImageEntry> {
+    pub fn begin_request(&self, path: &Path, max_w: u32, max_h: u32) -> RequestStep {
         let key = (path.to_path_buf(), max_w.max(1), max_h.max(1));
-        let guard = self.inner.lock().ok()?;
-        guard.renders.get(&key).map(|(_, entry)| entry.clone())
-    }
-
-    /// Returns the most recently built [`RenderImage`] for `path` at any size,
-    /// used as an immediate zero-blocking fallback on the UI thread while a new
-    /// target size is being resized on the background executor.
-    #[must_use]
-    pub fn latest_for_path(&self, path: &Path) -> Option<ScaledImageEntry> {
-        let guard = self.inner.lock().ok()?;
-        guard
-            .latest_by_path
-            .get(path)
-            .map(|(_, entry)| entry.clone())
-    }
-
-    fn begin_in_flight(&self, path: &Path, max_w: u32, max_h: u32) -> bool {
-        let key = (path.to_path_buf(), max_w.max(1), max_h.max(1));
-        self.inner
-            .lock()
-            .is_ok_and(|mut guard| guard.in_flight.insert(key))
-    }
-
-    fn finish_in_flight(&self, path: &Path, max_w: u32, max_h: u32) {
-        let key = (path.to_path_buf(), max_w.max(1), max_h.max(1));
-        if let Ok(mut guard) = self.inner.lock() {
-            guard.in_flight.remove(&key);
+        let current_stamp = FileStamp::of(path);
+        let Ok(mut guard) = self.inner.lock() else {
+            return RequestStep::InFlight { display: None };
+        };
+        match guard.transition(CacheTransition::BeginRequest { key, current_stamp }) {
+            TransitionOutcome::Step(step) => step,
+            _ => RequestStep::InFlight { display: None },
         }
     }
 
-    /// Synchronous lookup-or-build used by background worker tasks and unit tests.
-    /// Reuses the cached [`DecodedSource`] when resizing `path` to new dimensions.
-    #[must_use]
-    pub fn get_or_build(&self, path: &Path, max_w: u32, max_h: u32) -> Option<ScaledImageEntry> {
+    /// Execute the decode + Lanczos-3 build for `ticket` and attempt to publish it
+    /// through the single transition owner. Old workers from a cleared epoch
+    /// or superseded ticket are rejected and return `None`.
+    pub fn run_ticket(
+        &self,
+        path: &Path,
+        max_w: u32,
+        max_h: u32,
+        ticket: WorkTicket,
+    ) -> Option<ScaledImageEntry> {
         let max_w = max_w.max(1);
         let max_h = max_h.max(1);
-        let stamp = FileStamp::of(path)?;
         let key = (path.to_path_buf(), max_w, max_h);
+        let built = self.compute_for_epoch(path, max_w, max_h, ticket.epoch);
+        let mut guard = self.inner.lock().ok()?;
+        let result = built.as_ref().map(|(_, entry)| entry.clone());
+        match guard.transition(CacheTransition::FinishBuild { key, ticket, built }) {
+            TransitionOutcome::Published(true) => result,
+            _ => None,
+        }
+    }
 
+    fn compute_for_epoch(
+        &self,
+        path: &Path,
+        max_w: u32,
+        max_h: u32,
+        epoch: u64,
+    ) -> Option<(FileStamp, ScaledImageEntry)> {
+        let stamp = FileStamp::of(path)?;
         let cached_source = {
             let guard = self.inner.lock().ok()?;
-            if let Some((cached_stamp, entry)) = guard.renders.get(&key)
-                && *cached_stamp == stamp
-            {
-                return Some(entry.clone());
+            if guard.epoch != epoch {
+                return None;
             }
             guard
                 .sources
@@ -384,30 +582,34 @@ impl ScaledImageCache {
             src
         } else {
             let decoded = Arc::new(decode_premultiplied_source(path, stamp)?);
-            if let Ok(mut guard) = self.inner.lock() {
-                if guard.sources.len() >= MAX_DECODED_SOURCES {
-                    guard.sources.clear();
-                }
-                guard
-                    .sources
-                    .insert(path.to_path_buf(), Arc::clone(&decoded));
-                let count = guard.decode_counts.entry(path.to_path_buf()).or_insert(0);
-                *count = count.saturating_add(1);
+            let mut guard = self.inner.lock().ok()?;
+            if !matches!(
+                guard.transition(CacheTransition::StoreDecodedSource {
+                    epoch,
+                    path: path.to_path_buf(),
+                    source: Arc::clone(&decoded),
+                }),
+                TransitionOutcome::Published(true)
+            ) {
+                return None;
             }
             decoded
         };
 
         let built = resize_decoded_source(&source, max_w, max_h)?;
-        if let Ok(mut guard) = self.inner.lock() {
-            if guard.renders.len() >= MAX_SCALED_CACHE_ENTRIES {
-                guard.renders.clear();
-            }
-            guard.renders.insert(key, (stamp, built.clone()));
-            guard
-                .latest_by_path
-                .insert(path.to_path_buf(), (stamp, built.clone()));
+        Some((stamp, built))
+    }
+
+    /// Synchronous lookup-or-build helper that drives the same [`begin_request`] +
+    /// [`run_ticket`] state machine.
+    #[cfg(test)]
+    #[must_use]
+    pub fn get_or_build(&self, path: &Path, max_w: u32, max_h: u32) -> Option<ScaledImageEntry> {
+        match self.begin_request(path, max_w, max_h) {
+            RequestStep::Ready(entry) => Some(entry),
+            RequestStep::Spawn { ticket, .. } => self.run_ticket(path, max_w, max_h, ticket),
+            RequestStep::InFlight { display } => display,
         }
-        Some(built)
     }
 
     #[cfg(test)]
@@ -418,6 +620,41 @@ impl ScaledImageCache {
             .ok()
             .and_then(|guard| guard.decode_counts.get(path).copied())
             .unwrap_or(0)
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub fn fallback_count(&self) -> usize {
+        self.inner.lock().map_or(0, |guard| guard.fallbacks.len())
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub fn has_fallback_for(&self, path: &Path) -> bool {
+        self.inner
+            .lock()
+            .is_ok_and(|guard| guard.fallback_for(path).is_some())
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub fn is_building_with_ticket(
+        &self,
+        path: &Path,
+        max_w: u32,
+        max_h: u32,
+        ticket: WorkTicket,
+    ) -> bool {
+        let key = (path.to_path_buf(), max_w.max(1), max_h.max(1));
+        self.inner.lock().is_ok_and(|guard| {
+            matches!(
+                guard.slots.get(&key),
+                Some(SlotState::Building {
+                    ticket: active,
+                    ..
+                }) if *active == ticket
+            )
+        })
     }
 }
 
@@ -609,32 +846,32 @@ fn request_scaled_render_image(
     cx: &mut App,
 ) -> Option<ScaledImageEntry> {
     let cache = global_scaled_cache();
-    if let Some(hit) = cache.get_cached(path, max_w, max_h) {
-        return Some(hit);
+    match cache.begin_request(path, max_w, max_h) {
+        RequestStep::Ready(hit) => Some(hit),
+        RequestStep::InFlight { display } => display,
+        RequestStep::Spawn { ticket, display } => {
+            let bg_path = path.to_path_buf();
+            cx.spawn(async move |cx| {
+                let published = cx
+                    .background_executor()
+                    .spawn(async move {
+                        global_scaled_cache().run_ticket(&bg_path, max_w, max_h, ticket)
+                    })
+                    .await;
+                if published.is_some() {
+                    cx.update(App::refresh_windows);
+                }
+            })
+            .detach();
+            display
+        }
     }
-    if cache.begin_in_flight(path, max_w, max_h) {
-        let bg_path = path.to_path_buf();
-        cx.spawn(async move |cx| {
-            let built = cx
-                .background_executor()
-                .spawn(async move {
-                    let res = global_scaled_cache().get_or_build(&bg_path, max_w, max_h);
-                    global_scaled_cache().finish_in_flight(&bg_path, max_w, max_h);
-                    res
-                })
-                .await;
-            if built.is_some() {
-                cx.update(App::refresh_windows);
-            }
-        })
-        .detach();
-    }
-    cache.latest_for_path(path)
 }
 
 /// Decode `path` once and downscale with premultiplied-alpha Lanczos-3 to fit
 /// within `(max_w, max_h)` physical pixels, returning a cached `(RenderImage, dst_w, dst_h)`
 /// so GPUI maps 1 texel to 1 physical screen pixel without single-pass bilinear aliasing.
+#[cfg(test)]
 #[must_use]
 pub(crate) fn scaled_render_image(
     path: &Path,
