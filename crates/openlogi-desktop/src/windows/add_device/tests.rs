@@ -571,6 +571,7 @@ fn mouse_pairing_click_icon_resolves_text_color() {
         panel: gpui::hsla(0., 0., 0., 1.),
         control: gpui::hsla(0., 0., 0., 1.),
         control_hover: gpui::hsla(0., 0., 0., 1.),
+        control_active: gpui::hsla(0., 0., 0., 1.),
         muted: gpui::hsla(0., 0., 0., 1.),
         border: gpui::hsla(0., 0., 0., 1.),
         text_primary,

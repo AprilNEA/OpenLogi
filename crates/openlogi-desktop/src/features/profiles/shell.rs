@@ -18,7 +18,7 @@ use super::catalog::{AppCatalogPicker, ApplicationIconState, ProfileIconCache};
 use super::picker::add_app_popover;
 use super::{ProfileChoice, ProfileScopeActions, ProfileScopeModel};
 use crate::ui::components::control_button;
-use crate::ui::theme::{self, Palette, SelectableStyle as _, Typography as _};
+use crate::ui::theme::{self, Palette, PressableStyle as _, SelectableStyle as _, Typography as _};
 
 /// Icon edge inside single-line profile tabs.
 const TAB_ICON_EDGE: f32 = 18.;
@@ -99,10 +99,12 @@ fn profile_scope_content(shell: ProfileScopeShell, pal: Palette) -> impl IntoEle
         })
         .collect::<Vec<_>>();
     let default_actions = shell.actions.clone();
+    let id_base = shell.id_base;
 
     h_flex()
         .flex_shrink_0()
         .w_full()
+        .debug_selector(move || format!("{id_base}:bar"))
         .items_center()
         .gap_2()
         .border_b_1()
@@ -120,6 +122,7 @@ fn profile_scope_content(shell: ProfileScopeShell, pal: Palette) -> impl IntoEle
         .child(
             h_flex()
                 .id(format!("{}:tabs-scroll", shell.id_base))
+                .debug_selector(move || format!("{id_base}:tabs-scroll"))
                 .flex_1()
                 .min_w_0()
                 .items_center()
@@ -176,13 +179,7 @@ fn profile_tab(
         .text_body()
         .text_color(pal.text_primary)
         .selected_fill(selected)
-        .hover(move |tab| {
-            tab.bg(if selected {
-                theme::accent_tint_hover()
-            } else {
-                pal.control_hover
-            })
-        })
+        .pressable_fill(selected, pal)
         .focus_visible(move |style| style.focus_ring(pal))
         .children(leading)
         .child(label)

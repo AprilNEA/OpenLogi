@@ -29,6 +29,9 @@ pub use config::ConfigPersistence;
 pub(crate) use device_key::DeviceKey;
 pub(crate) use device_session::ObservedConnection;
 pub use devices::DeviceRecord;
+/// For test fixtures that build a record by hand.
+#[cfg(test)]
+pub(crate) use devices::{Link, Presence};
 pub(crate) use easy_switch::HostRenameRefusal;
 pub(crate) use events::{StateEvent, StateEvents};
 pub(crate) use flow::{
@@ -186,12 +189,6 @@ pub enum AgentLink {
     /// Connected and current: the agent's latest status snapshot.
     Ready(openlogi_ipc::AgentStatus),
 }
-
-/// Inventory snapshots can briefly miss a real device while another HID++
-/// request is in flight. Keep the previous record through this many
-/// consecutive misses so a transient probe timeout does not make the device card
-/// disappear mid-interaction.
-const INVENTORY_MISS_GRACE: u8 = 2;
 
 pub struct AppState {
     /// Live configuration and its last persisted rollback point.

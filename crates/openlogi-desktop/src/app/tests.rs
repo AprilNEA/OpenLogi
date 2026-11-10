@@ -1,6 +1,7 @@
 use super::home::{ConnectionGlyph, connection_glyph, ordered_device_indices};
 use super::{DetailTab, DeviceKind, DeviceRecord};
 use crate::services::assets::ResolvedAsset;
+use crate::state::{Link, Presence};
 use crate::ui::battery::battery_charging_no_reading;
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceModelInfo, DeviceTransports,
@@ -332,6 +333,62 @@ fn a_tab_opens_at_its_top_after_another_tab_scrolled(cx: &mut gpui::TestAppConte
     );
 }
 
+/// #2506: a profile strip wider than the window scrolls inside its bar. With
+/// the Buttons tab at its automatic minimum width, the strip's full width
+/// became the tab's, which ran past the window's right edge and cut off the
+/// inspector and the Add app button.
+#[gpui::test]
+fn a_long_profile_strip_keeps_the_buttons_inspector_in_the_window(cx: &mut gpui::TestAppContext) {
+    use gpui::{px, size};
+    use openlogi_core::binding::{Action, ButtonId};
+
+    use crate::services::i18n::LOCALE_LOCK;
+    use crate::state::tests::{KNOWN_MOUSE_KEY, direct_inventory};
+
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    let mut config = openlogi_core::config::Config::ephemeral();
+    for index in 0..30 {
+        config.set_per_app_binding(
+            KNOWN_MOUSE_KEY,
+            &format!("com.example.Application{index:02}"),
+            ButtonId::Back,
+            Some(Action::Undo),
+        );
+    }
+    let (app_view, cx) = open_device_detail(cx, direct_inventory([0xa3, 0x93, 0xca, 0xe0]), config);
+    let window_w = px(1280.);
+    cx.simulate_resize(size(window_w, px(900.)));
+    cx.update(|window, cx| {
+        app_view.update(cx, |view, cx| {
+            view.active_tab = DetailTab::Buttons;
+            cx.notify();
+        });
+        window.draw(cx).clear(cx);
+    });
+
+    let bar = cx
+        .debug_bounds("button-profile:bar")
+        .expect("the Buttons tab shows its profile bar");
+    let tabs = cx
+        .debug_bounds("button-profile:tabs-scroll")
+        .expect("the bar holds the profile tabs");
+    let inspector = cx
+        .debug_bounds("binding-inspector")
+        .expect("the Buttons tab shows its inspector");
+    assert!(
+        bar.right() <= window_w,
+        "the profile bar {bar:?} must end inside the {window_w:?} window"
+    );
+    assert!(
+        tabs.right() < bar.right(),
+        "the tabs {tabs:?} must scroll inside the bar {bar:?}, leaving Add app its room"
+    );
+    assert!(
+        inspector.right() <= window_w,
+        "the inspector {inspector:?} must end inside the {window_w:?} window"
+    );
+}
+
 /// "Charging" replaces the bogus percentage only when charging *and* the
 /// reading is still 0% or absent with no level (cold start, no cached
 /// pre-charge value). A non-zero charge, a real 0% while discharging, or a
@@ -557,7 +614,7 @@ fn connection_icon_preserves_saved_wired_device_without_live_route() {
         .current_record()
         .expect("saved keyboard must remain visible");
 
-    assert!(!record.online);
+    assert!(!record.is_online());
     assert!(record.route.is_none());
     assert_eq!(
         connection_glyph(
@@ -657,7 +714,7 @@ fn disconnected_gaming_keyboards_keep_the_observed_usb_icon() {
             ..Sources::in_memory(Config::ephemeral(), &resolver, commands)
         });
         let record = state.current_record().expect("connected keyboard");
-        assert!(record.online);
+        assert!(record.is_online());
         assert_eq!(
             connection_glyph(
                 record.route.as_ref(),
@@ -671,7 +728,7 @@ fn disconnected_gaming_keyboards_keep_the_observed_usb_icon() {
 
         let _ = state.refresh_inventories(&[], &[], &resolver, &[]);
         let record = state.current_record().expect("saved disconnected keyboard");
-        assert!(!record.online);
+        assert!(!record.is_online());
         assert!(
             record.route.is_none(),
             "offline writes must remain disabled"
@@ -759,7 +816,7 @@ fn disconnected_keyboard_icon_uses_only_unambiguous_saved_links() {
         let record = state
             .current_record()
             .expect("saved keyboard after restart");
-        assert!(!record.online);
+        assert!(!record.is_online());
         assert!(record.route.is_none());
         assert_eq!(
             connection_glyph(
@@ -904,7 +961,7 @@ fn assert_keyboard_modes(
     if let Some(icon) = offline_icon {
         let _ = state.refresh_inventories(&[], &[], &resolver, &[]);
         let record = state.current_record().expect("saved keyboard");
-        assert!(!record.online);
+        assert!(!record.is_online());
         assert!(
             record.route.is_none(),
             "history must not restore a writable route"
@@ -1090,7 +1147,7 @@ fn record(kind: DeviceKind, capabilities: Option<Capabilities>) -> DeviceRecord 
         hidpp10: false,
         light_capabilities: None,
         slot: 1,
-        online: true,
+        presence: Presence::Listed(Link::Online),
         battery: None,
         settings_revision: 0,
         stale_pairings: Vec::new(),
@@ -1220,8 +1277,8 @@ fn gallery_order_moves_connected_devices_first_stably() {
         record(DeviceKind::Trackball, None),
         record(DeviceKind::Light, None),
     ];
-    records[0].online = false;
-    records[2].online = false;
+    records[0].presence = Presence::Listed(Link::Offline);
+    records[2].presence = Presence::Listed(Link::Offline);
 
     assert_eq!(ordered_device_indices(&records), vec![1, 3, 0, 2]);
 }

@@ -73,7 +73,7 @@ impl AppState {
                 Some(HostSwitchTarget {
                     key: key.to_string(),
                     name: record.display_name.clone(),
-                    online: record.online,
+                    online: record.is_online(),
                     selected,
                 })
             })

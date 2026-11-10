@@ -43,7 +43,7 @@ use walkdir::WalkDir;
 
 use self::images::{
     buttons_image_for, find_variant_in_manifest, is_drawable_image, load_manifest, metadata_for,
-    read_png_dimensions, side_image_for, variant_image_for,
+    read_image_dimensions, side_image_for, variant_image_for,
 };
 pub(crate) use self::paths::user_cache_root;
 use self::paths::{bundle_assets_root, load_index};
@@ -185,7 +185,7 @@ fn resolve_side_view(
         .into_iter()
         .chain(["side.png".to_string()])
         .filter_map(|n| safe_component_path(dir, &n, "asset file").ok())
-        .find_map(|p| read_png_dimensions(&p).ok().map(|dims| (p, dims)))?;
+        .find_map(|p| read_image_dimensions(&p).ok().map(|dims| (p, dims)))?;
     Some(SideView {
         image_path,
         png_width,
@@ -431,13 +431,13 @@ impl AssetResolver {
             };
             let side_view = resolve_side_view(&dir, entry, manifest.as_ref(), ext, &metadata);
             let image_path = main_view(image_path, side_view.as_ref(), hero_image_path.as_ref());
-            let (png_width, png_height) = match read_png_dimensions(&image_path) {
+            let (png_width, png_height) = match read_image_dimensions(&image_path) {
                 Ok(dims) => dims,
                 Err(e) => {
                     warn!(
                         path = %image_path.display(),
                         error = %e,
-                        "could not read PNG dimensions — falling back to metadata origin"
+                        "could not read image dimensions — falling back to metadata origin"
                     );
                     let origin = metadata.origin();
                     (
@@ -503,7 +503,7 @@ impl AssetResolver {
             if !image_path.is_file() {
                 continue;
             }
-            let Ok((png_width, png_height)) = read_png_dimensions(&image_path) else {
+            let Ok((png_width, png_height)) = read_image_dimensions(&image_path) else {
                 continue;
             };
             debug!(

@@ -18,6 +18,8 @@ use super::{Entity, IconName, Palette, SettingPage, SettingsView};
 use crate::ui::components::control_button;
 #[cfg(target_os = "macos")]
 use crate::ui::theme::FocusRingStyle as _;
+#[cfg(target_os = "macos")]
+use crate::ui::theme::PressableStyle as _;
 use crate::ui::theme::Typography as _;
 #[cfg(target_os = "macos")]
 use gpui_kit::base::Button as BaseButton;
@@ -459,13 +461,14 @@ fn permission_field(
                 .text_caption()
                 .cursor_pointer()
                 .bg(pal.control)
-                .hover(move |s| s.bg(pal.control_hover))
+                .pressable_fill(false, pal)
                 .focus_visible(move |s| s.focus_ring(pal))
                 .child(action_label)
-                .on_click(move |_, _, cx| {
+                .on_click(move |event, window, cx| {
                     // Accessibility must be prompted in the agent (it owns the
                     // hook); prompting in the GUI would authorize the wrong
-                    // binary. Other panes just deep-link to System Settings.
+                    // binary. Every pane then opens in System Settings, the
+                    // agent's two with the drag guide while they are missing.
                     if matches!(permission, Permission::Accessibility)
                         && let Some(state) = crate::state::AppState::try_global(cx)
                     {
@@ -477,7 +480,7 @@ fn permission_field(
                         crate::features::camera::request_camera_access(cx);
                         return;
                     }
-                    permissions::open_pane(permission);
+                    crate::platform::permission_guide::open(permission, event, window, cx);
                 }),
         )
 }

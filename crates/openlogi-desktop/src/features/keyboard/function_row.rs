@@ -59,7 +59,9 @@ use crate::services::assets::{GlowGeometry, ResolvedAsset};
 use crate::state::{AppState, DeviceKey, DeviceRecord, GamingKeys, StateEvent, StateEvents};
 use crate::ui::action::localized_action_label;
 use crate::ui::components::{MenuRow, control_button};
-use crate::ui::theme::{self, ACCENT_BLUE, Palette, SCREEN_PAD, Typography as _};
+use crate::ui::theme::{
+    self, ACCENT_BLUE, Palette, PressableStyle as _, SCREEN_PAD, Typography as _,
+};
 use gpui::{Animation, AnimationExt, ease_out_quint, img};
 use openlogi_core::hid::KeypadDescriptor;
 
@@ -396,13 +398,14 @@ impl FunctionRowView {
         gaming: Option<GamingKeys>,
         view: &Entity<Self>,
         pal: &Palette,
+        cx: &App,
     ) -> Option<AnyElement> {
         if keypad {
             return Some(
-                keypad_page_bar(self.keypad_page, last_page, view, pal).into_any_element(),
+                keypad_page_bar(self.keypad_page, last_page, view, pal, cx).into_any_element(),
             );
         }
-        gaming.map(|gaming| gaming_bar(gaming, self.g_profile, view, pal).into_any_element())
+        gaming.map(|gaming| gaming_bar(gaming, self.g_profile, view, pal, cx).into_any_element())
     }
 
     /// Edit the G-keys of `profile`, dropping any open editor when it moves.
@@ -586,7 +589,7 @@ impl Render for FunctionRowView {
                 .into_any_element()
         };
         let (inspector, column_h) = self.inspector(selected, &slots, &view, &pal, cx);
-        let page_bar = self.device_bar(keypad || keypad_photo, last_page, gaming, &view, &pal);
+        let page_bar = self.device_bar(keypad || keypad_photo, last_page, gaming, &view, &pal, cx);
 
         let row = InspectorRow::new(device, inspector, (panel_w, column_h));
         keys_tab_content(page_bar, row, &view)
@@ -1306,13 +1309,7 @@ impl RenderOnce for KeyCallout {
                 pal.control
             })
             .cursor_pointer()
-            .hover(move |s| {
-                s.bg(if highlighted {
-                    theme::accent_tint_hover()
-                } else {
-                    pal.control_hover
-                })
-            })
+            .pressable_fill(highlighted, pal)
             .child(if self.slot.bound {
                 svg()
                     .path(self.slot.binding_icon)

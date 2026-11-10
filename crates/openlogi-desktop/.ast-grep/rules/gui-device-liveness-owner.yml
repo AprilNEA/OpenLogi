@@ -1,0 +1,53 @@
+# Owner: openlogi-desktop's DeviceRecord liveness, state/devices/presence.rs.
+# Presence decides whether a card shows its device online, which route a write
+# reaches it on (DeviceRecord::addressable_route) and whether the latest
+# snapshot read it at all (DeviceRecord::sighting_key). A condition that joins
+# is_online() with the record's route or persistence re-derives one of those.
+id: gui-device-liveness-owner
+language: rust
+severity: error
+message: Ask the record. DeviceRecord::addressable_route() is the route a write reaches an online device on, and DeviceRecord::sighting_key() is the key a snapshot's reading of it is recorded under. Do not join is_online() with its route or persistence.
+note: |
+  "online && route.is_some()" was re-derived in five feature modules and
+  "is_persistent() && online" twice in the inventory merge. The second copy
+  also counted a grace-kept card, which shows online but was not read by the
+  snapshot. See "Single source of truth" in AGENTS.md.
+files:
+  - crates/openlogi-desktop/src/**/*.rs
+ignores:
+  - crates/openlogi-desktop/src/state/devices/presence.rs
+  - "**/tests.rs"
+  - "**/tests/**"
+rule:
+  all:
+    - any:
+        - pattern: $LEFT && $RIGHT
+        - kind: let_chain
+    - has:
+        stopBy: end
+        pattern: $RECORD.is_online()
+        # `persistent && !online` is the forget-device gate, not liveness.
+        not:
+          inside:
+            kind: unary_expression
+    - has:
+        stopBy: end
+        any:
+          - pattern: $RECORD.is_persistent()
+          - kind: field_expression
+            has:
+              field: field
+              regex: ^route$
+            # Comparing two records' routes asks whether a device moved.
+            not:
+              inside:
+                any:
+                  - pattern: $A.route == $B.route
+                  - pattern: $A.route != $B.route
+    - not:
+        inside:
+          kind: mod_item
+          stopBy: end
+          has:
+            field: name
+            regex: ^tests$

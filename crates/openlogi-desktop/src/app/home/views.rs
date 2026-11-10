@@ -123,7 +123,7 @@ pub(in crate::app) fn device_gallery(window: &Window, cx: &mut Context<AppView>)
 /// within the connected and offline groups.
 pub(in crate::app) fn ordered_device_indices(records: &[DeviceRecord]) -> Vec<usize> {
     let mut indices: Vec<_> = (0..records.len()).collect();
-    indices.sort_by_key(|index| !records[*index].online);
+    indices.sort_by_key(|index| !records[*index].is_online());
     indices
 }
 
@@ -267,15 +267,14 @@ fn device_card_element(
 ) -> BaseButton {
     let record = &state.devices()[idx];
     let active = idx == active_idx;
-    let record_key = record.record_key();
-    let connectivity = Connectivity::new(record.online, agent_live(state));
+    let connectivity = Connectivity::new(record.is_online(), agent_live(state));
     let enabled = state.device_enabled(&record.config_key);
     let light_enabled =
         record.kind == DeviceKind::Light && state.light_enabled_for(&record.device_key());
     let light_settings = state.light_for(&record.device_key());
     let glow = keyboard_glow(state, record);
 
-    device_card(
+    let card = device_card(
         record,
         connectivity,
         state.offline_connection(record),
@@ -284,19 +283,41 @@ fn device_card_element(
         light_enabled,
         light_settings,
         pal,
-    )
-    .active(gpui::Styled::shadow_2xs)
-    .accessibility_label(record.display_name.clone())
-    .aria_description(device_accessibility_description(record, connectivity))
-    .aria_selected(active)
-    .cursor_pointer()
-    .hover(move |card| card.border_color(rgb(theme::ACCENT_BLUE)).shadow_sm())
-    .focus_visible(move |card| card.focus_ring(pal))
-    .on_click(move |_, _, cx| {
-        view.update(cx, |this, cx| {
-            this.open_device(record_key.clone(), cx);
-        });
-    })
+    );
+    device_entry_interaction(card, record, connectivity, active, enabled, view, pal)
+}
+
+/// The selection mark, states, accessibility, and click shared by a gallery
+/// card and a list row, so the two layouts open and announce a device the same
+/// way.
+fn device_entry_interaction(
+    entry: BaseButton,
+    record: &DeviceRecord,
+    connectivity: Connectivity,
+    active: bool,
+    enabled: bool,
+    view: gpui::Entity<AppView>,
+    pal: Palette,
+) -> BaseButton {
+    let record_key = record.record_key();
+    entry
+        // The disabled ring outranks the selection mark: a disabled active
+        // device keeps reading as disabled.
+        .when(active && enabled, |entry| {
+            entry.selected_border(true, pal).selected_fill(true)
+        })
+        .active(gpui::Styled::shadow_2xs)
+        .accessibility_label(record.display_name.clone())
+        .aria_description(device_accessibility_description(record, connectivity))
+        .aria_selected(active)
+        .cursor_pointer()
+        .hover(move |entry| entry.border_color(rgb(theme::ACCENT_BLUE)).shadow_sm())
+        .focus_visible(move |entry| entry.focus_ring(pal))
+        .on_click(move |_, _, cx| {
+            view.update(cx, |this, cx| {
+                this.open_device(record_key.clone(), cx);
+            });
+        })
 }
 
 fn device_list_row(
@@ -308,15 +329,14 @@ fn device_list_row(
 ) -> BaseButton {
     let record = &state.devices()[idx];
     let active = idx == active_idx;
-    let connectivity = Connectivity::new(record.online, agent_live(state));
+    let connectivity = Connectivity::new(record.is_online(), agent_live(state));
     let enabled = state.device_enabled(&record.config_key);
     let light_enabled =
         record.kind == DeviceKind::Light && state.light_enabled_for(&record.device_key());
     let light_settings = state.light_for(&record.device_key());
     let glow = keyboard_glow(state, record);
-    let record_key = record.record_key();
 
-    BaseButton::new((ElementId::from("device-list-row"), record_key.clone()))
+    let row = BaseButton::new((ElementId::from("device-list-row"), record.record_key()))
         .w_full()
         .min_h(px(96.))
         .flex()
@@ -339,7 +359,7 @@ fn device_list_row(
                 .items_center()
                 .justify_center()
                 .overflow_hidden()
-                .opacity(if record.online { 1. } else { 0.38 })
+                .opacity(if record.is_online() { 1. } else { 0.38 })
                 .when_some(glow, |this, (geom, color)| {
                     this.child(super::glow_canvas(geom, color))
                 })
@@ -387,26 +407,15 @@ fn device_list_row(
                 .gap_2()
                 .when_some(record.battery.as_ref(), |this, battery| {
                     this.child(battery_reading(
-                        BatteryIndicator::status(battery, record.online),
+                        BatteryIndicator::status(battery, record.is_online()),
                         connectivity,
                     ))
                 })
                 .when(record.persistent, |this| {
                     this.child(device_menu_button(record, pal))
                 }),
-        )
-        .active(gpui::Styled::shadow_2xs)
-        .accessibility_label(record.display_name.clone())
-        .aria_description(device_accessibility_description(record, connectivity))
-        .aria_selected(active)
-        .cursor_pointer()
-        .hover(move |row| row.border_color(rgb(theme::ACCENT_BLUE)).shadow_sm())
-        .focus_visible(move |row| row.focus_ring(pal))
-        .on_click(move |_, _, cx| {
-            view.update(cx, |this, cx| {
-                this.open_device(record_key.clone(), cx);
-            });
-        })
+        );
+    device_entry_interaction(row, record, connectivity, active, enabled, view, pal)
 }
 
 fn device_accessibility_description(
