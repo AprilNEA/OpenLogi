@@ -2,6 +2,8 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 
@@ -311,16 +313,18 @@ enum SlotState {
     Building {
         ticket: WorkTicket,
         fallback: Option<ScaledImageEntry>,
+        prev_ready: Option<(FileStamp, ScaledImageEntry)>,
     },
     Ready {
         stamp: FileStamp,
         image: ScaledImageEntry,
+        needs_recheck: bool,
     },
 }
 
 /// Result of requesting a scaled render through [`ScaledImageCache::begin_request`].
 pub(crate) enum RequestStep {
-    /// Fresh cached texture matching the current on-disk [`FileStamp`].
+    /// Fresh cached texture served directly from memory with zero file I/O.
     Ready(ScaledImageEntry),
     /// Build already in flight for this key; draw `display` while waiting.
     InFlight { display: Option<ScaledImageEntry> },
@@ -334,8 +338,8 @@ pub(crate) enum RequestStep {
 enum CacheTransition {
     BeginRequest {
         key: ScaledKey,
-        current_stamp: Option<FileStamp>,
     },
+    MarkForRefresh,
     StoreDecodedSource {
         epoch: u64,
         path: PathBuf,
@@ -352,6 +356,7 @@ enum CacheTransition {
 enum TransitionOutcome {
     Step(RequestStep),
     Published(bool),
+    Refreshed,
     Cleared,
 }
 
@@ -406,54 +411,21 @@ impl ScaledCacheState {
                 self.fallbacks.clear();
                 TransitionOutcome::Cleared
             }
-            CacheTransition::BeginRequest { key, current_stamp } => {
-                if let Some(existing) = self.slots.get(&key).cloned() {
-                    match existing {
-                        SlotState::Ready { stamp, image } => {
-                            if current_stamp == Some(stamp) {
-                                return TransitionOutcome::Step(RequestStep::Ready(image));
-                            }
-                            self.next_ticket_id = self.next_ticket_id.wrapping_add(1);
-                            let ticket = WorkTicket {
-                                epoch: self.epoch,
-                                id: self.next_ticket_id,
-                            };
-                            self.slots.insert(
-                                key,
-                                SlotState::Building {
-                                    ticket,
-                                    fallback: Some(image.clone()),
-                                },
-                            );
-                            return TransitionOutcome::Step(RequestStep::Spawn {
-                                ticket,
-                                display: Some(image),
-                            });
-                        }
-                        SlotState::Building { fallback, .. } => {
-                            return TransitionOutcome::Step(RequestStep::InFlight {
-                                display: fallback,
-                            });
-                        }
+            CacheTransition::MarkForRefresh => {
+                self.epoch = self.epoch.wrapping_add(1);
+                self.slots.retain(|_, state| {
+                    if let SlotState::Ready { needs_recheck, .. } = state {
+                        *needs_recheck = true;
+                        true
+                    } else {
+                        false
                     }
-                }
-                let fallback = self.fallback_for(&key.0);
-                self.next_ticket_id = self.next_ticket_id.wrapping_add(1);
-                let ticket = WorkTicket {
-                    epoch: self.epoch,
-                    id: self.next_ticket_id,
-                };
-                self.insert_slot(
-                    key,
-                    SlotState::Building {
-                        ticket,
-                        fallback: fallback.clone(),
-                    },
-                );
-                TransitionOutcome::Step(RequestStep::Spawn {
-                    ticket,
-                    display: fallback,
-                })
+                });
+                self.slot_order.retain(|k| self.slots.contains_key(k));
+                TransitionOutcome::Refreshed
+            }
+            CacheTransition::BeginRequest { key } => {
+                TransitionOutcome::Step(self.begin_request_slot(key))
             }
             CacheTransition::StoreDecodedSource {
                 epoch,
@@ -472,29 +444,97 @@ impl ScaledCacheState {
                 TransitionOutcome::Published(true)
             }
             CacheTransition::FinishBuild { key, ticket, built } => {
-                if ticket.epoch != self.epoch {
-                    return TransitionOutcome::Published(false);
-                }
-                let owns_slot = matches!(
-                    self.slots.get(&key),
-                    Some(SlotState::Building {
-                        ticket: active,
-                        ..
-                    }) if *active == ticket
-                );
-                if !owns_slot {
-                    return TransitionOutcome::Published(false);
-                }
-                if let Some((stamp, image)) = built {
-                    self.record_fallback(key.0.clone(), image.clone());
-                    self.slots.insert(key, SlotState::Ready { stamp, image });
-                    TransitionOutcome::Published(true)
-                } else {
-                    self.slots.remove(&key);
-                    self.slot_order.retain(|k| k != &key);
-                    TransitionOutcome::Published(false)
-                }
+                TransitionOutcome::Published(self.finish_slot_build(key, ticket, built))
             }
+        }
+    }
+
+    fn begin_request_slot(&mut self, key: ScaledKey) -> RequestStep {
+        if let Some(existing) = self.slots.get(&key).cloned() {
+            return match existing {
+                SlotState::Ready {
+                    stamp,
+                    image,
+                    needs_recheck,
+                } => {
+                    if !needs_recheck {
+                        return RequestStep::Ready(image);
+                    }
+                    let ticket = self.issue_ticket();
+                    self.slots.insert(
+                        key,
+                        SlotState::Building {
+                            ticket,
+                            fallback: Some(image.clone()),
+                            prev_ready: Some((stamp, image.clone())),
+                        },
+                    );
+                    RequestStep::Spawn {
+                        ticket,
+                        display: Some(image),
+                    }
+                }
+                SlotState::Building { fallback, .. } => RequestStep::InFlight { display: fallback },
+            };
+        }
+        let fallback = self.fallback_for(&key.0);
+        let ticket = self.issue_ticket();
+        self.insert_slot(
+            key,
+            SlotState::Building {
+                ticket,
+                fallback: fallback.clone(),
+                prev_ready: None,
+            },
+        );
+        RequestStep::Spawn {
+            ticket,
+            display: fallback,
+        }
+    }
+
+    fn finish_slot_build(
+        &mut self,
+        key: ScaledKey,
+        ticket: WorkTicket,
+        built: Option<(FileStamp, ScaledImageEntry)>,
+    ) -> bool {
+        if ticket.epoch != self.epoch {
+            return false;
+        }
+        let owns_slot = matches!(
+            self.slots.get(&key),
+            Some(SlotState::Building {
+                ticket: active,
+                ..
+            }) if *active == ticket
+        );
+        if !owns_slot {
+            return false;
+        }
+        if let Some((stamp, image)) = built {
+            self.record_fallback(key.0.clone(), image.clone());
+            self.slots.insert(
+                key,
+                SlotState::Ready {
+                    stamp,
+                    image,
+                    needs_recheck: false,
+                },
+            );
+            true
+        } else {
+            self.slots.remove(&key);
+            self.slot_order.retain(|k| k != &key);
+            false
+        }
+    }
+
+    fn issue_ticket(&mut self) -> WorkTicket {
+        self.next_ticket_id = self.next_ticket_id.wrapping_add(1);
+        WorkTicket {
+            epoch: self.epoch,
+            id: self.next_ticket_id,
         }
     }
 }
@@ -504,6 +544,8 @@ impl ScaledCacheState {
 #[derive(Default)]
 pub(crate) struct ScaledImageCache {
     inner: Mutex<ScaledCacheState>,
+    #[cfg(test)]
+    stamp_reads: AtomicUsize,
 }
 
 impl ScaledImageCache {
@@ -518,19 +560,27 @@ impl ScaledImageCache {
         }
     }
 
-    /// Evaluate the request path for `(path, max_w, max_h)`:
-    /// - Returns [`RequestStep::Ready`] when a cached texture matches the file's current [`FileStamp`].
+    /// Mark cached textures so their next request rechecks on-disk [`FileStamp`]
+    /// freshness on the background executor after an asset download completes.
+    pub fn mark_for_refresh(&self) {
+        if let Ok(mut guard) = self.inner.lock() {
+            let _ = guard.transition(CacheTransition::MarkForRefresh);
+        }
+    }
+
+    /// Evaluate the request path for `(path, max_w, max_h)` without performing any
+    /// UI-thread file I/O:
+    /// - Returns [`RequestStep::Ready`] directly from memory when a verified texture is cached.
     /// - Transitions to `SlotState::Building` with an epoch-bound [`WorkTicket`] on a miss
-    ///   or when on-disk artwork at `path` was refreshed, returning any bounded fallback texture
-    ///   for immediate non-blocking drawing.
+    ///   or after [`Self::mark_for_refresh`], returning any bounded fallback texture for
+    ///   immediate non-blocking drawing while freshness/decode runs in the background.
     #[must_use]
     pub fn begin_request(&self, path: &Path, max_w: u32, max_h: u32) -> RequestStep {
         let key = (path.to_path_buf(), max_w.max(1), max_h.max(1));
-        let current_stamp = FileStamp::of(path);
         let Ok(mut guard) = self.inner.lock() else {
             return RequestStep::InFlight { display: None };
         };
-        match guard.transition(CacheTransition::BeginRequest { key, current_stamp }) {
+        match guard.transition(CacheTransition::BeginRequest { key }) {
             TransitionOutcome::Step(step) => step,
             _ => RequestStep::InFlight { display: None },
         }
@@ -549,7 +599,7 @@ impl ScaledImageCache {
         let max_w = max_w.max(1);
         let max_h = max_h.max(1);
         let key = (path.to_path_buf(), max_w, max_h);
-        let built = self.compute_for_epoch(path, max_w, max_h, ticket.epoch);
+        let built = self.compute_for_epoch(&key, max_w, max_h, ticket);
         let mut guard = self.inner.lock().ok()?;
         let result = built.as_ref().map(|(_, entry)| entry.clone());
         match guard.transition(CacheTransition::FinishBuild { key, ticket, built }) {
@@ -560,23 +610,41 @@ impl ScaledImageCache {
 
     fn compute_for_epoch(
         &self,
-        path: &Path,
+        key: &ScaledKey,
         max_w: u32,
         max_h: u32,
-        epoch: u64,
+        ticket: WorkTicket,
     ) -> Option<(FileStamp, ScaledImageEntry)> {
+        let path = key.0.as_path();
+        #[cfg(test)]
+        self.stamp_reads.fetch_add(1, Ordering::Relaxed);
         let stamp = FileStamp::of(path)?;
-        let cached_source = {
+        let (prev_ready, cached_source) = {
             let guard = self.inner.lock().ok()?;
-            if guard.epoch != epoch {
+            if guard.epoch != ticket.epoch {
                 return None;
             }
-            guard
+            let prev = match guard.slots.get(key) {
+                Some(SlotState::Building {
+                    ticket: active,
+                    prev_ready,
+                    ..
+                }) if *active == ticket => prev_ready.clone(),
+                _ => None,
+            };
+            let src = guard
                 .sources
                 .get(path)
                 .filter(|src| src.stamp == stamp)
-                .cloned()
+                .cloned();
+            (prev, src)
         };
+
+        if let Some((prev_stamp, prev_image)) = prev_ready
+            && prev_stamp == stamp
+        {
+            return Some((stamp, prev_image));
+        }
 
         let source = if let Some(src) = cached_source {
             src
@@ -585,7 +653,7 @@ impl ScaledImageCache {
             let mut guard = self.inner.lock().ok()?;
             if !matches!(
                 guard.transition(CacheTransition::StoreDecodedSource {
-                    epoch,
+                    epoch: ticket.epoch,
                     path: path.to_path_buf(),
                     source: Arc::clone(&decoded),
                 }),
@@ -610,6 +678,12 @@ impl ScaledImageCache {
             RequestStep::Spawn { ticket, .. } => self.run_ticket(path, max_w, max_h, ticket),
             RequestStep::InFlight { display } => display,
         }
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub fn source_read_count(&self) -> usize {
+        self.stamp_reads.load(Ordering::Relaxed)
     }
 
     #[cfg(test)]
@@ -669,6 +743,14 @@ fn global_scaled_cache() -> &'static ScaledImageCache {
 pub(crate) fn clear_scaled_image_cache() {
     if let Some(cache) = SCALED_IMAGE_CACHE.get() {
         cache.clear();
+    }
+}
+
+/// Mark cached textures for background [`FileStamp`] revalidation after an
+/// asset sync finishes, so drawing [`SlotState::Ready`] hits never touches disk.
+pub(crate) fn refresh_scaled_image_cache() {
+    if let Some(cache) = SCALED_IMAGE_CACHE.get() {
+        cache.mark_for_refresh();
     }
 }
 

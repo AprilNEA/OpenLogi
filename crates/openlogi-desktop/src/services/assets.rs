@@ -41,7 +41,7 @@ use openlogi_core::device::{DeviceKind, DeviceModelInfo};
 use tracing::{debug, warn};
 use walkdir::WalkDir;
 
-pub(crate) use self::images::{ScaledImage, contain_fit_bounds};
+pub(crate) use self::images::{ScaledImage, contain_fit_bounds, refresh_scaled_image_cache};
 use self::images::{
     buttons_image_for, clear_scaled_image_cache, find_variant_in_manifest, is_drawable_image,
     load_manifest, metadata_for, read_image_dimensions, side_image_for, variant_image_for,

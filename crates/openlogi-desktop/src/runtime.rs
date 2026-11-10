@@ -557,6 +557,7 @@ impl Runtime {
     /// the whole-record comparison in `refresh_inventories` decides whether
     /// anything actually changed.
     fn on_sync_finished(&mut self, cx: &AsyncApp) {
+        assets::refresh_scaled_image_cache();
         self.resolver = assets::AssetResolver::new();
         self.refresh_devices(cx);
     }

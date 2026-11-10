@@ -1515,12 +1515,13 @@ fn refresh_replaces_same_path_artwork() {
     ));
 
     // 2. Settings -> Assets -> Refresh downloads new blue artwork [R=40, G=20, B=240, A=255]
-    // to the exact same path -> BGRA [240, 20, 40, 255].
+    // to the exact same path -> BGRA [240, 20, 40, 255] and notifies the cache on sync completion.
     let blue_img = image::RgbaImage::from_pixel(200, 100, image::Rgba([40, 20, 240, 255]));
     blue_img.save(&png_path).expect("overwrite with blue png");
+    cache.mark_for_refresh();
 
-    // 3. Requesting the already-cached (100, 50) size through the request path detects
-    // the updated file, returns the old texture as non-blocking fallback, and spawns a refresh ticket.
+    // 3. Requesting the already-cached (100, 50) size through the request path returns
+    // the old texture as non-blocking fallback and spawns a background refresh ticket.
     let super::images::RequestStep::Spawn {
         ticket: t2,
         display: fallback,
@@ -1613,4 +1614,52 @@ fn wide_card_stage_fits_keyboard_image_and_glow_to_identical_bounds() {
     assert!((f32::from(image_fit.origin.y) - f32::from(glow_fit.origin.y)).abs() < 0.5);
     assert!((f32::from(image_fit.size.width) - f32::from(glow_fit.size.width)).abs() < 1.0);
     assert!((f32::from(image_fit.size.height) - f32::from(glow_fit.size.height)).abs() < 1.0);
+}
+
+#[test]
+fn ready_image_requests_do_not_read_source() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let png_path = dir.path().join("no_ui_read.png");
+    let img = image::RgbaImage::from_pixel(200, 100, image::Rgba([80, 160, 240, 255]));
+    img.save(&png_path).expect("save test png");
+
+    let cache = super::images::ScaledImageCache::new();
+    assert_eq!(cache.source_read_count(), 0);
+
+    // 1. Cold `begin_request` on the UI thread must not read the source file;
+    // only the background `run_ticket` worker reads and hashes the file.
+    let super::images::RequestStep::Spawn { ticket, .. } = cache.begin_request(&png_path, 100, 50)
+    else {
+        panic!("expected Spawn on cold cache");
+    };
+    assert_eq!(
+        cache.source_read_count(),
+        0,
+        "UI-thread begin_request must not read the source file"
+    );
+
+    let (built_arc, _, _) = cache
+        .run_ticket(&png_path, 100, 50, ticket)
+        .expect("background worker builds texture");
+    assert_eq!(cache.source_read_count(), 1);
+    assert_eq!(cache.decode_count(&png_path), 1);
+
+    // 2. Even if the source file is removed on disk, repeated `Ready` cache hits
+    // serve the cached texture directly from memory with zero file reads.
+    std::fs::remove_file(&png_path).expect("remove source file after texture is cached");
+    for _ in 0..8 {
+        let super::images::RequestStep::Ready((hit_arc, w, h)) =
+            cache.begin_request(&png_path, 100, 50)
+        else {
+            panic!("expected Ready cache hit without touching disk");
+        };
+        assert_eq!((w, h), (100, 50));
+        assert!(Arc::ptr_eq(&built_arc, &hit_arc));
+    }
+    assert_eq!(
+        cache.source_read_count(),
+        1,
+        "repeated Ready requests must not re-read or hash the source file"
+    );
+    assert_eq!(cache.decode_count(&png_path), 1);
 }
