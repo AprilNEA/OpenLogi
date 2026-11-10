@@ -39,6 +39,7 @@ use openlogi_core::binding::{Action, KeyCombo, WorkflowStep};
 /// Which power-user editor is showing for the selected key.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum PowerUserKind {
+    CustomShortcut,
     OpenApplication,
     TypeText,
     RunAppleScript,
@@ -49,6 +50,7 @@ pub enum PowerUserKind {
 impl PowerUserKind {
     pub(crate) fn heading_key(self) -> &'static str {
         match self {
+            Self::CustomShortcut => "action_ring.custom_shortcut",
             Self::OpenApplication => "action_ring.open_application_or_folder",
             Self::TypeText => "actions.type_text_heading",
             Self::RunAppleScript => "actions.run_applescript_heading",
@@ -60,6 +62,7 @@ impl PowerUserKind {
 
 pub(crate) fn text_editor_placeholder(kind: PowerUserKind) -> gpui::SharedString {
     match kind {
+        PowerUserKind::CustomShortcut => "Ctrl+F11".into(),
         PowerUserKind::OpenApplication => tr!("action_ring.application_folder_path_or_url"),
         PowerUserKind::TypeText => tr!("actions.type_text_placeholder"),
         PowerUserKind::RunAppleScript => "display dialog \"Hello\"".into(),
@@ -70,6 +73,9 @@ pub(crate) fn text_editor_placeholder(kind: PowerUserKind) -> gpui::SharedString
 
 pub(crate) fn text_editor_seed(action: Option<&Action>, kind: PowerUserKind) -> String {
     match (action, kind) {
+        (Some(Action::CustomShortcut(combo)), PowerUserKind::CustomShortcut) => {
+            combo.rendered_label()
+        }
         (Some(Action::TypeText(text)), PowerUserKind::TypeText)
         | (Some(Action::RunAppleScript(text)), PowerUserKind::RunAppleScript)
         | (Some(Action::RunShellCommand(text)), PowerUserKind::RunShellCommand) => text.clone(),
@@ -240,6 +246,10 @@ fn editor_action_row(
                         .map(|s| s.read(cx).value().to_string())
                         .unwrap_or_default();
                     let action = match kind {
+                        PowerUserKind::CustomShortcut => match text.trim().parse::<KeyCombo>() {
+                            Ok(combo) => Action::CustomShortcut(combo),
+                            Err(_) => return,
+                        },
                         PowerUserKind::TypeText => Action::TypeText(text),
                         PowerUserKind::RunAppleScript => Action::RunAppleScript(text),
                         PowerUserKind::RunShellCommand => Action::RunShellCommand(text),

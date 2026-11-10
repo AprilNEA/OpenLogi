@@ -1694,6 +1694,11 @@ fn panel_action_rows(
 
     let power_user_actions: &[(PowerUserKind, SharedString, &'static str)] = &[
         (
+            PowerUserKind::CustomShortcut,
+            tr!("action_ring.custom_shortcut"),
+            "action-icons/keyboard.svg",
+        ),
+        (
             PowerUserKind::OpenApplication,
             tr!("action_ring.open_application_or_folder"),
             "action-icons/grid-3x3.svg",
@@ -1769,6 +1774,9 @@ fn power_user_selected(current: Option<&Action>, kind: PowerUserKind) -> bool {
     matches!(
         (current, kind),
         (
+            Some(Action::CustomShortcut(_)),
+            PowerUserKind::CustomShortcut
+        ) | (
             Some(Action::OpenApplication(_)),
             PowerUserKind::OpenApplication
         ) | (Some(Action::TypeText(_)), PowerUserKind::TypeText)

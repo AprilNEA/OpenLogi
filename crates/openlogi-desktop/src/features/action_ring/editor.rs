@@ -351,6 +351,7 @@ fn power_user_action(kind: PowerUserKind, text: String) -> Option<Action> {
         return None;
     }
     match kind {
+        PowerUserKind::CustomShortcut => text.trim().parse().ok().map(Action::CustomShortcut),
         PowerUserKind::TypeText => Some(Action::TypeText(text)),
         PowerUserKind::RunAppleScript => Some(Action::RunAppleScript(text)),
         PowerUserKind::RunShellCommand => Some(Action::RunShellCommand(text)),
