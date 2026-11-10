@@ -345,17 +345,19 @@ fn text_action_editor(
 
 /// Build the [`Action`] a Power User editor's text commits as, or `None` for
 /// empty input, [`PowerUserKind::Workflow`] (no single-field editor here), or
-/// [`PowerUserKind::OpenApplication`] (the ring has its own path editor).
+/// [`PowerUserKind::OpenApplication`] and [`PowerUserKind::CustomShortcut`]
+/// (the ring has its own path and shortcut editors).
 fn power_user_action(kind: PowerUserKind, text: String) -> Option<Action> {
     if text.is_empty() {
         return None;
     }
     match kind {
-        PowerUserKind::CustomShortcut => text.trim().parse().ok().map(Action::CustomShortcut),
         PowerUserKind::TypeText => Some(Action::TypeText(text)),
         PowerUserKind::RunAppleScript => Some(Action::RunAppleScript(text)),
         PowerUserKind::RunShellCommand => Some(Action::RunShellCommand(text)),
-        PowerUserKind::OpenApplication | PowerUserKind::Workflow => None,
+        PowerUserKind::CustomShortcut
+        | PowerUserKind::OpenApplication
+        | PowerUserKind::Workflow => None,
     }
 }
 
@@ -666,6 +668,16 @@ mod tests {
         );
         assert_eq!(
             power_user_action(PowerUserKind::Workflow, "irrelevant".to_string()),
+            None
+        );
+    }
+
+    /// The ring commits custom shortcuts from its pinned shortcut editor, so
+    /// the Power User text fields never build one.
+    #[test]
+    fn power_user_action_leaves_custom_shortcuts_to_the_shortcut_editor() {
+        assert_eq!(
+            power_user_action(PowerUserKind::CustomShortcut, "Ctrl+Alt+T".to_string()),
             None
         );
     }
