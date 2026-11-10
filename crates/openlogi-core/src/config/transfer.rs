@@ -5,12 +5,13 @@
 //! it will change and what it leaves out before anything is written. Buttons
 //! merge: the source's bindings land on the target, and the target's other
 //! buttons keep theirs. Controls the target does not have are left out and
-//! reported, never written. From a file, bindings that run a command or a
-//! script are left out too: a shared file must not put one on a button
+//! reported, never written. From a file, bindings whose payload decides
+//! what they do (a command, a script, typed text, an app, file or URL to
+//! open) are left out too: a shared file must not put one on a button
 //! without the user seeing it.
 
 use super::{Config, DeviceConfig};
-use crate::binding::{Action, ActionRingConfig, ActionRingEntry, Binding, ButtonId, WorkflowStep};
+use crate::binding::{Action, ActionRingConfig, ActionRingEntry, Binding, ButtonId};
 use crate::device::{Capabilities, DeviceKind};
 
 /// One setting a transfer writes on the target.
@@ -69,9 +70,9 @@ pub enum SkipReason {
     NoPointerSpeed,
     /// A key or control a mouse does not have.
     NotOnAMouse,
-    /// From a file, a binding that runs a shell command or an AppleScript,
-    /// itself or as a workflow step.
-    RunsCode,
+    /// From a file, a binding that runs a shell command, an AppleScript or a
+    /// workflow, types text, or opens an app, file or URL.
+    NotFromAFile,
 }
 
 /// A setting a transfer leaves out, and why.
@@ -180,8 +181,9 @@ impl Config {
     }
 
     /// A transfer from `source`, a device's settings read from a file, onto
-    /// the device `target_key`. Bindings that run a shell command or an
-    /// AppleScript are left out and reported as [`SkipReason::RunsCode`].
+    /// the device `target_key`. Bindings that run a command, a script or a
+    /// workflow, type text, or open an app, file or URL are left out and
+    /// reported as [`SkipReason::NotFromAFile`].
     #[must_use]
     pub fn settings_transfer_from_file(
         &self,
@@ -237,9 +239,9 @@ impl Transfer {
     }
 
     /// Whether `actions` must stay out because the source is a file and one
-    /// of them runs a command or a script.
+    /// of them does what its payload says.
     fn refuses<'a>(&self, mut actions: impl Iterator<Item = &'a Action>) -> bool {
-        self.origin == Origin::File && actions.any(runs_code)
+        self.origin == Origin::File && actions.any(acts_on_its_payload)
     }
 
     /// Why the target cannot take `binding` on `button`, if it cannot.
@@ -275,7 +277,7 @@ impl Transfer {
             if let Some(reason) = self.button_gap(button, Some(binding)) {
                 self.skip(item, reason);
             } else if self.refuses(binding_actions(binding)) {
-                self.skip(item, SkipReason::RunsCode);
+                self.skip(item, SkipReason::NotFromAFile);
             } else if self.settings.bindings.get(&button) != Some(binding) {
                 self.settings.bindings.insert(button, binding.clone());
                 self.changed.push(item);
@@ -286,7 +288,7 @@ impl Transfer {
             if let Some(reason) = self.button_gap(button, None) {
                 self.skip(item, reason);
             } else if self.refuses(directions.values()) {
-                self.skip(item, SkipReason::RunsCode);
+                self.skip(item, SkipReason::NotFromAFile);
             } else if self.settings.disabled_gestures.get(&button) != Some(directions) {
                 self.settings
                     .disabled_gestures
@@ -306,7 +308,7 @@ impl Transfer {
                     continue;
                 }
                 if self.refuses(std::iter::once(action)) {
-                    self.skip(item, SkipReason::RunsCode);
+                    self.skip(item, SkipReason::NotFromAFile);
                     continue;
                 }
                 let current = self
@@ -328,7 +330,7 @@ impl Transfer {
             return;
         }
         if self.refuses(ring_actions(&source.action_ring)) {
-            self.skip(TransferItem::ActionRing, SkipReason::RunsCode);
+            self.skip(TransferItem::ActionRing, SkipReason::NotFromAFile);
         } else if self.settings.action_ring != source.action_ring {
             self.settings.action_ring = source.action_ring.clone();
             self.changed.push(TransferItem::ActionRing);
@@ -448,19 +450,19 @@ fn ring_actions(ring: &ActionRingConfig) -> impl Iterator<Item = &Action> {
         .map(ActionRingEntry::action)
 }
 
-/// Whether `action` runs a shell command or an AppleScript, itself or as a
-/// workflow step.
-fn runs_code(action: &Action) -> bool {
-    match action {
-        Action::RunAppleScript(_) | Action::RunShellCommand(_) => true,
-        Action::Workflow(steps) => steps.iter().any(|step| {
-            matches!(
-                step,
-                WorkflowStep::RunAppleScript(_) | WorkflowStep::RunShellCommand(_)
-            )
-        }),
-        _ => false,
-    }
+/// Whether `action` does what its own payload says: runs a shell command, an
+/// AppleScript or a workflow, types text, or opens an app, file or URL. The
+/// label of such an action need not match what it does, so a file must not
+/// bring one.
+fn acts_on_its_payload(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::RunAppleScript(_)
+            | Action::RunShellCommand(_)
+            | Action::Workflow(_)
+            | Action::TypeText(_)
+            | Action::OpenApplication(_)
+    )
 }
 
 fn has_thumbwheel(capabilities: &Capabilities) -> bool {

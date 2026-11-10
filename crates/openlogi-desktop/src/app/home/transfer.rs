@@ -329,7 +329,7 @@ fn skipped_label(skipped: &SkippedItem) -> SharedString {
         SkipReason::NoDpi => tr!("device.copy_settings_no_dpi"),
         SkipReason::NoPointerSpeed => tr!("device.copy_settings_no_pointer_speed"),
         SkipReason::NotOnAMouse => tr!("device.copy_settings_not_on_a_mouse"),
-        SkipReason::RunsCode => tr!("device.copy_settings_runs_code"),
+        SkipReason::NotFromAFile => tr!("device.copy_settings_not_from_a_file"),
     };
     tr!(
         "device.copy_settings_skipped_item",

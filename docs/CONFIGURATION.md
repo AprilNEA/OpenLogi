@@ -143,7 +143,8 @@ config file of its own, under a neutral key instead of its serial number,
 without the routes it was seen on and with app settings left at their defaults.
 **Import settings** reads such a file, or a whole `config.toml`, and asks which
 device to copy from when it holds several. From a file, bindings that run a
-shell command or an AppleScript, the Actions Ring included, are left out.
+shell command, an AppleScript or a workflow, type text, or open an app, file or
+URL are left out, the Actions Ring included.
 Buttons merge: the source's bindings land on the target and the target's other
 buttons keep theirs. A setting the source never set leaves the target's alone,
 and a copied value replaces the target's per-link override of it. Controls the
