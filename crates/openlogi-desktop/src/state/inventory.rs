@@ -191,6 +191,8 @@ impl AppState {
             self.pointer_speed_reconnected(key);
             self.sidetone_reconnected(key);
             self.force_sensing_reconnected(key);
+            self.report_rate_reconnected(key);
+            self.backlight_reconnected(key);
         }
         for key in &disable_keys_invalidated {
             self.invalidate_disable_keys(key);

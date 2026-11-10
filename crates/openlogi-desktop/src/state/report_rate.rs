@@ -149,6 +149,12 @@ impl AppState {
         StateEvent::ReportRateChanged(key.clone()).into()
     }
 
+    /// `key`'s mouse came back online: re-run any failed report-rate read even
+    /// when `settings_revision` did not move across sleep/wake.
+    pub(super) fn report_rate_reconnected(&mut self, key: &DeviceKey) {
+        self.pointer.reads.retry_report_rate_if_failed(key);
+    }
+
     pub(super) fn load_current_report_rate(&mut self, cx: &mut gpui::Context<Self>) {
         let Some((key, route)) = self
             .current_record()
@@ -178,7 +184,7 @@ impl AppState {
                     .capabilities
                     .is_some_and(|capabilities| capabilities.report_rate)
             })
-            .filter_map(|record| Some((record.device_key(), record.route.clone()?)))
+            .filter_map(|record| Some((record.device_key(), record.addressable_route()?.clone())))
             .collect();
         let sender = self.ipc_sender();
         for (key, route) in targets {

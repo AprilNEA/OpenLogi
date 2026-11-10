@@ -311,3 +311,151 @@ fn a_write_answered_after_a_route_change_keeps_the_new_connections_rates(
     );
     assert_eq!(current_load(cx), Load::Ready(Arc::new(receiver_answer)));
 }
+
+fn two_device_inventory(mouse_online: bool) -> DeviceInventory {
+    let mut kbd_caps = Capabilities::presumed_from_kind(DeviceKind::Keyboard);
+    kbd_caps.backlight = false;
+    let mut mouse_caps = Capabilities::presumed_from_kind(DeviceKind::Mouse);
+    mouse_caps.report_rate = true;
+
+    DeviceInventory {
+        receiver: ReceiverInfo {
+            name: "Bolt Receiver".to_string(),
+            vendor_id: 0x046d,
+            product_id: 0xc548,
+            unique_id: Some("82839805".to_string()),
+        },
+        paired: vec![
+            PairedDevice {
+                slot: 1,
+                codename: Some("MX Keys Mini".to_string()),
+                wpid: None,
+                kind: DeviceKind::Keyboard,
+                online: true,
+                battery: None,
+                model_info: Some(DeviceModelInfo {
+                    entity_count: 1,
+                    serial_number: None,
+                    unit_id: [0x11, 0x22, 0x33, 0x44],
+                    transports: DeviceTransports::default(),
+                    model_ids: [0xb369, 0, 0],
+                    extended_model_id: 0,
+                }),
+                capabilities: Some(kbd_caps),
+                settings_revision: 0,
+                hidpp10: false,
+            },
+            PairedDevice {
+                slot: 2,
+                codename: Some("PRO X SUPERLIGHT 2".to_string()),
+                wpid: None,
+                kind: DeviceKind::Mouse,
+                online: mouse_online,
+                battery: None,
+                model_info: Some(DeviceModelInfo {
+                    entity_count: 1,
+                    serial_number: None,
+                    unit_id: [0x22, 0x33, 0x44, 0x55],
+                    transports: DeviceTransports::default(),
+                    model_ids: [0x40a8, 0, 0],
+                    extended_model_id: 0,
+                }),
+                capabilities: Some(mouse_caps),
+                settings_revision: 0,
+                hidpp10: false,
+            },
+        ],
+    }
+}
+
+#[gpui::test]
+fn unselected_sleeping_mouse_is_read_after_wake(cx: &mut gpui::TestAppContext) {
+    let resolver = AssetResolver::new();
+    let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let state = AppState::new(Sources {
+        inventories: &[two_device_inventory(false)],
+        ..Sources::in_memory(Config::ephemeral(), &resolver, commands)
+    });
+    assert_eq!(state.selected_device_index(), Some(0));
+    let mouse_key = DeviceKey::of_record("unit:22334455");
+
+    // 1. Startup with keyboard selected and mouse asleep: `load_all_report_rates`
+    // uses `addressable_route()`, so no `ReadReportRate` is issued while asleep.
+    install(state, cx);
+    assert!(
+        !drain(&mut receiver)
+            .iter()
+            .any(|cmd| matches!(cmd, Command::ReadReportRate(_))),
+        "sleeping unselected mouse must not be queried before waking"
+    );
+    cx.read(|cx| {
+        let state = AppState::try_read(cx).expect("state");
+        assert!(
+            state
+                .devices()
+                .iter()
+                .filter(|d| d.kind == DeviceKind::Mouse)
+                .all(|d| state.report_rate_load_for(&d.device_key()).is_none())
+        );
+    });
+
+    // 2. Wake the unselected mouse once, exhaust all 3 retries into `Load::Failed`
+    // (simulating a mouse that went right back to sleep before answering), then put
+    // it offline and wake it again on the SAME route with `settings_revision` unchanged.
+    cx.update(|cx| {
+        let resolver = AssetResolver::new();
+        AppState::update(cx, |state, _| {
+            let _ = state.refresh_inventories(&[two_device_inventory(true)], &[], &resolver, &[]);
+        });
+        AppState::load_current_device_reads(cx);
+    });
+    cx.run_until_parked();
+
+    for attempt in 0..3 {
+        let mut failed_one = false;
+        for cmd in drain(&mut receiver) {
+            if let Command::ReadReportRate(ReadReportRate { reply, .. }) = cmd {
+                let _ = reply.send(Err(WriteError::AgentUnavailable));
+                failed_one = true;
+            }
+        }
+        assert!(failed_one, "expected retry attempt {}", attempt + 1);
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(5));
+        cx.run_until_parked();
+    }
+    cx.read(|cx| {
+        let state = AppState::try_read(cx).expect("state");
+        assert!(
+            matches!(
+                state.report_rate_load_for(&mouse_key),
+                Some(Load::Failed(_))
+            ),
+            "expected Failed load after exhausting retries"
+        );
+    });
+
+    // Mouse drops offline (`online = false`), then wakes (`online = true`) on the same
+    // receiver route with `settings_revision == 0`: reconnect refreshes the failed read!
+    cx.update(|cx| {
+        let resolver = AssetResolver::new();
+        AppState::update(cx, |state, _| {
+            let _ = state.refresh_inventories(&[two_device_inventory(false)], &[], &resolver, &[]);
+            let _ = state.refresh_inventories(&[two_device_inventory(true)], &[], &resolver, &[]);
+        });
+        AppState::load_current_device_reads(cx);
+    });
+    cx.run_until_parked();
+
+    let expected_info = info(2000, &[125, 500, 1000, 2000, 4000]);
+    let _ = answer_rate_read(&mut receiver, &expected_info);
+    cx.run_until_parked();
+
+    cx.read(|cx| {
+        let state = AppState::try_read(cx).expect("state");
+        assert_eq!(
+            state.report_rate_load_for(&mouse_key),
+            Some(&Load::Ready(Arc::new(expected_info)))
+        );
+    });
+}

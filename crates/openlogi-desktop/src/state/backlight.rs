@@ -108,6 +108,12 @@ impl AppState {
         self.pointer.reads.backlight_load(key)
     }
 
+    /// `key`'s keyboard came back online: re-run any failed backlight read even
+    /// when `settings_revision` did not move across sleep/wake.
+    pub(super) fn backlight_reconnected(&mut self, key: &DeviceKey) {
+        self.pointer.reads.retry_backlight_if_failed(key);
+    }
+
     /// Ensure backlight state is queried for all online backlight-capable keyboards
     /// so Home and Detail battery duration estimates reflect the live backlight config.
     pub(super) fn load_all_backlights(&mut self, cx: &mut gpui::Context<Self>) {
@@ -120,7 +126,7 @@ impl AppState {
                     .capabilities
                     .is_some_and(|capabilities| capabilities.backlight)
             })
-            .filter_map(|record| Some((record.device_key(), record.route.clone()?)))
+            .filter_map(|record| Some((record.device_key(), record.addressable_route()?.clone())))
             .collect();
         let sender = self.ipc_sender();
         for (key, route) in targets {

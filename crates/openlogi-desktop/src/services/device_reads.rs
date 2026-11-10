@@ -618,6 +618,18 @@ impl DeviceReads {
         read.query.revalidate();
     }
 
+    /// Retry `key`'s report-rate query on reconnect when a previous attempt
+    /// while sleeping or unreachable settled in [`Load::Failed`].
+    pub(crate) fn retry_report_rate_if_failed(&mut self, key: &DeviceKey) {
+        if self
+            .report_rate
+            .get(key)
+            .is_some_and(|read| matches!(read.load, Load::Failed(_)))
+        {
+            self.retry_report_rate(key);
+        }
+    }
+
     /// `key`'s report-rate load, or `None` while nothing has subscribed to it.
     #[must_use]
     pub(crate) fn report_rate_load(&self, key: &DeviceKey) -> Option<&ReportRateLoad> {
@@ -1128,6 +1140,18 @@ impl DeviceReads {
             read.load = Load::Loading;
         }
         read.query.revalidate();
+    }
+
+    /// Retry `key`'s backlight query on reconnect when a previous attempt
+    /// while sleeping or unreachable settled in [`Load::Failed`].
+    pub(crate) fn retry_backlight_if_failed(&mut self, key: &DeviceKey) {
+        if self
+            .backlight
+            .get(key)
+            .is_some_and(|read| matches!(read.load, Load::Failed(_)))
+        {
+            self.retry_backlight(key);
+        }
     }
 
     /// `key`'s backlight load, or `None` while nothing has subscribed to it.

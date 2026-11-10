@@ -252,10 +252,12 @@ impl BatteryTelemetry {
         nominal_full_hours: u32,
         now_secs: u64,
     ) {
-        if !online {
-            return;
-        }
-        let Some(battery) = battery else {
+        let Some(battery) = battery.filter(|_| online) else {
+            if let Some(entry) = self.store.devices.get_mut(config_key)
+                && entry.phase.observe_contact_lost()
+            {
+                self.dirty = true;
+            }
             return;
         };
 
@@ -396,6 +398,27 @@ impl BatteryPhase {
             true
         } else {
             false
+        }
+    }
+
+    /// Move `Charging` back to `ChargingProgress::Unmeasured` when contact is lost
+    /// (device goes offline or omits its battery reading), while preserving any
+    /// active `Discharging` anchor across wireless sleep/wake cycles.
+    fn observe_contact_lost(&mut self) -> bool {
+        match self {
+            Self::Charging {
+                progress: ChargingProgress::AwaitingLiveStep { .. } | ChargingProgress::Live { .. },
+            } => {
+                *self = Self::Charging {
+                    progress: ChargingProgress::Unmeasured,
+                };
+                true
+            }
+            Self::Unanchored
+            | Self::Discharging { .. }
+            | Self::Charging {
+                progress: ChargingProgress::Unmeasured,
+            } => false,
         }
     }
 
@@ -2766,5 +2789,110 @@ mod tests {
             "Detail subline must display Est. health once calibrated: {}",
             est_calibrated.detail_subline()
         );
+    }
+
+    #[test]
+    fn charging_disconnect_requires_fresh_live_step() {
+        let mut telemetry = BatteryTelemetry::default();
+        let key = "unit:disconnect-charge";
+        let sig = Some("mouse:standard");
+        let mut now = 5_000_000_u64;
+
+        // 1. Reach `ChargingProgress::Live` (50% -> 55% over 10 min => 2.0 min/%).
+        telemetry.observe_device(
+            key,
+            true,
+            Some(&BatteryInfo {
+                percentage: Some(50),
+                level: BatteryLevel::Good,
+                status: BatteryStatus::Charging,
+            }),
+            sig,
+            1680,
+            now,
+        );
+        now += 600;
+        telemetry.observe_device(
+            key,
+            true,
+            Some(&BatteryInfo {
+                percentage: Some(55),
+                level: BatteryLevel::Good,
+                status: BatteryStatus::Charging,
+            }),
+            sig,
+            1680,
+            now,
+        );
+        assert!(telemetry.live_charging_rate(key).is_some());
+
+        // 2. Device disconnects (`online = false`) for 2 hours, then reconnects
+        // charging at the same 55%. It must NOT reuse the pre-disconnect pace or
+        // count the 2 hours of disconnected time as charging time.
+        now += 60;
+        telemetry.observe_device(key, false, None, sig, 1680, now);
+        assert_eq!(
+            telemetry.phase_for(key),
+            Some(&BatteryPhase::Charging {
+                progress: ChargingProgress::Unmeasured
+            })
+        );
+        assert_eq!(telemetry.live_charging_rate(key), None);
+
+        now += 7_200;
+        telemetry.observe_device(
+            key,
+            true,
+            Some(&BatteryInfo {
+                percentage: Some(55),
+                level: BatteryLevel::Good,
+                status: BatteryStatus::Charging,
+            }),
+            sig,
+            1680,
+            now,
+        );
+        assert_eq!(
+            telemetry.live_charging_rate(key),
+            None,
+            "reconnecting at the same percentage must wait for a fresh live step"
+        );
+
+        // 3. A 5% step 10 minutes after reconnect measures 2.0 min/% (not ~26 min/% from the 2h disconnect!).
+        now += 600;
+        telemetry.observe_device(
+            key,
+            true,
+            Some(&BatteryInfo {
+                percentage: Some(60),
+                level: BatteryLevel::Good,
+                status: BatteryStatus::Charging,
+            }),
+            sig,
+            1680,
+            now,
+        );
+        let rate = telemetry
+            .live_charging_rate(key)
+            .expect("fresh live step after reconnect");
+        assert!((rate - 2.0).abs() < 0.05, "expected ~2.0 min/%, got {rate}");
+
+        // 4. Verify a Discharging anchor is preserved across an offline sleep/wake cycle.
+        let discharge_key = "unit:sleep-discharge";
+        telemetry.observe_device(
+            discharge_key,
+            true,
+            Some(&BatteryInfo {
+                percentage: Some(80),
+                level: BatteryLevel::Full,
+                status: BatteryStatus::Discharging,
+            }),
+            sig,
+            1680,
+            now,
+        );
+        let anchor_before = telemetry.phase_for(discharge_key).cloned();
+        telemetry.observe_device(discharge_key, false, None, sig, 1680, now + 300);
+        assert_eq!(telemetry.phase_for(discharge_key), anchor_before.as_ref());
     }
 }
