@@ -333,6 +333,62 @@ fn a_tab_opens_at_its_top_after_another_tab_scrolled(cx: &mut gpui::TestAppConte
     );
 }
 
+/// #2506: a profile strip wider than the window scrolls inside its bar. With
+/// the Buttons tab at its automatic minimum width, the strip's full width
+/// became the tab's, which ran past the window's right edge and cut off the
+/// inspector and the Add app button.
+#[gpui::test]
+fn a_long_profile_strip_keeps_the_buttons_inspector_in_the_window(cx: &mut gpui::TestAppContext) {
+    use gpui::{px, size};
+    use openlogi_core::binding::{Action, ButtonId};
+
+    use crate::services::i18n::LOCALE_LOCK;
+    use crate::state::tests::{KNOWN_MOUSE_KEY, direct_inventory};
+
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    let mut config = openlogi_core::config::Config::ephemeral();
+    for index in 0..30 {
+        config.set_per_app_binding(
+            KNOWN_MOUSE_KEY,
+            &format!("com.example.Application{index:02}"),
+            ButtonId::Back,
+            Some(Action::Undo),
+        );
+    }
+    let (app_view, cx) = open_device_detail(cx, direct_inventory([0xa3, 0x93, 0xca, 0xe0]), config);
+    let window_w = px(1280.);
+    cx.simulate_resize(size(window_w, px(900.)));
+    cx.update(|window, cx| {
+        app_view.update(cx, |view, cx| {
+            view.active_tab = DetailTab::Buttons;
+            cx.notify();
+        });
+        window.draw(cx).clear(cx);
+    });
+
+    let bar = cx
+        .debug_bounds("button-profile:bar")
+        .expect("the Buttons tab shows its profile bar");
+    let tabs = cx
+        .debug_bounds("button-profile:tabs-scroll")
+        .expect("the bar holds the profile tabs");
+    let inspector = cx
+        .debug_bounds("binding-inspector")
+        .expect("the Buttons tab shows its inspector");
+    assert!(
+        bar.right() <= window_w,
+        "the profile bar {bar:?} must end inside the {window_w:?} window"
+    );
+    assert!(
+        tabs.right() < bar.right(),
+        "the tabs {tabs:?} must scroll inside the bar {bar:?}, leaving Add app its room"
+    );
+    assert!(
+        inspector.right() <= window_w,
+        "the inspector {inspector:?} must end inside the {window_w:?} window"
+    );
+}
+
 /// "Charging" replaces the bogus percentage only when charging *and* the
 /// reading is still 0% or absent with no level (cold start, no cached
 /// pre-charge value). A non-zero charge, a real 0% while discharging, or a
