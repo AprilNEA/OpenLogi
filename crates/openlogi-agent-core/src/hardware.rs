@@ -54,7 +54,7 @@ pub(crate) use write_order::{WriteOrder, WriteTicket};
 /// own, so without this an asleep / unresponsive device would hang (and leak)
 /// this background thread forever; a write to a live device completes in well
 /// under a second.
-const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Physical transport behind a route. Slots on one receiver share a HID writer,
 /// so they share one turnstile even though their device indices differ.

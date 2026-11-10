@@ -538,6 +538,60 @@ async fn a_manual_write_for_another_keyboard_writes_nothing() {
     keyboard.assert_writes(&[0x80]);
 }
 
+/// Confirming which keyboard a bound write reaches is device I/O inside the
+/// requester's deadline: a keyboard that does not answer the identity read
+/// costs the requester no more than the write budget, and the write gives
+/// the receiver back with the requester, writing nothing.
+#[tokio::test]
+async fn identity_preflight_counts_against_disable_keys_deadline() {
+    use std::time::Duration;
+
+    use openlogi_fixture::RequestMatch;
+
+    let shared = orchestrator(Config::default()).shared();
+    let keyboard = Keyboard::publish(&shared).await;
+    // `getDeviceInfo` on the scripted `0x0003`.
+    let identity = keyboard
+        .reports
+        .hold_next_response(RequestMatch::Hidpp20, &[0x10, 0xff, 0x0e, 0x00, 0, 0, 0]);
+    let bound = shared.reaching(crate::test_support::UNIT);
+    let mut write = std::pin::pin!(bound.set_disable_keys(&keyboard.route, DisableKeysMask::EMPTY));
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !identity.is_request_written() {
+            assert!(futures_lite::future::poll_once(&mut write).await.is_none());
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("the identity read reached the keyboard");
+
+    // The requester's deadline already runs while the keyboard is silent.
+    tokio::time::pause();
+    assert!(futures_lite::future::poll_once(&mut write).await.is_none());
+    tokio::time::advance(crate::hardware::WRITE_TIMEOUT + Duration::from_millis(1)).await;
+    let error = futures_lite::future::poll_once(&mut write)
+        .await
+        .expect("the requester's deadline covers the identity read")
+        .expect_err("the keyboard never answered");
+    assert!(
+        matches!(error, WriteError::RequestTimedOut { .. }),
+        "{error:?}"
+    );
+    tokio::time::resume();
+
+    let lease = tokio::time::timeout(
+        Duration::from_secs(2),
+        shared
+            .receiver_access
+            .acquire_exclusive(ExclusiveAccessReason::Pairing),
+    )
+    .await
+    .expect("the write gave the receiver back with its requester");
+    drop(lease);
+    identity.release();
+    keyboard.assert_writes(&[]);
+}
+
 #[tokio::test]
 async fn an_old_confirmation_cannot_replace_a_completed_manual_choice() {
     let shared = orchestrator(Config::default()).shared();

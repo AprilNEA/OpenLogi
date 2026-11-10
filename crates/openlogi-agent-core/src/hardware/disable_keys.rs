@@ -259,9 +259,19 @@ async fn run_disable_keys(
         Ok(())
     };
     check()?;
-    let shared = op.reach(HidppOperation::WriteDisableKeys).await?;
-    check()?;
     let _ = started.send(());
+    // Confirming the device is device I/O inside the requester's deadline,
+    // which starts above: it is bounded by the same budget, and it ends when
+    // the requester gives up, since it writes nothing.
+    let shared = tokio::select! {
+        biased;
+        () = cancelled.wait() => return Err(timed_out()),
+        reached = tokio::time::timeout(
+            WRITE_TIMEOUT,
+            op.reach(HidppOperation::WriteDisableKeys),
+        ) => reached.map_err(|_| timed_out())??,
+    };
+    check()?;
     // Cancellation can stop admission, but must never drop an in-flight
     // native report. The write-through checkpoints still run between reports.
     openlogi_hid::set_disable_keys_write_through_on(&shared, desired, check).await
