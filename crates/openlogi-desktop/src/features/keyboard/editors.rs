@@ -479,6 +479,22 @@ mod tests {
         );
     }
 
+    /// The Custom Shortcut editor reopens on the bound chord, written so Save
+    /// parses it back to the same chord.
+    #[test]
+    fn custom_shortcut_seed_parses_back_to_the_bound_chord() {
+        let combo: KeyCombo = "Win+Shift+S".parse().expect("a valid chord");
+        let seed = text_editor_seed(
+            Some(&Action::CustomShortcut(combo.clone())),
+            PowerUserKind::CustomShortcut,
+        );
+        assert_eq!(seed.parse::<KeyCombo>(), Ok(combo));
+        assert_eq!(
+            text_editor_seed(Some(&Action::Copy), PowerUserKind::CustomShortcut),
+            ""
+        );
+    }
+
     #[test]
     fn workflow_editor_seed_only_uses_workflow_action() {
         let steps = vec![WorkflowStep::TypeText("hello".into())];

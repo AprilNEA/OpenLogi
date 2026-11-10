@@ -770,6 +770,23 @@ fn an_open_application_binding_selects_its_power_user_row() {
     ));
 }
 
+#[test]
+fn a_custom_shortcut_binding_selects_its_power_user_row() {
+    let shortcut = Action::CustomShortcut("Ctrl+Alt+T".parse().expect("a valid chord"));
+    assert!(power_user_selected(
+        Some(&shortcut),
+        PowerUserKind::CustomShortcut
+    ));
+    assert!(!power_user_selected(
+        Some(&shortcut),
+        PowerUserKind::TypeText
+    ));
+    assert!(!power_user_selected(
+        Some(&Action::Copy),
+        PowerUserKind::CustomShortcut
+    ));
+}
+
 /// The Keys tab body in a main-window-sized window, with no device: the
 /// fallback F-row, motion reduced so a frame shows the settled layout.
 fn keys_tab(
