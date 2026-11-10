@@ -138,7 +138,9 @@ impl DeviceKind {
 pub struct Capabilities {
     /// Reprogrammable buttons — HID++ `0x1b00`–`0x1b04` (ReprogControls).
     pub buttons: bool,
-    /// Adjustable pointer resolution — HID++ `0x2201` / `0x2202` (AdjustableDpi).
+    /// Adjustable pointer resolution — HID++ `0x2201` / `0x2202` (AdjustableDpi),
+    /// or a standalone driver that reads and selects the sensor's DPI (the
+    /// G600's report `0xf0`).
     pub pointer: bool,
     /// Solid-colour RGB the lighting panel can drive — HID++ effect engines
     /// (`0x8070` / `0x8071`) or per-zone lighting (`0x8080` / `0x8081`).

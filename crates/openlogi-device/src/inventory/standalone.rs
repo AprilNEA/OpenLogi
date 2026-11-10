@@ -105,9 +105,14 @@ pub(super) fn standalone_device(device: &crate::backend::NodeInfo) -> Option<Sta
             unit_id: [0; 4],
             kind: DeviceKind::Mouse,
             online: true,
-            // Measured, not unknown: `None` would make clients presume a
-            // mouse's HID++ button and pointer controls this device lacks.
-            capabilities: Some(Capabilities::default()),
+            // Measured, not unknown: `None` would make clients presume the
+            // HID++ button controls this device lacks. The pointer capability
+            // is what the driver delivers — the DPI slot read and selected
+            // through report `0xf0` (`write::g600`).
+            capabilities: Some(Capabilities {
+                pointer: true,
+                ..Capabilities::default()
+            }),
             light_capabilities: None,
             driver_id: G600_DRIVER_ID.to_owned(),
             registry_model_id: None,
@@ -184,14 +189,23 @@ mod tests {
     }
 
     #[test]
-    fn g600_vendor_collection_is_an_identity_only_mouse() {
+    fn g600_vendor_collection_is_a_dpi_only_mouse() {
         let device = standalone_device(&g600_node(0xff80, 0x0080)).expect("G600 is recognized");
 
         assert_eq!(device.kind, DeviceKind::Mouse);
         assert_eq!(device.display_name, "G600 Gaming Mouse");
         assert_eq!(device.driver_id, "logitech-g600");
         assert_eq!(device.address.identity, "id:g600-node");
-        assert_eq!(device.capabilities, Some(Capabilities::default()));
+        let capabilities = device.capabilities.expect("measured, not presumed");
+        assert!(capabilities.pointer, "the driver selects the DPI slot");
+        assert!(!capabilities.buttons, "no ReprogControls to divert");
+        assert_eq!(
+            capabilities,
+            Capabilities {
+                pointer: true,
+                ..Capabilities::default()
+            }
+        );
         assert!(device.light_capabilities.is_none());
     }
 

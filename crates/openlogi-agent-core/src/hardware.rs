@@ -1591,7 +1591,7 @@ pub fn lighting_rgb(lighting: &Lighting) -> (u8, u8, u8) {
 
 /// Bound any single HID++ call by [`WRITE_TIMEOUT`] so an asleep / unresponsive
 /// device can't hang the awaiting IPC handler indefinitely.
-async fn timed<T>(
+pub(crate) async fn timed<T>(
     operation: HidppOperation,
     fut: impl Future<Output = Result<T, WriteError>>,
 ) -> Result<T, WriteError> {

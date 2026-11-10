@@ -962,3 +962,59 @@ fn two_mouse_hidpp_plans_are_device_scoped_while_hook_fallback_is_selected_devic
         "the passive Windows fallback is one selected-device map, not a per-source map"
     );
 }
+
+/// A standalone raw-HID device has no HID++ channel to capture on. A G600
+/// keyed by its serial used to get a plan anyway, and the session it started
+/// ended at once and was re-armed every second.
+#[test]
+fn a_raw_hid_standalone_device_gets_no_capture_plan() {
+    use openlogi_core::device::{Capabilities, DeviceKind, RawDeviceAddress, StandaloneDevice};
+
+    let g600 = StandaloneDevice {
+        address: RawDeviceAddress {
+            vendor_id: 0x046d,
+            product_id: 0xc24a,
+            usage_page: 0xff80,
+            usage_id: 0x0080,
+            identity: "serial:783891c3f32f0017".to_string(),
+        },
+        display_name: "G600 Gaming Mouse".to_string(),
+        manufacturer: Some("Logitech".to_string()),
+        serial_number: Some("783891C3F32F0017".to_string()),
+        unit_id: [0; 4],
+        kind: DeviceKind::Mouse,
+        online: true,
+        capabilities: Some(Capabilities {
+            pointer: true,
+            ..Capabilities::default()
+        }),
+        light_capabilities: None,
+        driver_id: "logitech-g600".to_string(),
+        registry_model_id: None,
+    };
+    let mut orch = orchestrator(Config::default());
+    orch.refresh_inventory(
+        &[direct_inventory(Some("mx"), [1, 2, 3, 4])],
+        &[g600],
+        false,
+    );
+    assert!(
+        orch.devices
+            .iter()
+            .any(|dev| dev.config_key == "serial:783891c3f32f0017"),
+        "the G600 is still an inventory device"
+    );
+    let published = orch.shared.capture_plans.borrow();
+    assert_eq!(
+        published.plans().len(),
+        1,
+        "only the HID++ mouse is captured"
+    );
+    assert!(
+        published
+            .plans()
+            .iter()
+            .all(|plan| !matches!(plan.target.route, DeviceRoute::RawHid { .. })),
+        "no plan names a raw-HID route"
+    );
+}

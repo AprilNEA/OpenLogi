@@ -30,7 +30,7 @@ use openlogi_core::device::{
 use openlogi_core::device_order::{DeviceIdentity, DeviceStableId, PhysicalDeviceKey};
 use openlogi_hid::{
     BacklightChange, BacklightState, CaptureChannelSlot, ChannelPool, ChannelRegistry,
-    DeviceIoGate, DeviceRoute, DisableKeysMask, Dpi, EasySwitchHosts, FnLockState,
+    DeviceIoGate, DeviceRoute, DisableKeysMask, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
     ForceSensingInfo, GamingWanted, HidppOperation, HostOs, PointerSpeed, ReportRate,
     ReportRateInfo, SidetoneLevel, WriteError, commands_for_light_settings,
     is_reserved_keyboard_control, key_display_for,
@@ -49,7 +49,7 @@ use crate::capture_plan::{
 use crate::flow::{FlowController, InventoryDevice};
 use crate::hardware::{
     DeviceAccess, DeviceOp, HardwareContext, KeptOsLayouts, VolatileMouseSettings, WriteOrder,
-    show_precision_led, write_pointer_speed_in_background,
+    show_precision_led, timed, write_pointer_speed_in_background,
 };
 use crate::notices::LowBatteryWatch;
 use crate::observable::ObservableState;
@@ -385,13 +385,42 @@ impl SharedHandles {
             .await
     }
 
+    /// Read the DPI and the values the mouse at `route` supports.
+    ///
+    /// A G600 keeps its DPI in its onboard profile and is read over its own
+    /// feature reports; every other mouse answers over HID++.
+    pub async fn read_dpi(&self, route: &DeviceRoute) -> Result<DpiInfo, WriteError> {
+        if openlogi_hid::is_g600_route(route) {
+            return timed(
+                HidppOperation::ReadDpiCapabilities,
+                self.hardware.read_g600_dpi(route),
+            )
+            .await;
+        }
+        self.device(route)
+            .run(HidppOperation::ReadDpiCapabilities, |c| async move {
+                openlogi_hid::get_dpi_info_on(&c).await
+            })
+            .await
+    }
+
     /// Write `dpi` to the mouse at `route`. On a DPI mouse the write ends
     /// precision mode, so the pointer moves at the DPI the settings app
     /// shows, and darkens the DPI LED when the precision speed ends with it.
     /// It is ordered with the precision button, the DPI preset actions and
     /// the reconnect reapply. A write superseded before its turn writes
     /// nothing.
+    ///
+    /// A G600 has no precision mode and no DPI LED to order with: its write
+    /// selects one of the active profile's slots over its own feature reports.
     pub async fn set_dpi(&self, route: &DeviceRoute, dpi: Dpi) -> Result<(), WriteError> {
+        if openlogi_hid::is_g600_route(route) {
+            return timed(
+                HidppOperation::WriteDpi,
+                self.hardware.set_g600_dpi(route, dpi),
+            )
+            .await;
+        }
         let AppWrite { ticket, restore } = self
             .pointer_speeds
             .app_write(route, SavedSpeed::Dpi(Some(dpi)));
@@ -1384,6 +1413,12 @@ impl Orchestrator {
         let mut plans = Vec::new();
         let mut routes = BTreeMap::new();
         for dev in &self.devices {
+            // A standalone raw-HID device has no HID++ channel to capture on:
+            // a plan for it starts a session that ends at once and is re-armed
+            // every second — what a G600 keyed by its serial did.
+            if !is_hidpp_device(dev) {
+                continue;
+            }
             let Some((physical_key, route)) = Self::capture_identity(dev) else {
                 continue;
             };
@@ -1783,6 +1818,12 @@ impl Orchestrator {
             return;
         };
         let key = &dev.config_key;
+        // A standalone raw-HID device has no HID++ channel for the writes
+        // below; its light, when it is one, is what the agent re-applies.
+        if !is_hidpp_device(dev) {
+            self.reapply_light(dev, route);
+            return;
+        }
         let route_key = stable_id(dev).route_key();
         let device = self.config.devices.get(key.as_str());
         let saved = saved_speed(&self.config, dev);
@@ -1837,16 +1878,21 @@ impl Orchestrator {
         }
         self.keep_os_layout(dev);
         let _ = self.shared.reapply_disabled_keys(&route);
+        self.reapply_light(dev, route);
+        let writes =
+            reconnect_follower_cookies(&self.config, devices, dev, &mut self.follower_cookies());
+        self.write_follower_cookies(writes);
+    }
+
+    /// Re-apply the saved light settings of `dev`, when it is a light.
+    fn reapply_light(&self, dev: &AgentDevice, route: DeviceRoute) {
         if let Some(capabilities) = dev.light_capabilities
-            && let Some(light) = self.effective_light_settings(key)
+            && let Some(light) = self.effective_light_settings(&dev.config_key)
         {
             self.shared
                 .hardware
                 .set_light_in_background(Some(route), &light, capabilities);
         }
-        let writes =
-            reconnect_follower_cookies(&self.config, devices, dev, &mut self.follower_cookies());
-        self.write_follower_cookies(writes);
     }
 
     /// Write the `ChangeHost` cookies of linked pointing devices, so that Logi

@@ -31,11 +31,12 @@ pub use openlogi_device::{backend, inventory, pairing, session, write};
 pub use hidpp::feature::FeatureType;
 pub use hidpp::feature::device_information::DeviceEntityType;
 pub use host::{
-    apply_litra, channel_pool, dump_features, dump_firmware_entities, dump_reprog_controls,
-    enumerate, enumerate_hid_only, enumerate_standalone, get_backlight, get_dpi, get_dpi_info,
-    get_onboard, get_pointer_scaling, get_scroll_wheel_mode, get_sidetone, get_smartshift_status,
-    list_pairing_receivers, play_haptic, raw_feature_calls, read_battery_raw, read_litra_state,
-    set_dpi, set_fn_lock, set_keyboard_color, set_keyboard_color_with, set_pointer_scaling,
+    apply_litra, channel_pool, dump_features, dump_firmware_entities, dump_g600_reports,
+    dump_reprog_controls, enumerate, enumerate_hid_only, enumerate_standalone, get_backlight,
+    get_dpi, get_dpi_info, get_g600_dpi_info, get_onboard, get_pointer_scaling,
+    get_scroll_wheel_mode, get_sidetone, get_smartshift_status, list_pairing_receivers,
+    play_haptic, raw_feature_calls, read_battery_raw, read_g600_status, read_litra_state, set_dpi,
+    set_fn_lock, set_g600_dpi, set_keyboard_color, set_keyboard_color_with, set_pointer_scaling,
     set_scroll_inversion, set_scroll_resolution, set_scroll_wheel_mode, set_sidetone,
     set_smartshift, set_smartshift_sensitivity, set_smartshift_torque, toggle_smartshift,
     update_backlight, walk_per_key_zones, watch_button_spy, watch_hotplug, watch_litra,

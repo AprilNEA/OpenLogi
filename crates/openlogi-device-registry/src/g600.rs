@@ -6,7 +6,8 @@
 //! G-key keyboard): report `0xf0` carries the active profile and DPI slot,
 //! `0xf3`–`0xf5` the three 154-byte onboard profiles (libratbag,
 //! `src/driver-logitech-g600.c`, MIT). OpenLogi surfaces it as a standalone
-//! raw-HID device for identity only; no report is read or written yet.
+//! raw-HID device; `openlogi_device::write` holds the driver that reads
+//! those reports and selects the DPI slot.
 
 use crate::LOGITECH_VENDOR_ID;
 
