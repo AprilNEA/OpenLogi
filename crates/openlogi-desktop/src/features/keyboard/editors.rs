@@ -264,13 +264,14 @@ fn editor_action_row(
                         .map(|s| s.read(cx).value().to_string())
                         .unwrap_or_default();
                     let action = match kind {
-                        PowerUserKind::CustomShortcut => match text.parse::<KeyCombo>() {
-                            Ok(combo) => Action::CustomShortcut(combo),
-                            Err(_) => {
+                        PowerUserKind::CustomShortcut => {
+                            if let Ok(combo) = text.parse::<KeyCombo>() {
+                                Action::CustomShortcut(combo)
+                            } else {
                                 view_save.update(cx, |v, vcx| v.mark_editor_invalid(vcx));
                                 return;
                             }
-                        },
+                        }
                         PowerUserKind::TypeText => Action::TypeText(text),
                         PowerUserKind::RunAppleScript => Action::RunAppleScript(text),
                         PowerUserKind::RunShellCommand => Action::RunShellCommand(text),
