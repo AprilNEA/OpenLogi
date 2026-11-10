@@ -131,6 +131,13 @@ optional physical device key.
   action returns when the last frame is posted, about 315 ms later. With the
   setting off, the agent posts two frames and the Dock changes Space at once.
   A change applies from the next switch. Windows and Linux ignore the setting.
+- `one_gesture_per_press` (default `true`): each press of a gesture button
+  commits at most one swipe, however far the mouse moves, so two presses
+  during one movement are two swipes. On macOS a Previous Desktop or Next
+  Desktop requested while a switch on the same display is still under way is
+  posted at once, without waiting for the running slide to finish. Off, one
+  hold can repeat its swipe as the mouse keeps moving or turns back, and a
+  desktop switch requested during a slide is dropped.
 
 `[devices."<physical-key>"]` contains per-device state. Receiver keys look like
 `receiver:<receiver-id>:slot:<number>`; direct, raw-HID, and camera devices use

@@ -13,7 +13,7 @@
 use std::ffi::{c_int, c_void};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{LazyLock, mpsc};
+use std::sync::{LazyLock, Mutex, MutexGuard, PoisonError, mpsc};
 use std::time::{Duration, Instant};
 
 use block2::RcBlock;
@@ -40,12 +40,33 @@ use super::super::space_switch::{
 use super::{app_services, app_services_symbol};
 
 static BUSY: AtomicBool = AtomicBool::new(false);
+/// The switch that holds [`BUSY`]. Written by every acquisition, under this
+/// lock; read only by a request that finds [`BUSY`] held, or by the holder
+/// itself, under the same lock. So whoever reads it reads the holder's.
+static IN_FLIGHT: Mutex<InFlight> = Mutex::new(InFlight {
+    display: 0,
+    followed: false,
+});
+/// Held while a switch's events are posted. Desktop switches reach this
+/// module from more than one dispatch thread (the hook's action worker and
+/// each HID++ gesture session), so a follow-up and the switch it follows
+/// take turns rather than interleave their frames at the Dock.
+static POSTING: Mutex<()> = Mutex::new(());
 /// Whether a switch slides. The host publishes the user's choice here
 /// through [`set_desktop_switch`]; until it does, switches stay instant.
 static SLIDE: AtomicBool = AtomicBool::new(false);
 
 pub(in crate::inject) fn set_desktop_switch(switch: DesktopSwitch) {
     SLIDE.store(switch == DesktopSwitch::Animated, Ordering::Relaxed);
+}
+
+/// Whether a request that finds a switch in flight on its display is posted
+/// at once. The host publishes the user's choice through
+/// [`set_desktop_chain`]; until it does, such a request is dropped.
+static CHAIN_SWITCHES: AtomicBool = AtomicBool::new(false);
+
+pub(in crate::inject) fn set_desktop_chain(enabled: bool) {
+    CHAIN_SWITCHES.store(enabled, Ordering::Relaxed);
 }
 
 fn desktop_switch() -> DesktopSwitch {
@@ -63,16 +84,48 @@ pub(super) fn next_desktop() {
     start(Direction::Next);
 }
 
+/// The switch in flight: its display, and whether a follow-up was posted
+/// while it waited for its Space.
+#[derive(Clone, Copy)]
+struct InFlight {
+    display: u32,
+    followed: bool,
+}
+
+fn in_flight() -> MutexGuard<'static, InFlight> {
+    IN_FLIGHT.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn posting() -> MutexGuard<'static, ()> {
+    POSTING.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 fn start(direction: Direction) {
-    let Some(lease) = Lease::acquire(&BUSY) else {
-        tracing::debug!(?direction, "Space switch already pending — skipped");
-        return;
-    };
     // Capture the display before scheduling. A moved cursor must not retarget
     // a delayed action to another monitor; `post` checks it again.
     let Some(display_id) = cursor_display() else {
         tracing::warn!(?direction, "Space switch: cursor display unavailable");
         return;
+    };
+    let lease = {
+        let mut current = in_flight();
+        let Some(lease) = Lease::acquire(&BUSY) else {
+            let follows = CHAIN_SWITCHES.load(Ordering::Relaxed) && current.display == display_id;
+            drop(current);
+            if !follows {
+                tracing::info!(?direction, "Space switch already pending: skipped");
+            } else if follow_up(display_id, direction) {
+                // Only the in-flight switch's log line reads the flag, so
+                // flagging a successor that started meanwhile is harmless.
+                in_flight().followed = true;
+            }
+            return;
+        };
+        *current = InFlight {
+            display: display_id,
+            followed: false,
+        };
+        lease
     };
     // Read once: a setting changed mid-switch applies to the next one.
     let switch = desktop_switch();
@@ -91,6 +144,12 @@ fn start(direction: Direction) {
                         "Space switch result"
                     );
                 }
+                // A follow-up moved the Space on before this one saw its own.
+                Err(Failure::ContextChanged) if in_flight().followed => tracing::debug!(
+                    display_id,
+                    ?direction,
+                    "Space switch overtaken by a follow-up"
+                ),
                 Err(error) => tracing::warn!(
                     display_id,
                     ?direction,
@@ -103,6 +162,38 @@ fn start(direction: Direction) {
     if let Err(error) = result {
         tracing::warn!(?error, "Space switch preparation failed — no retry");
     }
+}
+
+/// A switch requested while another is still in flight on `display_id`. It
+/// is posted at once, the way a second key press reaches the Dock mid-slide,
+/// never waiting for the first Space to land. Nothing confirms it; the switch
+/// in flight already owns the one confirmation. True once it is posted.
+fn follow_up(display_id: u32, direction: Direction) -> bool {
+    let switch = desktop_switch();
+    let Some(output) = Output::prepare(switch, direction) else {
+        tracing::warn!(
+            ?direction,
+            "Space switch follow-up preparation failed — no retry"
+        );
+        return false;
+    };
+    if cursor_display() != Some(display_id) {
+        tracing::info!(
+            ?direction,
+            "Space switch follow-up: cursor left the display"
+        );
+        return false;
+    }
+    let posting = posting();
+    output.post();
+    drop(posting);
+    tracing::info!(
+        display_id,
+        ?direction,
+        ?switch,
+        "Space switch follow-up posted"
+    );
+    true
 }
 
 fn cursor_display() -> Option<u32> {
@@ -262,6 +353,7 @@ impl Backend for Native {
         if cursor_display() != Some(self.display) {
             return Err(Failure::ContextChanged);
         }
+        let _posting = posting();
         gate.commit(|| output.post())
     }
 

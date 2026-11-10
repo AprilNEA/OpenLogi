@@ -3,6 +3,7 @@
 //! shared by both gesture-capture paths. This is input processing, distinct
 //! from the `Action` vocabulary the parent [`binding`](super) module defines.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use super::GestureDirection;
@@ -33,6 +34,19 @@ pub const GESTURE_REARM_PAUSE: std::time::Duration = std::time::Duration::from_m
 /// cursor happened to be moving. Shared by both gesture paths (the HID++ thumb
 /// pad and the OS-hook Back/Forward buttons).
 pub const GESTURE_HOLD_FOR_SWIPE: std::time::Duration = std::time::Duration::from_millis(160);
+
+/// Whether a press commits at most one swipe. Off until a host publishes the
+/// user's choice through [`set_one_swipe_per_press`]; off, one hold chains
+/// reversals and repeats (#1652).
+static ONE_SWIPE_PER_PRESS: AtomicBool = AtomicBool::new(false);
+
+/// Choose whether every press of a gesture button commits at most one swipe,
+/// as in Logi Options+: the number of presses is the number of swipes, however
+/// far the hand travels. Off, one hold also chains reversals and repeats. A
+/// hold already under way keeps the rule it began with.
+pub fn set_one_swipe_per_press(enabled: bool) {
+    ONE_SWIPE_PER_PRESS.store(enabled, Ordering::Relaxed);
+}
 
 /// Classify the *running* raw-XY travel of a held gesture button into a
 /// directional swipe, the instant it commits — or `None` while it's still too
@@ -118,6 +132,9 @@ pub struct SwipeAccumulator {
     repeat_cross: i32,
     /// When the last motion arrived, to detect the pause that ends a stroke.
     moved_at: Option<Instant>,
+    /// Whether this hold commits at most one swipe, read from
+    /// [`set_one_swipe_per_press`] when the hold begins.
+    one_per_press: bool,
 }
 
 impl SwipeAccumulator {
@@ -131,6 +148,7 @@ impl SwipeAccumulator {
         self.repeat = 0;
         self.repeat_cross = 0;
         self.moved_at = None;
+        self.one_per_press = ONE_SWIPE_PER_PRESS.load(Ordering::Relaxed);
     }
 
     /// Whether a hold is in progress (between [`Self::begin`] and [`Self::end`]),
@@ -143,9 +161,14 @@ impl SwipeAccumulator {
     /// Feed a pointer-move / raw-XY delta into the current hold. Returns
     /// `Some(direction)` the instant travel commits (only after the hold passes
     /// [`GESTURE_HOLD_FOR_SWIPE`]), then restarts travel so the same hold can
-    /// commit again; `None` while still too short or not holding.
+    /// commit again; `None` while still too short or not holding. A hold that
+    /// began under [`set_one_swipe_per_press`] commits once and then ignores
+    /// the rest of its travel.
     pub fn accumulate(&mut self, dx: i32, dy: i32) -> Option<GestureDirection> {
         self.held_since?;
+        if self.one_per_press && self.fired {
+            return None;
+        }
         let now = Instant::now();
         if self
             .moved_at
@@ -263,6 +286,14 @@ impl SwipeAccumulator {
         if self.held_since.is_some() {
             self.held_since = Instant::now().checked_sub(GESTURE_HOLD_FOR_SWIPE * 2);
         }
+    }
+
+    /// Test-only seam: make the current hold commit at most one swipe, as
+    /// [`set_one_swipe_per_press`] does, without touching the process-wide
+    /// setting other tests read.
+    #[doc(hidden)]
+    pub fn one_swipe_per_press_for_test(&mut self) {
+        self.one_per_press = true;
     }
 
     /// Test-only seam: age the last motion past [`GESTURE_REARM_PAUSE`], as if
@@ -393,6 +424,33 @@ mod tests {
         );
         // Continuing the same swipe must not re-fire.
         assert_eq!(acc.accumulate(50, 0), None);
+    }
+
+    #[test]
+    fn one_swipe_per_press_commits_once_however_far_the_hand_goes() {
+        let mut acc = SwipeAccumulator::default();
+        acc.begin();
+        acc.one_swipe_per_press_for_test();
+        acc.backdate_hold_for_test();
+        let t = GESTURE_SWIPE_THRESHOLD + 10;
+        assert_eq!(acc.accumulate(t, 0), Some(GestureDirection::Right));
+        // A long continuous sweep, a reversal, and a rest then a fresh swipe
+        // all stay inside the same press.
+        let mut fired = Vec::new();
+        for _ in 0..(3 * GESTURE_REPEAT_DISTANCE / 10) {
+            fired.extend(acc.accumulate(10, 0));
+        }
+        fired.extend(acc.accumulate(-t, 0));
+        fired.extend(acc.accumulate(-t, 0));
+        acc.rest_for_test();
+        fired.extend(acc.accumulate(t, 0));
+        assert!(fired.is_empty(), "one press is one swipe, got {fired:?}");
+        assert!(!acc.end(), "the press swiped, so it is not a click");
+        // The next press swipes again.
+        acc.begin();
+        acc.one_swipe_per_press_for_test();
+        acc.backdate_hold_for_test();
+        assert_eq!(acc.accumulate(t, 0), Some(GestureDirection::Right));
     }
 
     #[test]

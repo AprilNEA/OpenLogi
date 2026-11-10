@@ -216,6 +216,25 @@ fn desktop_switches_slide_unless_turned_off() {
 }
 
 #[test]
+fn one_gesture_per_press_is_on_unless_turned_off() {
+    assert!(Config::default().app_settings.one_gesture_per_press);
+
+    let predating: Config = toml::from_str(
+        r"
+            schema_version = 11
+            [app_settings]
+            animate_desktop_switch = false
+        ",
+    )
+    .expect("config predating the one-gesture-per-press setting loads");
+    assert!(predating.app_settings.one_gesture_per_press);
+
+    let mut cfg = Config::default();
+    cfg.app_settings.one_gesture_per_press = false;
+    assert!(!write_and_read(&cfg).app_settings.one_gesture_per_press);
+}
+
+#[test]
 fn a_config_without_an_update_channel_writes_back_unchanged() {
     let mut cfg = Config::default();
     cfg.app_settings.check_for_updates = true;

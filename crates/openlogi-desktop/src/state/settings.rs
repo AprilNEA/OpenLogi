@@ -427,6 +427,19 @@ impl AppState {
         self.persist_and_reload("desktop switch animation setting");
         StateEvent::SettingsChanged.into()
     }
+    /// Toggle whether each gesture-button press is one swipe, and persist it.
+    /// The agent reads it on config reload. An already-set value writes
+    /// nothing and is still reported; disk failures restore the persisted
+    /// value.
+    pub fn commit_one_gesture_per_press(&mut self, enabled: bool) -> StateEvents {
+        if self.config.app_settings.one_gesture_per_press == enabled {
+            return StateEvent::SettingsChanged.into();
+        }
+        self.config
+            .edit(|config| config.app_settings.one_gesture_per_press = enabled);
+        self.persist_and_reload("one swipe per press setting");
+        StateEvent::SettingsChanged.into()
+    }
     /// Set traditional vertical mouse-wheel sensitivity and persist it. The
     /// agent publishes the value to its scroll worker on config reload. An
     /// already-set value writes nothing and is still reported; disk failures
