@@ -8,6 +8,8 @@
 use std::collections::BTreeMap;
 
 #[cfg(feature = "fs")]
+use super::DeviceConfig;
+#[cfg(feature = "fs")]
 use super::settings::GestureOwner;
 use super::{Config, identity};
 #[cfg(feature = "fs")]
@@ -15,6 +17,8 @@ use crate::binding::{
     Action, Binding, ButtonId, GestureDirection, default_binding, default_binding_for,
     default_gesture_binding,
 };
+#[cfg(feature = "fs")]
+use crate::device_order::DeviceIdentity;
 use crate::device_order::PhysicalDeviceKey;
 
 impl Config {
@@ -175,20 +179,30 @@ impl Config {
             })
             .collect();
 
-        for (old, (new, route)) in &renames {
+        self.rename_device_keys(&renames);
+    }
+
+    /// Apply `renames`, each old key mapped to its new key and the route it
+    /// was reached by: move each entry, record the route in its `links`, and
+    /// rewrite `selected_device` and every host-switch target naming it.
+    ///
+    /// An entry renamed onto a key that already holds one is folded into it
+    /// rather than inserted over it, which keeps the rename lossless.
+    fn rename_device_keys(&mut self, renames: &BTreeMap<String, (String, String)>) {
+        for (old, (new, route)) in renames {
             let Some(mut device) = self.devices.remove(old) else {
                 continue;
             };
             device.links.entry(route.clone()).or_default();
             // One device reached on two direct routes — an MX Master 3S over
             // USB and over Bluetooth-direct — has two v4 entries that rename
-            // to the same identity key. Inserting would drop whichever lost
-            // the `BTreeMap` ordering, bindings and all; folding is what
-            // makes this phase lossless, and it is the same merge adoption
-            // performs at runtime, so the second entry's disagreements land
-            // as overrides on the route they were set for.
+            // to the same identity key, and a model-only device's key may
+            // already hold an entry. Inserting would drop whichever lost the
+            // `BTreeMap` ordering, bindings and all; folding is what makes
+            // the rename lossless, and it is the same merge adoption
+            // performs at runtime.
             match self.devices.get_mut(new) {
-                Some(existing) => identity::fold(existing, device, route),
+                Some(existing) => identity::fold(existing, device, new, route),
                 None => {
                     self.devices.insert(new.clone(), device);
                 }
@@ -209,6 +223,64 @@ impl Config {
                 }
             }
         }
+    }
+
+    /// Move settings released builds saved for a model-only direct device to
+    /// its model key.
+    ///
+    /// A direct device reporting neither a serial nor a unit id (the G402)
+    /// was keyed `direct:<vid>:<pid>:unit:00000000` by released builds, and
+    /// is keyed `direct:<vid>:<pid>` now. The same zero-unit key also names a
+    /// probe that never read the identity of a device that has one, so an
+    /// entry moves only when it is evidently a model-only device's:
+    ///
+    /// - its recorded identity says DeviceInformation answered with neither
+    ///   a serial nor a unit id. An entry without one may be an unread probe;
+    /// - no other entry indexes its route. One that does is a device of that
+    ///   model reporting its own identity.
+    ///
+    /// When the model key already holds an entry, the two are folded with the
+    /// model entry canonical: nothing on disk says which is newer, and the
+    /// model key is the one this version reads and writes, so its values
+    /// stand and the released entry only fills what it leaves unset. Every
+    /// value it loses is logged.
+    ///
+    /// Released files share the current schema, so this runs on every load;
+    /// once the entry has moved there is nothing left for it to match.
+    #[cfg(feature = "fs")]
+    pub(super) fn migrate_zero_unit_direct_keys(&mut self) {
+        let answered_with_model_only = |device: &DeviceConfig| {
+            device
+                .identity
+                .as_ref()
+                .and_then(|identity| identity.model_info.as_ref())
+                .is_some_and(|info| {
+                    DeviceIdentity::from_parts(info.serial_number.as_deref(), info.unit_id)
+                        == DeviceIdentity::Model
+                })
+        };
+        let route_owned_elsewhere = |old: &str, model: &str| {
+            self.devices
+                .iter()
+                .any(|(key, device)| key != old && key != model && device.links.contains_key(model))
+        };
+        let renames: BTreeMap<String, (String, String)> = self
+            .devices
+            .iter()
+            .filter(|(_, device)| answered_with_model_only(device))
+            .filter_map(|(old, _)| {
+                let model = PhysicalDeviceKey::model_key_of_zero_unit_direct(old)?.into_string();
+                (!route_owned_elsewhere(old, &model)).then(|| (old.clone(), (model.clone(), model)))
+            })
+            .collect();
+        for (old, (model, _)) in &renames {
+            tracing::info!(
+                legacy_key = %old,
+                model_key = %model,
+                "Settings an earlier version saved under the all-zero unit id were moved to the device's model key. This is not a problem."
+            );
+        }
+        self.rename_device_keys(&renames);
     }
 
     /// Preserve the native behavior of explicit pre-v7 thumb-wheel defaults.

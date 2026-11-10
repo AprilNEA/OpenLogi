@@ -109,6 +109,15 @@ pub(crate) fn direct_inventory(unit_id: [u8; 4]) -> DeviceInventory {
     }
 }
 
+/// The same cabled mouse before its probe read DeviceInformation: no model
+/// info at all, so the GUI knows the route but not yet which device sits on
+/// it, not even its model.
+pub(crate) fn half_read_direct_inventory() -> DeviceInventory {
+    let mut inventory = direct_inventory([0; 4]);
+    inventory.paired[0].model_info = None;
+    inventory
+}
+
 fn superseded_litra_light() -> StandaloneDevice {
     StandaloneDevice {
         address: RawDeviceAddress {

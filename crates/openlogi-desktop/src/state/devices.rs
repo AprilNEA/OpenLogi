@@ -310,22 +310,23 @@ pub(super) fn build_device_list(
                     );
                     (key, None, None, paired.codename.clone(), None, [0u8; 4])
                 };
-            let stable_id = DeviceStableId::from_parts(
-                route.as_ref(),
-                paired.slot,
-                serial_number.as_deref(),
-                unit_id,
-            );
-            let identity = RouteIdentity::from_parts(serial_number.as_deref(), unit_id);
+            // Only an answered DeviceInformation read yields an identity; a
+            // device whose probe never got there has none yet, not even its
+            // model, and stays transient until it does.
+            let identity = model_info.as_ref().map(|model| {
+                RouteIdentity::from_parts(model.serial_number.as_deref(), model.unit_id)
+            });
+            let stable_id =
+                DeviceStableId::from_parts(route.as_ref(), paired.slot, identity.clone());
+            let online_identity = identity.as_ref().filter(|_| paired.online);
             let (config_key, persistent) = config
-                .resolve_device_key(&stable_id, paired.online.then_some(&identity))
+                .resolve_device_key(&stable_id, online_identity)
                 .map_or_else(
                     || (stable_id.runtime_key(), false),
                     |key| (key.into_string(), true),
                 );
-            let canonical_key =
-                canonical_device_key(&stable_id, paired.online.then_some(&identity))
-                    .map(PhysicalDeviceKey::into_string);
+            let canonical_key = canonical_device_key(&stable_id, online_identity)
+                .map(PhysicalDeviceKey::into_string);
             let route_key = stable_id.route_key();
 
             let display_name = paired_display_name(asset.as_ref(), paired);
@@ -553,13 +554,12 @@ fn append_standalone(
 ) {
     for device in devices {
         let route = Some(device.route());
+        let identity = RouteIdentity::from_parts(device.serial_number.as_deref(), device.unit_id);
         let stable_id = DeviceStableId::from_parts(
             route.as_ref(),
             openlogi_core::hid::DIRECT_DEVICE_INDEX,
-            device.serial_number.as_deref(),
-            device.unit_id,
+            Some(identity.clone()),
         );
-        let identity = RouteIdentity::from_parts(device.serial_number.as_deref(), device.unit_id);
         let (config_key, persistent) = config
             .resolve_device_key(&stable_id, device.online.then_some(&identity))
             .map_or_else(
@@ -941,8 +941,10 @@ fn device_order_key(record: &DeviceRecord) -> (DeviceStableId, String, String) {
         DeviceStableId::from_parts(
             record.route.as_ref(),
             record.slot,
-            record.serial_number.as_deref(),
-            record.unit_id,
+            Some(RouteIdentity::from_parts(
+                record.serial_number.as_deref(),
+                record.unit_id,
+            )),
         ),
         record.model_key.clone(),
         record.model_name.clone(),

@@ -1129,3 +1129,24 @@ fn a_saved_leftover_slot_does_not_return_as_a_placeholder() {
     assert_eq!(card.route, Some(bolt_slot(4)));
     assert_eq!(card.stale_pairings, [bolt_slot(2)]);
 }
+
+#[test]
+fn two_model_only_devices_of_one_model_show_one_card() {
+    // Two devices that report only their model, reached by one
+    // `direct:<vid>:<pid>` route, cannot be told apart: one card, one entry.
+    let resolver = AssetResolver::new();
+    let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = AppState::new(Sources::in_memory(Config::ephemeral(), &resolver, commands));
+
+    let _ = state.refresh_inventories(
+        &[direct_inventory([0; 4]), direct_inventory([0; 4])],
+        &[],
+        &resolver,
+        &[],
+    );
+
+    assert_eq!(state.devices().len(), 1);
+    assert_eq!(state.devices()[0].config_key, "direct:046d:b023");
+    let entries: Vec<&str> = state.config.devices.keys().map(String::as_str).collect();
+    assert_eq!(entries, ["direct:046d:b023"]);
+}

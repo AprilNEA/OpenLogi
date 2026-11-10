@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, HashSet};
 
 use openlogi_core::config::{Config, DeviceIdentity};
-use openlogi_core::device::{DeviceInventory, StandaloneDevice};
+use openlogi_core::device::{Capabilities, DeviceInventory, StandaloneDevice};
 use openlogi_core::device_order::PhysicalDeviceKey;
 use openlogi_core::hid::DeviceRoute;
 use tracing::debug;
@@ -270,13 +270,13 @@ impl AppState {
     }
     /// Pair each transient direct record in the snapshot with the device it
     /// physically is. A transient key (`…:unit:00000000`) is a half-read probe
-    /// of some existing device, not a new one (#482): when exactly one known
-    /// card sharing its `direct:<vid>:<pid>` wire identity is not live online —
-    /// so the half-read probe can only be that device — the transient record is
-    /// folded into that card instead of surfacing beside it (or evicting it).
-    /// With no such card the transient is dropped as probe noise when its wire
-    /// product is already live online, and an ambiguous one (two known
-    /// same-model cards absent) is left alone.
+    /// of some existing device, not a new one (#482): when no device of its
+    /// `direct:<vid>:<pid>` wire identity is online and exactly one known card
+    /// shares that identity, the half-read probe can only be that device, and
+    /// the transient record is folded into that card instead of surfacing
+    /// beside it (or evicting it). With a device of that wire identity online
+    /// it is dropped as probe noise, whichever card is absent, and an
+    /// ambiguous one (two known same-model cards absent) is left alone.
     ///
     /// The wire identity is compared through [`DeviceRecord::route_key`], not
     /// `config_key`: since Task 6 a persistent record's `config_key` may
@@ -286,11 +286,13 @@ impl AppState {
     /// backs an offline placeholder that has already been adopted once, but
     /// two same-model direct devices can only ever have *one* owner for a
     /// shared `direct:<vid>:<pid>` route (`Config::adopt_route` is
-    /// exclusive), so the absent twin also needs a route-independent proof:
-    /// [`record_wire_pid`] compares the HID++ model id the offline
-    /// placeholder persisted against the one the half-read probe itself
-    /// reports (`model_info` survives a half read even when the unit id
-    /// does not).
+    /// exclusive), so the absent twin also needs another proof: the route
+    /// its last live record was reached by, or [`record_wire_pid`], which
+    /// compares the HID++ model id the offline placeholder persisted against
+    /// the one the transient probe reports, when it reports one. A probe
+    /// that read DeviceInformation is no longer transient, even with an
+    /// all-zero unit id (a model identity), so for a direct device the
+    /// last live route is the proof that remains.
     pub(crate) fn adopt_transient_records(
         &self,
         by_key: &mut BTreeMap<String, DeviceRecord>,
@@ -324,30 +326,36 @@ impl AppState {
                         || transient_wire_pid.is_some()
                             && record_wire_pid(record) == transient_wire_pid)
             };
-            // A live online sibling is accounted for and never a candidate,
-            // but it must not discard the transient — the half-read probe may
-            // be the *other* same-model device.
+            // A direct route is only `vid:pid`, so nothing says which mouse
+            // answered: the half-read node may be a second node of a device
+            // online there. Folding it into an absent twin would show an
+            // unplugged mouse online and save edits under its key.
+            if by_key
+                .values()
+                .any(|record| same_wire(record) && record.is_online())
+            {
+                by_key.remove(&key);
+                continue;
+            }
             let mut candidates: Vec<String> = by_key
                 .iter()
-                .filter(|(_, record)| same_wire(record) && !record.is_online())
+                .filter(|(_, record)| same_wire(record))
                 .map(|(k, _)| k.clone())
                 .collect();
+            // Last tick's live record proves its wire by its own route, which
+            // its offline placeholder in this snapshot no longer carries. A
+            // half-read probe with no model info has no other proof to offer.
+            let absent_now =
+                |key: &String| by_key.get(key).is_none_or(|record| !record.is_online());
             for previous in &self.devices.records {
                 if same_wire(previous)
-                    && !by_key.contains_key(&previous.config_key)
+                    && absent_now(&previous.config_key)
                     && !candidates.contains(&previous.config_key)
                 {
                     candidates.push(previous.config_key.clone());
                 }
             }
             let [known_key] = candidates.as_slice() else {
-                if candidates.is_empty()
-                    && by_key
-                        .iter()
-                        .any(|(_, record)| same_wire(record) && record.is_online())
-                {
-                    by_key.remove(&key);
-                }
                 continue;
             };
             // Last tick's record carries the freshest identity; the offline
@@ -673,11 +681,14 @@ pub(super) fn persist_identities(config: &mut Config, list: &[DeviceRecord]) -> 
 /// entry, so a device reached both ways in one snapshot resolves to the one
 /// entry its settings actually live under.
 ///
-/// A route two online records share cannot be attributed to either one —
-/// `route_key` for a Direct route strips the device's own identity, so two
-/// same-model direct devices seen online in the same snapshot report the
-/// *same* route key. `Config::adopt_route` is exclusive per route, so
-/// adopting it for one twin only gets it stolen back by the other on the
+/// A route that online records of two different devices share cannot be
+/// attributed to either one — `route_key` for a Direct route strips the
+/// device's own identity, so two same-model direct devices seen online in the
+/// same snapshot report the *same* route key. Records that fold onto the same
+/// key are one entry listed more than once — two G402s sharing their model
+/// key, or two HID++ nodes of one mouse — not twins, and their route is
+/// adopted once. `Config::adopt_route` is exclusive per route, so adopting it
+/// for one twin only gets it stolen back by the other on the
 /// very next tick — a persist-and-reload storm that also churns the loser's
 /// `LinkConfig` (including any per-link overrides) on every refresh. Such a
 /// route is therefore skipped entirely; the route-derived key each twin
@@ -689,29 +700,72 @@ pub(super) fn persist_identities(config: &mut Config, list: &[DeviceRecord]) -> 
 /// still under a pre-schema-5 route key — so folding onto `config_key` would
 /// fold the legacy entry onto itself and the branch would never converge.
 pub(super) fn adopt_routes(config: &mut Config, list: &[DeviceRecord]) -> bool {
-    let mut route_counts: BTreeMap<&str, usize> = BTreeMap::new();
-    let sightings = || list.iter().filter(|record| record.sighting_key().is_some());
-    for record in sightings() {
-        *route_counts.entry(record.route_key.as_str()).or_insert(0) += 1;
+    let adoptable = || list.iter().filter(|record| record.sighting_key().is_some());
+    let mut sightings: BTreeMap<&str, Vec<&DeviceRecord>> = BTreeMap::new();
+    for record in adoptable() {
+        sightings
+            .entry(record.route_key.as_str())
+            .or_default()
+            .push(record);
     }
     let mut adopted = false;
-    for record in sightings() {
-        if route_counts
-            .get(record.route_key.as_str())
-            .is_some_and(|&count| count > 1)
-        {
+    // List order, not route order: folding two legacy entries into one
+    // device keeps the first one's values as its defaults.
+    let mut handled = HashSet::new();
+    for record in adoptable() {
+        let route_key = record.route_key.as_str();
+        if !handled.insert(route_key) {
             continue;
         }
-        let canonical = record
-            .canonical_key
-            .as_deref()
-            .unwrap_or(&record.config_key);
-        let Some(key) = PhysicalDeviceKey::parse(canonical) else {
+        let Some(sighting) = RouteSighting::of(&sightings[route_key]) else {
             continue;
         };
-        adopted |= config.adopt_route(&key, &record.route_key, record.capabilities);
+        let Some(key) = PhysicalDeviceKey::parse(sighting.device) else {
+            continue;
+        };
+        adopted |= config.adopt_route(&key, route_key, sighting.capabilities);
     }
     adopted
+}
+
+/// What every online record listed on one route says about it, once they
+/// are known to name a single device.
+struct RouteSighting<'a> {
+    /// The entry [`adopt_routes`] folds the route into.
+    device: &'a str,
+    /// The capabilities every record that read them agrees on. Two nodes of
+    /// one device that disagree record none, rather than overwriting the link
+    /// with each reading in turn and saving the config on every tick.
+    capabilities: Option<Capabilities>,
+}
+
+impl<'a> RouteSighting<'a> {
+    /// `None` when the records fold onto two different entries: same-model
+    /// twins, which the route alone cannot tell apart.
+    fn of(records: &[&'a DeviceRecord]) -> Option<Self> {
+        let (first, rest) = records.split_first()?;
+        let device = fold_target(first);
+        if rest.iter().any(|record| fold_target(record) != device) {
+            return None;
+        }
+        let mut readings = records.iter().filter_map(|record| record.capabilities);
+        let capabilities = readings
+            .next()
+            .filter(|first| readings.all(|reading| reading == *first));
+        Some(Self {
+            device,
+            capabilities,
+        })
+    }
+}
+
+/// The entry [`adopt_routes`] folds `record`'s route into: its canonical key
+/// when it has one, else the key its settings resolve to.
+fn fold_target(record: &DeviceRecord) -> &str {
+    record
+        .canonical_key
+        .as_deref()
+        .unwrap_or(&record.config_key)
 }
 
 /// The devices in `new` that changed a setting themselves since `old` — Fn
