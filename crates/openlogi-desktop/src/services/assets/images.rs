@@ -1,7 +1,14 @@
 //! Device image and depot-manifest helpers.
 
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 
+use gpui::{
+    App, Bounds, Corners, IntoElement, Pixels, RenderImage, RenderOnce, Styled as _, Window,
+    canvas, img, point, px, size,
+};
+use image::imageops::FilterType;
 use openlogi_assets::DepotManifest;
 use tracing::warn;
 
@@ -251,4 +258,313 @@ pub(super) fn load_manifest(dir: &Path) -> Option<DepotManifest> {
             |e| warn!(error = ?e, path = %manifest_path.display(), "depot manifest unreadable"),
         )
         .ok()
+}
+
+const MAX_SCALED_CACHE_ENTRIES: usize = 128;
+
+type ScaledImageEntry = (Arc<RenderImage>, u32, u32);
+type ScaledImageMap = HashMap<(PathBuf, u32, u32), ScaledImageEntry>;
+
+static SCALED_IMAGE_CACHE: OnceLock<Mutex<ScaledImageMap>> = OnceLock::new();
+
+/// Evict all cached Lanczos-3 [`RenderImage`] textures when [`super::AssetResolver::new`]
+/// or [`super::clear_cache`] runs so freshly downloaded or cleared assets take effect
+/// immediately.
+pub(crate) fn clear_scaled_image_cache() {
+    if let Some(cache) = SCALED_IMAGE_CACHE.get()
+        && let Ok(mut guard) = cache.lock()
+    {
+        guard.clear();
+    }
+}
+
+/// Contain-fit a box of `aspect` (`width / height`) centered inside `bounds`.
+///
+/// Shared by [`ScaledImage::fill_stage`] and Home's keyboard `glow_canvas` so
+/// a wide RGB keyboard's product render and its inter-key glow always fit the
+/// exact same stage rectangle at any card width up to `GALLERY_CARD_MAX_W`.
+#[must_use]
+pub(crate) fn contain_fit_bounds(bounds: Bounds<Pixels>, aspect: f32) -> Bounds<Pixels> {
+    let bw = f32::from(bounds.size.width);
+    let bh = f32::from(bounds.size.height);
+    if bw <= 0.0 || bh <= 0.0 || aspect <= 0.0 || !aspect.is_finite() {
+        return Bounds::default();
+    }
+    let (rw, rh) = if bw / bh > aspect {
+        (bh * aspect, bh)
+    } else {
+        (bw, bw / aspect)
+    };
+    let ox = f32::from(bounds.origin.x) + (bw - rw) * 0.5;
+    let oy = f32::from(bounds.origin.y) + (bh - rh) * 0.5;
+    Bounds {
+        origin: point(px(ox), px(oy)),
+        size: size(px(rw), px(rh)),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ScaledFit {
+    /// Fit inside the parent stage's runtime layout bounds (`size_full`),
+    /// sharing [`contain_fit_bounds`] with `glow_canvas`.
+    StageContain,
+    /// Fit inside explicit `(max_w, max_h)` logical bounds while preserving aspect ratio.
+    BoxContain { max_w: f32, max_h: f32 },
+    /// Render into an already aspect-fitted logical box `(width, height)`.
+    Exact { width: f32, height: f32 },
+}
+
+/// HiDPI-aware GPUI image element that downscales high-resolution asset renders
+/// once via premultiplied-alpha Lanczos-3 to match the exact physical pixel box
+/// (`logical_size * window.scale_factor()`), eliminating single-pass bilinear
+/// aliasing when GPUI lacks texture mipmaps.
+#[derive(IntoElement)]
+pub(crate) struct ScaledImage {
+    path: PathBuf,
+    fit: ScaledFit,
+}
+
+impl ScaledImage {
+    /// Fit `path` dynamically to the full runtime bounds of its parent stage
+    /// (`size_full`), sharing [`contain_fit_bounds`] with `glow_canvas`.
+    #[must_use]
+    pub fn fill_stage(path: PathBuf) -> Self {
+        Self {
+            path,
+            fit: ScaledFit::StageContain,
+        }
+    }
+
+    /// Fit `path` inside `(max_w, max_h)` logical pixels while preserving aspect ratio.
+    #[must_use]
+    pub fn contain(path: PathBuf, max_w: f32, max_h: f32) -> Self {
+        Self {
+            path,
+            fit: ScaledFit::BoxContain {
+                max_w: max_w.max(1.),
+                max_h: max_h.max(1.),
+            },
+        }
+    }
+
+    /// Render `path` into an already aspect-fitted logical box `(width, height)`.
+    #[must_use]
+    pub fn exact(path: PathBuf, width: f32, height: f32) -> Self {
+        Self {
+            path,
+            fit: ScaledFit::Exact {
+                width: width.max(1.),
+                height: height.max(1.),
+            },
+        }
+    }
+}
+
+impl RenderOnce for ScaledImage {
+    #[expect(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "bounded logical and physical pixel dimensions fit within f32/u32"
+    )]
+    fn render(self, window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        match self.fit {
+            ScaledFit::StageContain => {
+                let path = self.path;
+                canvas(
+                    move |_, _, _| path,
+                    move |bounds, path, window, _| {
+                        let bw = f32::from(bounds.size.width);
+                        let bh = f32::from(bounds.size.height);
+                        if bw <= 0.0 || bh <= 0.0 {
+                            return;
+                        }
+                        let scale_factor = window.scale_factor().clamp(1.0, 4.0);
+                        let phys_max_w = (bw * scale_factor).round().max(1.0) as u32;
+                        let phys_max_h = (bh * scale_factor).round().max(1.0) as u32;
+                        if let Some((render_img, dst_w, dst_h)) =
+                            scaled_render_image(&path, phys_max_w, phys_max_h)
+                        {
+                            let aspect = (dst_w as f32) / (dst_h.max(1) as f32);
+                            let image_bounds = contain_fit_bounds(bounds, aspect);
+                            let _ = window.paint_image(
+                                bounds,
+                                image_bounds,
+                                Corners::default(),
+                                render_img,
+                                0,
+                                false,
+                            );
+                        }
+                    },
+                )
+                .size_full()
+                .into_any_element()
+            }
+            ScaledFit::BoxContain { max_w, max_h } => {
+                let scale_factor = window.scale_factor().clamp(1.0, 4.0);
+                let phys_max_w = (max_w * scale_factor).round().max(1.0) as u32;
+                let phys_max_h = (max_h * scale_factor).round().max(1.0) as u32;
+                if let Some((render_img, phys_dst_w, phys_dst_h)) =
+                    scaled_render_image(&self.path, phys_max_w, phys_max_h)
+                {
+                    let logical_w = (phys_dst_w as f32) / scale_factor;
+                    let logical_h = (phys_dst_h as f32) / scale_factor;
+                    return img(render_img)
+                        .w(px(logical_w))
+                        .h(px(logical_h))
+                        .into_any_element();
+                }
+                img(self.path).max_w_full().max_h_full().into_any_element()
+            }
+            ScaledFit::Exact { width, height } => {
+                let scale_factor = window.scale_factor().clamp(1.0, 4.0);
+                let phys_max_w = (width * scale_factor).round().max(1.0) as u32;
+                let phys_max_h = (height * scale_factor).round().max(1.0) as u32;
+                if let Some((render_img, _, _)) =
+                    scaled_render_image(&self.path, phys_max_w, phys_max_h)
+                {
+                    return img(render_img)
+                        .w(px(width))
+                        .h(px(height))
+                        .into_any_element();
+                }
+                img(self.path).w(px(width)).h(px(height)).into_any_element()
+            }
+        }
+    }
+}
+
+/// Decode `path` once and downscale with premultiplied-alpha Lanczos-3 to fit
+/// within `(max_w, max_h)` physical pixels, returning a cached `(RenderImage, dst_w, dst_h)`
+/// so GPUI maps 1 texel to 1 physical screen pixel without single-pass bilinear aliasing.
+#[must_use]
+pub(crate) fn scaled_render_image(
+    path: &Path,
+    max_w: u32,
+    max_h: u32,
+) -> Option<(Arc<RenderImage>, u32, u32)> {
+    let key = (path.to_path_buf(), max_w.max(1), max_h.max(1));
+    let cache = SCALED_IMAGE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(guard) = cache.lock()
+        && let Some(cached) = guard.get(&key)
+    {
+        return Some(cached.clone());
+    }
+
+    let built = build_scaled_render_image(path, key.1, key.2)?;
+    if let Ok(mut guard) = cache.lock() {
+        if guard.len() >= MAX_SCALED_CACHE_ENTRIES {
+            guard.clear();
+        }
+        guard.insert(key, built.clone());
+    }
+    Some(built)
+}
+
+#[expect(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "bounded image dimensions and RGBA channel math fit within f32/u32/u8"
+)]
+fn build_scaled_render_image(
+    path: &Path,
+    max_w: u32,
+    max_h: u32,
+) -> Option<(Arc<RenderImage>, u32, u32)> {
+    let mut rgba = image::ImageReader::open(path)
+        .ok()?
+        .with_guessed_format()
+        .ok()?
+        .decode()
+        .ok()?
+        .into_rgba8();
+    let (src_w, src_h) = rgba.dimensions();
+    if src_w == 0 || src_h == 0 {
+        return None;
+    }
+
+    let scale = (max_w as f32 / src_w as f32)
+        .min(max_h as f32 / src_h as f32)
+        .min(1.0);
+    let dst_w = ((src_w as f32 * scale).round() as u32).max(1);
+    let dst_h = ((src_h as f32 * scale).round() as u32).max(1);
+
+    // 1. Premultiply RGB by alpha so transparent (0,0,0,0) exterior pixels never
+    // bleed dark fringes into light silhouette edges during Lanczos-3 resampling.
+    for p in rgba.pixels_mut() {
+        let a = u16::from(p[3]);
+        p[0] = ((u16::from(p[0]) * a + 127) / 255) as u8;
+        p[1] = ((u16::from(p[1]) * a + 127) / 255) as u8;
+        p[2] = ((u16::from(p[2]) * a + 127) / 255) as u8;
+    }
+
+    let mut resized = if dst_w == src_w && dst_h == src_h {
+        rgba
+    } else {
+        image::imageops::resize(&rgba, dst_w, dst_h, FilterType::Lanczos3)
+    };
+
+    // 2. Un-premultiply back to straight alpha.
+    for p in resized.pixels_mut() {
+        let a = u16::from(p[3]);
+        if a > 0 && a < 255 {
+            p[0] = ((u16::from(p[0]) * 255 + a / 2) / a).min(255) as u8;
+            p[1] = ((u16::from(p[1]) * 255 + a / 2) / a).min(255) as u8;
+            p[2] = ((u16::from(p[2]) * 255 + a / 2) / a).min(255) as u8;
+        }
+    }
+
+    // 3. Apply a mild interior-only unsharp mask on larger renders (e.g. Keys view)
+    // so fine key sub-legends (F1..F12) stay crisp without ringing silhouette borders.
+    if dst_w >= 200 && dst_h >= 120 {
+        sharpen_opaque_interior(&mut resized);
+    }
+
+    // 4. GPUI's RenderImage expects BGRA byte order.
+    for p in resized.pixels_mut() {
+        p.0.swap(0, 2);
+    }
+
+    let render_img = Arc::new(RenderImage::new(vec![image::Frame::new(resized)]));
+    Some((render_img, dst_w, dst_h))
+}
+
+fn sharpen_opaque_interior(img: &mut image::RgbaImage) {
+    let (w, h) = img.dimensions();
+    if w < 3 || h < 3 {
+        return;
+    }
+    let src = img.clone();
+    for y in 1..(h - 1) {
+        for x in 1..(w - 1) {
+            let center = src.get_pixel(x, y);
+            if center[3] < 245 {
+                continue;
+            }
+            let top = src.get_pixel(x, y - 1);
+            let bottom = src.get_pixel(x, y + 1);
+            let left = src.get_pixel(x - 1, y);
+            let right = src.get_pixel(x + 1, y);
+            if top[3] < 245 || bottom[3] < 245 || left[3] < 245 || right[3] < 245 {
+                continue;
+            }
+            let out = img.get_pixel_mut(x, y);
+            for ch in 0..3 {
+                let c = i32::from(center[ch]);
+                let avg = (i32::from(top[ch])
+                    + i32::from(bottom[ch])
+                    + i32::from(left[ch])
+                    + i32::from(right[ch]))
+                    / 4;
+                let diff = c - avg;
+                // Mild micro-contrast boost (0.35x) only for subtle legend transitions.
+                if diff.abs() <= 48 {
+                    out[ch] =
+                        u8::try_from((c + (diff * 35) / 100).clamp(0, 255)).unwrap_or(center[ch]);
+                }
+            }
+        }
+    }
 }

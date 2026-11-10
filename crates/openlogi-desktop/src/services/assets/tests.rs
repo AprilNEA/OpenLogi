@@ -1,3 +1,4 @@
+use super::images::{contain_fit_bounds, scaled_render_image};
 use super::*;
 use openlogi_assets::DeviceEntry;
 use openlogi_core::device::DeviceTransports;
@@ -1298,4 +1299,126 @@ fn a_webp_colour_variant_gets_both_views_at_their_own_size() {
     assert_eq!((side.png_width, side.png_height), (1157, 2800));
     assert_eq!(asset.image_path, dir.join(G502X_PLUS_EXT2_FRONT));
     assert_eq!((asset.png_width, asset.png_height), (1662, 2800));
+}
+
+#[test]
+fn scaled_render_image_preserves_aspect_ratio_and_never_poisons_missing_files() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let png_path = dir.path().join("late_arrival.png");
+
+    // 1. Before the file exists on disk, scaled_render_image returns None without
+    // poisoning the cache.
+    assert!(scaled_render_image(&png_path, 240, 136).is_none());
+
+    // 2. Build a 400x200 RGBA PNG with:
+    // - A transparent border (x < 40) carrying poison green RGB [0, 255, 0, 0] so any
+    //   non-premultiplied resize bleeds bright green into the silhouette edge.
+    // - An opaque red-orange body [240, 20, 40, 255] so BGRA byte-order swapping is
+    //   verifiable on every opaque pixel (B=40, G=20, R=240, A=255).
+    // - A fine 2px interior legend stroke at x in 200..202 ([180, 20, 40, 255]) so
+    //   Lanczos-3 resampling + interior micro-contrast sharpening are verified.
+    let mut img = image::RgbaImage::from_pixel(400, 200, image::Rgba([240, 20, 40, 255]));
+    for y in 0..200 {
+        for x in 0..40 {
+            img.put_pixel(x, y, image::Rgba([0, 255, 0, 0]));
+        }
+        for x in 200..202 {
+            img.put_pixel(x, y, image::Rgba([180, 20, 40, 255]));
+        }
+    }
+    img.save(&png_path).expect("save test png");
+
+    // Fits 400x200 (2:1) inside 240x136 -> 240x120 (>= 200x120 so interior sharpening runs).
+    let (first_arc, dst_w, dst_h) =
+        scaled_render_image(&png_path, 240, 136).expect("scaled image built");
+    assert_eq!((dst_w, dst_h), (240, 120));
+
+    let bgra = first_arc.as_bytes(0).expect("frame 0 BGRA bytes");
+    let px_at = |x: u32, y: u32| -> [u8; 4] {
+        let idx = ((y * dst_w + x) * 4) as usize;
+        [bgra[idx], bgra[idx + 1], bgra[idx + 2], bgra[idx + 3]]
+    };
+
+    // Counter-proof A (BGRA swap): Opaque body pixel at (100, 60) must be [B=40, G=20, R=240, A=255].
+    // Reverting `p.0.swap(0, 2)` yields [240, 20, 40, 255] and fails this assertion.
+    assert_eq!(px_at(100, 60), [40, 20, 240, 255]);
+
+    // Counter-proof B (Premultiplied-alpha Lanczos-3): Across the transparent/opaque
+    // silhouette transition (x = 20..28, y = 60), no pixel with alpha > 0 may bleed
+    // the poison green channel (G=255) from the transparent exterior.
+    // Reverting the premultiply pass before `imageops::resize` bleeds G > 80 into x = 23..25.
+    for x in 0..dst_w {
+        let [_b, g, _r, a] = px_at(x, 60);
+        if a > 0 {
+            assert!(
+                g <= 25,
+                "transparent exterior bled green channel G={g} at x={x} (a={a})"
+            );
+        }
+    }
+
+    // Counter-proof C (Lanczos-3 + sharpen_opaque_interior on fine key legends):
+    // At the downscaled legend stroke (x = 120, y = 60), Lanczos-3 + interior micro-contrast
+    // lowers R below 205 while boosting adjacent shoulder contrast above 240.
+    // Replacing FilterType::Lanczos3 with FilterType::Triangle or removing
+    // `sharpen_opaque_interior` fails these bounds.
+    let [_, _, legend_r, _] = px_at(120, 60);
+    let [_, _, shoulder_r, _] = px_at(119, 60);
+    assert!(
+        legend_r <= 198,
+        "expected crisp legend stroke R <= 198, got {legend_r}"
+    );
+    assert!(
+        shoulder_r >= 241,
+        "expected micro-contrast shoulder R >= 241, got {shoulder_r}"
+    );
+
+    // 3. Subsequent call returns the cached Arc<RenderImage> pointer.
+    let (second_arc, cached_w, cached_h) =
+        scaled_render_image(&png_path, 240, 136).expect("cached scaled image");
+    assert_eq!((cached_w, cached_h), (240, 120));
+    assert!(Arc::ptr_eq(&first_arc, &second_arc));
+
+    // 4. Clearing the cache evicts the entry so the next lookup rebuilds a fresh Arc.
+    super::images::clear_scaled_image_cache();
+    let (third_arc, _, _) =
+        scaled_render_image(&png_path, 240, 136).expect("rebuilt after cache clear");
+    assert!(!Arc::ptr_eq(&first_arc, &third_arc));
+}
+
+#[test]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "test stage dimensions fit cleanly in f32"
+)]
+fn wide_card_stage_fits_keyboard_image_and_glow_to_identical_bounds() {
+    // At GALLERY_CARD_MAX_W (25.3125 rem = 405 px) minus 32 px horizontal padding,
+    // the card photo stage is 373 x 196 px. A wide keyboard (1376x613) must fill the
+    // full 373 px stage width so `ScaledImage::fill_stage` and `glow_canvas` share
+    // identical bounds instead of clamping the image at 240 px.
+    let stage = gpui::Bounds {
+        origin: gpui::point(gpui::px(16.0), gpui::px(16.0)),
+        size: gpui::size(gpui::px(373.0), gpui::px(crate::ui::theme::GALLERY_PHOTO_H)),
+    };
+    let keyboard_aspect = 1376.0_f32 / 613.0_f32;
+    let glow_fit = contain_fit_bounds(stage, keyboard_aspect);
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let kbd_path = dir.path().join("wide_kbd.png");
+    let img = image::RgbaImage::from_pixel(1376, 613, image::Rgba([220, 220, 220, 255]));
+    img.save(&kbd_path).expect("save wide keyboard png");
+
+    let (_, dst_w, dst_h) = scaled_render_image(&kbd_path, 373, 196).expect("scaled wide kbd");
+    let image_aspect = (dst_w as f32) / (dst_h as f32);
+    let image_fit = contain_fit_bounds(stage, image_aspect);
+
+    assert_eq!(f32::from(image_fit.size.width), 373.0);
+    assert!(
+        f32::from(image_fit.size.width) > 240.0,
+        "wide card keyboard image must not be clamped to 240px"
+    );
+    assert!((f32::from(image_fit.origin.x) - f32::from(glow_fit.origin.x)).abs() < 0.5);
+    assert!((f32::from(image_fit.origin.y) - f32::from(glow_fit.origin.y)).abs() < 0.5);
+    assert!((f32::from(image_fit.size.width) - f32::from(glow_fit.size.width)).abs() < 1.0);
+    assert!((f32::from(image_fit.size.height) - f32::from(glow_fit.size.height)).abs() < 1.0);
 }
