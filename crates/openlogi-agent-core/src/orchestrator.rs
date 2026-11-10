@@ -963,15 +963,7 @@ impl Orchestrator {
             .map(|key| shift_bindings_for(&self.config, key))
             .unwrap_or_default();
         HookMaps {
-            gesture_policies: gestures
-                .iter()
-                .map(|(button, actions)| {
-                    (
-                        *button,
-                        openlogi_core::binding::GesturePolicy::for_bindings(actions),
-                    )
-                })
-                .collect(),
+            gesture_policies: openlogi_core::binding::GesturePolicy::for_maps(gestures.iter()),
             bindings,
             gestures,
             pointer,

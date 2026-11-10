@@ -43,7 +43,7 @@ use crate::channel::route::DeviceRoute;
 
 pub use super::capture::CaptureHost;
 use super::capture::{ArmedCapture, Liveness, ReportingChangeStream, run_capture};
-use accum::CaptureAccum;
+use accum::{CaptureAccum, CaptureRoutes};
 pub(crate) use arm::enumerate_controls;
 use arm::{ArmedControls, ArmedThumb, ArmedThumbwheel, arm_controls};
 pub use main_wheel::MainWheelDivert;
@@ -361,10 +361,12 @@ impl ArmedCapture for GestureCapture {
                 let mut acc = accum.lock().unwrap_or_else(PoisonError::into_inner);
                 acc.on_event(
                     event,
-                    &gesture_cids,
-                    &dpi_set,
-                    &gesture_button_set,
-                    &button_set,
+                    CaptureRoutes {
+                        gestures: &gesture_cids,
+                        dpi: &dpi_set,
+                        gesture_buttons: &gesture_button_set,
+                        buttons: &button_set,
+                    },
                     &sink,
                 );
                 return;

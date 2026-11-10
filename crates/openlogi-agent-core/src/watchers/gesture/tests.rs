@@ -59,6 +59,27 @@ fn plan_with_config(config: &openlogi_core::config::Config) -> DeviceCapturePlan
     )
 }
 
+fn gesture_pointer(target: openlogi_hook::PointerTarget) -> crate::runtime::PointerSelection {
+    crate::runtime::PointerSelection::new(
+        target,
+        std::collections::BTreeSet::from([ButtonId::GestureButton]),
+    )
+}
+
+fn assert_fresh_gesture_target(
+    target: crate::runtime::ActionDispatchTarget,
+    action: &Action,
+    plan: &DispatchPlan,
+) {
+    let current = plan.pointer.as_ref().expect("pointer selection").target();
+    assert!(
+        target
+            .resolve_with(action, || current, |_| false, || None)
+            .is_some(),
+        "fresh HID++ semantic target reaches output admission"
+    );
+}
+
 fn live_session_from_plan(epoch: u64, plan: DeviceCapturePlan) -> RunningSession {
     let (stop, _rx) = oneshot::channel();
     CaptureSession::active(session_id(epoch), plan.target, plan.dispatch, stop)
@@ -1075,10 +1096,7 @@ fn hidpp_gesture_token_survives_pointer_refresh_and_cancels_on_binding_change() 
 
     let (mut dispatcher, mut owner, events, mut scroll) = gesture_dispatcher();
     let mut initial = plan();
-    initial.dispatch.pointer = Some(crate::runtime::PointerSelection::new(
-        openlogi_hook::PointerTarget::Desktop,
-        std::collections::BTreeSet::from([ButtonId::GestureButton]),
-    ));
+    initial.dispatch.pointer = Some(gesture_pointer(openlogi_hook::PointerTarget::Desktop));
     initial.dispatch.gesture_bindings.insert(
         ButtonId::GestureButton,
         [
@@ -1109,13 +1127,11 @@ fn hidpp_gesture_token_survives_pointer_refresh_and_cancels_on_binding_change() 
     .enumerate()
     {
         if index == 1 {
-            initial.dispatch.pointer = Some(crate::runtime::PointerSelection::new(
-                openlogi_hook::PointerTarget::Window {
+            initial.dispatch.pointer =
+                Some(gesture_pointer(openlogi_hook::PointerTarget::Window {
                     process_id: 41,
                     window_id: 7,
-                },
-                std::collections::BTreeSet::from([ButtonId::GestureButton]),
-            ));
+                }));
             reconcile_session(
                 &mut session,
                 Some((&initial.target, &initial.dispatch)),
@@ -1136,19 +1152,7 @@ fn hidpp_gesture_token_survives_pointer_refresh_and_cancels_on_binding_change() 
             panic!("triggered")
         };
         assert_eq!(triggered.token(), press.token());
-        let current = session
-            .dispatch()
-            .pointer
-            .as_ref()
-            .expect("pointer selection")
-            .target();
-        assert!(
-            triggered
-                .target()
-                .resolve_with(&action, || current, |_| false, || None)
-                .is_some(),
-            "fresh HID++ semantic target reaches output admission"
-        );
+        assert_fresh_gesture_target(triggered.target(), &action, session.dispatch());
         assert_eq!(
             action,
             session.dispatch().gesture_bindings[&ButtonId::GestureButton][&direction]

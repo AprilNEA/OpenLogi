@@ -636,17 +636,31 @@ fn a_side_gesture_button_uses_its_hidpp_raw_xy() {
     let buttons = [(cid, ButtonId::Forward)];
     let down = RawControlEvent::DivertedButtons([cid, 0, 0, 0]);
 
-    acc.on_event(down, &[], &[], &buttons, &[], &tx);
+    acc.on_event(
+        down,
+        CaptureRoutes {
+            gesture_buttons: &buttons,
+            ..CaptureRoutes::default()
+        },
+        &tx,
+    );
     stale_report(&mut acc, &tx);
     acc.on_event(
         RawControlEvent::RawXy { dx: -120, dy: 5 },
-        &[],
-        &[],
-        &buttons,
-        &[],
+        CaptureRoutes {
+            gesture_buttons: &buttons,
+            ..CaptureRoutes::default()
+        },
         &tx,
     );
-    acc.on_event(release(), &[], &[], &buttons, &[], &tx);
+    acc.on_event(
+        release(),
+        CaptureRoutes {
+            gesture_buttons: &buttons,
+            ..CaptureRoutes::default()
+        },
+        &tx,
+    );
 
     assert_eq!(
         rx.try_recv(),
@@ -677,8 +691,22 @@ fn a_side_gesture_button_tap_is_a_click() {
     let buttons = [(cid, ButtonId::Forward)];
     let down = RawControlEvent::DivertedButtons([cid, 0, 0, 0]);
 
-    acc.on_event(down, &[], &[], &buttons, &[], &tx);
-    acc.on_event(release(), &[], &[], &buttons, &[], &tx);
+    acc.on_event(
+        down,
+        CaptureRoutes {
+            gesture_buttons: &buttons,
+            ..CaptureRoutes::default()
+        },
+        &tx,
+    );
+    acc.on_event(
+        release(),
+        CaptureRoutes {
+            gesture_buttons: &buttons,
+            ..CaptureRoutes::default()
+        },
+        &tx,
+    );
 
     assert_eq!(
         rx.try_recv(),
@@ -706,17 +734,31 @@ fn a_dpi_gesture_button_uses_the_shared_raw_xy_path() {
     let buttons = [(cid, ButtonId::DpiToggle)];
     let down = RawControlEvent::DivertedButtons([cid, 0, 0, 0]);
 
-    acc.on_event(down, &[], &[], &buttons, &[], &tx);
+    acc.on_event(
+        down,
+        CaptureRoutes {
+            gesture_buttons: &buttons,
+            ..CaptureRoutes::default()
+        },
+        &tx,
+    );
     stale_report(&mut acc, &tx);
     acc.on_event(
         RawControlEvent::RawXy { dx: 5, dy: -120 },
-        &[],
-        &[],
-        &buttons,
-        &[],
+        CaptureRoutes {
+            gesture_buttons: &buttons,
+            ..CaptureRoutes::default()
+        },
         &tx,
     );
-    acc.on_event(release(), &[], &[], &buttons, &[], &tx);
+    acc.on_event(
+        release(),
+        CaptureRoutes {
+            gesture_buttons: &buttons,
+            ..CaptureRoutes::default()
+        },
+        &tx,
+    );
 
     assert_eq!(
         rx.try_recv(),
@@ -936,28 +978,24 @@ fn reconnect_reset_preserves_gesture_timing_and_retires_old_edges() {
             CaptureAccum::with_policies(BTreeMap::from([(ButtonId::GestureButton, policy)]));
         let (tx, mut rx) = mpsc::unbounded_channel();
         let now = Instant::now();
-        acc.on_event_at(now, press(), GESTURE, &[], &[], &[], &tx);
+        let routes = CaptureRoutes {
+            gestures: GESTURE,
+            ..CaptureRoutes::default()
+        };
+        acc.on_event_at(now, press(), routes, &tx);
         assert_eq!(
             rx.try_recv(),
             Ok(CapturedInput::ButtonDown(ButtonId::GestureButton))
         );
         acc.reset_input_state();
-        acc.on_event_at(now, press(), GESTURE, &[], &[], &[], &tx);
+        acc.on_event_at(now, press(), routes, &tx);
         assert_eq!(
             rx.try_recv(),
             Ok(CapturedInput::ButtonDown(ButtonId::GestureButton)),
             "a reconnected hold has a fresh edge"
         );
         for _ in 0..3 {
-            acc.on_event_at(
-                now,
-                RawControlEvent::RawXy { dx, dy },
-                GESTURE,
-                &[],
-                &[],
-                &[],
-                &tx,
-            );
+            acc.on_event_at(now, RawControlEvent::RawXy { dx, dy }, routes, &tx);
         }
         assert_eq!(
             rx.try_recv(),
@@ -967,10 +1005,7 @@ fn reconnect_reset_preserves_gesture_timing_and_retires_old_edges() {
             acc.on_event_at(
                 now + Duration::from_millis(1),
                 RawControlEvent::RawXy { dx, dy },
-                GESTURE,
-                &[],
-                &[],
-                &[],
+                routes,
                 &tx,
             );
         }

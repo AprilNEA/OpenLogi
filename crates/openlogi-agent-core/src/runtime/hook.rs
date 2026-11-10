@@ -205,7 +205,7 @@ enum PressPhase {
     /// button per thread holds: a gesture press is first admitted by
     /// [`ButtonPresses::admit_gesture`], which refuses it while another
     /// button's hold is live and ends one that went stale.
-    HeldAsGesture { hold: GestureHold },
+    HeldAsGesture { hold: Box<GestureHold> },
     /// A remapped press whose lifecycle the runtime accepted. Its release is
     /// suppressed too, even when moving the pointer restores a native binding
     /// before the physical release.
@@ -529,7 +529,7 @@ fn start_press(
                 return dispatcher.try_hook_button_down(id, None, target).map_or(
                     PressPhase::Passthrough,
                     |press| PressPhase::HeldAsGesture {
-                        hold: GestureHold::new(press, now, gesture, policy),
+                        hold: Box::new(GestureHold::new(press, now, gesture, policy)),
                     },
                 );
             }
@@ -564,12 +564,10 @@ fn end_press(
         PressPhase::HeldAsGesture { hold } => {
             let (press, was_click) = hold.end();
             if was_click {
-                let action = hooks.try_read().ok().map(|m| {
-                    (
-                        resolve_gesture_click(&m.gestures, id),
-                        m.pointer_press(id),
-                    )
-                });
+                let action = hooks
+                    .try_read()
+                    .ok()
+                    .map(|m| (resolve_gesture_click(&m.gestures, id), m.pointer_press(id)));
                 if let Some((action, pointer)) = action {
                     dispatcher.try_dispatch_while_pressed(
                         &press,

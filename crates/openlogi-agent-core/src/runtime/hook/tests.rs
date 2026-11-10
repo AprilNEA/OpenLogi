@@ -32,12 +32,12 @@ fn attributed_sources_still_follow_the_device_policy() {
 /// A hold of `press` begun now.
 fn held(press: PressToken) -> PressPhase {
     PressPhase::HeldAsGesture {
-        hold: GestureHold::new(
+        hold: Box::new(GestureHold::new(
             press,
             Instant::now(),
             BTreeMap::new(),
             GesturePolicy::default(),
-        ),
+        )),
     }
 }
 
@@ -48,7 +48,9 @@ fn held_for_swipe(press: PressToken) -> PressPhase {
     let mut hold = GestureHold::new(press, now, BTreeMap::new(), GesturePolicy::default());
     assert_eq!(hold.swipe.accumulate_at(now, 0, 0), None);
     assert_eq!(hold.swipe.accumulate_at(now, 49, 0), None);
-    PressPhase::HeldAsGesture { hold }
+    PressPhase::HeldAsGesture {
+        hold: Box::new(hold),
+    }
 }
 
 /// The token of a released hold and whether it was a click; `None` for any
@@ -169,12 +171,12 @@ fn an_aged_hold_yields_to_a_new_buttons_press() {
     presses.press(
         ButtonId::Back,
         PressPhase::HeldAsGesture {
-            hold: GestureHold::new(
+            hold: Box::new(GestureHold::new(
                 token(1, ButtonId::Back),
                 pressed_at,
                 BTreeMap::new(),
                 GesturePolicy::default(),
-            ),
+            )),
         },
     );
     assert!(

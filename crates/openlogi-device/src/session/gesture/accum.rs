@@ -49,10 +49,9 @@ fn begin_hold(
     overlap: bool,
     skip_first_raw_xy: bool,
     policy: GesturePolicy,
-    now: Instant,
 ) -> HoldState {
     let mut swipe = SwipeAccumulator::default();
-    swipe.begin_at(now, policy);
+    swipe.begin_with_policy(policy);
     HoldState::Holding {
         cid,
         button,
@@ -79,6 +78,16 @@ pub(super) struct CaptureAccum {
     /// Diverted standard-button and wheel-hold CIDs held in the last event,
     /// in press order.
     buttons_down: Vec<u16>,
+}
+
+/// Control routes captured by one session, grouped separately from the event
+/// clock and output sink.
+#[derive(Clone, Copy, Default)]
+pub(super) struct CaptureRoutes<'a> {
+    pub(super) gestures: &'a [u16],
+    pub(super) dpi: &'a [u16],
+    pub(super) gesture_buttons: &'a [(u16, ButtonId)],
+    pub(super) buttons: &'a [(u16, ButtonId)],
 }
 
 /// The [`ButtonId`] a gesture-source CID dispatches as, per
@@ -120,37 +129,25 @@ impl CaptureAccum {
     pub(super) fn on_event(
         &mut self,
         event: RawControlEvent,
-        gesture_cids: &[u16],
-        dpi_cids: &[u16],
-        gesture_button_cids: &[(u16, ButtonId)],
-        button_cids: &[(u16, ButtonId)],
+        routes: CaptureRoutes<'_>,
         sink: &mpsc::UnboundedSender<CapturedInput>,
     ) {
-        self.on_event_at(
-            Instant::now(),
-            event,
-            gesture_cids,
-            dpi_cids,
-            gesture_button_cids,
-            button_cids,
-            sink,
-        );
+        self.on_event_at(Instant::now(), event, routes, sink);
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "existing report routing inputs plus explicit replay clock"
-    )]
     pub(super) fn on_event_at(
         &mut self,
         now: Instant,
         event: RawControlEvent,
-        gesture_cids: &[u16],
-        dpi_cids: &[u16],
-        gesture_button_cids: &[(u16, ButtonId)],
-        button_cids: &[(u16, ButtonId)],
+        routes: CaptureRoutes<'_>,
         sink: &mpsc::UnboundedSender<CapturedInput>,
     ) {
+        let CaptureRoutes {
+            gestures: gesture_cids,
+            dpi: dpi_cids,
+            gesture_buttons: gesture_button_cids,
+            buttons: button_cids,
+        } = routes;
         match event {
             RawControlEvent::DivertedButtons(cids) => {
                 // The swipe accumulator belongs to the gesture-mode diverts:
@@ -193,7 +190,7 @@ impl CaptureAccum {
                         if let HoldState::Holding {
                             button, mut swipe, ..
                         } = previous
-                            && swipe.end_at(now)
+                            && swipe.end()
                         {
                             debug!(%button, "gesture click");
                             let _ =
@@ -211,7 +208,6 @@ impl CaptureAccum {
                                 held.len() > 1,
                                 !self.gestures_down.contains(&cid),
                                 self.policies.get(&button).cloned().unwrap_or_default(),
-                                now,
                             ),
                             None => HoldState::Idle,
                         }
@@ -282,11 +278,9 @@ impl CaptureAccum {
         };
         trace!(dx, dy, %button, "gesture travel");
         // A fresh hold's first report can contain travel from before the press
-        // or a panel contact jump. Consume recognition's initial sample using
-        // zero travel, preserving the stale-report rule for every source.
+        // or a panel contact jump. Drop it for every source.
         if *skip_first_raw_xy {
             *skip_first_raw_xy = false;
-            swipe.accumulate_at(now, 0, 0);
             return;
         }
         // While two armed sources are held the report could belong to either
@@ -359,5 +353,14 @@ pub(super) fn handle_reprog(
     button_cids: &[(u16, ButtonId)],
     sink: &mpsc::UnboundedSender<CapturedInput>,
 ) {
-    acc.on_event(event, gesture_cids, dpi_cids, &[], button_cids, sink);
+    acc.on_event(
+        event,
+        CaptureRoutes {
+            gestures: gesture_cids,
+            dpi: dpi_cids,
+            gesture_buttons: &[],
+            buttons: button_cids,
+        },
+        sink,
+    );
 }
