@@ -166,7 +166,7 @@ Feature coverage depends on what each device reports; the app shows only the con
 | Media keys | Native | Native | D-Bus MPRIS |
 | Window-manager actions (desktops, Mission Control, …) | Native | Native equivalents | GNOME, KDE (KWin), Hyprland; some macOS-only actions do nothing |
 | Menu-bar / tray icon | ✓ | ✓ | — |
-| In-app updates | Sparkle | Built-in | Built-in |
+| In-app updates | Sparkle | Built-in | `.deb`, `.rpm`, and Arch packages, with a polkit prompt ([details](docs/INSTALL-linux.md#updating)) |
 
 ## Install
 
