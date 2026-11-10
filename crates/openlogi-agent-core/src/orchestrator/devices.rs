@@ -5,11 +5,11 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
-use openlogi_core::config::{Config, DeviceConfig, ScrollResolution};
+use openlogi_core::config::{Config, DeviceConfig, PinnedOs, ScrollResolution};
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_core::device_order::{DeviceIdentity, DeviceStableId};
 use openlogi_hid::session::gesture::MainWheelDivert;
-use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute, Dpi, LeadCookie, ReportRate};
+use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute, Dpi, HostOs, LeadCookie, OsMask, ReportRate};
 
 use super::AgentDevice;
 use crate::hardware::WheelModeChange;
@@ -773,16 +773,44 @@ pub(super) fn keeps_os_layout(config: &Config, dev: &AgentDevice) -> bool {
         && config_keeps_os_layout(config, &dev.config_key)
 }
 
+/// The platform of the OS the device under `key` is pinned to, at any
+/// version, while the device is enabled and the setting is off.
+fn pinned_os_layout(config: &Config, key: &str) -> Option<HostOs> {
+    if !config.device_enabled(key) || config.keep_os_layout(key) {
+        return None;
+    }
+    let os = match config.os_layout_pin(key)? {
+        PinnedOs::MacOs => OsMask::MACOS,
+        PinnedOs::Windows => OsMask::WINDOWS,
+        PinnedOs::Linux => OsMask::LINUX,
+    };
+    Some(HostOs { os, version: None })
+}
+
+/// The host platform `config` keeps `dev`'s key layout on: as
+/// [`os_layout_target`], for a keyboard whose platform software can set.
+pub(super) fn os_layout_target(config: &Config, dev: &AgentDevice) -> Option<HostOs> {
+    if keeps_os_layout(config, dev) {
+        HostOs::current()
+    } else if dev.capabilities.is_some_and(|caps| caps.os_layout) {
+        pinned_os_layout(config, &dev.config_key)
+    } else {
+        None
+    }
+}
+
 /// The devices whose "keep OS layout" takes effect going from `previous` to
 /// `config`: the setting turned on, or its device re-enabled.
+/// A pin that is new, or moved to another OS, takes effect too.
 pub(super) fn newly_kept_os_layouts<'a>(
     previous: &'a Config,
     config: &'a Config,
     devices: &'a [AgentDevice],
 ) -> impl Iterator<Item = &'a AgentDevice> {
-    devices
-        .iter()
-        .filter(|dev| keeps_os_layout(config, dev) && !keeps_os_layout(previous, dev))
+    devices.iter().filter(|dev| {
+        os_layout_target(config, dev)
+            .is_some_and(|host| os_layout_target(previous, dev) != Some(host))
+    })
 }
 
 /// How many explicit confirmation passes a first-sighted or wake-targeted

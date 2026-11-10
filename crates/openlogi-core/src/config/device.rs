@@ -181,6 +181,18 @@ impl LinkOverrides {
     }
 }
 
+/// An OS a keyboard's key layout can be pinned to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PinnedOs {
+    /// macOS.
+    MacOs,
+    /// Windows.
+    Windows,
+    /// Linux.
+    Linux,
+}
+
 /// Settings scoped to a single physical device.
 ///
 /// Deserialization goes through `RawDeviceConfig` (`#[serde(from)]`) so
@@ -351,6 +363,27 @@ pub struct DeviceConfig {
     /// combination). `None` means "never set", which is on, as in Options+.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keep_os_layout: Option<bool>,
+    /// OS this keyboard's key layout is pinned to while [`Self::keep_os_layout`]
+    /// is off. `None` leaves the layout where it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os_layout_pin: Option<PinnedOs>,
+    /// OS-level pointer speed factor for mice whose speed OpenLogi sets at
+    /// the compositor level (like Logi Options+ does on macOS). The agent
+    /// applies it via the compositor's CLI when the mouse connects. `None`
+    /// means "never set — leave the OS pointer speed alone".
+    ///
+    /// Scope: the compositor settings it drives (Sway `input *`, Hyprland
+    /// `input:sensitivity` and the accel curve, GNOME `gsettings`) are global,
+    /// not per device. Only configured mice trigger a write, but a configured
+    /// mouse still changes the pointer for every device the compositor sees.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os_pointer_speed: Option<f32>,
+    /// Whether to use a macOS-style acceleration curve (Apple IOHID) instead
+    /// of the compositor's native sensitivity. `None` means auto: enabled on
+    /// Hyprland, disabled elsewhere. `Some(true)` forces it on, `Some(false)`
+    /// forces it off (falls back to sensitivity).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os_pointer_accel: Option<bool>,
     /// Report rate (HID++ `0x8060` / `0x8061`), in hertz. The agent re-applies
     /// it when the device reconnects, like [`Self::dpi`], but only where the
     /// device lists it for the connection it is on — a wired-only rate is
@@ -507,6 +540,9 @@ impl Default for DeviceConfig {
             host_switch_targets: Vec::new(),
             fn_lock: None,
             keep_os_layout: None,
+            os_layout_pin: None,
+            os_pointer_speed: None,
+            os_pointer_accel: None,
             report_rate: None,
             pointer_speed: None,
             force_sensing: None,
@@ -520,17 +556,6 @@ impl Default for DeviceConfig {
         }
     }
 }
-
-/// `skip_serializing_if` helper: a single-page keypad (or any other device)
-/// keeps `keypad_pages` out of `config.toml`.
-#[expect(
-    clippy::trivially_copy_pass_by_ref,
-    reason = "serde's skip_serializing_if requires a fn(&T) -> bool signature"
-)]
-fn is_first_page(page: &KeypadPage) -> bool {
-    *page == KeypadPage::FIRST
-}
-
 /// `skip_serializing_if` helper: the default gaming-key mode stays out of
 /// `config.toml`.
 #[expect(
@@ -549,6 +574,16 @@ fn is_default_gaming_key_mode(mode: &GamingKeyMode) -> bool {
 )]
 fn is_default_g_key_owner(owner: &GKeyOwner) -> bool {
     *owner == GKeyOwner::default()
+}
+
+/// `skip_serializing_if` helper: a single-page keypad (or any other device)
+/// keeps `keypad_pages` out of `config.toml`.
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's skip_serializing_if requires a fn(&T) -> bool signature"
+)]
+fn is_first_page(page: &KeypadPage) -> bool {
+    *page == KeypadPage::FIRST
 }
 
 /// `serde(default)` helper for `bool` fields that default to `true`.
@@ -676,6 +711,12 @@ struct RawDeviceConfig {
     #[serde(default)]
     keep_os_layout: Option<bool>,
     #[serde(default)]
+    os_layout_pin: Option<PinnedOs>,
+    #[serde(default)]
+    os_pointer_speed: Option<f32>,
+    #[serde(default)]
+    os_pointer_accel: Option<bool>,
+    #[serde(default)]
     report_rate: Option<ReportRate>,
     #[serde(default)]
     pointer_speed: Option<PointerSpeed>,
@@ -687,16 +728,24 @@ struct RawDeviceConfig {
     gshift_bindings: BTreeMap<ButtonId, Action>,
     #[serde(default)]
     keypad_pages: KeypadPage,
+    #[serde(default = "default_true")]
+    enabled: bool,
+    #[serde(default)]
+    custom_name: Option<String>,
     #[serde(default)]
     g_key_owner: GKeyOwner,
     #[serde(default)]
     gaming_key_mode: GamingKeyMode,
     #[serde(default)]
     g_key_profile_names: BTreeMap<GKeyProfile, String>,
-    #[serde(default = "default_true")]
-    enabled: bool,
-    #[serde(default)]
-    custom_name: Option<String>,
+}
+
+/// Whether `speed` is a usable OS pointer speed factor: finite and within
+/// `-1.0..=1.0`. The desktop slider and the CLI both write this range, and a
+/// config value outside it is dropped at load rather than sent to a compositor.
+#[must_use]
+pub fn is_valid_os_pointer_speed(speed: f32) -> bool {
+    speed.is_finite() && (-1.0..=1.0).contains(&speed)
 }
 
 impl From<RawDeviceConfig> for DeviceConfig {
@@ -757,6 +806,11 @@ impl From<RawDeviceConfig> for DeviceConfig {
             host_switch_targets: raw.host_switch_targets,
             fn_lock: raw.fn_lock,
             keep_os_layout: raw.keep_os_layout,
+            os_layout_pin: raw.os_layout_pin,
+            os_pointer_speed: raw
+                .os_pointer_speed
+                .filter(|speed| is_valid_os_pointer_speed(*speed)),
+            os_pointer_accel: raw.os_pointer_accel,
             report_rate: raw.report_rate,
             pointer_speed: raw.pointer_speed,
             force_sensing: raw.force_sensing,
@@ -785,7 +839,6 @@ mod tests {
   "receiver:mouse:slot:2",
 ]"#,
         )?;
-
         assert_eq!(
             config.host_switch_targets,
             ["receiver:keyboard:slot:1", "receiver:mouse:slot:2"]
@@ -796,15 +849,29 @@ mod tests {
     }
 
     #[test]
+    fn os_pointer_speed_outside_the_factor_range_loads_as_unset()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let valid: DeviceConfig = toml::from_str("os_pointer_speed = 0.5")?;
+        assert_eq!(valid.os_pointer_speed, Some(0.5));
+        for text in [
+            "os_pointer_speed = nan",
+            "os_pointer_speed = inf",
+            "os_pointer_speed = -2.0",
+        ] {
+            let config: DeviceConfig = toml::from_str(text)?;
+            assert_eq!(config.os_pointer_speed, None, "{text}");
+        }
+        Ok(())
+    }
+
+    #[test]
     fn disabled_keys_preserves_unmanaged_empty_and_non_empty_states()
     -> Result<(), Box<dyn std::error::Error>> {
         let missing: DeviceConfig = toml::from_str("")?;
         assert_eq!(missing.disabled_keys, None);
-
         let empty: DeviceConfig = toml::from_str("disabled_keys = []")?;
         assert_eq!(empty.disabled_keys, Some(BTreeSet::new()));
         assert!(toml::to_string(&empty)?.contains("disabled_keys = []"));
-
         let configured: DeviceConfig =
             toml::from_str("disabled_keys = [\"caps_lock\", \"windows_command\"]")?;
         assert_eq!(
@@ -819,8 +886,6 @@ mod tests {
         Ok(())
     }
 
-    /// Every device entry written before binding pages existed omits
-    /// `keypad_pages`, and must still load — as one page.
     #[test]
     fn a_device_without_keypad_pages_loads_with_one_page() -> Result<(), Box<dyn std::error::Error>>
     {

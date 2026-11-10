@@ -167,11 +167,55 @@ impl AppState {
         self.pointer.refused_pointer_speeds.remove(key);
         self.pointer.reads.refresh_pointer_speed(key);
     }
+    /// Persisted OS-level pointer speed factor for the active device.
+    #[must_use]
+    pub fn current_os_pointer_speed(&self) -> Option<f32> {
+        self.current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .and_then(|key| self.config.os_pointer_speed(key))
+    }
+
+    /// Whether macOS-style acceleration is enabled for the active device.
+    /// `None` means auto (enabled on Hyprland, disabled elsewhere).
+    #[must_use]
+    pub fn current_os_pointer_accel(&self) -> Option<bool> {
+        self.current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .and_then(|key| self.config.os_pointer_accel(key))
+    }
+
+    /// Persist the macOS-style acceleration toggle for the active device.
+    pub fn commit_os_pointer_accel(&mut self, enabled: Option<bool>) -> StateEvents {
+        let events = self.for_current_device(StateEvent::DeviceConfigChanged);
+        let persistent_key = self
+            .current_record()
+            .and_then(|r| r.persistent_config_key().map(str::to_string));
+        if let Some(key) = persistent_key {
+            self.config
+                .edit(|config| config.set_os_pointer_accel(&key, enabled));
+            self.persist_and_reload("os pointer accel");
+        }
+        events
+    }
+
+    /// Persist `speed` (or clear with `None`) for the active device.
+    pub fn commit_os_pointer_speed(&mut self, speed: Option<f32>) -> StateEvents {
+        let events = self.for_current_device(StateEvent::DeviceConfigChanged);
+        let persistent_key = self
+            .current_record()
+            .and_then(|r| r.persistent_config_key().map(str::to_string));
+        if let Some(key) = persistent_key {
+            self.config
+                .edit(|config| config.set_os_pointer_speed(&key, speed));
+            self.persist_and_reload("os pointer speed");
+        }
+        events
+    }
 
     pub(super) fn load_current_pointer_speed(&mut self, cx: &mut gpui::Context<Self>) {
         let Some((key, route)) = self
             .current_record()
-            .filter(|record| scales_pointer(record))
+            .filter(|record| reads_pointer_scaling(record))
             .and_then(|record| Some((record.device_key(), record.route.clone()?)))
         else {
             return;
@@ -181,9 +225,25 @@ impl AppState {
             .reads
             .ensure_pointer_speed(key, route, self.ipc_sender(), cx);
     }
+
+    /// Whether the active device's OS pointer speed can be set and saved: a
+    /// mouse whose speed OpenLogi sets, with a persistent key to save it under.
+    pub fn os_pointer_speed_settable(&self) -> bool {
+        self.current_record().is_some_and(|record| {
+            record.persistent_config_key().is_some() && scales_pointer(record)
+        })
+    }
 }
 
 fn scales_pointer(record: &DeviceRecord) -> bool {
+    record
+        .capabilities
+        .is_some_and(|capabilities| capabilities.sets_os_pointer_speed())
+}
+
+/// Whether the mouse's HID++ `0x2205` speed can be read. Only scaled mice
+/// answer it; a DPI-only mouse gets no read.
+fn reads_pointer_scaling(record: &DeviceRecord) -> bool {
     record
         .capabilities
         .is_some_and(|capabilities| capabilities.pointer_scaling)

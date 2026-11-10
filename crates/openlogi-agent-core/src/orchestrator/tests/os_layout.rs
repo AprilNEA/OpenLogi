@@ -1,7 +1,11 @@
 //! Which keyboards the agent keeps on the host OS's `0x4531` key layout, and
 //! when.
 
+use openlogi_core::config::PinnedOs;
+use openlogi_hid::{HostOs, OsMask};
+
 use super::*;
+use crate::hardware::KeptOsLayouts;
 
 /// An online keyboard whose platform software can set.
 fn layout_keyboard(key: &str, slot: u8) -> AgentDevice {
@@ -12,6 +16,21 @@ fn layout_keyboard(key: &str, slot: u8) -> AgentDevice {
         ..Capabilities::default()
     });
     device
+}
+
+fn host() -> HostOs {
+    HostOs::current().expect("tests run on an OS a 0x4531 descriptor names")
+}
+
+fn platform(os: OsMask) -> HostOs {
+    HostOs { os, version: None }
+}
+
+fn pinned(os: PinnedOs) -> Config {
+    let mut config = Config::default();
+    config.set_keep_os_layout("kbd", false);
+    config.set_os_layout_pin("kbd", Some(os));
+    config
 }
 
 #[test]
@@ -42,6 +61,23 @@ fn turning_the_setting_off_or_disabling_the_device_stops_it() {
 }
 
 #[test]
+fn a_pin_picks_the_platform_only_while_keep_is_off() {
+    let keyboard = layout_keyboard("kbd", 1);
+    let mut config = pinned(PinnedOs::MacOs);
+    assert!(!keeps_os_layout(&config, &keyboard));
+    assert_eq!(
+        os_layout_target(&config, &keyboard),
+        Some(platform(OsMask::MACOS))
+    );
+    config.set_keep_os_layout("kbd", true);
+    assert_eq!(os_layout_target(&config, &keyboard), Some(host()));
+    assert!(keeps_os_layout(&config, &keyboard));
+    config.set_keep_os_layout("kbd", false);
+    config.set_device_enabled("kbd", false);
+    assert_eq!(os_layout_target(&config, &keyboard), None);
+}
+
+#[test]
 fn a_reload_writes_only_the_keyboards_whose_setting_just_took_effect() {
     let devices = [layout_keyboard("kbd", 1), layout_keyboard("other", 2)];
     let keys = |previous: &Config, config: &Config| {
@@ -61,6 +97,12 @@ fn a_reload_writes_only_the_keyboards_whose_setting_just_took_effect() {
     // on whatever layout it has.
     assert!(keys(&Config::default(), &Config::default()).is_empty());
     assert!(keys(&Config::default(), &off).is_empty());
+    assert_eq!(keys(&off, &pinned(PinnedOs::MacOs)), ["kbd"]);
+    assert_eq!(
+        keys(&pinned(PinnedOs::MacOs), &pinned(PinnedOs::Windows)),
+        ["kbd"]
+    );
+    assert!(keys(&pinned(PinnedOs::MacOs), &pinned(PinnedOs::MacOs)).is_empty());
 }
 
 /// `layout_keyboard("kbd", slot)` with `online` and `settings_revision`.
@@ -146,15 +188,80 @@ fn a_reload_withdraws_queued_layout_writes_the_user_opted_out_of() {
     let mut orch = orchestrator(Config::default());
     let kept = Arc::clone(&orch.kept_os_layouts);
     for key in ["kbd", "disabled", "other"] {
-        kept.keep(key);
+        kept.keep(key, host());
     }
     let mut config = Config::default();
     config.set_keep_os_layout("kbd", false);
     config.set_device_enabled("disabled", false);
     orch.reload_config(config);
-    assert!(!kept.contains("kbd"));
-    assert!(!kept.contains("disabled"));
-    assert!(kept.contains("other"));
+    assert!(!kept.contains("kbd", host()));
+    assert!(!kept.contains("disabled", host()));
+    assert!(kept.contains("other", host()));
+}
+
+#[test]
+fn unconfigured_mouse_writes_no_global_pointer_settings() {
+    use openlogi_core::compositor::Compositor;
+    assert!(pointer_commands(Compositor::Hyprland, None, None).is_empty());
+    assert!(pointer_commands(Compositor::Sway, None, None).is_empty());
+}
+
+#[test]
+fn hyprland_curve_carries_the_speed_without_a_sensitivity_command() {
+    use openlogi_core::compositor::Compositor;
+    let commands = pointer_commands(Compositor::Hyprland, Some(0.3), None);
+    assert_eq!(commands.len(), 1);
+    assert!(commands[0][2].contains("accel_profile"));
+    assert!(!commands[0][2].contains("sensitivity"));
+}
+
+#[test]
+fn hyprland_adaptive_profile_keeps_the_sensitivity() {
+    use openlogi_core::compositor::Compositor;
+    let commands = pointer_commands(Compositor::Hyprland, Some(0.3), Some(false));
+    assert_eq!(commands.len(), 2);
+    assert!(commands[0][2].contains("'adaptive'"));
+    assert!(commands[1][2].contains("input:sensitivity 0.3"));
+}
+
+#[test]
+fn sway_speed_is_a_single_sensitivity_command() {
+    use openlogi_core::compositor::Compositor;
+    assert_eq!(
+        pointer_commands(Compositor::Sway, Some(-0.5), None),
+        vec![
+            vec!["swaymsg", "input", "*", "pointer_accel", "-0.5"]
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>()
+        ]
+    );
+}
+
+#[test]
+fn pin_only_layout_survives_an_unrelated_config_reload() {
+    let mut orch = orchestrator(pinned(PinnedOs::Windows));
+    orch.devices = vec![layout_keyboard("kbd", 1)];
+    let target = platform(OsMask::WINDOWS);
+    orch.kept_os_layouts.keep("kbd", target);
+
+    let mut unrelated = orch.config.clone();
+    unrelated.app_settings.launch_at_login = !unrelated.app_settings.launch_at_login;
+    orch.replace_config(unrelated);
+
+    assert!(orch.kept_os_layouts.contains("kbd", target));
+}
+
+#[test]
+fn a_kept_layout_is_wanted_only_on_the_platform_it_was_kept_on() {
+    let kept = KeptOsLayouts::default();
+    let macos = platform(OsMask::MACOS);
+    let windows = platform(OsMask::WINDOWS);
+    kept.keep("kbd", macos);
+    assert!(kept.contains("kbd", macos));
+    kept.keep("kbd", windows);
+    assert!(!kept.contains("kbd", macos));
+    assert!(kept.contains("kbd", windows));
 }
 
 #[test]
@@ -177,12 +284,33 @@ fn a_refresh_checks_a_keyboard_whose_layout_support_shows_up_late() {
         "sanity: no reapply left"
     );
     let key = orch.devices[0].config_key.clone();
-    assert!(!orch.kept_os_layouts.contains(&key));
+    assert!(!orch.kept_os_layouts.contains(&key, host()));
     // A later walk finds `0x4531` on the same, still-online route.
     inventory.paired[0].capabilities = Some(Capabilities {
         os_layout: true,
         ..Capabilities::default()
     });
     orch.refresh_inventory(std::slice::from_ref(&inventory), &[], false);
-    assert!(orch.kept_os_layouts.contains(&key));
+    assert!(orch.kept_os_layouts.contains(&key, host()));
+}
+
+#[test]
+fn turning_keep_on_replaces_a_pin_queued_while_the_keyboard_is_offline() {
+    // Pin to an OS other than the host: on the host OS the kept entry would
+    // still match the target and the assertion would hold for the wrong reason.
+    let (target, stale) = if host().os == OsMask::WINDOWS {
+        (PinnedOs::Linux, OsMask::LINUX)
+    } else {
+        (PinnedOs::Windows, OsMask::WINDOWS)
+    };
+    let mut orch = orchestrator(pinned(target));
+    let mut keyboard = layout_keyboard("kbd", 1);
+    keyboard.online = false;
+    orch.devices = vec![keyboard];
+    let stale = platform(stale);
+    orch.kept_os_layouts.keep("kbd", stale);
+    let mut keep = orch.config.clone();
+    keep.set_keep_os_layout("kbd", true);
+    orch.replace_config(keep);
+    assert!(!orch.kept_os_layouts.contains("kbd", stale));
 }

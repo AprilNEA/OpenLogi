@@ -36,7 +36,11 @@ impl Save {
                 device,
                 set: Some(_),
             }
-            | ApiCommand::OsLayout { device, .. } => device,
+            | ApiCommand::OsLayout { device, .. }
+            | ApiCommand::PointerSpeed {
+                device,
+                set: Some(_),
+            } => device,
             ApiCommand::Smartshift(args)
                 if args.mode.is_some() || args.auto_disengage.is_some() =>
             {
@@ -55,6 +59,26 @@ impl Save {
                 ));
             }
         };
+        Self::open(path, snapshot, device, Some(command))
+    }
+
+    /// The device's saved OS pointer speed, read without writing anything.
+    /// `None` when no speed is saved for the device.
+    pub(super) fn saved_os_pointer_speed(
+        snapshot: &AgentSnapshot,
+        device: &str,
+    ) -> Result<Option<f32>, ApiError> {
+        let path = openlogi_core::paths::config_path()
+            .map_err(|error| ApiError::new("config_error", error.to_string()))?;
+        Ok(Self::open(&path, snapshot, device, None)?.os_pointer_speed())
+    }
+
+    fn open(
+        path: &Path,
+        snapshot: &AgentSnapshot,
+        device: &str,
+        command: Option<&ApiCommand>,
+    ) -> Result<Self, ApiError> {
         let route = select_device(snapshot, device)?;
         let (config, file) = ConfigFile::load_from_path(path)
             .map_err(|error| ApiError::new("config_error", error.to_string()))?;
@@ -105,8 +129,8 @@ impl Save {
             .and_then(|device| device.links.get(&stable.route_key()))
         {
             let overridden = match command {
-                ApiCommand::Dpi { .. } => link.overrides.dpi.is_some(),
-                ApiCommand::Smartshift(_) => link.overrides.smartshift.is_some(),
+                Some(ApiCommand::Dpi { .. }) => link.overrides.dpi.is_some(),
+                Some(ApiCommand::Smartshift(_)) => link.overrides.smartshift.is_some(),
                 _ => false,
             };
             if overridden {
@@ -133,6 +157,14 @@ impl Save {
 
     pub(super) fn keep_os_layout(&mut self, keep: bool) {
         self.config.set_keep_os_layout(&self.key, keep);
+    }
+
+    pub(super) fn set_os_pointer_speed(&mut self, speed: f32) {
+        self.config.set_os_pointer_speed(&self.key, Some(speed));
+    }
+
+    pub(super) fn os_pointer_speed(&self) -> Option<f32> {
+        self.config.os_pointer_speed(&self.key)
     }
     pub(super) fn report_rate(&mut self, rate: ReportRate) {
         self.config.set_report_rate(&self.key, rate);

@@ -262,6 +262,10 @@ impl Config {
 /// before schema 5, so a route-keyed entry on disk cannot carry one — but
 /// [`Config::migrate_transport_scoped_keys`] folds two *renamed* entries that
 /// each already carry the route they were renamed out of.
+#[expect(
+    clippy::float_cmp,
+    reason = "fold_option_field compares scalar Option fields; an exact mismatch is the only trigger for the warning"
+)]
 pub(super) fn fold(device: &mut DeviceConfig, mut legacy: DeviceConfig, route_key: &str) {
     for (key, value) in std::mem::take(&mut legacy.links) {
         device.links.entry(key).or_insert(value);
@@ -310,11 +314,10 @@ pub(super) fn fold(device: &mut DeviceConfig, mut legacy: DeviceConfig, route_ke
     // `smooth_wheel` is a bare opt-in with no per-link slot: for the same
     // reason only a legacy `true` is evidence of a choice, so it carries over.
     device.smooth_wheel |= legacy.smooth_wheel;
-    // Handing the G-keys to OpenLogi is the same kind of bare opt-in.
+
     if legacy.g_key_owner == GKeyOwner::OpenLogi {
         device.g_key_owner = GKeyOwner::OpenLogi;
     }
-    // Only a mode the user picked is evidence; the default is never-set.
     if device.gaming_key_mode == GamingKeyMode::default() {
         device.gaming_key_mode = legacy.gaming_key_mode;
     }
@@ -346,6 +349,9 @@ pub(super) fn fold(device: &mut DeviceConfig, mut legacy: DeviceConfig, route_ke
     fold_option_field!(momentum_scrolling);
     fold_option_field!(fn_lock);
     fold_option_field!(keep_os_layout);
+    fold_option_field!(os_layout_pin);
+    fold_option_field!(os_pointer_speed);
+    fold_option_field!(os_pointer_accel);
     fold_option_field!(onboard_memory);
     fold_option_field!(report_rate);
     fold_option_field!(pointer_speed);
@@ -431,8 +437,8 @@ fn fold_maps(device: &mut DeviceConfig, legacy: &mut DeviceConfig, route_key: &s
     fold_map_field!(bindings);
     fold_map_field!(disabled_gestures);
     fold_map_field!(per_app_bindings);
-    fold_map_field!(camera_profiles);
     fold_map_field!(g_key_profile_names);
+    fold_map_field!(camera_profiles);
 }
 
 #[cfg(test)]

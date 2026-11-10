@@ -4,7 +4,9 @@
 use openlogi_core::hid::PointerSpeed;
 use openlogi_hid::DpiTarget;
 
-use super::super::{assignments_changed, saved_speed};
+use super::super::{
+    assignments_changed, run_compositor_command, saved_speed, sets_os_pointer_speed,
+};
 use super::*;
 use crate::pointer_speed::{PrecisionPress, SavedSpeed, SpeedTarget};
 
@@ -233,4 +235,34 @@ fn an_offline_dpi_mouse_whose_mode_a_reload_ends_reconnects_at_its_default_dpi()
         .reapply("a", &route, SavedSpeed::Dpi(None))
         .expect("a write owed to the reconnect");
     assert_eq!(write.target, SpeedTarget::Dpi(DpiTarget::Default));
+}
+
+#[test]
+fn pointer_policy_rejects_keyboards() {
+    let mut keyboard = dev("k", 2, true);
+    keyboard.capabilities = Some(Capabilities::default());
+    assert!(!sets_os_pointer_speed(&keyboard));
+    assert!(sets_os_pointer_speed(&scaled_mouse()));
+    assert!(sets_os_pointer_speed(&dpi_mouse()));
+    let mut offline = scaled_mouse();
+    offline.online = false;
+    assert!(!sets_os_pointer_speed(&offline));
+    let mut unmeasured = scaled_mouse();
+    unmeasured.capabilities = None;
+    assert!(!sets_os_pointer_speed(&unmeasured));
+}
+
+#[test]
+fn compositor_spawn_failure_is_reported() {
+    let command = vec!["swaymsg".to_owned(), "input".to_owned()];
+    let missing = run_compositor_command(&command, &mut |_, _| {
+        Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+    });
+    assert!(missing.is_err_and(|error| error.contains("swaymsg could not start")));
+    let failed = run_compositor_command(&command, &mut |_, _| Ok(false));
+    assert!(failed.is_err_and(|error| error.contains("exited unsuccessfully")));
+    assert_eq!(
+        run_compositor_command(&command, &mut |_, _| Ok(true)),
+        Ok(())
+    );
 }

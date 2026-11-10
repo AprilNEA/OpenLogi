@@ -28,10 +28,17 @@ fn mouse_state(
     pointer_scaling: bool,
     config: Config,
 ) -> (AppState, tokio::sync::mpsc::UnboundedReceiver<Command>) {
+    state_for(mouse_inventory(pointer_scaling), config)
+}
+
+fn state_for(
+    inventory: DeviceInventory,
+    config: Config,
+) -> (AppState, tokio::sync::mpsc::UnboundedReceiver<Command>) {
     let resolver = AssetResolver::new();
     let (commands, receiver) = tokio::sync::mpsc::unbounded_channel();
     let state = AppState::new(Sources {
-        inventories: &[mouse_inventory(pointer_scaling)],
+        inventories: &[inventory],
         ..Sources::in_memory(config, &resolver, commands)
     });
     (state, receiver)
@@ -67,6 +74,37 @@ fn a_release_persists_the_speed_and_writes_the_mouse() {
     assert_eq!(*written_route, route);
     assert_eq!(*written, speed(0x0180));
     assert_eq!(*written_key, key);
+}
+
+#[test]
+fn an_os_speed_override_is_persisted_and_can_be_cleared() {
+    let (mut state, mut receiver) = mouse_state(true, Config::ephemeral());
+    drain(&mut receiver);
+    let key = state
+        .current_record()
+        .expect("the mouse is selected")
+        .device_key();
+
+    assert_eq!(state.current_os_pointer_speed(), None);
+    assert_eq!(
+        state.commit_os_pointer_speed(Some(-0.4)),
+        [StateEvent::DeviceConfigChanged(key.clone())]
+    );
+    assert_eq!(state.current_os_pointer_speed(), Some(-0.4));
+    assert!(matches!(
+        drain(&mut receiver).as_slice(),
+        [Command::ReloadConfig(_)]
+    ));
+
+    assert_eq!(
+        state.commit_os_pointer_speed(None),
+        [StateEvent::DeviceConfigChanged(key)]
+    );
+    assert_eq!(state.current_os_pointer_speed(), None);
+    assert!(matches!(
+        drain(&mut receiver).as_slice(),
+        [Command::ReloadConfig(_)]
+    ));
 }
 
 #[test]
@@ -164,6 +202,27 @@ fn a_mouse_with_no_saved_speed_shows_its_reading(cx: &mut gpui::TestAppContext) 
     cx.run_until_parked();
 
     assert_eq!(shown(cx), Some(speed(0x0140)));
+}
+
+/// A DPI-only mouse has no `0x2205` to read: selecting it must not ask the
+/// agent for one, since the answer would be hidden anyway.
+#[gpui::test]
+fn a_dpi_only_mouse_is_not_asked_for_its_pointer_scaling(cx: &mut gpui::TestAppContext) {
+    let mut inventory = mouse_inventory(false);
+    inventory.paired[0]
+        .capabilities
+        .as_mut()
+        .expect("the fixture mouse has capabilities")
+        .pointer = true;
+    let (state, mut receiver) = state_for(inventory, Config::ephemeral());
+    install(state, cx);
+
+    assert!(
+        drain(&mut receiver)
+            .iter()
+            .all(|command| !matches!(command, Command::ReadPointerSpeed(_))),
+        "a DPI-only mouse must not get a HID++ 0x2205 read"
+    );
 }
 
 /// Precision mode moves the pointer at the slowest speed, which the mouse

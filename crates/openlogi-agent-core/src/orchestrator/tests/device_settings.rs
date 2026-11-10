@@ -950,83 +950,6 @@ fn grid_only_bindings_publish_their_index_set() {
     assert!(spec.wanted.is_empty(), "grid keys divert nothing");
 }
 
-#[test]
-fn keyboard_spec_is_absent_without_a_real_binding_or_for_a_disabled_keyboard() {
-    let config = Config::default();
-    let mut orch = orchestrator(config);
-    orch.devices = vec![keyboard("kbd", 1, true)];
-    assert!(
-        sole_keyboard_spec(&orch).is_none(),
-        "an unconfigured key is never diverted"
-    );
-
-    let mut config = Config::default();
-    config.set_binding(
-        "kbd",
-        ButtonId::control(0x010a),
-        Binding::Single(Action::Screenshot),
-    );
-    config.set_device_enabled("kbd", false);
-    let mut orch = orchestrator(config);
-    orch.devices = vec![keyboard("kbd", 1, true)];
-    assert!(
-        sole_keyboard_spec(&orch).is_none(),
-        "a disabled keyboard is left fully native"
-    );
-}
-
-/// A G-series keyboard's G-key row is OpenLogi's only once the user takes it
-/// over, bound or not, and then its M keys follow the cluster mode.
-#[test]
-fn a_taken_over_g_key_row_captures_without_bindings() {
-    use openlogi_core::binding::ModeKey;
-    use openlogi_core::config::{GKeyOwner, GamingKeyMode};
-
-    let g915 = || {
-        let mut device = keyboard("g915", 1, true);
-        device.capabilities = Some(Capabilities {
-            g_keys: true,
-            m_keys: true,
-            macro_record: true,
-            ..Capabilities::default()
-        });
-        device
-    };
-    let mut orch = orchestrator(Config::default());
-    orch.devices = vec![g915()];
-    assert!(
-        sole_keyboard_spec(&orch).is_none(),
-        "the onboard G-key actions stay until the user takes the row"
-    );
-
-    let mut config = Config::default();
-    config.set_g_key_owner("g915", GKeyOwner::OpenLogi);
-    let mut orch = orchestrator(config.clone());
-    orch.devices = vec![g915()];
-    let spec = sole_keyboard_spec(&orch).expect("a taken row captures");
-    assert!(spec.gaming.take_g_row);
-    assert!(spec.wanted.is_empty());
-    assert_eq!(
-        spec.gaming.mode_keys.iter().copied().collect::<Vec<_>>(),
-        [ModeKey::M1, ModeKey::M2, ModeKey::M3],
-        "MR keeps recording macros while M1–M3 switch profiles"
-    );
-
-    config.set_gaming_key_mode("g915", GamingKeyMode::NineButtons);
-    let mut orch = orchestrator(config.clone());
-    orch.devices = vec![g915()];
-    let spec = sole_keyboard_spec(&orch).expect("a taken row captures");
-    assert_eq!(spec.gaming_mode, GamingKeyMode::NineButtons);
-    assert_eq!(spec.gaming.mode_keys.len(), 4);
-
-    let mut orch = orchestrator(config);
-    orch.devices = vec![keyboard("g915", 1, true)];
-    assert!(
-        sole_keyboard_spec(&orch).is_none(),
-        "a keyboard without 0x8010 has no row to take"
-    );
-}
-
 /// Every bound keyboard-family device captures at once, each on its own
 /// route with its own keys and bindings — asleep or not — so a keyboard and
 /// a keypad never compete for one session.
@@ -1111,6 +1034,83 @@ fn keyboard_spec_skips_a_keyboard_with_no_bound_controls() {
     // bound one holds the session even while asleep.
     orch.devices = vec![keyboard("unbound", 1, true), keyboard("bound", 2, false)];
     assert_eq!(sole_keyboard_spec(&orch).expect("spec").config_key, "bound");
+}
+
+#[test]
+fn keyboard_spec_is_absent_without_a_real_binding_or_for_a_disabled_keyboard() {
+    let config = Config::default();
+    let mut orch = orchestrator(config);
+    orch.devices = vec![keyboard("kbd", 1, true)];
+    assert!(
+        sole_keyboard_spec(&orch).is_none(),
+        "an unconfigured key is never diverted"
+    );
+
+    let mut config = Config::default();
+    config.set_binding(
+        "kbd",
+        ButtonId::control(0x010a),
+        Binding::Single(Action::Screenshot),
+    );
+    config.set_device_enabled("kbd", false);
+    let mut orch = orchestrator(config);
+    orch.devices = vec![keyboard("kbd", 1, true)];
+    assert!(
+        sole_keyboard_spec(&orch).is_none(),
+        "a disabled keyboard is left fully native"
+    );
+}
+
+/// A G-series keyboard's G-key row is OpenLogi's only once the user takes it
+/// over, bound or not, and then its M keys follow the cluster mode.
+#[test]
+fn a_taken_over_g_key_row_captures_without_bindings() {
+    use openlogi_core::binding::ModeKey;
+    use openlogi_core::config::{GKeyOwner, GamingKeyMode};
+
+    let g915 = || {
+        let mut device = keyboard("g915", 1, true);
+        device.capabilities = Some(Capabilities {
+            g_keys: true,
+            m_keys: true,
+            macro_record: true,
+            ..Capabilities::default()
+        });
+        device
+    };
+    let mut orch = orchestrator(Config::default());
+    orch.devices = vec![g915()];
+    assert!(
+        sole_keyboard_spec(&orch).is_none(),
+        "the onboard G-key actions stay until the user takes the row"
+    );
+
+    let mut config = Config::default();
+    config.set_g_key_owner("g915", GKeyOwner::OpenLogi);
+    let mut orch = orchestrator(config.clone());
+    orch.devices = vec![g915()];
+    let spec = sole_keyboard_spec(&orch).expect("a taken row captures");
+    assert!(spec.gaming.take_g_row);
+    assert!(spec.wanted.is_empty());
+    assert_eq!(
+        spec.gaming.mode_keys.iter().copied().collect::<Vec<_>>(),
+        [ModeKey::M1, ModeKey::M2, ModeKey::M3],
+        "MR keeps recording macros while M1–M3 switch profiles"
+    );
+
+    config.set_gaming_key_mode("g915", GamingKeyMode::NineButtons);
+    let mut orch = orchestrator(config.clone());
+    orch.devices = vec![g915()];
+    let spec = sole_keyboard_spec(&orch).expect("a taken row captures");
+    assert_eq!(spec.gaming_mode, GamingKeyMode::NineButtons);
+    assert_eq!(spec.gaming.mode_keys.len(), 4);
+
+    let mut orch = orchestrator(config);
+    orch.devices = vec![keyboard("g915", 1, true)];
+    assert!(
+        sole_keyboard_spec(&orch).is_none(),
+        "a keyboard without 0x8010 has no row to take"
+    );
 }
 
 #[test]

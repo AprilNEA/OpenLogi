@@ -68,6 +68,32 @@ fn v9_without_disabled_keys_loads_and_a_save_stamps_the_current_schema() {
 }
 
 #[test]
+fn v11_without_os_layout_pin_loads_and_a_save_stamps_the_current_schema() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    fs::write(
+        &path,
+        "schema_version = 11\n[devices.keyboard]\nkeep_os_layout = false\n",
+    )
+    .expect("write v11 config");
+
+    let (mut config, mut file) = ConfigFile::load_from_path(&path).expect("load v11 config");
+    assert_eq!(config.schema_version, SCHEMA_VERSION);
+    assert_eq!(config.os_layout_pin("keyboard"), None);
+
+    config.set_os_layout_pin("keyboard", Some(PinnedOs::MacOs));
+    file.save(&config).expect("save the current schema");
+
+    let saved = fs::read_to_string(&path).expect("read saved config");
+    assert!(
+        saved.starts_with(&format!("schema_version = {SCHEMA_VERSION}\n")),
+        "saved header: {saved}"
+    );
+    let reloaded = Config::load_from_path(&path).expect("reload the current schema");
+    assert_eq!(reloaded.os_layout_pin("keyboard"), Some(PinnedOs::MacOs));
+}
+
+#[test]
 fn schema_version_zero_is_rejected() {
     let temp = tempfile::tempdir().expect("tempdir");
     let path = temp.path().join("config.toml");
