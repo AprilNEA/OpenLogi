@@ -87,6 +87,8 @@ fn begin_right(swipes: &mut SpaceSwipes, now: Instant) -> Frame {
             now,
         )
         .expect("a desktop swipe opens a transition")
+        .frame()
+        .expect("no switch is landing")
 }
 
 fn phases(frames: &[Frame]) -> Vec<SpaceSwipePhase> {
@@ -272,6 +274,120 @@ fn a_full_desktop_report_after_landing_on_the_last_desktop_holds_at_the_edge() {
     let frames = swipes.motion(&session(), BUTTON, -100, later + Duration::from_millis(8));
     assert_eq!(phases(&frames), vec![SpaceSwipePhase::Changed]);
     assert!((frames[0].progress - (1.0 - 100.0 / TRAVEL)).abs() < 1e-9);
+}
+
+fn begin_again(swipes: &mut SpaceSwipes, now: Instant) -> Option<Frame> {
+    swipes
+        .begin(
+            &session(),
+            BUTTON,
+            GestureDirection::Right,
+            &Action::NextDesktop,
+            Some(&Action::PreviousDesktop),
+            now,
+        )
+        .expect("a desktop swipe opens a transition")
+        .frame()
+}
+
+#[test]
+fn a_hold_right_after_a_finished_switch_waits_for_it_to_land() {
+    let mut swipes = swipes(SILENT);
+    let start = Instant::now();
+    begin_right(&mut swipes, start);
+    let (_, now) = sweep(&mut swipes, start, 45, 10);
+    let frames = swipes.end(&session(), BUTTON, now + Duration::from_millis(300));
+    assert!(frames.first().and_then(end_speed).is_some(), "{frames:?}");
+    // The next hold opens without a Began while the Dock still animates.
+    let now = now + Duration::from_millis(400);
+    assert_eq!(begin_again(&mut swipes, now), None);
+    let (frames, now) = sweep(&mut swipes, now, 10, 10);
+    assert!(frames.is_empty(), "no frames while the last switch lands");
+    // Once it has landed (here: timed out), the leg begins from the hand.
+    let frames = swipes.motion(&session(), BUTTON, 40, now + SETTLE_TIMEOUT);
+    assert_eq!(phases(&frames), vec![SpaceSwipePhase::Began]);
+}
+
+#[test]
+fn a_hold_waiting_on_a_landing_keeps_its_action_until_it_begins() {
+    let start = Instant::now();
+    let mut swipes = swipes_settling(start);
+    let _ = swipes.end(&session(), BUTTON, start);
+    let now = start + Duration::from_millis(100);
+    assert_eq!(begin_again(&mut swipes, now), None);
+    // Released or refused before it begins, the hold falls back on this.
+    assert_eq!(
+        swipes.unstarted(&session(), BUTTON),
+        Some(Action::NextDesktop)
+    );
+    let frames = swipes.motion(&session(), BUTTON, 40, now + SETTLE_TIMEOUT);
+    assert_eq!(phases(&frames), vec![SpaceSwipePhase::Began]);
+    assert_eq!(swipes.unstarted(&session(), BUTTON), None);
+}
+
+#[test]
+fn a_hold_that_begins_at_once_has_no_fallback_to_keep() {
+    let mut swipes = swipes(PROMPT);
+    begin_right(&mut swipes, Instant::now());
+    assert_eq!(swipes.unstarted(&session(), BUTTON), None);
+}
+
+#[test]
+fn canceling_a_settling_hold_still_holds_off_the_next_hold() {
+    let start = Instant::now();
+    let mut swipes = swipes_settling(start);
+    assert!(swipes.cancel(&session(), BUTTON).is_empty());
+    assert_eq!(
+        begin_again(&mut swipes, start + Duration::from_millis(100)),
+        None
+    );
+
+    let mut swipes = swipes_settling(start);
+    assert!(swipes.cancel_session(&session()).is_empty());
+    assert_eq!(
+        begin_again(&mut swipes, start + Duration::from_millis(100)),
+        None
+    );
+}
+
+#[test]
+fn a_hold_after_the_last_switch_landed_begins_at_once() {
+    let mut swipes = swipes(PROMPT);
+    let start = Instant::now();
+    begin_right(&mut swipes, start);
+    let (_, now) = sweep(&mut swipes, start, 45, 10);
+    let _ = swipes.end(&session(), BUTTON, now + Duration::from_millis(300));
+    assert_eq!(
+        begin_again(&mut swipes, now + Duration::from_millis(400)).map(|f| f.phase),
+        Some(SpaceSwipePhase::Began)
+    );
+}
+
+#[test]
+fn a_release_while_settling_still_holds_off_the_next_hold() {
+    let start = Instant::now();
+    let mut swipes = swipes_settling(start);
+    assert!(swipes.end(&session(), BUTTON, start).is_empty());
+    assert_eq!(
+        begin_again(&mut swipes, start + Duration::from_millis(100)),
+        None
+    );
+}
+
+#[test]
+fn the_edge_is_read_again_before_holding_there() {
+    // The start reads the last desktop: a switch had not been reported yet.
+    HAS_NEXT.set(false);
+    let mut swipes = swipes(SILENT_UNTIL_LAST);
+    let start = Instant::now();
+    begin_right(&mut swipes, start);
+    // WindowServer catches up mid-drag: the next desktop exists after all.
+    HAS_NEXT.set(true);
+    let (frames, _) = sweep(&mut swipes, start, 8, 100);
+    assert!(
+        frames.last().and_then(end_speed).is_some(),
+        "the switch finishes instead of holding at a stale edge: {frames:?}"
+    );
 }
 
 #[test]

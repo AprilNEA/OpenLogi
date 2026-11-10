@@ -1200,6 +1200,10 @@ async fn an_invalidated_press_springs_its_live_transition_back_on_release() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "two scenarios share the runtime setup"
+)]
 async fn only_a_transition_its_commit_opens_takes_the_commit_travel() {
     use std::cell::RefCell;
 
@@ -1231,12 +1235,15 @@ async fn only_a_transition_its_commit_opens_takes_the_commit_travel() {
         VerticalScrollSensitivity::default(),
     )))
     .unwrap();
-    let mut dispatcher = InputDispatcher::new(GestureOutputs::new(
-        actions.dispatcher(),
-        scroll.input(),
-        Arc::default(),
-    ))
-    .with_space_output(800.0, record);
+    let new_dispatcher = || {
+        InputDispatcher::new(GestureOutputs::new(
+            actions.dispatcher(),
+            scroll.input(),
+            Arc::default(),
+        ))
+        .with_space_output(800.0, record)
+    };
+    let mut dispatcher = new_dispatcher();
     let button = ButtonId::GestureButton;
     let motion = |dx| CapturedInput::GestureMotion { button, dx, dy: 0 };
     let commit_travel = |dx| CapturedInput::GestureCommitTravel { button, dx, dy: 0 };
@@ -1276,7 +1283,9 @@ async fn only_a_transition_its_commit_opens_takes_the_commit_travel() {
     );
 
     // A transition already following the hand saw the reversal as motion; a
-    // later commit's travel must not move it again.
+    // later commit's travel must not move it again. A fresh dispatcher: the
+    // switch above would otherwise hold the next transition off until it lands.
+    let mut dispatcher = new_dispatcher();
     let mut both = plan();
     both.dispatch.gesture_bindings.insert(
         button,
