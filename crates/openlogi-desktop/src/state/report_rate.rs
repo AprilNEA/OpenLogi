@@ -42,6 +42,12 @@ impl AppState {
             .unwrap_or_default()
     }
 
+    /// What is known of `key`'s report rate, if queried.
+    #[must_use]
+    pub(crate) fn report_rate_load_for(&self, key: &DeviceKey) -> Option<&ReportRateLoad> {
+        self.pointer.reads.report_rate_load(key)
+    }
+
     /// Persist `rate` for the active mouse and write it through the agent.
     /// The panel shows `rate` at once; the mouse's read-back arrives as
     /// [`Self::apply_report_rate_written`]. No-op when no device is selected,

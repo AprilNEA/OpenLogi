@@ -102,6 +102,34 @@ impl AppState {
             .unwrap_or_default()
     }
 
+    /// What is known of `key`'s backlight, if queried.
+    #[must_use]
+    pub(crate) fn backlight_load_for(&self, key: &DeviceKey) -> Option<&BacklightLoad> {
+        self.pointer.reads.backlight_load(key)
+    }
+
+    /// Ensure backlight state is queried for all online backlight-capable keyboards
+    /// so Home and Detail battery duration estimates reflect the live backlight config.
+    pub(super) fn load_all_backlights(&mut self, cx: &mut gpui::Context<Self>) {
+        let targets: Vec<(DeviceKey, DeviceRoute)> = self
+            .devices
+            .records
+            .iter()
+            .filter(|record| {
+                record
+                    .capabilities
+                    .is_some_and(|capabilities| capabilities.backlight)
+            })
+            .filter_map(|record| Some((record.device_key(), record.route.clone()?)))
+            .collect();
+        let sender = self.ipc_sender();
+        for (key, route) in targets {
+            self.pointer
+                .reads
+                .ensure_backlight(key, route, sender.clone(), cx);
+        }
+    }
+
     /// Write `change` to the active keyboard through the agent. The panel
     /// shows the changed backlight at once; the keyboard's read-back arrives
     /// as [`Self::apply_backlight_written`]. No-op when no device is selected,

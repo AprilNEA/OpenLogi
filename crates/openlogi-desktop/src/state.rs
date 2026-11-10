@@ -262,6 +262,7 @@ impl AppState {
             state.load_current_sidetone(cx);
             state.load_current_force_sensing(cx);
             state.load_current_backlight(cx);
+            state.load_all_backlights(cx);
             state.load_current_easy_switch(cx);
             state.load_current_disable_keys(cx);
             state.load_current_onboard(cx);

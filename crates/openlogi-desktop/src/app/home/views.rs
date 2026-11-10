@@ -273,6 +273,7 @@ fn device_card_element(
         record.kind == DeviceKind::Light && state.light_enabled_for(&record.device_key());
     let light_settings = state.light_for(&record.device_key());
     let glow = keyboard_glow(state, record);
+    let battery_estimate = crate::ui::battery_estimate::estimate_for_device(state, record);
 
     let card = device_card(
         record,
@@ -282,6 +283,7 @@ fn device_card_element(
         glow,
         light_enabled,
         light_settings,
+        battery_estimate,
         pal,
     );
     device_entry_interaction(card, record, connectivity, active, enabled, view, pal)
@@ -404,13 +406,27 @@ fn device_list_row(
                 .min_w(rems(8.25))
                 .flex_none()
                 .items_end()
-                .gap_2()
+                .gap_1()
                 .when_some(record.battery.as_ref(), |this, battery| {
                     this.child(battery_reading(
                         BatteryIndicator::status(battery, record.is_online()),
                         connectivity,
                     ))
                 })
+                .when_some(
+                    crate::ui::battery_estimate::estimate_for_device(state, record),
+                    |this, estimate| {
+                        this.child(
+                            div()
+                                .text_caption()
+                                .text_color(pal.text_muted)
+                                .when(connectivity == Connectivity::Reconnecting, |dimmed| {
+                                    dimmed.opacity(0.5)
+                                })
+                                .child(estimate.home_label()),
+                        )
+                    },
+                )
                 .when(record.persistent, |this| {
                     this.child(device_menu_button(record, pal))
                 }),
