@@ -311,26 +311,29 @@ impl InputDispatcher {
     }
 
     /// Route one captured input from `session` to its bound action or
-    /// re-synthesised scroll output.
+    /// re-synthesised scroll output. `at` is when the input arrived from the
+    /// device: it times a live Space transition, so a batch drained late keeps
+    /// the gaps between its reports.
     pub(super) fn dispatch(
         &mut self,
         session: &HidppSessionId,
         plan: &DispatchPlan,
         input: CapturedInput,
+        at: Instant,
     ) {
         let key = session.device_key();
         match input {
             CapturedInput::Gesture(button, direction) => {
-                self.dispatch_gesture(session, plan, button, direction);
+                self.dispatch_gesture(session, plan, button, direction, at);
             }
             CapturedInput::GestureMotion { button, dx, .. } => {
-                self.follow_gesture_motion(session, button, dx);
+                self.follow_gesture_motion(session, button, dx, at);
             }
             CapturedInput::GestureCommitTravel { button, dx, .. } => {
                 // Only a transition this commit just opened takes the commit's
                 // travel; one already following the hold saw it as motion.
                 if self.spaces.awaits_commit_travel(session, button) {
-                    self.follow_gesture_motion(session, button, dx);
+                    self.follow_gesture_motion(session, button, dx, at);
                 }
             }
             CapturedInput::ButtonDown(button) => {
@@ -374,7 +377,7 @@ impl InputDispatcher {
                     if let Some(action) = self.spaces.unstarted(session, button) {
                         self.dispatch_while_held(session, button, &action);
                     }
-                    self.spaces.end(session, button, Instant::now())
+                    self.spaces.end(session, button, at)
                 } else {
                     self.spaces.cancel(session, button)
                 };
@@ -473,6 +476,7 @@ impl InputDispatcher {
         plan: &DispatchPlan,
         button: ButtonId,
         direction: GestureDirection,
+        at: Instant,
     ) {
         let key = session.device_key();
         if !self.press_is_live(session, button) {
@@ -494,9 +498,9 @@ impl InputDispatcher {
         };
         debug!(key, %button, ?direction, action = %action.label(), "gesture → action");
         let opposite = map.and_then(|map| map.get(&reverse(direction)));
-        if let Some(opened) =
-            self.spaces
-                .begin(session, button, direction, action, opposite, Instant::now())
+        if let Some(opened) = self
+            .spaces
+            .begin(session, button, direction, action, opposite, at)
         {
             let Some(frame) = opened.frame() else {
                 debug!(key, %button, ?direction, "live Space transition waits for the last switch to land");
@@ -531,10 +535,16 @@ impl InputDispatcher {
 
     /// Move the live transition `button`'s hold is driving, or spring it back
     /// at once when the press ended without a release reaching this session.
-    fn follow_gesture_motion(&mut self, session: &HidppSessionId, button: ButtonId, dx: i32) {
+    fn follow_gesture_motion(
+        &mut self,
+        session: &HidppSessionId,
+        button: ButtonId,
+        dx: i32,
+        at: Instant,
+    ) {
         let unstarted = self.spaces.unstarted(session, button);
         let frames = if self.press_is_live(session, button) {
-            self.spaces.motion(session, button, dx, Instant::now())
+            self.spaces.motion(session, button, dx, at)
         } else {
             self.spaces.cancel(session, button)
         };

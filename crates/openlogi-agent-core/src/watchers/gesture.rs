@@ -134,6 +134,9 @@ struct CapturedEvent {
     physical_key: PhysicalDeviceKey,
     session: HidppSessionId,
     input: CapturedInput,
+    /// When the input came off the device's session, read before it waits in
+    /// the manager's queue.
+    at: std::time::Instant,
 }
 
 struct SessionDone {
@@ -219,6 +222,7 @@ fn spawn_input_forwarder(
                 physical_key: physical_key.clone(),
                 session: session.clone(),
                 input,
+                at: std::time::Instant::now(),
             }));
         }
     })
@@ -588,7 +592,8 @@ impl GestureManagerState {
                 let live = self.slots.get(key).and_then(GestureSlot::session);
                 let dispatch_context = dispatch_context_for(&event.session, live);
                 if let Some((session, plan)) = dispatch_context {
-                    self.input_dispatcher.dispatch(session, plan, event.input);
+                    self.input_dispatcher
+                        .dispatch(session, plan, event.input, event.at);
                 } else {
                     self.input_dispatcher.cancel_session(&event.session);
                     debug!(

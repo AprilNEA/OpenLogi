@@ -333,6 +333,44 @@ fn a_hold_that_begins_at_once_has_no_fallback_to_keep() {
 }
 
 #[test]
+fn a_hold_has_no_fallback_action_once_its_first_leg_began() {
+    let start = Instant::now();
+    let mut swipes = swipes_settling(start);
+    let _ = swipes.end(&session(), BUTTON, start);
+    let now = start + Duration::from_millis(100);
+    assert_eq!(begin_again(&mut swipes, now), None);
+    // The landing over, the first leg begins and completes a switch: the
+    // hold now waits on its own switch, with nothing to switch one-shot.
+    let now = now + SETTLE_TIMEOUT;
+    let frames = swipes.motion(&session(), BUTTON, 40, now);
+    assert_eq!(phases(&frames), vec![SpaceSwipePhase::Began]);
+    let (frames, _) = sweep(&mut swipes, now, 20, 40);
+    assert!(
+        frames.iter().any(|frame| end_speed(frame).is_some()),
+        "{frames:?}"
+    );
+    assert_eq!(swipes.unstarted(&session(), BUTTON), None);
+}
+
+#[test]
+fn a_hold_waiting_on_a_landing_moves_nothing_before_it_begins() {
+    let start = Instant::now();
+    let mut swipes = swipes_settling(start);
+    let _ = swipes.end(&session(), BUTTON, start);
+    let now = start + Duration::from_millis(100);
+    assert_eq!(begin_again(&mut swipes, now), None);
+    let (frames, now) = sweep(&mut swipes, now, 10, 10);
+    assert!(frames.is_empty(), "{frames:?}");
+    // The leg begins from the report after the landing alone, not from the
+    // travel dropped while it waited.
+    let frames = swipes.motion(&session(), BUTTON, 40, now + SETTLE_TIMEOUT);
+    assert_eq!(
+        frames,
+        vec![Frame::new(40.0 / TRAVEL, SpaceSwipePhase::Began)]
+    );
+}
+
+#[test]
 fn canceling_a_settling_hold_still_holds_off_the_next_hold() {
     let start = Instant::now();
     let mut swipes = swipes_settling(start);

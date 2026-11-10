@@ -195,13 +195,30 @@ impl Opened {
     }
 }
 
+/// Where one hold's transition is. Waiting for a landing comes in two kinds,
+/// since only a hold that has posted nothing yet has a one-shot fallback.
+/// Motion is dropped while either waits, and the leg's Began waits too: the
+/// Dock does not take a new swipe mid-animation, which then falls through to
+/// the app.
 enum Stage {
+    /// The hold opened while the last switch was still landing, and has
+    /// posted nothing. `action` is its binding, switched one-shot should the
+    /// Began be refused or the hold end first.
+    WaitingFirst { landing: Landing, action: Action },
     /// A Dock transition is following the hand.
     InFlight { progress: f64, bounds: Bounds },
-    /// A switch completed and is still landing; motion is dropped until it
-    /// lands, and the next leg's Began waits for it too: the Dock does not
-    /// take a new swipe mid-animation, which then falls through to the app.
-    Settling(Landing),
+    /// This hold completed a switch that is still landing.
+    WaitingNext(Landing),
+}
+
+impl Stage {
+    /// The switch this stage waits on, if it waits.
+    fn landing(&self) -> Option<Landing> {
+        match self {
+            Self::WaitingFirst { landing, .. } | Self::WaitingNext(landing) => Some(*landing),
+            Self::InFlight { .. } => None,
+        }
+    }
 }
 
 struct Transition {
@@ -216,10 +233,6 @@ struct Transition {
     /// Opened by a commit and not moved since: the commit's own travel is
     /// still to come.
     fresh: bool,
-    /// The bound action, while the transition waits on the last switch's
-    /// landing and no Began has been posted for it: the one-shot fallback
-    /// should that Began be refused or the hold end first.
-    unstarted: Option<Action>,
     /// Smoothed speed along the transition, desktop widths per second.
     velocity: f64,
     moved_at: Instant,
@@ -256,9 +269,9 @@ fn step(
     if !bounds.allows(sign) {
         return follow(sign, bounds);
     }
-    let settling = Stage::Settling(Landing::at(probe, now));
+    let waiting = Stage::WaitingNext(Landing::at(probe, now));
     let speed = velocity * sign;
-    (settling, Frame::new(sign, SpaceSwipePhase::Ended { speed }))
+    (waiting, Frame::new(sign, SpaceSwipePhase::Ended { speed }))
 }
 
 /// Live transitions by capture session and held gesture source. A hold keeps
@@ -322,13 +335,16 @@ impl SpaceSwipes {
             .take()
             .filter(|landing| !landing.is_over(self.probe, now))
         {
-            Some(landing) => Stage::Settling(landing),
+            Some(landing) => Stage::WaitingFirst {
+                landing,
+                action: action.clone(),
+            },
             None => Stage::InFlight {
                 progress: 0.0,
                 bounds: Bounds::read(self.probe),
             },
         };
-        let waits = matches!(stage, Stage::Settling(_));
+        let waits = matches!(stage, Stage::WaitingFirst { .. });
         self.active.insert(
             (session.clone(), button),
             Transition {
@@ -336,7 +352,6 @@ impl SpaceSwipes {
                 keep_sign: (!swings_both_ways).then_some(target),
                 stage,
                 fresh: true,
-                unstarted: waits.then(|| action.clone()),
                 velocity: 0.0,
                 moved_at: now,
             },
@@ -351,9 +366,10 @@ impl SpaceSwipes {
     /// The action `button`'s hold is bound to, while its transition waits to
     /// begin and has posted nothing yet.
     pub(super) fn unstarted(&self, session: &HidppSessionId, button: ButtonId) -> Option<Action> {
-        self.active
-            .get(&(session.clone(), button))
-            .and_then(|t| t.unstarted.clone())
+        match &self.active.get(&(session.clone(), button))?.stage {
+            Stage::WaitingFirst { action, .. } => Some(action.clone()),
+            Stage::InFlight { .. } | Stage::WaitingNext(_) => None,
+        }
     }
 
     /// Forget a transition whose Began, for its first leg or a later one,
@@ -364,20 +380,14 @@ impl SpaceSwipes {
 
     /// Spring back the transition `button`'s hold is driving, if any.
     pub(super) fn cancel(&mut self, session: &HidppSessionId, button: ButtonId) -> Vec<Frame> {
-        match self.active.remove(&(session.clone(), button)) {
-            Some(Transition {
-                stage: Stage::InFlight { progress, .. },
-                ..
-            }) => vec![Frame::new(progress, SpaceSwipePhase::Cancelled)],
-            Some(Transition {
-                stage: Stage::Settling(landing),
-                ..
-            }) => {
-                self.landing = Some(landing);
-                Vec::new()
-            }
-            None => Vec::new(),
+        let Some(t) = self.active.remove(&(session.clone(), button)) else {
+            return Vec::new();
+        };
+        if let Stage::InFlight { progress, .. } = t.stage {
+            return vec![Frame::new(progress, SpaceSwipePhase::Cancelled)];
         }
+        self.landing = t.stage.landing();
+        Vec::new()
     }
 
     /// Follow one raw-XY report of the hold, returning the frames to post.
@@ -414,8 +424,8 @@ impl SpaceSwipes {
             _ => progress,
         };
 
-        match &mut t.stage {
-            Stage::Settling(landing) => {
+        match &t.stage {
+            Stage::WaitingFirst { landing, .. } | Stage::WaitingNext(landing) => {
                 if !landing.is_over(probe, now) {
                     return Vec::new();
                 }
@@ -425,7 +435,6 @@ impl SpaceSwipes {
                 // other (a full desktop's worth finishes at once, with no
                 // speed sample yet).
                 t.velocity = 0.0;
-                t.unstarted = None;
                 let (stage, frame) = step(hold_sign(delta), 0.0, Bounds::read(probe), probe, now);
                 t.stage = stage;
                 match frame.phase {
@@ -435,9 +444,9 @@ impl SpaceSwipes {
                     _ => vec![Frame::new(frame.progress, SpaceSwipePhase::Began)],
                 }
             }
-            Stage::InFlight { progress, bounds } => {
+            &Stage::InFlight { progress, bounds } => {
                 let (stage, frame) =
-                    step(hold_sign(*progress + delta), velocity, *bounds, probe, now);
+                    step(hold_sign(progress + delta), velocity, bounds, probe, now);
                 t.stage = stage;
                 vec![frame]
             }
@@ -458,12 +467,9 @@ impl SpaceSwipes {
         let Some(t) = self.active.remove(&(session.clone(), button)) else {
             return Vec::new();
         };
-        let (progress, bounds) = match t.stage {
-            Stage::InFlight { progress, bounds } => (progress, bounds),
-            Stage::Settling(landing) => {
-                self.landing = Some(landing);
-                return Vec::new();
-            }
+        let Stage::InFlight { progress, bounds } = t.stage else {
+            self.landing = t.stage.landing();
+            return Vec::new();
         };
         let sign = progress.signum();
         let speed = if now.saturating_duration_since(t.moved_at) >= STALE_MOTION {
@@ -489,11 +495,10 @@ impl SpaceSwipes {
             if candidate != session {
                 return true;
             }
-            match t.stage {
-                Stage::InFlight { progress, .. } => {
-                    frames.push(Frame::new(progress, SpaceSwipePhase::Cancelled));
-                }
-                Stage::Settling(settling) => landing = Some(settling),
+            if let Stage::InFlight { progress, .. } = t.stage {
+                frames.push(Frame::new(progress, SpaceSwipePhase::Cancelled));
+            } else {
+                landing = t.stage.landing();
             }
             false
         });

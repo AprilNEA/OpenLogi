@@ -996,6 +996,7 @@ async fn a_pointer_only_plan_refresh_keeps_a_held_gesture() {
         &id,
         session.dispatch(),
         CapturedInput::ButtonDown(ButtonId::GestureButton),
+        std::time::Instant::now(),
     );
     assert!(dispatcher.holds_gesture_press(&id, ButtonId::GestureButton));
 
@@ -1096,7 +1097,7 @@ async fn a_desktop_swipe_drives_one_live_transition_until_release() {
         CapturedInput::Gesture(button, GestureDirection::Left),
         CapturedInput::ButtonUp(button),
     ] {
-        dispatcher.dispatch(&id, session.dispatch(), input);
+        dispatcher.dispatch(&id, session.dispatch(), input, std::time::Instant::now());
     }
     let posted = POSTED.with_borrow(Clone::clone);
     assert!(
@@ -1176,13 +1177,18 @@ async fn an_invalidated_press_springs_its_live_transition_back_on_release() {
             dy: 0,
         },
     ] {
-        dispatcher.dispatch(&id, session.dispatch(), input);
+        dispatcher.dispatch(&id, session.dispatch(), input, std::time::Instant::now());
     }
     // A configuration reload invalidates every press, but leaves unchanged
     // gesture bindings (and so this capture session) in place.
     actions.dispatcher().cancel_all_buttons();
     // The hand stopped: the release is the first input after the reload.
-    dispatcher.dispatch(&id, session.dispatch(), CapturedInput::ButtonUp(button));
+    dispatcher.dispatch(
+        &id,
+        session.dispatch(),
+        CapturedInput::ButtonUp(button),
+        std::time::Instant::now(),
+    );
 
     let posted = POSTED.with_borrow(Clone::clone);
     assert_eq!(
@@ -1267,7 +1273,7 @@ async fn only_a_transition_its_commit_opens_takes_the_commit_travel() {
         commit_travel(470),
         CapturedInput::ButtonUp(button),
     ] {
-        dispatcher.dispatch(&id, session.dispatch(), input);
+        dispatcher.dispatch(&id, session.dispatch(), input, std::time::Instant::now());
     }
     let posted = POSTED.with_borrow_mut(std::mem::take);
     assert!(
@@ -1306,7 +1312,7 @@ async fn only_a_transition_its_commit_opens_takes_the_commit_travel() {
         CapturedInput::Gesture(button, GestureDirection::Left),
         commit_travel(-70),
     ] {
-        dispatcher.dispatch(&id, session.dispatch(), input);
+        dispatcher.dispatch(&id, session.dispatch(), input, std::time::Instant::now());
     }
     let progress: Vec<f64> = POSTED.with_borrow(|posted| {
         posted
@@ -1394,7 +1400,7 @@ async fn a_refused_next_leg_drops_the_holds_live_transition() {
         motion(100),
         CapturedInput::ButtonUp(button),
     ] {
-        dispatcher.dispatch(&id, session.dispatch(), input);
+        dispatcher.dispatch(&id, session.dispatch(), input, std::time::Instant::now());
     }
     let posted = POSTED.with_borrow(Clone::clone);
     assert!(
@@ -1407,6 +1413,117 @@ async fn a_refused_next_leg_drops_the_holds_live_transition() {
             ]
         ),
         "{posted:?}"
+    );
+
+    scroll.shutdown();
+    actions.shutdown();
+}
+
+#[tokio::test]
+async fn queued_motion_preserves_release_speed() {
+    use std::cell::RefCell;
+
+    use crate::runtime::scroll::{ScrollPreferences, ScrollRuntime};
+    use openlogi_inject::SpaceSwipePhase;
+
+    thread_local! {
+        static POSTED: RefCell<Vec<SpaceSwipePhase>> = const { RefCell::new(Vec::new()) };
+    }
+    fn record(_progress: f64, phase: SpaceSwipePhase) -> bool {
+        POSTED.with_borrow_mut(|posted| posted.push(phase));
+        true
+    }
+
+    let (_signal, device_io) = openlogi_hid::device_io_channel();
+    let (ring, _ring_rx) = mpsc::unbounded_channel();
+    let device_access = DeviceAccess {
+        channel: CaptureChannelSlot::default(),
+        registry: openlogi_hid::ChannelRegistry::default(),
+        receiver_access: ReceiverAccess::default(),
+        device_io,
+        transport_turns: crate::hardware::TransportTurns::default(),
+    };
+    let mut actions =
+        crate::runtime::ActionRuntime::new(Arc::default(), Arc::default(), device_access, ring)
+            .unwrap();
+    let mut scroll = ScrollRuntime::spawn(Arc::new(ScrollPreferences::new(
+        false,
+        VerticalScrollSensitivity::default(),
+    )))
+    .unwrap();
+    let new_dispatcher = || {
+        InputDispatcher::new(GestureOutputs::new(
+            actions.dispatcher(),
+            scroll.input(),
+            Arc::default(),
+        ))
+        .with_space_output(800.0, record)
+    };
+    let button = ButtonId::GestureButton;
+    let mut held = plan();
+    held.dispatch.gesture_bindings.insert(
+        button,
+        [
+            (GestureDirection::Left, Action::PreviousDesktop),
+            (GestureDirection::Right, Action::NextDesktop),
+        ]
+        .into(),
+    );
+    // A short, fast stroke: a quarter of a desktop, short of halfway, at
+    // 5 desktops/s, so only its speed can finish the switch.
+    let motion = CapturedInput::GestureMotion {
+        button,
+        dx: 40,
+        dy: 0,
+    };
+    let stroke = [
+        CapturedInput::ButtonDown(button),
+        CapturedInput::Gesture(button, GestureDirection::Right),
+        CapturedInput::GestureCommitTravel {
+            button,
+            dx: 40,
+            dy: 0,
+        },
+        motion,
+        motion,
+        motion,
+        motion,
+        CapturedInput::ButtonUp(button),
+    ];
+
+    // Each report dispatched as it arrives, 10 ms apart.
+    let session = live_session_from_plan(7, held.clone());
+    let id = session.id().clone();
+    let mut dispatcher = new_dispatcher();
+    let mut arrivals = Vec::new();
+    for input in stroke {
+        std::thread::sleep(Duration::from_millis(10));
+        let at = std::time::Instant::now();
+        arrivals.push(at);
+        dispatcher.dispatch(&id, session.dispatch(), input, at);
+    }
+    let immediate = POSTED.with_borrow_mut(std::mem::take);
+
+    // The same reports queued behind other work, then drained in one batch.
+    std::thread::sleep(Duration::from_millis(200));
+    let session = live_session_from_plan(8, held);
+    let id = session.id().clone();
+    let mut dispatcher = new_dispatcher();
+    for (input, at) in stroke.into_iter().zip(arrivals) {
+        dispatcher.dispatch(&id, session.dispatch(), input, at);
+    }
+    let queued = POSTED.with_borrow_mut(std::mem::take);
+
+    assert!(
+        matches!(
+            immediate.last(),
+            Some(SpaceSwipePhase::Ended { speed }) if *speed > 0.0
+        ),
+        "the flick finishes the switch: {immediate:?}"
+    );
+    assert_eq!(
+        queued, immediate,
+        "a drained batch releases at the same speed"
     );
 
     scroll.shutdown();
