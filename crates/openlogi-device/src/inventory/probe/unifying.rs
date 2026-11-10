@@ -430,7 +430,7 @@ pub(in crate::inventory) fn assemble_unifying_device(
         kind: resolve_device_kind(probe.kind, register_kind),
         online,
         battery: probe.battery,
-        model_info: probe.model_info,
+        model_info: probe.identity.into_model(),
         capabilities,
         settings_revision,
         hidpp10,

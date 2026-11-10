@@ -128,7 +128,7 @@ pub(super) async fn probe_direct(
         debug!(
             vid = format_args!("{:04x}", info.vendor_id),
             pid = format_args!("{:04x}", info.product_id),
-            has_model = probe.model_info.is_some(),
+            has_model = probe.identity.model().is_some(),
             "slot 0xff exposes no battery or config feature — likely a receiver \
              secondary interface; skipping"
         );
@@ -164,7 +164,7 @@ pub(super) async fn probe_direct(
             // nothing about the headset: its battery feature does.
             online: !probe.unlinked,
             battery: probe.battery,
-            model_info: probe.model_info,
+            model_info: probe.identity.into_model(),
             capabilities,
             settings_revision: pass.settings_revision(DIRECT_DEVICE_INDEX),
             hidpp10: false,

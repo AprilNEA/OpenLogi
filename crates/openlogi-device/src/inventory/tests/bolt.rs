@@ -223,7 +223,10 @@ fn stale_silent_slot_cache() -> (CacheKey, HashMap<CacheKey, Cached>) {
         unit_id: SILENT_SLOT_UNIT_ID,
     };
     let mut entry = cache_entry();
-    entry.probe = probed(Some(model(SILENT_SLOT_UNIT_ID, Some("SN-1"))), false);
+    entry.probe = probed(ProbedIdentity::Known(model(
+        SILENT_SLOT_UNIT_ID,
+        Some("SN-1"),
+    )));
     entry.probed_at = Instant::now()
         .checked_sub(REFRESH_INTERVAL + Duration::from_nanos(1))
         .expect("the process has been up longer than the refresh interval's worth of ticks");
@@ -532,7 +535,10 @@ async fn a_bolt_slot_is_named_by_its_marketing_name_over_the_truncated_register(
         ScriptedRawHidChannel::with_responder(bolt_receiver_with_a_truncated_codename);
     let channel = scripted_channel(raw.presenting_as(BOLT_RECEIVER_PID)).await;
     let mut entry = cache_entry();
-    entry.probe = probed(Some(model(SILENT_SLOT_UNIT_ID, Some("SN-1"))), false);
+    entry.probe = probed(ProbedIdentity::Known(model(
+        SILENT_SLOT_UNIT_ID,
+        Some("SN-1"),
+    )));
     entry.probe.marketing_name = Some("MX Anywhere 3S".to_owned());
     let cache = HashMap::from([(
         CacheKey::Bolt {
