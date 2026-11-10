@@ -136,6 +136,20 @@ optional physical device key.
 `receiver:<receiver-id>:slot:<number>`; direct, raw-HID, and camera devices use
 other generated keys. Do not substitute a model id such as `2b042`.
 
+A device's settings can be copied onto another device of the same kind from the
+device card's menu: **Copy settings from** lists the other devices with
+settings, offline ones included. **Export settings** saves one device to a
+config file of its own, under a neutral key instead of its serial number,
+without the routes it was seen on and with app settings left at their defaults.
+**Import settings** reads such a file, or a whole `config.toml`, and asks which
+device to copy from when it holds several. From a file, bindings that run a
+shell command or an AppleScript, the Actions Ring included, are left out.
+Buttons merge: the source's bindings land on the target and the target's other
+buttons keep theirs. A setting the source never set leaves the target's alone,
+and a copied value replaces the target's per-link override of it. Controls the
+target lacks, such as a haptic panel or a thumb wheel, are left out. The app
+lists what changes and what is left out before anything is written.
+
 A camera without a USB serial has no unique port-stable identity. Its
 `custom_name` key therefore follows the OS capture id so two same-model cameras
 remain distinguishable; moving it to another USB port may require naming it

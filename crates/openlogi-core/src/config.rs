@@ -25,6 +25,7 @@ mod per_app;
 mod per_device;
 mod revision;
 mod settings;
+mod transfer;
 mod wheel_hold;
 
 // Stacked, not `all(test, …)`: clippy reads the combined form as a test
@@ -55,6 +56,9 @@ pub use settings::{
     MomentumScrolling, MouseProfileTarget, OnboardMemory, SMARTSHIFT_AUTO_DISENGAGE_DEFAULT,
     SMARTSHIFT_MIN_AUTO_DISENGAGE, ScrollResolution, SmartShift, ThumbwheelSensitivity, UiScale,
     VerticalScrollSensitivity, WheelMode,
+};
+pub use transfer::{
+    SettingsTransfer, SkipReason, SkippedItem, TransferItem, TransferTarget, transfer_settings,
 };
 
 use crate::app::AppAliases;

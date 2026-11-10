@@ -2,6 +2,7 @@
 //! layouts, and the loading/empty states shown before the agent reports an
 //! inventory.
 
+mod transfer;
 mod views;
 
 pub(super) use views::device_gallery;
@@ -388,7 +389,8 @@ pub(super) fn custom_model_subtitle(record: &DeviceRecord) -> Option<SharedStrin
     (record.display_name != record.model_name).then(|| record.model_name.clone().into())
 }
 
-/// The card's action menu — rename, and for an offline device, delete. One
+/// The card's action menu — rename, settings transfer, and for an offline
+/// device, delete. One
 /// builder serves both the corner menu button and the card's context menu.
 pub(super) fn device_menu(
     record: &DeviceRecord,
@@ -405,7 +407,8 @@ pub(super) fn device_menu(
     // so deletion is only offered once it is offline.
     let deletable = record.persistent && !record.is_online();
     let has_stale_pairings = !record.stale_pairings.is_empty();
-    move |menu, _window, _cx| {
+    let transferable = record.persistent;
+    move |menu, window, cx| {
         let menu = menu.item(
             PopupMenuItem::new(tr!("common.rename_dialog"))
                 .icon(Icon::empty().path("action-icons/pencil.svg"))
@@ -424,6 +427,17 @@ pub(super) fn device_menu(
                     }
                 }),
         );
+        let menu = if transferable {
+            transfer::transfer_items(
+                menu.item(PopupMenuItem::separator()),
+                &record_key,
+                &display_name,
+                window,
+                cx,
+            )
+        } else {
+            menu
+        };
         let menu = if has_stale_pairings {
             menu.item(
                 PopupMenuItem::new(tr!("device.remove_old_pairings_dialog"))
