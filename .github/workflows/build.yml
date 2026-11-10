@@ -1029,7 +1029,7 @@ jobs:
         include:
           - arch: amd64
             runner:
-              - nscloud-ubuntu-24.04-amd64-8x32-with-features
+              - nscloud-ubuntu-24.04-amd64-16x32-with-features
               - namespace-features:container.privileged=true
           - arch: arm64
             runner:
