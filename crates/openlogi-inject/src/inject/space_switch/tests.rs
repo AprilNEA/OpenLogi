@@ -185,13 +185,133 @@ fn native_failure_stops_without_keyboard_fallback() {
     assert!(backend.posts.is_empty());
 }
 
+fn lead(admission: Admission<'_>) -> Ticket<'_> {
+    match admission {
+        Admission::Lead(ticket) => ticket,
+        Admission::Follow(_) => panic!("expected to lead, got a follow-up"),
+        Admission::Refused => panic!("expected to lead, got refused"),
+    }
+}
+
+fn follower(admission: &Admission<'_>) -> Follower {
+    match admission {
+        Admission::Follow(follower) => *follower,
+        Admission::Lead(_) => panic!("expected a follow-up, got a lead"),
+        Admission::Refused => panic!("expected a follow-up, got refused"),
+    }
+}
+
+fn refused(admission: &Admission<'_>) -> bool {
+    matches!(admission, Admission::Refused)
+}
+
+#[test]
+fn every_phase_decides_every_request() {
+    let deadline = Instant::now();
+    let preparing = Phase::Preparing {
+        flight: 1,
+        display: 5,
+        deadline,
+    };
+    let confirming = Phase::Confirming {
+        flight: 1,
+        display: 5,
+        followed: false,
+    };
+    for (phase, display, chain, step) in [
+        (Phase::Idle, 5, false, Step::Lead),
+        (Phase::Idle, 5, true, Step::Lead),
+        (preparing, 5, true, Step::Wait(deadline)),
+        (preparing, 5, false, Step::Refuse),
+        (preparing, 6, true, Step::Refuse),
+        (confirming, 5, true, Step::Follow(1)),
+        (confirming, 5, false, Step::Refuse),
+        (confirming, 6, true, Step::Refuse),
+    ] {
+        assert_eq!(phase.step(display, chain), step, "{phase:?} on {display}");
+    }
+}
+
 #[test]
 fn only_one_transaction_can_run_and_drop_releases_the_slot() {
-    let busy = AtomicBool::new(false);
-    let lease = Lease::acquire(&busy).unwrap();
-    assert!(Lease::acquire(&busy).is_none());
-    drop(lease);
-    assert!(Lease::acquire(&busy).is_some());
+    let flight = Flight::new();
+    let ticket = lead(flight.admit(5, false, Instant::now()));
+    assert!(refused(&flight.admit(5, false, Instant::now())));
+    assert!(refused(&flight.admit(6, true, Instant::now())));
+    drop(ticket);
+    let _next = lead(flight.admit(6, true, Instant::now()));
+}
+
+#[test]
+fn follow_up_waits_for_first_post() {
+    let flight = Flight::new();
+    let ticket = lead(flight.admit(5, true, Instant::now()));
+    std::thread::scope(|scope| {
+        let waiting = scope.spawn(|| follower(&flight.admit(5, true, Instant::now())));
+        // Only this post can let the waiting request through as a follow-up.
+        ticket.posted();
+        let follower = waiting.join().unwrap();
+        assert!(!ticket.followed());
+        flight.followed(follower);
+        assert!(ticket.followed());
+    });
+}
+
+#[test]
+fn a_follow_up_of_a_switch_that_never_posted_is_refused() {
+    let flight = Flight::new();
+    // A switch whose preparation ended without a post, its worker stuck.
+    let stuck = lead(flight.admit(
+        5,
+        true,
+        Instant::now().checked_sub(PREPARATION_TIMEOUT).unwrap(),
+    ));
+    assert!(stuck.deadline() <= Instant::now());
+    assert!(refused(&flight.admit(5, true, Instant::now())));
+    assert!(
+        refused(&flight.admit(5, false, Instant::now())),
+        "the stuck switch still holds the flight"
+    );
+    drop(stuck);
+    let _next = lead(flight.admit(5, true, Instant::now()));
+}
+
+#[test]
+fn a_stale_follow_up_never_marks_the_next_switch() {
+    let flight = Flight::new();
+    let first = lead(flight.admit(5, true, Instant::now()));
+    first.posted();
+    let stale = follower(&flight.admit(5, true, Instant::now()));
+    drop(first);
+    let second = lead(flight.admit(5, true, Instant::now()));
+    second.posted();
+    flight.followed(stale);
+    assert!(
+        !second.followed(),
+        "the follow-up belonged to the first switch"
+    );
+    let current = follower(&flight.admit(5, true, Instant::now()));
+    flight.followed(current);
+    assert!(second.followed());
+}
+
+#[test]
+fn desktop_post_rechecks_display_after_wait() {
+    let turn = Mutex::new(());
+    for (cursor, posts) in [(5, true), (6, false)] {
+        let mut emitted = false;
+        let result = post_on_display(
+            &turn,
+            5,
+            || {
+                assert!(turn.try_lock().is_err(), "the display is read in turn");
+                Some(cursor)
+            },
+            || emitted = true,
+        );
+        assert_eq!(result.is_some(), posts, "cursor on {cursor}");
+        assert_eq!(emitted, posts, "cursor on {cursor}");
+    }
 }
 
 #[test]
@@ -199,7 +319,7 @@ fn dispatch_returns_after_posting_without_waiting_for_confirmation() {
     let (did_post, posted) = mpsc::channel();
     let (confirm, confirmation) = mpsc::channel();
     let (finished, finish) = mpsc::channel();
-    spawn_ordered(move |gate| {
+    spawn_ordered(Instant::now() + PREPARATION_TIMEOUT, move |gate| {
         gate.commit(|| {
             did_post.send(()).unwrap();
         })
@@ -219,7 +339,7 @@ fn dispatch_returns_after_posting_without_waiting_for_confirmation() {
 fn early_exit_releases_the_caller_without_acknowledging_a_post() {
     for snapshot in [state(42), state(0)] {
         let (finished, finish) = mpsc::channel();
-        spawn_ordered(move |gate| {
+        spawn_ordered(Instant::now() + PREPARATION_TIMEOUT, move |gate| {
             let mut backend = Fake::new([snapshot]);
             let result = run(&mut backend, Direction::Next, gate);
             finished.send((backend.posts, result)).unwrap();
@@ -236,14 +356,14 @@ fn early_exit_releases_the_caller_without_acknowledging_a_post() {
 
 #[test]
 fn preparation_timeout_cancels_late_output_but_keeps_the_worker_lease() {
-    let busy = AtomicBool::new(false);
-    let lease = Lease::acquire(&busy).unwrap();
+    let flight = Flight::new();
+    let ticket = lead(flight.admit(5, true, Instant::now()));
     let deadline = Instant::now() + Duration::from_secs(60);
     let (gate, wait) = PostGate::new(deadline);
     let (resume, blocked) = mpsc::channel();
     std::thread::scope(|scope| {
         let worker = scope.spawn(move || {
-            let _lease = lease;
+            let _ticket = ticket;
             blocked.recv().unwrap();
             let mut backend = Fake::new([state(7), state(7)]);
             let result = run(&mut backend, Direction::Next, gate);
@@ -251,13 +371,13 @@ fn preparation_timeout_cancels_late_output_but_keeps_the_worker_lease() {
         });
         // Advance the waiter's clock to its deadline while preparation is held.
         assert_eq!(wait.wait(deadline), Err(Failure::TimedOut));
-        assert!(Lease::acquire(&busy).is_none());
+        assert!(refused(&flight.admit(6, true, Instant::now())));
         // Later actions can proceed now. Releasing the stalled preparation
         // must never let that stale request emit either swipe phase.
         resume.send(()).unwrap();
         assert_eq!(worker.join().unwrap(), (vec![], Err(Failure::TimedOut)));
     });
-    assert!(Lease::acquire(&busy).is_some());
+    let _next = lead(flight.admit(6, true, Instant::now()));
 }
 
 #[test]

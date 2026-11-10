@@ -13,7 +13,7 @@
 use std::ffi::{c_int, c_void};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{LazyLock, Mutex, MutexGuard, PoisonError, mpsc};
+use std::sync::{LazyLock, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use block2::RcBlock;
@@ -35,18 +35,13 @@ use objc2_foundation::{
 
 use super::super::DesktopSwitch;
 use super::super::space_switch::{
-    self, Backend, Direction, Failure, Lease, Pace, PostGate, SlideFrame, SlidePhase, SpaceState,
+    self, Admission, Backend, Direction, Failure, Flight, Pace, PostGate, SlideFrame, SlidePhase,
+    SpaceState, Ticket,
 };
 use super::{app_services, app_services_symbol};
 
-static BUSY: AtomicBool = AtomicBool::new(false);
-/// The switch that holds [`BUSY`]. Written by every acquisition, under this
-/// lock; read only by a request that finds [`BUSY`] held, or by the holder
-/// itself, under the same lock. So whoever reads it reads the holder's.
-static IN_FLIGHT: Mutex<InFlight> = Mutex::new(InFlight {
-    display: 0,
-    followed: false,
-});
+/// The one switch in flight, and who may lead or follow it.
+static FLIGHT: Flight = Flight::new();
 /// Held while a switch's events are posted. Desktop switches reach this
 /// module from more than one dispatch thread (the hook's action worker and
 /// each HID++ gesture session), so a follow-up and the switch it follows
@@ -84,22 +79,6 @@ pub(super) fn next_desktop() {
     start(Direction::Next);
 }
 
-/// The switch in flight: its display, and whether a follow-up was posted
-/// while it waited for its Space.
-#[derive(Clone, Copy)]
-struct InFlight {
-    display: u32,
-    followed: bool,
-}
-
-fn in_flight() -> MutexGuard<'static, InFlight> {
-    IN_FLIGHT.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
-fn posting() -> MutexGuard<'static, ()> {
-    POSTING.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
 fn start(direction: Direction) {
     // Capture the display before scheduling. A moved cursor must not retarget
     // a delayed action to another monitor; `post` checks it again.
@@ -107,33 +86,32 @@ fn start(direction: Direction) {
         tracing::warn!(?direction, "Space switch: cursor display unavailable");
         return;
     };
-    let lease = {
-        let mut current = in_flight();
-        let Some(lease) = Lease::acquire(&BUSY) else {
-            let follows = CHAIN_SWITCHES.load(Ordering::Relaxed) && current.display == display_id;
-            drop(current);
-            if !follows {
-                tracing::info!(?direction, "Space switch already pending: skipped");
-            } else if follow_up(display_id, direction) {
-                // Only the in-flight switch's log line reads the flag, so
-                // flagging a successor that started meanwhile is harmless.
-                in_flight().followed = true;
+    let chain = CHAIN_SWITCHES.load(Ordering::Relaxed);
+    let ticket = match FLIGHT.admit(display_id, chain, Instant::now()) {
+        Admission::Lead(ticket) => ticket,
+        Admission::Follow(follower) => {
+            if follow_up(display_id, direction) {
+                FLIGHT.followed(follower);
             }
             return;
-        };
-        *current = InFlight {
-            display: display_id,
-            followed: false,
-        };
-        lease
+        }
+        Admission::Refused => {
+            tracing::info!(?direction, "Space switch already pending: skipped");
+            return;
+        }
     };
     // Read once: a setting changed mid-switch applies to the next one.
     let switch = desktop_switch();
-    let result = space_switch::spawn_ordered(move |gate| {
-        let _lease = lease;
+    let deadline = ticket.deadline();
+    let result = space_switch::spawn_ordered(deadline, move |gate| {
         autoreleasepool(|_| {
-            let result = Native::new(display_id, switch)
-                .and_then(|mut native| space_switch::run(&mut native, direction, gate));
+            let (result, followed) = match Native::new(display_id, switch, ticket) {
+                Ok(mut native) => {
+                    let result = space_switch::run(&mut native, direction, gate);
+                    (result, native.ticket.followed())
+                }
+                Err(error) => (Err(error), false),
+            };
             match result {
                 Ok(outcome) => {
                     tracing::debug!(
@@ -145,7 +123,7 @@ fn start(direction: Direction) {
                     );
                 }
                 // A follow-up moved the Space on before this one saw its own.
-                Err(Failure::ContextChanged) if in_flight().followed => tracing::debug!(
+                Err(Failure::ContextChanged) if followed => tracing::debug!(
                     display_id,
                     ?direction,
                     "Space switch overtaken by a follow-up"
@@ -164,10 +142,11 @@ fn start(direction: Direction) {
     }
 }
 
-/// A switch requested while another is still in flight on `display_id`. It
-/// is posted at once, the way a second key press reaches the Dock mid-slide,
-/// never waiting for the first Space to land. Nothing confirms it; the switch
-/// in flight already owns the one confirmation. True once it is posted.
+/// A switch requested while another is in flight on `display_id` and has
+/// posted. It is posted at once, the way a second key press reaches the Dock
+/// mid-slide, never waiting for the first Space to land. Nothing confirms
+/// it; the switch in flight already owns the one confirmation. True once it
+/// is posted.
 fn follow_up(display_id: u32, direction: Direction) -> bool {
     let switch = desktop_switch();
     let Some(output) = Output::prepare(switch, direction) else {
@@ -177,16 +156,15 @@ fn follow_up(display_id: u32, direction: Direction) -> bool {
         );
         return false;
     };
-    if cursor_display() != Some(display_id) {
+    if space_switch::post_on_display(&POSTING, display_id, cursor_display, || output.post())
+        .is_none()
+    {
         tracing::info!(
             ?direction,
             "Space switch follow-up: cursor left the display"
         );
         return false;
     }
-    let posting = posting();
-    output.post();
-    drop(posting);
     tracing::info!(
         display_id,
         ?direction,
@@ -305,6 +283,8 @@ struct Native {
     api: &'static Api,
     display: u32,
     switch: DesktopSwitch,
+    /// This switch's hold on the flight, released when the switch ends.
+    ticket: Ticket<'static>,
     uuid: String,
     started: Instant,
     changed: mpsc::Receiver<()>,
@@ -312,7 +292,7 @@ struct Native {
 }
 
 impl Native {
-    fn new(display: u32, switch: DesktopSwitch) -> Result<Self, Failure> {
+    fn new(display: u32, switch: DesktopSwitch, ticket: Ticket<'static>) -> Result<Self, Failure> {
         let api = API.as_ref().ok_or(Failure::Unavailable)?;
         // SAFETY: dynamically resolved CGDisplayCreateUUIDFromDisplayID accepts
         // a public CGDirectDisplayID and returns a Create-rule CFUUID or null.
@@ -329,6 +309,7 @@ impl Native {
             api,
             display,
             switch,
+            ticket,
             uuid,
             started: Instant::now(),
             changed,
@@ -350,11 +331,14 @@ impl Backend for Native {
 
     fn post(&mut self, direction: Direction, gate: PostGate) -> Result<(), Failure> {
         let output = Output::prepare(self.switch, direction).ok_or(Failure::PostFailed)?;
-        if cursor_display() != Some(self.display) {
-            return Err(Failure::ContextChanged);
-        }
-        let _posting = posting();
-        gate.commit(|| output.post())
+        space_switch::post_on_display(&POSTING, self.display, cursor_display, || {
+            gate.commit(|| output.post())
+        })
+        .unwrap_or(Err(Failure::ContextChanged))?;
+        // The posting lock is released by now, so a follow-up let through
+        // here can take it.
+        self.ticket.posted();
+        Ok(())
     }
 
     fn elapsed(&self) -> Duration {
