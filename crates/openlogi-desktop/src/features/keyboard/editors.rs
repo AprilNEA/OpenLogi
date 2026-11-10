@@ -16,7 +16,10 @@
 
 use std::rc::Rc;
 
-use super::function_row::{FunctionRowView, KeyTarget, bound_action, commit_key_action};
+use super::function_row::{
+    EditorOutcome, EditorState, EditorTransition, FunctionRowView, KeyTarget, bound_action,
+    commit_key_action,
+};
 use crate::features::binding_editor::{
     PickFn, application_editor, compact_panel, divider, editor_scroll_list, title,
 };
@@ -93,25 +96,43 @@ pub(crate) fn workflow_editor_seed(action: Option<&Action>) -> Vec<WorkflowStep>
     }
 }
 
-/// Render the editor card for `kind`, replacing the panel's action list.
-/// `invalid` shows the single-field editor's error after it rejected its
-/// input.
-pub fn editor_card(
+/// Render the editor card for `editor`, replacing the panel's action list.
+pub(super) fn editor_card(
     target: KeyTarget,
-    kind: PowerUserKind,
-    text_state: Option<Entity<InputState>>,
-    workflow_draft: Vec<WorkflowStep>,
-    invalid: bool,
+    editor: &EditorState,
     view: &Entity<FunctionRowView>,
     pal: Palette,
 ) -> gpui::Div {
-    match kind {
-        PowerUserKind::Workflow => workflow_editor_card(target, workflow_draft, view, pal),
-        _ => match text_state {
-            Some(state) if kind == PowerUserKind::OpenApplication => {
-                application_editor_card(target, state, invalid, view, pal)
+    match editor {
+        EditorState::Closed => compact_panel(pal)
+            .w(px(300.))
+            .child(title(tr!("keyboard.editor_unavailable"), pal)),
+        EditorState::Workflow { steps, .. } => {
+            workflow_editor_card(target, steps.clone(), view, pal)
+        }
+        EditorState::Application { input, invalid, .. } => match input.clone() {
+            Some(state) => application_editor_card(target, state, *invalid, view, pal),
+            None => compact_panel(pal)
+                .w(px(300.))
+                .child(title(tr!("keyboard.editor_unavailable"), pal)),
+        },
+        EditorState::CustomShortcut { input, invalid, .. } => match input.clone() {
+            Some(state) => text_editor_card(
+                target,
+                PowerUserKind::CustomShortcut,
+                state,
+                *invalid,
+                view,
+                pal,
+            ),
+            None => compact_panel(pal)
+                .w(px(300.))
+                .child(title(tr!("keyboard.editor_unavailable"), pal)),
+        },
+        EditorState::Text { kind, input, .. } => match input.clone() {
+            Some(state) => {
+                text_editor_card(target, kind.power_user_kind(), state, false, view, pal)
             }
-            Some(state) => text_editor_card(target, kind, state, invalid, view, pal),
             None => compact_panel(pal)
                 .w(px(300.))
                 .child(title(tr!("keyboard.editor_unavailable"), pal)),
@@ -158,7 +179,7 @@ fn text_editor_card(
                             .child(tr!("action_ring.custom_action_invalid_input")),
                     )
                 })
-                .child(editor_action_row(target, kind, view)),
+                .child(editor_action_row(target, view)),
         )
 }
 
@@ -174,12 +195,26 @@ fn application_editor_card(
     let heading = tr!(PowerUserKind::OpenApplication.heading_key());
     let key_name = target.label();
     let view_pick = view.clone();
+    let commit_target = target.clone();
     let on_pick: PickFn = Rc::new(move |action, _window, cx| {
-        AppState::apply(cx, |state| {
-            let action = keep_application_name(bound_action(state, &target), action);
-            commit_key_action(state, &target, Some(action))
+        let outcome = view_pick.update(cx, |v, vcx| {
+            let out = v.transition_editor(EditorTransition::CommitApplication {
+                expected_target: &commit_target,
+                picked: action,
+            });
+            vcx.notify();
+            out
         });
-        view_pick.update(cx, |v, vcx| v.close_editor(vcx));
+        if let EditorOutcome::Commit {
+            target: committed,
+            action,
+        } = outcome
+        {
+            AppState::apply(cx, |state| {
+                let action = keep_application_name(bound_action(state, &committed), action);
+                commit_key_action(state, &committed, Some(action))
+            });
+        }
     });
     let view_invalid = view.clone();
     let on_invalid = Rc::new(move |cx: &mut App| {
@@ -233,11 +268,7 @@ fn keep_application_name(bound: Option<Action>, picked: Action) -> Action {
 }
 
 /// Cancel (back to list) + Save (commit the drafted text).
-fn editor_action_row(
-    target: KeyTarget,
-    kind: PowerUserKind,
-    view: &Entity<FunctionRowView>,
-) -> impl IntoElement {
+fn editor_action_row(target: KeyTarget, view: &Entity<FunctionRowView>) -> impl IntoElement {
     let view_save = view.clone();
     let view_cancel = view.clone();
 
@@ -263,22 +294,23 @@ fn editor_action_row(
                         .text_state()
                         .map(|s| s.read(cx).value().to_string())
                         .unwrap_or_default();
-                    let action = match kind {
-                        PowerUserKind::CustomShortcut => {
-                            if let Ok(combo) = text.parse::<KeyCombo>() {
-                                Action::CustomShortcut(combo)
-                            } else {
-                                view_save.update(cx, |v, vcx| v.mark_editor_invalid(vcx));
-                                return;
-                            }
-                        }
-                        PowerUserKind::TypeText => Action::TypeText(text),
-                        PowerUserKind::RunAppleScript => Action::RunAppleScript(text),
-                        PowerUserKind::RunShellCommand => Action::RunShellCommand(text),
-                        PowerUserKind::OpenApplication | PowerUserKind::Workflow => return,
-                    };
-                    AppState::apply(cx, |state| commit_key_action(state, &target, Some(action)));
-                    view_save.update(cx, |v, vcx| v.close_editor(vcx));
+                    let outcome = view_save.update(cx, |v, vcx| {
+                        let out = v.transition_editor(EditorTransition::CommitText {
+                            expected_target: &target,
+                            raw_text: text,
+                        });
+                        vcx.notify();
+                        out
+                    });
+                    if let EditorOutcome::Commit {
+                        target: committed,
+                        action,
+                    } = outcome
+                    {
+                        AppState::apply(cx, |state| {
+                            commit_key_action(state, &committed, Some(action))
+                        });
+                    }
                 }),
         )
 }
@@ -338,12 +370,23 @@ fn workflow_editor_card(
                         .on_click({
                             let v = view.clone();
                             move |_e, _window, cx| {
-                                let steps = v.read(cx).workflow_draft().to_vec();
-                                let action = Action::Workflow(steps);
-                                AppState::apply(cx, |state| {
-                                    commit_key_action(state, &target, Some(action))
+                                let outcome = v.update(cx, |v, vcx| {
+                                    let out =
+                                        v.transition_editor(EditorTransition::CommitWorkflow {
+                                            expected_target: &target,
+                                        });
+                                    vcx.notify();
+                                    out
                                 });
-                                v.update(cx, |v, vcx| v.close_editor(vcx));
+                                if let EditorOutcome::Commit {
+                                    target: committed,
+                                    action,
+                                } = outcome
+                                {
+                                    AppState::apply(cx, |state| {
+                                        commit_key_action(state, &committed, Some(action))
+                                    });
+                                }
                             }
                         }),
                 ),
