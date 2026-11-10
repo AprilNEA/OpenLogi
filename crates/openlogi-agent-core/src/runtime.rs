@@ -963,15 +963,8 @@ impl ActionDispatcher {
         self.buttons.invalidate_all();
     }
 
-    /// End ordinary presses on a context refresh while keeping unchanged
-    /// gesture capabilities alive for their separately admitted actions.
-    pub fn cancel_context_buttons(&self) {
-        self.buttons.cancel_context();
-    }
-
-    /// End ordinary pointer-scoped presses when the hovered window changes.
-    /// Gesture capabilities survive unchanged bindings and refresh each output
-    /// target; keyboard and focus-scoped holds keep their own lifecycles.
+    /// End only pointer-scoped presses when the hovered window changes.
+    /// Keyboard and explicitly focus-scoped holds keep their own lifecycles.
     /// Preserve presses already admitted against the newly published target.
     pub fn cancel_pointer_buttons_except(&self, current: openlogi_hook::PointerTarget) {
         self.buttons.cancel_pointer_except(current);

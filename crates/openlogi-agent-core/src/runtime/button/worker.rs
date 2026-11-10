@@ -112,9 +112,6 @@ fn process_command(
         ButtonCommand::CancelHooks => {
             emit_canceled(state.cancel_hooks(), CancelReason::SourceEnded, emit);
         }
-        ButtonCommand::CancelContext => {
-            emit_canceled(state.cancel_context(), CancelReason::Invalidated, emit);
-        }
         ButtonCommand::CancelPointerExcept(current) => {
             emit_canceled(
                 state.cancel_pointer_except(current),
