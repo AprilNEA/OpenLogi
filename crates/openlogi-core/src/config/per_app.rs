@@ -150,8 +150,9 @@ impl Config {
         direction: GestureDirection,
         action: Action,
     ) {
+        // Only the edited direction changes: a sparse map stays sparse, as
+        // `set_gesture_direction` keeps it device-wide.
         let mut binding = self.app_binding(device_key, app, button);
-        binding.fill_gesture_defaults();
         let Binding::Gesture(map) = &mut binding else {
             return;
         };
@@ -165,20 +166,15 @@ impl Config {
             .insert(button, binding);
     }
 
-    /// The binding `app`'s profile resolves `button` to: its own override, or
-    /// the inherited one, or the button's canonical default.
+    /// The binding an editor for `app`'s profile shows for `button`, which is
+    /// what its next edit starts from: resolved as [`Self::effective_bindings`]
+    /// resolves it, so a reset exact profile shows and edits the `exe:` or
+    /// alias profile it now falls back to, then Default, then the button's
+    /// canonical default.
     fn app_binding(&self, device_key: &str, app: &str, button: ButtonId) -> Binding {
         let mut binding = self
-            .devices
-            .get(device_key)
-            .and_then(|device| {
-                device
-                    .per_app_bindings
-                    .get(app)
-                    .and_then(|overlay| overlay.get(&button))
-                    .or_else(|| device.bindings.get(&button))
-            })
-            .cloned()
+            .effective_bindings(device_key, Some(app))
+            .remove(&button)
             .unwrap_or_else(|| default_binding_for(button));
         if let Binding::Gesture(map) = &mut binding {
             map.entry(GestureDirection::Click)

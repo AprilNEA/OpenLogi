@@ -568,3 +568,78 @@ fn removing_an_app_profile_drops_its_stash() {
     assert!(cfg.devices["mouse"].per_app_bindings.is_empty());
     assert!(cfg.devices["mouse"].per_app_disabled_gestures.is_empty());
 }
+
+#[test]
+fn an_app_direction_edit_changes_only_that_direction_of_a_sparse_map() {
+    let mut cfg = Config::default();
+    let sparse = BTreeMap::from([
+        (GestureDirection::Click, Action::Copy),
+        (GestureDirection::Up, Action::Undo),
+    ]);
+    cfg.set_binding("mouse", ButtonId::Back, Binding::Gesture(sparse.clone()));
+    cfg.set_per_app_gesture_direction(
+        "mouse",
+        "com.example.App",
+        ButtonId::Back,
+        GestureDirection::Up,
+        Action::Redo,
+    );
+    let mut expected = sparse;
+    expected.insert(GestureDirection::Up, Action::Redo);
+    assert_eq!(
+        cfg.per_app_overrides("mouse", "com.example.App").unwrap()[&ButtonId::Back],
+        Binding::Gesture(expected)
+    );
+}
+
+/// After an exact profile is reset, its editor shows the `exe:` profile it
+/// now falls back to; the next edit must start from that map, not Default.
+#[test]
+fn an_edit_after_resetting_an_exact_profile_starts_from_its_fallback() {
+    let (device, exact, button) = ("mouse", r"c:\apps\code_1\code.exe", ButtonId::Back);
+    let fallback_map = BTreeMap::from([
+        (GestureDirection::Click, Action::Copy),
+        (GestureDirection::Left, Action::Undo),
+    ]);
+    let mut cfg = Config::default();
+    cfg.set_binding(device, button, Binding::Single(Action::BrowserBack));
+    cfg.devices
+        .get_mut(device)
+        .unwrap()
+        .per_app_bindings
+        .insert(
+            "exe:code.exe".into(),
+            BTreeMap::from([(button, Binding::Gesture(fallback_map.clone()))]),
+        );
+    cfg.set_per_app_binding(device, exact, button, Some(Action::Paste));
+    cfg.set_per_app_binding(device, exact, button, None);
+    assert_eq!(
+        cfg.effective_bindings(device, Some(exact))[&button],
+        Binding::Gesture(fallback_map.clone()),
+        "the reset exact profile shows its fallback"
+    );
+
+    cfg.set_per_app_gesture_direction(device, exact, button, GestureDirection::Up, Action::Redo);
+    let mut expected = fallback_map.clone();
+    expected.insert(GestureDirection::Up, Action::Redo);
+    assert_eq!(
+        cfg.per_app_overrides(device, exact).unwrap()[&button],
+        Binding::Gesture(expected)
+    );
+
+    cfg.set_per_app_binding(device, exact, button, None);
+    cfg.disable_per_app_gestures(device, exact, button);
+    assert_eq!(
+        cfg.effective_bindings(device, Some(exact))[&button],
+        Binding::Single(Action::Copy),
+        "turning the shown gestures off keeps their click"
+    );
+    assert_eq!(
+        cfg.devices[device].per_app_disabled_gestures[exact][&button],
+        fallback_map
+    );
+    assert_eq!(
+        cfg.effective_bindings(device, None)[&button],
+        Binding::Single(Action::BrowserBack)
+    );
+}
