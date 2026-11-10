@@ -308,13 +308,16 @@ fn an_export_holds_one_device_without_this_machines_routes() {
     assert!(config.device_export("serial:missing").is_none());
 }
 
-/// A device whose buttons, Actions Ring and app profile run commands and
-/// scripts, next to bindings that run none.
-const RUNS_CODE: &str = r#"
+/// A device whose buttons, Actions Ring and app profile run commands,
+/// scripts and workflows, type text and open things, next to bindings that
+/// do none of that.
+const PAYLOAD_ACTIONS: &str = r#"
 [bindings]
 Back = { RunShellCommand = "say back" }
-Forward = { Workflow = [{ TypeText = "hi" }, { RunAppleScript = "beep" }] }
-Thumbwheel = { Workflow = [{ TypeText = "hi" }] }
+Forward = { Workflow = [{ TypeText = "hi" }] }
+MiddleClick = { TypeText = "hi" }
+WheelTiltLeft = { OpenApplication = { path = "~/Downloads/run.command", display_name = "Calculator" } }
+Thumbwheel = "Copy"
 
 [bindings.GestureButton]
 Up = { RunShellCommand = "say up" }
@@ -332,10 +335,13 @@ Top = { action = { RunShellCommand = "say ring" } }
 "#;
 
 #[test]
-fn a_file_brings_no_command_or_script() {
+fn a_file_brings_no_action_its_payload_decides() {
     let config = Config::default();
-    let transfer =
-        config.settings_transfer_from_file(&device(RUNS_CODE), "unit:new", mouse(mx_master()));
+    let transfer = config.settings_transfer_from_file(
+        &device(PAYLOAD_ACTIONS),
+        "unit:new",
+        mouse(mx_master()),
+    );
 
     assert_eq!(transfer.changed.len(), 2, "{:?}", transfer.changed);
     assert!(
@@ -350,12 +356,14 @@ fn a_file_brings_no_command_or_script() {
     let left_out: Vec<&TransferItem> = transfer
         .skipped
         .iter()
-        .inspect(|skipped| assert_eq!(skipped.reason, SkipReason::RunsCode))
+        .inspect(|skipped| assert_eq!(skipped.reason, SkipReason::NotFromAFile))
         .map(|skipped| &skipped.item)
         .collect();
     for item in [
         TransferItem::Button(ButtonId::Back),
         TransferItem::Button(ButtonId::Forward),
+        TransferItem::Button(ButtonId::MiddleClick),
+        TransferItem::Button(ButtonId::WheelTiltLeft),
         TransferItem::Button(ButtonId::GestureButton),
         TransferItem::StoredGestures(ButtonId::DpiToggle),
         TransferItem::AppButton {
@@ -366,25 +374,35 @@ fn a_file_brings_no_command_or_script() {
     ] {
         assert!(left_out.contains(&&item), "{item:?} left out: {left_out:?}");
     }
-    assert_eq!(left_out.len(), 6);
+    assert_eq!(left_out.len(), 8);
 
     let settings = &transfer.settings;
-    assert!(!settings.bindings.contains_key(&ButtonId::Back));
-    assert!(!settings.bindings.contains_key(&ButtonId::GestureButton));
+    for button in [
+        ButtonId::Back,
+        ButtonId::Forward,
+        ButtonId::MiddleClick,
+        ButtonId::WheelTiltLeft,
+        ButtonId::GestureButton,
+    ] {
+        assert!(!settings.bindings.contains_key(&button), "{button:?}");
+    }
     assert!(settings.disabled_gestures.is_empty());
     assert!(settings.action_ring.is_default());
 }
 
 #[test]
-fn a_device_of_this_machine_brings_its_commands_and_scripts() {
+fn a_device_of_this_machine_brings_every_action() {
     let transfer = transfer_settings(
-        &device(RUNS_CODE),
+        &device(PAYLOAD_ACTIONS),
         &DeviceConfig::default(),
         mouse(mx_master()),
     );
 
     assert!(transfer.skipped.is_empty(), "{:?}", transfer.skipped);
-    assert_eq!(transfer.changed.len(), 8, "{:?}", transfer.changed);
-    assert_eq!(transfer.settings.bindings, device(RUNS_CODE).bindings);
-    assert_eq!(transfer.settings.action_ring, device(RUNS_CODE).action_ring);
+    assert_eq!(transfer.changed.len(), 10, "{:?}", transfer.changed);
+    assert_eq!(transfer.settings.bindings, device(PAYLOAD_ACTIONS).bindings);
+    assert_eq!(
+        transfer.settings.action_ring,
+        device(PAYLOAD_ACTIONS).action_ring
+    );
 }
