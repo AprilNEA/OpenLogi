@@ -158,12 +158,17 @@ impl BatteryTelemetry {
     }
 
     /// Observe a single device's current battery and configuration state at `now_secs`.
+    ///
+    /// When `signature` is `None`, the device's power-affecting hardware settings
+    /// (such as `BacklightLoad` or `ReportRateLoad`) have not finished loading yet.
+    /// Charging transitions still immediately invalidate any prior discharging anchor,
+    /// while discharging readings preserve the existing anchor until settings arrive.
     pub fn observe_device(
         &mut self,
         config_key: &str,
         online: bool,
         battery: Option<&BatteryInfo>,
-        signature: &str,
+        signature: Option<&str>,
         nominal_full_hours: u32,
         now_secs: u64,
     ) {
@@ -214,6 +219,11 @@ impl BatteryTelemetry {
         if percentage == 0 {
             return;
         }
+
+        // 3. Wait for known hardware settings before anchoring or comparing discharge profiles.
+        let Some(signature) = signature else {
+            return;
+        };
 
         if advance_discharging_entry(entry, percentage, signature, nominal_full_hours, now_secs) {
             self.dirty = true;
@@ -496,35 +506,48 @@ pub(crate) fn observe_state_telemetry(state: &mut AppState) {
     observe_state_telemetry_at(state, now_secs);
 }
 
+struct DeviceObservation {
+    config_key: String,
+    online: bool,
+    battery: Option<BatteryInfo>,
+    signature: Option<String>,
+    nominal_full_hours: u32,
+}
+
 pub(crate) fn observe_state_telemetry_at(state: &mut AppState, now_secs: u64) {
-    let observations: Vec<(String, bool, Option<BatteryInfo>, String, u32)> = state
+    let observations: Vec<DeviceObservation> = state
         .devices()
         .iter()
         .filter(|record| record.persistent)
         .map(|record| {
             let (nominal_full_hours, signature, _) = nominal_profile_for_device(state, record);
-            (
-                record.config_key.clone(),
-                record.is_online(),
-                record.battery.clone(),
-                signature,
+            let known_sig = (!signature_has_pending_read(&signature)).then_some(signature);
+            DeviceObservation {
+                config_key: record.config_key.clone(),
+                online: record.is_online(),
+                battery: record.battery.clone(),
+                signature: known_sig,
                 nominal_full_hours,
-            )
+            }
         })
         .collect();
 
     let telemetry = state.battery_telemetry_mut();
-    for (config_key, online, battery, signature, nominal_full_hours) in observations {
+    for obs in observations {
         telemetry.observe_device(
-            &config_key,
-            online,
-            battery.as_ref(),
-            &signature,
-            nominal_full_hours,
+            &obs.config_key,
+            obs.online,
+            obs.battery.as_ref(),
+            obs.signature.as_deref(),
+            obs.nominal_full_hours,
             now_secs,
         );
     }
     telemetry.flush();
+}
+
+fn signature_has_pending_read(signature: &str) -> bool {
+    signature == "kbd:unmeasured" || signature.ends_with(":hz=unknown")
 }
 
 /// Compute the battery duration & health estimate for `record` given current `AppState`.
@@ -602,6 +625,46 @@ fn effective_percentage(battery: &BatteryInfo) -> Option<u8> {
     }
 }
 
+/// Evaluated RGB power state for a device, distinguishing unset onboard lighting
+/// from explicitly dark or lit saved settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RgbPowerState {
+    /// Device does not advertise `Capabilities::lighting`.
+    Unsupported,
+    /// Device supports `Capabilities::lighting`, but no saved `Lighting` preference
+    /// exists yet — hardware continues running its onboard lighting state.
+    Unknown,
+    /// Saved `Lighting` is disabled, has `brightness == 0`, or emits black (`0, 0, 0`).
+    Off,
+    /// Saved `Lighting` is enabled with non-zero brightness and a non-black color.
+    On,
+}
+
+impl RgbPowerState {
+    const fn token(self) -> &'static str {
+        match self {
+            Self::Unsupported | Self::Off => "off",
+            Self::Unknown => "unknown",
+            Self::On => "on",
+        }
+    }
+}
+
+fn lighting_emits_light(lighting: &openlogi_core::config::Lighting) -> bool {
+    let (r, g, b) = lighting.color.components();
+    lighting.enabled && lighting.brightness > 0 && (r != 0 || g != 0 || b != 0)
+}
+
+fn rgb_power_state_for_device(state: &AppState, record: &DeviceRecord) -> RgbPowerState {
+    let has_lighting_cap = record.capabilities.is_some_and(|c| c.lighting);
+    match state.lighting_for(&record.config_key, &record.route_key) {
+        Some(lighting) if lighting_emits_light(&lighting) => RgbPowerState::On,
+        Some(_) => RgbPowerState::Off,
+        None if has_lighting_cap => RgbPowerState::Unknown,
+        None => RgbPowerState::Unsupported,
+    }
+}
+
 /// Returns `(nominal_full_charge_hours, config_signature, localized_config_note)`.
 ///
 /// Strictly gates on `record.capabilities` and `Load::Ready` so unprobed or
@@ -630,17 +693,18 @@ pub(crate) fn nominal_profile_for_device(
             }
 
             // Check RGB lighting for gaming keyboards
-            if let Some(lighting) = state.lighting_for(&record.config_key, &record.route_key) {
-                if lighting.enabled {
+            match rgb_power_state_for_device(state, record) {
+                RgbPowerState::On => {
                     let note = tr!("device.battery_note_rgb_on").into();
-                    return (40, "kbd:rgb-on".to_owned(), Some(note));
+                    (40, "kbd:rgb-on".to_owned(), Some(note))
                 }
-                let note = tr!("device.battery_note_rgb_off").into();
-                return (180 * 24, "kbd:rgb-off".to_owned(), Some(note));
+                RgbPowerState::Off => {
+                    let note = tr!("device.battery_note_rgb_off").into();
+                    (180 * 24, "kbd:rgb-off".to_owned(), Some(note))
+                }
+                RgbPowerState::Unknown => (40, "kbd:rgb-unknown".to_owned(), None),
+                RgbPowerState::Unsupported => (120 * 24, "kbd:standard".to_owned(), None),
             }
-
-            // Standard non-backlit / unprobed keyboard
-            (120 * 24, "kbd:standard".to_owned(), None)
         }
         DeviceKind::Mouse | DeviceKind::Trackball | DeviceKind::Touchpad => {
             let has_report_rate = record.capabilities.is_some_and(|c| c.report_rate);
@@ -652,9 +716,7 @@ pub(crate) fn nominal_profile_for_device(
             } else {
                 None
             };
-            let rgb_on = state
-                .lighting_for(&record.config_key, &record.route_key)
-                .is_some_and(|l| l.enabled);
+            let rgb_state = rgb_power_state_for_device(state, record);
 
             if model_lower.contains("mx master") {
                 return (70 * 24, "mouse:mx-master".to_owned(), None);
@@ -666,11 +728,16 @@ pub(crate) fn nominal_profile_for_device(
                 return (120 * 24, "mouse:ergo".to_owned(), None);
             }
             if has_report_rate
+                || rgb_state != RgbPowerState::Unsupported
                 || model_lower.contains("g502")
                 || model_lower.contains("pro x")
                 || model_lower.contains("g pro")
             {
-                let mut base_hours: f32 = if rgb_on { 45.0 } else { 130.0 };
+                let mut base_hours: f32 = match rgb_state {
+                    RgbPowerState::On => 45.0,
+                    RgbPowerState::Unknown => 90.0,
+                    RgbPowerState::Off | RgbPowerState::Unsupported => 130.0,
+                };
                 if let Some(hz) = rate_hz {
                     if hz >= 2000 {
                         base_hours *= 0.65;
@@ -678,14 +745,18 @@ pub(crate) fn nominal_profile_for_device(
                         base_hours *= 1.25;
                     }
                 }
-                let note = match (rgb_on, rate_hz) {
-                    (true, Some(hz)) => Some(tr!("device.battery_note_rgb_rate", hz => hz).into()),
-                    (false, Some(hz)) => Some(tr!("device.battery_note_rate", hz => hz).into()),
-                    (true, None) => Some(tr!("device.battery_note_rgb_on").into()),
-                    (false, None) => None,
+                let note = match (rgb_state, rate_hz) {
+                    (RgbPowerState::On, Some(hz)) => {
+                        Some(tr!("device.battery_note_rgb_rate", hz => hz).into())
+                    }
+                    (_, Some(hz)) => Some(tr!("device.battery_note_rate", hz => hz).into()),
+                    (RgbPowerState::On, None) => Some(tr!("device.battery_note_rgb_on").into()),
+                    (RgbPowerState::Off, None) => Some(tr!("device.battery_note_rgb_off").into()),
+                    (RgbPowerState::Unknown | RgbPowerState::Unsupported, None) => None,
                 };
+                let rgb_token = rgb_state.token();
                 let hz_token = rate_hz.map_or_else(|| "unknown".to_owned(), |hz| hz.to_string());
-                let sig = format!("mouse:gaming:rgb={rgb_on}:hz={hz_token}");
+                let sig = format!("mouse:gaming:rgb={rgb_token}:hz={hz_token}");
                 return (base_hours.round().max(10.0) as u32, sig, note);
             }
 
@@ -765,10 +836,17 @@ fn keyboard_backlight_profile(
         .into()
     };
 
-    let sig = format!(
-        "kbd:bl-on:mode={:?}:lvl={level}/{max_level}:dur={timeout_secs}:ps={}",
-        bl.mode, bl.power_save
-    );
+    let sig = if bl.mode == BacklightMode::Automatic {
+        format!(
+            "kbd:bl-on:mode=Auto:dur={timeout_secs}:ps={}",
+            bl.power_save
+        )
+    } else {
+        format!(
+            "kbd:bl-on:mode={:?}:lvl={level}/{max_level}:dur={timeout_secs}:ps={}",
+            bl.mode, bl.power_save
+        )
+    };
     (estimated_hours, sig, Some(note))
 }
 
@@ -989,7 +1067,14 @@ mod tests {
         };
 
         // 1. Anchor at 80% discharging
-        telemetry.observe_device(key, true, Some(&discharging(80)), sig, nominal_hours, t0);
+        telemetry.observe_device(
+            key,
+            true,
+            Some(&discharging(80)),
+            Some(sig),
+            nominal_hours,
+            t0,
+        );
         assert_eq!(
             telemetry.phase_for(key),
             Some(&DischargePhase::Discharging {
@@ -1001,12 +1086,19 @@ mod tests {
 
         // 2. Partial charge observed at 75% -> must transition phase to Charging
         let t1 = t0 + 3_600;
-        telemetry.observe_device(key, true, Some(&charging(75)), sig, nominal_hours, t1);
+        telemetry.observe_device(key, true, Some(&charging(75)), Some(sig), nominal_hours, t1);
         assert_eq!(telemetry.phase_for(key), Some(&DischargePhase::Charging));
 
         // 3. Unplugged at 75% discharging -> re-anchors at 75% without learning 80% -> 75%
         let t2 = t1 + 600;
-        telemetry.observe_device(key, true, Some(&discharging(75)), sig, nominal_hours, t2);
+        telemetry.observe_device(
+            key,
+            true,
+            Some(&discharging(75)),
+            Some(sig),
+            nominal_hours,
+            t2,
+        );
         assert_eq!(
             telemetry.query(key, sig).2,
             0,
@@ -1023,7 +1115,14 @@ mod tests {
 
         // 4. Subsequent 5% drop (75% -> 70%) over 2 days learns strictly from 5% / 2 days (2.5%/day)
         let t3 = t2 + 2 * 86_400;
-        telemetry.observe_device(key, true, Some(&discharging(70)), sig, nominal_hours, t3);
+        telemetry.observe_device(
+            key,
+            true,
+            Some(&discharging(70)),
+            Some(sig),
+            nominal_hours,
+            t3,
+        );
         let (_, learned, samples) = telemetry.query(key, sig);
         assert_eq!(samples, 1);
         let drain = learned.expect("learned drain present");
@@ -1048,11 +1147,25 @@ mod tests {
             status: BatteryStatus::Discharging,
         };
 
-        telemetry.observe_device(key, true, Some(&discharging(90)), sig, nominal_hours, t0);
+        telemetry.observe_device(
+            key,
+            true,
+            Some(&discharging(90)),
+            Some(sig),
+            nominal_hours,
+            t0,
+        );
 
         // 15 days later (> MAX_LEARN_WINDOW_SECS) at 60%: must re-anchor without learning
         let t_gap = t0 + MAX_LEARN_WINDOW_SECS + 86_400;
-        telemetry.observe_device(key, true, Some(&discharging(60)), sig, nominal_hours, t_gap);
+        telemetry.observe_device(
+            key,
+            true,
+            Some(&discharging(60)),
+            Some(sig),
+            nominal_hours,
+            t_gap,
+        );
         assert_eq!(telemetry.query(key, sig).2, 0);
         assert_eq!(
             telemetry.phase_for(key),
@@ -1069,7 +1182,7 @@ mod tests {
             key,
             true,
             Some(&discharging(58)),
-            sig,
+            Some(sig),
             nominal_hours,
             t_next,
         );
@@ -1106,7 +1219,7 @@ mod tests {
             &key,
             true,
             Some(&coarse_low),
-            "kbd:standard",
+            Some("kbd:standard"),
             120 * 24,
             t0 + 2 * 86_400,
         );
@@ -1144,7 +1257,7 @@ mod tests {
 
         // Before report rate is Ready: signature uses hz=unknown (never unwrap_or(1000))
         let (_, sig_unknown, note_unknown) = nominal_profile_for_device(&state, &mouse_record);
-        assert_eq!(sig_unknown, "mouse:gaming:rgb=false:hz=unknown");
+        assert_eq!(sig_unknown, "mouse:gaming:rgb=off:hz=unknown");
         assert_eq!(note_unknown, None);
 
         // Once report rate is Ready at 2000Hz on the unselected mouse:
@@ -1156,7 +1269,7 @@ mod tests {
             })),
         );
         let (hours_2k, sig_2k, note_2k) = nominal_profile_for_device(&state, &mouse_record);
-        assert_eq!(sig_2k, "mouse:gaming:rgb=false:hz=2000");
+        assert_eq!(sig_2k, "mouse:gaming:rgb=off:hz=2000");
         assert_eq!(note_2k.as_deref(), Some("2000Hz"));
         assert!(hours_2k < 130);
 
@@ -1170,7 +1283,7 @@ mod tests {
                 percentage: Some(70),
                 ..battery
             }),
-            &sig_2k,
+            Some(&sig_2k),
             hours_2k,
             t0 + 3_600 * 4,
         );
@@ -1214,7 +1327,7 @@ mod tests {
             "serial:test",
             true,
             Some(&battery),
-            "kbd:standard",
+            Some("kbd:standard"),
             2880,
             1000,
         );
@@ -1244,5 +1357,224 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn restart_preserves_discharge_interval_until_async_settings_reply_arrives() {
+        let caps = Capabilities {
+            backlight: true,
+            ..Default::default()
+        };
+        let battery_80 = BatteryInfo {
+            percentage: Some(80),
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Discharging,
+        };
+        let mut state =
+            test_state_with_devices(vec![mx_keys_mini_device(Some(caps), Some(battery_80))]);
+        let dev_key = state.devices()[0].device_key();
+        let cfg_key = state.devices()[0].config_key.clone();
+        let t0 = 1_700_000_000;
+
+        // Session 1: Backlight is Ready -> anchors at 80% with kbd:bl-on:...
+        state.device_reads_mut().set_backlight_load_for_test(
+            dev_key.clone(),
+            crate::state::BacklightLoad::Ready(Arc::new(manual_backlight(4, 15))),
+        );
+        observe_state_telemetry_at(&mut state, t0);
+        let (_, expected_sig, _) = nominal_profile_for_device(&state, &state.devices()[0]);
+        assert_eq!(
+            state.battery_telemetry().phase_for(&cfg_key),
+            Some(&DischargePhase::Discharging {
+                percentage: 80,
+                timestamp_secs: t0,
+                signature: expected_sig.clone(),
+            })
+        );
+
+        // Simulate app restart 2 hours later: battery is now 75%, but BacklightLoad is Unknown
+        // when the first inventory update arrives before `load_all_backlights` replies.
+        let t_restart = t0 + 2 * 3_600;
+        state
+            .device_reads_mut()
+            .set_backlight_load_for_test(dev_key.clone(), crate::state::BacklightLoad::Unknown);
+        let battery_75 = BatteryInfo {
+            percentage: Some(75),
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Discharging,
+        };
+        let inv = DeviceInventory {
+            receiver: ReceiverInfo {
+                name: "Logi Bolt Receiver".into(),
+                vendor_id: 0x046d,
+                product_id: 0xc548,
+                unique_id: Some("bolt-1".into()),
+            },
+            paired: vec![mx_keys_mini_device(Some(caps), Some(battery_75))],
+        };
+        let resolver = AssetResolver::new();
+        let _ = state.refresh_inventories(&[inv], &[], &resolver, &[]);
+        observe_state_telemetry_at(&mut state, t_restart);
+
+        // Anchor must STILL be the 80% @ t0 reading (not overwritten by kbd:unmeasured)!
+        assert_eq!(
+            state.battery_telemetry().phase_for(&cfg_key),
+            Some(&DischargePhase::Discharging {
+                percentage: 80,
+                timestamp_secs: t0,
+                signature: expected_sig.clone(),
+            })
+        );
+
+        // Now the async backlight read completes at t_restart + 1s:
+        // The 80% -> 75% interval is preserved and learned!
+        state.device_reads_mut().set_backlight_load_for_test(
+            dev_key,
+            crate::state::BacklightLoad::Ready(Arc::new(manual_backlight(4, 15))),
+        );
+        observe_state_telemetry_at(&mut state, t_restart + 1);
+        let (_, _, samples) = state.battery_telemetry().query(&cfg_key, &expected_sig);
+        assert_eq!(
+            samples, 1,
+            "restart must preserve the prior anchor until settings reply arrives"
+        );
+    }
+
+    #[test]
+    fn automatic_brightness_sensor_changes_preserve_learning_window() {
+        let caps = Capabilities {
+            backlight: true,
+            ..Default::default()
+        };
+        let battery_90 = BatteryInfo {
+            percentage: Some(90),
+            level: BatteryLevel::Full,
+            status: BatteryStatus::Discharging,
+        };
+        let mut state =
+            test_state_with_devices(vec![mx_keys_mini_device(Some(caps), Some(battery_90))]);
+        let dev_key = state.devices()[0].device_key();
+        let cfg_key = state.devices()[0].config_key.clone();
+        let t0 = 1_700_000_000;
+
+        let auto_bl = |level: u8| BacklightState {
+            enabled: true,
+            power_save: false,
+            mode: BacklightMode::Automatic,
+            controls: BacklightControls::AUTOMATIC | BacklightControls::DURATION,
+            status: BacklightStatus::AlsAutomatic,
+            current_level: level,
+            nb_levels: 8,
+            duration: Some(BacklightDuration::try_from(15u16).unwrap()),
+        };
+
+        // 1. Anchor at 90% in Automatic mode with ambient sensor level 2
+        state.device_reads_mut().set_backlight_load_for_test(
+            dev_key.clone(),
+            crate::state::BacklightLoad::Ready(Arc::new(auto_bl(2))),
+        );
+        observe_state_telemetry_at(&mut state, t0);
+        let (_, sig_lvl2, _) = nominal_profile_for_device(&state, &state.devices()[0]);
+
+        // 2. 10 minutes later, ambient room light changes sensor current_level to 6 (still 90%)
+        state.device_reads_mut().set_backlight_load_for_test(
+            dev_key.clone(),
+            crate::state::BacklightLoad::Ready(Arc::new(auto_bl(6))),
+        );
+        let (_, sig_lvl6, _) = nominal_profile_for_device(&state, &state.devices()[0]);
+        assert_eq!(
+            sig_lvl2, sig_lvl6,
+            "automatic mode signature must not depend on transient ambient sensor level"
+        );
+        observe_state_telemetry_at(&mut state, t0 + 600);
+        assert_eq!(
+            state.battery_telemetry().phase_for(&cfg_key),
+            Some(&DischargePhase::Discharging {
+                percentage: 90,
+                timestamp_secs: t0,
+                signature: sig_lvl2.clone(),
+            }),
+            "ambient sensor change must not reset the discharge anchor timestamp"
+        );
+
+        // 3. At t0 + 40 minutes (>= 30m window), battery drops to 88% with sensor at level 5 -> learns!
+        let battery_88 = BatteryInfo {
+            percentage: Some(88),
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Discharging,
+        };
+        state.device_reads_mut().set_backlight_load_for_test(
+            dev_key,
+            crate::state::BacklightLoad::Ready(Arc::new(auto_bl(5))),
+        );
+        let (hours_lvl5, sig_lvl5, _) = nominal_profile_for_device(&state, &state.devices()[0]);
+        state.battery_telemetry_mut().observe_device(
+            &cfg_key,
+            true,
+            Some(&battery_88),
+            Some(&sig_lvl5),
+            hours_lvl5,
+            t0 + 2_400,
+        );
+        assert_eq!(state.battery_telemetry().query(&cfg_key, &sig_lvl2).2, 1);
+    }
+
+    #[test]
+    fn unset_rgb_and_zero_brightness_or_black_color_select_correct_profiles() {
+        let _lock = LOCALE_LOCK.lock().unwrap();
+        rust_i18n::set_locale("en");
+        let battery = BatteryInfo {
+            percentage: Some(80),
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Discharging,
+        };
+        let rgb_kbd_caps = Capabilities {
+            lighting: true,
+            ..Default::default()
+        };
+        let mut g915 = mx_keys_mini_device(Some(rgb_kbd_caps), Some(battery));
+        g915.codename = Some("G915 TKL".into());
+
+        let mut state = test_state_with_devices(vec![g915]);
+        let record = state.devices()[0].clone();
+
+        // 1. Fresh RGB keyboard with `lighting: None` -> unknown lighting profile (40h, kbd:rgb-unknown), NOT kbd:standard
+        let (hours_unset, sig_unset, note_unset) = nominal_profile_for_device(&state, &record);
+        assert_eq!(hours_unset, 40);
+        assert_eq!(sig_unset, "kbd:rgb-unknown");
+        assert_eq!(note_unset, None);
+
+        // 2. Saved lighting with enabled: true, brightness: 80, white -> lit profile (40h, kbd:rgb-on)
+        let _ = state.commit_lighting(openlogi_core::config::Lighting {
+            enabled: true,
+            color: openlogi_core::color::Rgb::WHITE,
+            brightness: 80,
+        });
+        let (hours_on, sig_on, note_on) = nominal_profile_for_device(&state, &record);
+        assert_eq!(hours_on, 40);
+        assert_eq!(sig_on, "kbd:rgb-on");
+        assert_eq!(note_on.as_deref(), Some("RGB on"));
+
+        // 3. Saved lighting with enabled: true, brightness: 0 -> dark profile (180d, kbd:rgb-off)
+        let _ = state.commit_lighting(openlogi_core::config::Lighting {
+            enabled: true,
+            color: openlogi_core::color::Rgb::WHITE,
+            brightness: 0,
+        });
+        let (hours_zero, sig_zero, note_zero) = nominal_profile_for_device(&state, &record);
+        assert_eq!(hours_zero, 180 * 24);
+        assert_eq!(sig_zero, "kbd:rgb-off");
+        assert_eq!(note_zero.as_deref(), Some("RGB off"));
+
+        // 4. Saved lighting with enabled: true, brightness: 100, color: 000000 (black) -> dark profile
+        let _ = state.commit_lighting(openlogi_core::config::Lighting {
+            enabled: true,
+            color: openlogi_core::color::Rgb::new(0, 0, 0),
+            brightness: 100,
+        });
+        let (hours_black, sig_black, note_black) = nominal_profile_for_device(&state, &record);
+        assert_eq!(hours_black, 180 * 24);
+        assert_eq!(sig_black, "kbd:rgb-off");
+        assert_eq!(note_black.as_deref(), Some("RGB off"));
     }
 }
