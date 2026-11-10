@@ -296,6 +296,12 @@ impl Config {
         self.save_to_path(&paths::config_path()?)
     }
 
+    /// This config as the text of a config file, written from scratch. For a
+    /// copy kept outside the config folder, such as an export.
+    pub fn to_toml_string(&self) -> Result<String, ConfigError> {
+        Ok(toml::to_string_pretty(self)?)
+    }
+
     /// Atomically save to `path`, preserving comments in its current content.
     /// Used by tests and one-shot tools; long-lived writers should use
     /// [`ConfigFile::save`].
