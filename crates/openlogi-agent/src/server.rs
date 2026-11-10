@@ -39,6 +39,7 @@ use succession::Compat;
 
 use self::haptic_restore::RestoreLedger;
 use crate::pairing::PairingManager;
+use interprocess::local_socket::tokio::Listener;
 // Brings `Listener::accept` into scope for the concrete listener `transport::bind`
 // returns; `as _` keeps it anonymous (method resolution only).
 use interprocess::local_socket::traits::tokio::Listener as _;
@@ -1150,19 +1151,11 @@ impl RingHapticPlayer {
     }
 }
 
-/// Bind the agent's IPC socket and serve [`Agent`] requests until the process
-/// exits. A stale socket left by a prior crash is reclaimed by the listener —
-/// `main` holds the single-instance lock (`agent.lock`), so no other live agent
-/// owns this socket and any leftover is from a dead instance.
-pub async fn run(server: AgentServer) {
+/// Serve [`Agent`] requests on `listener` until the process exits. The caller
+/// binds it ([`transport::bind`]) and owns the failure: an agent without its
+/// endpoint exits rather than running on unreachable.
+pub async fn run(listener: Listener, server: AgentServer) {
     tokio::spawn(reload_after_flow_pairing(server.clone()));
-    let listener = match transport::bind() {
-        Ok(listener) => listener,
-        Err(e) => {
-            warn!(error = %e, "could not bind IPC socket; IPC disabled");
-            return;
-        }
-    };
     info!("IPC server listening");
 
     loop {

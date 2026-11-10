@@ -106,8 +106,11 @@ impl Profile {
         }
     }
 
-    /// The per-profile directory name under each XDG base.
-    const fn app_dir(self) -> &'static str {
+    /// The per-profile name: the directory under each XDG base, and the stem
+    /// of the agent's Windows pipe name — so a dev process shares neither
+    /// files nor IPC endpoint with the shipped app on any platform.
+    #[must_use]
+    pub const fn app_dir(self) -> &'static str {
         match self {
             Self::Production => APP_DIR,
             Self::Dev => DEV_APP_DIR,

@@ -22,6 +22,29 @@ interprocess = { workspace = true }
 succession = { version = "0.2", features = ["serde"] }
 futures-lite = { workspace = true, optional = true }
 
+# The per-user named pipe (transport/windows.rs): the caller's SID names,
+# owns, and ACLs the agent's pipe, and clients open it with an impersonation
+# ceiling and refuse one the caller does not own.
+[target.'cfg(windows)'.dependencies]
+# interprocess parses SDDL through widestring's `U16CStr` and does not
+# re-export it; this is the version it already pulls in.
+widestring = "1"
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    # Token access masks, TOKEN_USER, and the owner security information;
+    # CreateFileW and OpenProcessToken reference security types in their
+    # signatures, so windows-sys gates them behind this feature as well.
+    "Win32_Security",
+    # ConvertSidToStringSidW and GetSecurityInfo.
+    "Win32_Security_Authorization",
+    # CreateFileW and the SQOS flags.
+    "Win32_Storage_FileSystem",
+    # WaitNamedPipeW.
+    "Win32_System_Pipes",
+    # GetCurrentProcess and OpenProcessToken.
+    "Win32_System_Threading",
+] }
+
 [lints]
 workspace = true
 

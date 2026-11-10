@@ -131,7 +131,8 @@ async fn contributed_corpus_mock_rpcs_preserve_support_and_write_readback() {
     }
 }
 
-// Unix endpoints can be isolated with XDG_CONFIG_HOME; Windows uses a fixed pipe.
+// Unix endpoints can be isolated with XDG_CONFIG_HOME; the Windows pipe is
+// named by user and profile, which XDG does not move.
 #[cfg(unix)]
 #[test]
 fn contributed_corpus_mock_socket_handshake_and_observation() {
