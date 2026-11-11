@@ -417,9 +417,13 @@ tab. Their bindings live in the device's `bindings` like any other key:
   two keys under the grid turn the page.
 - The dialpad's four keys are its `0x1b04` controls. Its dial and roller are
   `DialLeft`/`DialRight` and `RollerUp`/`RollerDown`. A direction runs its
-  binding once per step, or scrolls when bound to a scroll action; only a
-  bound direction takes its control from the device, the others stay native.
-  The device's `thumbwheel_sensitivity` sets how many steps a turn makes.
+  binding once per step, or scrolls when bound to a scroll action. Binding
+  either direction takes that whole control from the device: the other
+  direction then does nothing until it is bound too. A control with no bound
+  direction stays native. The device's `thumbwheel_sensitivity` (else the
+  app-wide one) sets how many steps a turn makes.
+- A single-page keypad keeps its two paging keys native unless it has a live
+  key (below), whose value they adjust.
 
 The keypad's LCD keys have three more per-device settings:
 

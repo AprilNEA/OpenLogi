@@ -701,6 +701,18 @@ impl Config {
                 .any(|(button, action)| on_page(button) && *action != Action::None)
     }
 
+    /// The keypad grid slots of `device_key` that show a live value. A
+    /// `live_keys` entry under any other button is ignored: only an LCD key
+    /// can show one.
+    pub fn live_key_slots(&self, device_key: &str) -> impl Iterator<Item = ButtonId> + '_ {
+        self.devices
+            .get(device_key)
+            .into_iter()
+            .flat_map(|device| device.live_keys.keys())
+            .copied()
+            .filter(|button| button.grid_slot().is_some())
+    }
+
     /// How `device_key` styles the LCD key at grid `slot`, if at all.
     #[must_use]
     pub fn key_face_style(&self, device_key: &str, slot: ButtonId) -> Option<&KeyFaceStyle> {

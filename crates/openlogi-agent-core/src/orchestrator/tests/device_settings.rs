@@ -1553,3 +1553,89 @@ fn a_live_key_takes_over_the_page_keys_while_active() {
         "no live key there"
     );
 }
+/// A single-page keypad whose only configuration is a live key still gets a
+/// capture session: the key must reach the agent to activate, and the paging
+/// buttons to adjust it. Its face is the live value, not the binding's icon.
+#[test]
+fn a_keypad_with_only_a_live_key_is_captured() {
+    use openlogi_core::binding::{Cid, GridSlot, KeypadPage};
+    use openlogi_core::config::{LiveKey, LiveSource};
+    let slot = ButtonId::Grid(GridSlot {
+        page: KeypadPage::FIRST,
+        key: GridKey::Middle,
+    });
+    let mut config = Config::default();
+    config
+        .devices
+        .entry("keypad".into())
+        .or_default()
+        .live_keys
+        .insert(slot, LiveKey::new(LiveSource::Clock));
+    let mut orch = orchestrator(config);
+    orch.devices = vec![wired_keypad("keypad", true)];
+
+    let spec = sole_keyboard_spec(&orch).expect("a live key alone publishes a spec");
+    assert!(spec.grid.contains_key(&GridKey::Middle.index()));
+    for paging in Cid::PAGING {
+        assert!(
+            spec.wanted.contains_key(&paging.raw()),
+            "{paging:?} not captured"
+        );
+    }
+    assert_eq!(
+        spec.bindings.get(&ButtonId::grid(GridKey::Middle)),
+        Some(&Binding::Single(Action::ActivateLiveKey(slot)))
+    );
+}
+
+/// A keypad without live keys keeps exactly the capture it had: on one page
+/// its paging buttons stay native and nothing unbound is captured.
+#[test]
+fn a_single_page_keypad_without_live_keys_leaves_its_paging_keys_native() {
+    use openlogi_core::binding::Cid;
+    let mut config = Config::default();
+    config.set_binding(
+        "keypad",
+        ButtonId::grid(GridKey::Middle),
+        Binding::Single(Action::Copy),
+    );
+    let mut orch = orchestrator(config);
+    orch.devices = vec![wired_keypad("keypad", true)];
+
+    let spec = sole_keyboard_spec(&orch).expect("a bound key publishes a spec");
+    for paging in Cid::PAGING {
+        assert!(!spec.wanted.contains_key(&paging.raw()));
+    }
+    assert_eq!(spec.grid.len(), 1);
+}
+
+/// A dialpad diverts exactly the rotary controls with a stored direction,
+/// at the device's thumb-wheel speed.
+#[test]
+fn a_dialpad_diverts_only_the_rotary_controls_it_binds() {
+    use openlogi_core::binding::Rotary;
+    let dialpad = &openlogi_device_registry::dialpad::DIALPADS[0];
+    let mut config = Config::default();
+    config.set_binding(
+        "dialpad",
+        ButtonId::DialRight,
+        Binding::Single(Action::VolumeUp),
+    );
+    let mut orch = orchestrator(config);
+    orch.devices = vec![AgentDevice {
+        route: Some(DeviceRoute::Direct {
+            vendor_id: dialpad.vendor_id,
+            product_id: dialpad.product_id,
+        }),
+        slot: DIRECT_DEVICE_INDEX,
+        kind: DeviceKind::Dialpad,
+        ..dev("dialpad", DIRECT_DEVICE_INDEX, true)
+    }];
+
+    let spec = sole_keyboard_spec(&orch).expect("a bound direction publishes a spec");
+    assert_eq!(
+        spec.rotary,
+        std::collections::BTreeSet::from([Rotary::Dial])
+    );
+    assert!(spec.wanted.is_empty());
+}

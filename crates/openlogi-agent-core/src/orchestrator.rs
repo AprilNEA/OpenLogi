@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{
-    Action, ActionRingIcon, Binding, ButtonId, Cid, GamingButtons, GamingLayout, GridKey, GridSlot,
+    Action, ActionRingIcon, Binding, ButtonId, GamingButtons, GamingLayout, GridKey, GridSlot,
     KeypadPage, ModeKey, Rotary,
 };
 use openlogi_core::bindings::{bindings_on_page, button_bindings_for, oshook_gestures_for};
@@ -1213,33 +1213,12 @@ impl Orchestrator {
     /// `config_key`'s stored bindings for the foreground app, across every
     /// keypad page.
     fn foreground_key_bindings(&self, config_key: &str) -> BTreeMap<ButtonId, Binding> {
-        let mut bindings = button_bindings_for(
+        button_bindings_for(
             &self.config,
             Some(config_key),
             self.current_app.as_deref(),
             None,
-        );
-        // A live key is pressed to activate it, and the keys under the grid
-        // must reach the agent so they can adjust it.
-        if let Some(device) = self
-            .config
-            .devices
-            .get(config_key)
-            .filter(|device| !device.live_keys.is_empty())
-        {
-            for slot in device.live_keys.keys() {
-                bindings.insert(*slot, Binding::Single(Action::ActivateLiveKey(*slot)));
-            }
-            for (control, turn) in [
-                (Cid::LEFT_PAGING, Action::PreviousKeypadPage),
-                (Cid::RIGHT_PAGING, Action::NextKeypadPage),
-            ] {
-                bindings
-                    .entry(ButtonId::Control(control))
-                    .or_insert(Binding::Single(turn));
-            }
-        }
-        bindings
+        )
     }
 
     /// The live keys of the online, enabled devices with a key display.
@@ -1262,6 +1241,7 @@ impl Orchestrator {
                 config
                     .live_keys
                     .iter()
+                    .filter(|(slot, _)| slot.grid_slot().is_some())
                     .map(|(slot, key)| ((dev.config_key.clone(), *slot), key.clone()))
             })
             .collect()
@@ -2601,7 +2581,12 @@ impl Orchestrator {
     /// to. An unrelated save writes nothing, as for
     /// [`Self::apply_changed_fn_locks`].
     fn apply_changed_key_brightness(&self, previous: &Config) {
-        for dev in self.devices.iter().filter(|dev| dev.online) {
+        // A disabled device gets no writes of any kind, as on reconnect.
+        for dev in self
+            .devices
+            .iter()
+            .filter(|dev| dev.online && self.config.device_enabled(&dev.config_key))
+        {
             let Some(route) = dev.route.clone().filter(|route| route.keypad().is_some()) else {
                 continue;
             };

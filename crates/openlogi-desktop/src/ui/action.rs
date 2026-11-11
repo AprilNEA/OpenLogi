@@ -38,8 +38,24 @@ pub(crate) fn localized_action_label(action: &Action) -> SharedString {
         Action::OpenApplication(target) => {
             tr!("actions.open_named_target", name => target.display_name())
         }
+        // The agent binds it to a key that shows a live value.
+        Action::ActivateLiveKey(_) => tr!("keyboard.live_show_value"),
         _ => tr!(action
             .translation_key()
             .expect("every payload-free action has a translation key")),
+    }
+}
+#[cfg(test)]
+mod tests {
+    use openlogi_core::binding::{Action, ButtonId, GridKey};
+
+    /// The agent binds a live key's slot to `ActivateLiveKey`; the key's
+    /// panel must name it rather than find no catalog key for it.
+    #[test]
+    fn a_live_key_activation_has_a_label() {
+        let label = super::localized_action_label(&Action::ActivateLiveKey(ButtonId::grid(
+            GridKey::Middle,
+        )));
+        assert!(!label.is_empty());
     }
 }
