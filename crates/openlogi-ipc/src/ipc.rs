@@ -187,6 +187,8 @@ pub use succession::Identity;
 ///      profile and M1–M3/MR. `Capabilities::change_host` appended after
 ///      them — `0x1814` ChangeHost without `0x1815` HostsInfo.
 ///      `Action::HoldModifier` appended for bare-modifier holds.
+///      `DeviceRoute::Hidpp20Receiver` appended — a device paired to a
+///      receiver that speaks HID++ 2.0, such as the PRO X3's `c54f`.
 pub const PROTOCOL_VERSION: u32 = 46;
 
 /// Environment variable through which the agent hands a supervised helper the
