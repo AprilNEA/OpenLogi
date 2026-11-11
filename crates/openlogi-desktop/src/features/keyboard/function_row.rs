@@ -1885,7 +1885,7 @@ pub(super) trait KeySurfaceStyle: Styled + Sized {
             KeyState::Selected => self
                 .border_2()
                 .border_color(rgb(ACCENT_BLUE))
-                .bg(theme::accent_tint_hover())
+                .bg(theme::accent_tint_configured())
                 .shadow(vec![BoxShadow {
                     color: accent_alpha(0.35),
                     offset: point(px(0.), px(0.)),

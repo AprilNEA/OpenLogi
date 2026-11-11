@@ -2851,7 +2851,7 @@ fn live_face(
 /// Which of `bindings` the keyboard capture session takes over.
 ///
 /// A control is diverted whenever it is stored at all, even as
-/// [`Action::None`](openlogi_core::binding::Action::None) (which means
+/// [`Action::None`] (which means
 /// "suppress this key," not "leave native"):
 /// `button_bindings_for` seeds no default for a [`ButtonId::Control`], so
 /// presence here is always an explicit user choice (#1747). A keypad grid key
