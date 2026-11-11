@@ -26,6 +26,9 @@ pub use macos::{VirtualKeyboard, is_virtual_keyboard_product};
 #[cfg(any(target_os = "macos", test))]
 mod space_switch;
 
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+mod shell_tree;
+
 #[cfg(target_os = "linux")]
 mod linux;
 
@@ -375,9 +378,9 @@ fn run_to_end(mut command: std::process::Command, kind: &'static str) {
 /// most `max_bytes` of it decoded lossily. `None` when it could not start, or
 /// when it or its output ran past `timeout`; the shell is then killed.
 ///
-/// Blocking: call it off the async threads. A background child the command
-/// leaves holding its output open keeps one reader thread waiting until that
-/// child closes it; the answer does not wait for it.
+/// Blocking: call it off the async threads. Every process the command starts
+/// ends with it ([`shell_tree::ProcessTree`]): a pipeline stage or a
+/// background child cannot outlive the answer or keep its reader waiting.
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 #[must_use]
 pub fn shell_output(cmd: &str, timeout: std::time::Duration, max_bytes: usize) -> Option<String> {
@@ -386,13 +389,18 @@ pub fn shell_output(cmd: &str, timeout: std::time::Duration, max_bytes: usize) -
     use std::time::{Duration, Instant};
 
     let deadline = Instant::now() + timeout;
-    let mut child = platform::shell_command(cmd)
+    let mut command = platform::shell_command(cmd);
+    command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    let stdout = child.stdout.take()?;
+        .stderr(Stdio::null());
+    let (mut child, tree) = shell_tree::ProcessTree::spawn(&mut command).ok()?;
+    let Some(stdout) = child.stdout.take() else {
+        drop(tree);
+        let _ = child.kill();
+        let _ = child.wait();
+        return None;
+    };
     // Read on its own thread, so a command that writes more than the pipe
     // holds is not stalled by a wait that never drains it.
     let (sender, output) = std::sync::mpsc::channel();
@@ -410,12 +418,15 @@ pub fn shell_output(cmd: &str, timeout: std::time::Duration, max_bytes: usize) -
                 std::thread::sleep(Duration::from_millis(20));
             }
             _ => {
+                drop(tree);
                 let _ = child.kill();
                 let _ = child.wait();
                 return None;
             }
         }
     }
+    // What the shell left running ends now, so its output pipe closes.
+    drop(tree);
     let bytes = output
         .recv_timeout(deadline.saturating_duration_since(Instant::now()))
         .ok()?
@@ -1019,6 +1030,23 @@ mod tests {
         let capped =
             super::shell_output("echo 0123456789", Duration::from_secs(10), 4).expect("runs");
         assert_eq!(capped, "0123");
+    }
+
+    /// A command that leaves a child running in the background with its
+    /// output still open answers at once: the child ends with the shell.
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn shell_output_ends_what_the_command_left_running() {
+        use std::time::{Duration, Instant};
+        #[cfg(windows)]
+        let cmd = "start /b ping -n 30 127.0.0.1 & echo done";
+        #[cfg(not(windows))]
+        let cmd = "sleep 30 & echo done";
+        let started = Instant::now();
+        let out = super::shell_output(cmd, Duration::from_secs(20), 4096)
+            .expect("the shell finishes before its timeout");
+        assert!(out.contains("done"), "{out}");
+        assert!(started.elapsed() < Duration::from_secs(10));
     }
 
     /// A command that outlives its timeout is killed and answers nothing.
