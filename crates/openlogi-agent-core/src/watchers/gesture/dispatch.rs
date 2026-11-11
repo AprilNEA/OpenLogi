@@ -1,5 +1,7 @@
 //! Resolve captured HID++ inputs against the active per-device plan.
 
+#[cfg(any(target_os = "macos", test))]
+mod pinch;
 mod wheel;
 
 use std::collections::{HashMap, HashSet};
@@ -15,6 +17,8 @@ use openlogi_hid::thumbwheel::WheelResolution;
 use openlogi_inject::PinchGesture;
 use tracing::debug;
 
+#[cfg(target_os = "macos")]
+use self::pinch::PinchRamp;
 use self::wheel::{ScrollScale, WheelAccumulators, WheelOutput, WheelRotation};
 use super::GestureOutputs;
 use crate::capture_plan::DispatchPlan;
@@ -107,7 +111,14 @@ pub(super) struct InputDispatcher {
     held_presses: HeldPresses,
     shift_held: HeldShift,
     #[cfg(target_os = "macos")]
-    pinch: Option<(HidppSessionId, PinchGesture)>,
+    pinch: Option<ActivePinch>,
+}
+
+#[cfg(target_os = "macos")]
+struct ActivePinch {
+    owner: HidppSessionId,
+    gesture: PinchGesture,
+    ramp: PinchRamp,
 }
 
 impl InputDispatcher {
@@ -281,9 +292,11 @@ impl InputDispatcher {
                 self.held_presses.end(session, button);
             }
             #[cfg(target_os = "macos")]
-            CapturedInput::PinchMotion(dy) => self.dispatch_pinch(session, dy),
+            CapturedInput::PinchMotion { dy, captured_at } => {
+                self.dispatch_pinch(session, dy, captured_at);
+            }
             #[cfg(not(target_os = "macos"))]
-            CapturedInput::PinchMotion(_) => {}
+            CapturedInput::PinchMotion { .. } => {}
             CapturedInput::ButtonPulse(button) => self.dispatch_button_pulse(session, plan, button),
             CapturedInput::Scroll {
                 increments,
@@ -313,15 +326,20 @@ impl InputDispatcher {
     }
 
     #[cfg(target_os = "macos")]
-    fn dispatch_pinch(&mut self, session: &HidppSessionId, dy: i16) {
-        // Raw XY is positive toward the user. Bound any one hardware report
-        // so a delayed or unusually large packet cannot make a sudden jump.
-        let amount = (-f64::from(dy) / 1200.0).clamp(-0.15, 0.15);
-        match &self.pinch {
-            Some((owner, gesture)) if owner == session => gesture.update(amount),
+    fn dispatch_pinch(&mut self, session: &HidppSessionId, dy: i16, captured_at: Instant) {
+        match &mut self.pinch {
+            Some(active) if &active.owner == session => {
+                active.gesture.update(active.ramp.advance(dy, captured_at));
+            }
             Some(_) => {}
             None => {
-                self.pinch = PinchGesture::begin(amount).map(|gesture| (session.clone(), gesture));
+                let mut ramp = PinchRamp::default();
+                let amount = ramp.advance(dy, captured_at);
+                self.pinch = PinchGesture::begin(amount).map(|gesture| ActivePinch {
+                    owner: session.clone(),
+                    gesture,
+                    ramp,
+                });
             }
         }
     }
@@ -331,7 +349,7 @@ impl InputDispatcher {
         if self
             .pinch
             .as_ref()
-            .is_some_and(|(owner, _)| owner == session)
+            .is_some_and(|active| &active.owner == session)
         {
             self.pinch = None;
         }

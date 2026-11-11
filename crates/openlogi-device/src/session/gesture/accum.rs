@@ -3,6 +3,7 @@
 //! which held wheel-hold button the raw wheel belongs to.
 
 use std::num::NonZeroU8;
+use std::time::Instant;
 
 use openlogi_core::binding::{
     ButtonId, GESTURE_SWIPE_THRESHOLD, GestureDirection, SwipeAccumulator,
@@ -288,7 +289,10 @@ impl CaptureAccum {
                 *pinch_start_travel = None;
             }
             if dy != 0 {
-                let _ = sink.send(CapturedInput::PinchMotion(dy));
+                let _ = sink.send(CapturedInput::PinchMotion {
+                    dy,
+                    captured_at: Instant::now(),
+                });
             }
             return;
         }

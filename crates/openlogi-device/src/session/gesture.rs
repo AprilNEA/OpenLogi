@@ -30,6 +30,7 @@ mod spy;
 
 use std::num::NonZeroU8;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Instant;
 
 use hidpp::feature::hires_wheel::{self, HiResWheelEvent};
 use hidpp::protocol::v20;
@@ -66,7 +67,12 @@ pub enum CapturedInput {
     /// button's own direction map.
     Gesture(ButtonId, GestureDirection),
     /// Vertical raw motion from a DPI/ModeShift button in continuous pinch mode.
-    PinchMotion(i16),
+    PinchMotion {
+        /// Signed vertical travel in raw device counts.
+        dy: i16,
+        /// Capture time, independent of the dispatch queue's delivery cadence.
+        captured_at: Instant,
+    },
     /// A diverted button's physical down edge.
     ButtonDown(ButtonId),
     /// Thumb-wheel rotation to re-synthesise on the configured scroll axis.

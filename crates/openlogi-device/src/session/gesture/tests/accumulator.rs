@@ -741,15 +741,16 @@ fn dpi_pinch_reports_only_vertical_motion_during_the_hold() {
         acc.on_event(event, &[], &[], &buttons, &[], &tx);
     }
 
-    assert_eq!(
-        std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>(),
+    let events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+    assert!(matches!(
+        events.as_slice(),
         [
             CapturedInput::ButtonDown(ButtonId::DpiToggle),
-            CapturedInput::PinchMotion(-120),
-            CapturedInput::PinchMotion(80),
+            CapturedInput::PinchMotion { dy: -120, captured_at: up },
+            CapturedInput::PinchMotion { dy: 80, captured_at: down },
             CapturedInput::ButtonUp(ButtonId::DpiToggle),
-        ],
-    );
+        ] if up <= down
+    ));
 }
 
 #[test]
