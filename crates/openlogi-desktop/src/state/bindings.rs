@@ -345,17 +345,32 @@ impl AppState {
         self.bindings.restore(&self.config, key.as_deref(), layout);
     }
 
+    /// Whether the selected mouse can bind a continuous pinch to this button.
+    pub(crate) fn can_bind_pinch_zoom(&self, button: ButtonId) -> bool {
+        cfg!(target_os = "macos")
+            && button == ButtonId::DpiToggle
+            && self.binding_layer() == BindingLayer::Normal
+            && self
+                .current_record()
+                .and_then(|record| record.capabilities)
+                .is_some_and(|caps| caps.dpi_gestures)
+    }
+
     /// Update a single binding in memory, on disk, and in the shared hook
     /// map for the currently selected device — in whichever profile
     /// [`AppState::editing_app`] has open.
     ///
     /// In the global profile a long-press button keeps its long action and a
     /// wheel-hold button keeps holding the wheel: the picked action replaces
-    /// only the short or click action.
+    /// only the short or click action. Pinch Zoom owns the whole hold, so
+    /// selecting it replaces those modes with a single gesture-only binding.
     ///
     /// Disk failures restore the persisted projection and surface a config
     /// error instead of crashing the UI thread.
     pub fn commit_binding(&mut self, button: ButtonId, action: Action) -> StateEvents {
+        if action == Action::PinchZoom && !self.can_bind_pinch_zoom(button) {
+            return self.for_current_device(StateEvent::BindingsChanged);
+        }
         let events = self.for_current_device(StateEvent::BindingsChanged);
         self.bindings.button_bindings.insert(button, action.clone());
 
@@ -381,7 +396,11 @@ impl AppState {
             } else if gshift {
                 config.set_gshift_binding(&key, button, Some(action));
             } else {
-                let binding = match config.stored_bindings(&key).get(&button) {
+                let stored = config.stored_bindings(&key);
+                let previous = (action != Action::PinchZoom)
+                    .then(|| stored.get(&button))
+                    .flatten();
+                let binding = match previous {
                     Some(Binding::LongPress(binding)) => {
                         Binding::LongPress(LongPressBinding::new(action, binding.long().clone()))
                     }
