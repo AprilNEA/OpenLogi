@@ -31,8 +31,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, AppContext as _, Bounds, BoxShadow, Context, Entity, FontWeight, Hsla,
-    InteractiveElement, IntoElement, ParentElement, PathBuilder, Refineable as _, Render,
+    AnyElement, App, AppContext as _, Bounds, BoxShadow, Context, Entity, FocusHandle, FontWeight,
+    Hsla, InteractiveElement, IntoElement, ParentElement, PathBuilder, Refineable as _, Render,
     RenderOnce, Role, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled,
     Subscription, TextStyle, Window, canvas, div, hsla, linear_color_stop, linear_gradient, point,
     prelude::FluentBuilder as _, px, rems, rgb, svg,
@@ -77,6 +77,7 @@ mod gaming;
 mod key_colors;
 mod key_face;
 mod key_points;
+mod key_shortcut;
 mod key_symbol;
 mod keypad;
 
@@ -89,6 +90,7 @@ pub(crate) use key_points::KeyTarget;
 #[cfg(test)]
 use key_points::{EVEN_SPACING_END, EVEN_SPACING_START, key_x_fractions};
 use key_points::{KeySlotLayout, KeySurface, StoredAs, key_surface, keypad_canvas, shows_g_keys};
+use key_shortcut::ShortcutDraft;
 use keypad::{KeypadPane, KeypadPhotoPane, LastPage, keypad_page_bar, keypad_photo_render_size};
 
 /// Narrowest width of the inspector column beside the device: the key
@@ -231,6 +233,10 @@ pub struct FunctionRowView {
     face_image_rejected: bool,
     /// Which colour chooser's custom hex input holds no colour.
     face_hex_invalid: Option<ColorField>,
+    /// The selected key's custom shortcut editor.
+    shortcut: Option<ShortcutDraft>,
+    /// The shortcut Record button's area, which holds focus while recording.
+    shortcut_record_focus: FocusHandle,
     _state_obs: Subscription,
 }
 
@@ -304,6 +310,8 @@ impl FunctionRowView {
             face: None,
             face_image_rejected: false,
             face_hex_invalid: None,
+            shortcut: None,
+            shortcut_record_focus: cx.focus_handle(),
             _state_obs: state_obs,
         }
     }
@@ -368,6 +376,7 @@ impl FunctionRowView {
         self.face = None;
         self.face_image_rejected = false;
         self.face_hex_invalid = None;
+        self.shortcut = None;
     }
 
     /// Show the selected grid key's action or its face.
@@ -683,11 +692,25 @@ impl Render for FunctionRowView {
         let selected = self.selected_key;
         let hovered = self.hovered_key;
         let active_editor = self.active_editor;
+        // The key panel's Action tab opens on the key's custom shortcut: the
+        // action the key is bound to, read while `state` is still borrowed.
+        let shortcut_current = selected
+            .and_then(|idx| slots.get(idx))
+            .map(|slot| &slot.target)
+            .filter(|target| {
+                active_editor.is_none()
+                    && !(self.panel_tab == KeyPanelTab::Appearance
+                        && matches!(target, KeyTarget::Grid(_)))
+            })
+            .map(|target| state.and_then(|state| selected_key_action(state, target)));
         if let (Some(selected_idx), Some(kind)) = (selected, active_editor)
             && let Some(slot) = slots.get(selected_idx)
         {
             let current_action = state.and_then(|state| bound_action(state, &slot.target));
             self.seed_power_user_editor(kind, current_action.as_ref(), window, cx);
+        }
+        if let Some(current) = shortcut_current {
+            self.ensure_shortcut_draft(current.as_ref(), window, cx);
         }
         let view = cx.entity();
         let device = pane.render(
@@ -2024,11 +2047,13 @@ impl FunctionRowView {
         let mut rows = vec![native_row(&target, uses_default, app.is_some(), view, &pal)];
         rows.extend(panel_action_rows(current.as_ref(), &on_pick, view, &pal));
 
+        let shortcut = self.shortcut_section(&target, current.as_ref(), view, pal);
         compact_panel(pal)
             .max_h_full()
             .child(title_header(&key_name, app.as_deref(), &pal))
             .children(tabs)
             .child(divider(pal))
+            .children(shortcut.map(|section| section.child(divider(pal))))
             .child(editor_scroll_list("key-panel-scroll", rows))
     }
 }

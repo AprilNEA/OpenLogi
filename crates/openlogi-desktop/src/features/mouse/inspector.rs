@@ -84,35 +84,7 @@ pub(super) struct InvalidDrafts {
     pub command: bool,
 }
 
-/// Why the custom shortcut editor shows an error.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum ShortcutError {
-    /// The typed text, or the recorded key, is not a chord a shortcut can
-    /// send.
-    Unrecognized,
-    /// Record saw Shift with a digit or symbol key, which it cannot record
-    /// (see [`Recording::ShiftedSymbol`]). Typing the chord still works.
-    ///
-    /// [`Recording::ShiftedSymbol`]: crate::features::binding_editor::Recording::ShiftedSymbol
-    ShiftedSymbol,
-}
-
-/// Whether the custom shortcut editor records a tapped or a held chord.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(super) enum ShortcutMode {
-    #[default]
-    Tap,
-    Hold,
-}
-
-impl ShortcutMode {
-    fn action(self, combo: openlogi_core::binding::KeyCombo) -> Action {
-        match self {
-            Self::Tap => Action::CustomShortcut(combo),
-            Self::Hold => Action::HoldShortcut(combo),
-        }
-    }
-}
+pub(super) use crate::features::binding_editor::{ShortcutError, ShortcutMode};
 
 pub(super) fn binding_inspector(
     data: BindingInspectorData<'_>,
@@ -914,20 +886,11 @@ fn custom_shortcut_editor(
         .gap_1()
         .child(editor_section(tr!("action_ring.custom_shortcut"), pal))
         .child(
-            h_flex()
-                .gap_2()
-                .child(shortcut_mode_button(
-                    id_prefix,
-                    picker,
-                    ShortcutMode::Tap,
-                    pal,
-                ))
-                .child(shortcut_mode_button(
-                    id_prefix,
-                    picker,
-                    ShortcutMode::Hold,
-                    pal,
-                )),
+            h_flex().gap_2().flex_wrap().children(
+                ShortcutMode::ALL
+                    .into_iter()
+                    .map(|option| shortcut_mode_button(id_prefix, picker, option, pal)),
+            ),
         )
         .child(
             h_flex()
@@ -991,28 +954,20 @@ fn custom_shortcut_editor(
                     .debug_selector(move || format!("{id_prefix}-custom-shortcut-error"))
                     .text_caption()
                     .text_color(pal.text_danger)
-                    .child(match error {
-                        ShortcutError::Unrecognized => {
-                            tr!("action_ring.custom_action_invalid_input")
-                        }
-                        ShortcutError::ShiftedSymbol => tr!("actions.shifted_symbol_unrecordable"),
-                    }),
+                    .child(error.message()),
             )
         })
 }
 
-/// One Tap / Hold segment of the custom shortcut editor; the current mode
-/// takes the selected border and fill.
+/// One Tap / Hold / Hold modifiers segment of the custom shortcut editor;
+/// the current mode takes the selected border and fill.
 fn shortcut_mode_button(
     id_prefix: &'static str,
     picker: &ActionPickerContext<'_>,
     option: ShortcutMode,
     pal: Palette,
 ) -> impl IntoElement {
-    let (id, label) = match option {
-        ShortcutMode::Tap => ("tap", tr!("actions.shortcut_tap")),
-        ShortcutMode::Hold => ("hold", tr!("actions.shortcut_hold")),
-    };
+    let (id, label) = (option.id(), option.label());
     let selected = picker.shortcut_mode == option;
     let view = picker.view.clone();
     control_button(format!("{id_prefix}-shortcut-{id}"))

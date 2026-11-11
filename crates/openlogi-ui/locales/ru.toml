@@ -406,6 +406,7 @@ hold_modifiers_tap_key = "Удерживать %{modifiers}, нажать %{key}
 tap_key = "Нажать %{key}"
 shortcut_hold = "Удерживать"
 shortcut_tap = "Нажать"
+shortcut_hold_modifiers = "Hold modifiers"
 record_shortcut = "Записать"
 press_the_shortcut_to_record = "Нажмите сочетание клавиш. Esc — отмена."
 shifted_symbol_unrecordable = "Нельзя записать Shift с клавишей цифры или символа. Введите сочетание вручную, например Shift+]."

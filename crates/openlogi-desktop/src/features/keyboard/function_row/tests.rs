@@ -13,6 +13,7 @@ mod dialpad;
 mod gaming;
 mod key_colors;
 mod key_face;
+mod key_shortcut;
 mod key_symbol;
 mod native_function;
 /// The MX Creative Keypad, as its wired route names it.

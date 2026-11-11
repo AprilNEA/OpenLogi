@@ -406,6 +406,7 @@ hold_modifiers_tap_key = "%{modifiers} 길게 누르고 %{key} 한 번 누르기
 tap_key = "%{key} 한 번 누르기"
 shortcut_hold = "길게 누르기"
 shortcut_tap = "탭"
+shortcut_hold_modifiers = "Hold modifiers"
 record_shortcut = "기록"
 press_the_shortcut_to_record = "단축키를 누르세요. Esc를 누르면 취소됩니다."
 shifted_symbol_unrecordable = "Shift와 숫자 또는 기호 키 조합은 녹화할 수 없습니다. 단축키를 직접 입력하세요(예: Shift+])."
