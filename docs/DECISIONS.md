@@ -4,6 +4,31 @@ Durable "why we did it this way" records that are not obvious from the code.
 Add a dated entry when a non-obvious architectural or dependency decision is
 made or revisited.
 
+## 2026-11: The PRO X3's `c54f` receiver is listed by pinging its slots
+
+The Lightspeed receiver of the PRO X3 SUPERSTRIKE (`046d:c54f`) answers
+HID++ 2.0 at index `0xFF` and rejects the HID++ 1.0 receiver registers with
+error `0x06`. It has no pairing register to list devices from and sends no
+`0x41` connection notification. It is a receiver protocol of its own,
+`ReceiverProtocol::Hidpp20`, with its own route, `DeviceRoute::Hidpp20Receiver`.
+
+- **A device is whatever answers a ping.** Each pass pings slots 1-6 at once
+  and walks the features of every slot that answers. A silent slot is either
+  empty or holds a sleeping device, and the receiver cannot say which: a slot
+  seen answering before stays listed as offline, any other is left out. So a
+  paired mouse that OpenLogi has never seen awake is not listed until it wakes.
+- **No pairing or unpairing.** No pairing flow is known for this receiver. Add
+  Device does not offer it, and unpairing one of its slots is refused before
+  anything is written.
+- **No connection notification.** A device coming online is found by the
+  recovery scan, not by an event. A quick power cycle leaves no offline gap, so
+  settings are not applied again after it.
+- **No fixture capture.** `openlogi fixture contribute` refuses the route
+  before it writes anything, because a fixture cannot describe it yet.
+
+Verified on a PRO X3 SUPERSTRIKE in slot 1 on Linux. Not tested on macOS or
+Windows.
+
 ## 2026-11: The agent saves a paired Flow computer in `config.toml`
 
 Until now the agent only read `config.toml`; the GUI and `openlogi api` wrote
