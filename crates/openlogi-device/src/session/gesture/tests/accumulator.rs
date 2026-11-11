@@ -718,6 +718,72 @@ fn a_dpi_gesture_button_uses_the_shared_raw_xy_path() {
 }
 
 #[test]
+fn dpi_pinch_reports_only_vertical_motion_during_the_hold() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::pinch_zoom();
+    let cid = reprog_controls::DPI_MODE_SHIFT_CIDS[0];
+    let buttons = [(cid, ButtonId::DpiToggle)];
+    let down = RawControlEvent::DivertedButtons([cid, 0, 0, 0]);
+    let up_motion = RawControlEvent::RawXy { dx: 5, dy: -120 };
+    let down_motion = RawControlEvent::RawXy { dx: 1, dy: 80 };
+
+    for event in [
+        up_motion,
+        down,
+        down_motion,
+        RawControlEvent::RawXy { dx: 50, dy: 0 },
+        RawControlEvent::RawXy { dx: 0, dy: -15 },
+        up_motion,
+        down_motion,
+        release(),
+        up_motion,
+    ] {
+        acc.on_event(event, &[], &[], &buttons, &[], &tx);
+    }
+
+    assert_eq!(
+        std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>(),
+        [
+            CapturedInput::ButtonDown(ButtonId::DpiToggle),
+            CapturedInput::PinchMotion(-120),
+            CapturedInput::PinchMotion(80),
+            CapturedInput::ButtonUp(ButtonId::DpiToggle),
+        ],
+    );
+}
+
+#[test]
+fn dpi_pinch_does_nothing_on_a_tap_or_small_motion() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::pinch_zoom();
+    let cid = reprog_controls::DPI_MODE_SHIFT_CIDS[0];
+    let buttons = [(cid, ButtonId::DpiToggle)];
+    let down = RawControlEvent::DivertedButtons([cid, 0, 0, 0]);
+
+    for event in [
+        down,
+        release(),
+        down,
+        RawControlEvent::RawXy { dx: 250, dy: -450 },
+        RawControlEvent::RawXy { dx: 2, dy: 14 },
+        RawControlEvent::RawXy { dx: 1, dy: -20 },
+        release(),
+    ] {
+        acc.on_event(event, &[], &[], &buttons, &[], &tx);
+    }
+
+    assert_eq!(
+        std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>(),
+        [
+            CapturedInput::ButtonDown(ButtonId::DpiToggle),
+            CapturedInput::ButtonUp(ButtonId::DpiToggle),
+            CapturedInput::ButtonDown(ButtonId::DpiToggle),
+            CapturedInput::ButtonUp(ButtonId::DpiToggle),
+        ],
+    );
+}
+
+#[test]
 fn a_held_dpi_button_presses_once_on_the_rising_edge() {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut acc = CaptureAccum::default();

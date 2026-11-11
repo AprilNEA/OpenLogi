@@ -11,6 +11,8 @@ use openlogi_core::config::ThumbwheelSensitivity;
 use openlogi_core::scroll::ScrollDelta;
 use openlogi_hid::CapturedInput;
 use openlogi_hid::thumbwheel::WheelResolution;
+#[cfg(target_os = "macos")]
+use openlogi_inject::PinchGesture;
 use tracing::debug;
 
 use self::wheel::{ScrollScale, WheelAccumulators, WheelOutput, WheelRotation};
@@ -104,6 +106,8 @@ pub(super) struct InputDispatcher {
     wheels: SessionWheels,
     held_presses: HeldPresses,
     shift_held: HeldShift,
+    #[cfg(target_os = "macos")]
+    pinch: Option<(HidppSessionId, PinchGesture)>,
 }
 
 impl InputDispatcher {
@@ -115,6 +119,8 @@ impl InputDispatcher {
             wheels: SessionWheels::default(),
             held_presses: HeldPresses::default(),
             shift_held: HeldShift::default(),
+            #[cfg(target_os = "macos")]
+            pinch: None,
         }
     }
 
@@ -126,6 +132,8 @@ impl InputDispatcher {
 
     /// Cancel every input lifecycle retained for one capture session.
     pub(super) fn cancel_session(&mut self, session: &HidppSessionId) {
+        #[cfg(target_os = "macos")]
+        self.end_pinch(session);
         self.outputs.cancel_session(session);
         self.wheels.cancel_session(session);
         self.held_presses.cancel_session(session);
@@ -228,6 +236,11 @@ impl InputDispatcher {
                     debug!(key, %button, ?direction, "gesture with no binding — ignored");
                 }
             }
+            CapturedInput::ButtonDown(ButtonId::DpiToggle)
+                if matches!(
+                    plan.bindings.get(&ButtonId::DpiToggle),
+                    Some(Binding::Single(Action::PinchZoom))
+                ) => {}
             CapturedInput::ButtonDown(button) => {
                 if self.start_gshift(session, plan, button) {
                     return;
@@ -257,12 +270,20 @@ impl InputDispatcher {
                 }
             }
             CapturedInput::ButtonUp(button) => {
+                #[cfg(target_os = "macos")]
+                if button == ButtonId::DpiToggle {
+                    self.end_pinch(session);
+                }
                 if self.end_gshift(session, button) {
                     return;
                 }
                 self.outputs.actions.try_hidpp_button_up(session, button);
                 self.held_presses.end(session, button);
             }
+            #[cfg(target_os = "macos")]
+            CapturedInput::PinchMotion(dy) => self.dispatch_pinch(session, dy),
+            #[cfg(not(target_os = "macos"))]
+            CapturedInput::PinchMotion(_) => {}
             CapturedInput::ButtonPulse(button) => self.dispatch_button_pulse(session, plan, button),
             CapturedInput::Scroll {
                 increments,
@@ -288,6 +309,31 @@ impl InputDispatcher {
             CapturedInput::ButtonDiverted(_) => {
                 unreachable!("the session's forwarder records diverted buttons instead")
             }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn dispatch_pinch(&mut self, session: &HidppSessionId, dy: i16) {
+        // Raw XY is positive toward the user. Bound any one hardware report
+        // so a delayed or unusually large packet cannot make a sudden jump.
+        let amount = (-f64::from(dy) / 1200.0).clamp(-0.15, 0.15);
+        match &self.pinch {
+            Some((owner, gesture)) if owner == session => gesture.update(amount),
+            Some(_) => {}
+            None => {
+                self.pinch = PinchGesture::begin(amount).map(|gesture| (session.clone(), gesture));
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn end_pinch(&mut self, session: &HidppSessionId) {
+        if self
+            .pinch
+            .as_ref()
+            .is_some_and(|(owner, _)| owner == session)
+        {
+            self.pinch = None;
         }
     }
 

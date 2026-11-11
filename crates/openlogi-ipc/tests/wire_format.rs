@@ -508,6 +508,7 @@ fn hold_modifier_bits() {
     use openlogi_core::binding::Action;
     let ctrl_shift = "Ctrl+Shift".parse().expect("valid modifier set");
     assert_wire(&Action::HoldModifier(ctrl_shift), "3d06");
+    assert_wire(&Action::PinchZoom, "3e");
 }
 
 /// The agent identity is frozen: a helper from any build has to be able to
