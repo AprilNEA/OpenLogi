@@ -40,6 +40,7 @@ use hidpp::{
             ANNOUNCEMENT_MIN_VERSION, ChangeHostFeature, ChangeHostFeatureCapabilities,
             HostChangeRequest, decode_host_change_request,
         },
+        device_information::DeviceInformationFeature,
         hosts_info::{HostIndex, HostSlotStatus, HostsInfoFeature},
     },
     protocol::v20,
@@ -150,6 +151,11 @@ pub enum HostSwitchError {
         /// The zero-based host slot that has no pairing.
         host: u8,
     },
+    /// The device on the route reports another unit ID than the one the
+    /// request was made for: a receiver slot was paired to a different device
+    /// since.
+    #[error("the device on this route is not the one the request was made for")]
+    DeviceChanged,
     /// The requested host does not exist on this device.
     #[error("host {host} is outside device host count {host_count}")]
     HostOutOfRange {
@@ -177,9 +183,9 @@ impl From<HostSwitchError> for WriteError {
     fn from(error: HostSwitchError) -> Self {
         match error {
             HostSwitchError::Hid(error) => error.into(),
-            HostSwitchError::KeyboardNotFound | HostSwitchError::TargetNotFound => {
-                Self::DeviceNotFound
-            }
+            HostSwitchError::KeyboardNotFound
+            | HostSwitchError::TargetNotFound
+            | HostSwitchError::DeviceChanged => Self::DeviceNotFound,
             HostSwitchError::Hidpp(message) => Self::Hidpp(message),
             HostSwitchError::FeatureUnsupported => Self::FeatureUnsupported {
                 feature_hex: ChangeHostFeature::ID,
@@ -1024,6 +1030,58 @@ pub async fn switch_linked_hosts(
 /// transport or timeout variants when the device does not answer.
 pub async fn switch_host_on(shared: &SharedChannel, host: u8) -> Result<bool, HostSwitchError> {
     prepare_host_switch_on(shared, host).await?.apply().await
+}
+
+/// [`switch_host_on`] for a device that must still be the one with `unit_id`.
+///
+/// A receiver slot can be paired to another device between the request and
+/// this write, and the route alone cannot tell. The device's `0x0003` unit ID
+/// is read first, and a different one fails with
+/// [`HostSwitchError::DeviceChanged`] before anything is written. A zero
+/// `unit_id` means the caller never learned it, and skips the comparison.
+///
+/// # Errors
+///
+/// As [`switch_host_on`], and [`HostSwitchError::DeviceChanged`].
+pub async fn switch_host_on_unit(
+    shared: &SharedChannel,
+    host: u8,
+    unit_id: [u8; 4],
+) -> Result<bool, HostSwitchError> {
+    let mut device = timed_hidpp(
+        "opening host-change device",
+        Device::new(Arc::clone(shared.channel()), shared.device_index()),
+    )
+    .await?;
+    ensure_unit_id(&mut device, unit_id).await?;
+    let change = prepare_host_change_with(&mut device, shared.device_index(), host).await?;
+    apply_host_change(change).await
+}
+
+/// Refuse when `device` reports another `0x0003` unit ID than `expected`. A
+/// zero `expected` and a device without the feature pass: nothing is known to
+/// compare.
+async fn ensure_unit_id(device: &mut Device, expected: [u8; 4]) -> Result<(), HostSwitchError> {
+    if expected == [0; 4] {
+        return Ok(());
+    }
+    let Some(info) = timed_hidpp(
+        "locating device information feature",
+        device.root().get_feature(DeviceInformationFeature::ID),
+    )
+    .await?
+    else {
+        return Ok(());
+    };
+    let feature = device.add_feature::<DeviceInformationFeature>(info.index);
+    let reported = timed_hidpp("reading unit ID", feature.get_device_info())
+        .await?
+        .unit_id;
+    if reported == expected {
+        Ok(())
+    } else {
+        Err(HostSwitchError::DeviceChanged)
+    }
 }
 
 /// A host switch that passed every read-only check and waits for its write.

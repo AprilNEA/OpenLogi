@@ -762,16 +762,42 @@ pub fn toggle_smartshift_in_background(op: DeviceOp) {
 }
 
 /// Move `op`'s device to Easy-Switch `slot` in the background via
-/// [`openlogi_hid::switch_host_on`]. Returns immediately; a device without
-/// `0x1814` or an empty slot is logged and left where it is.
-pub fn switch_host_in_background(op: DeviceOp, slot: u8) {
+/// [`openlogi_hid::switch_host_on_unit`], in the order of `ticket` and
+/// skipping none: a device that leaves this computer on the first switch must
+/// not have a later request land before it. Returns immediately.
+///
+/// The write is refused when the route's device no longer reports `unit_id`,
+/// so a receiver slot re-paired while the request waited is not switched. A
+/// device without `0x1814`, an empty slot, or another device is logged and
+/// left where it is.
+pub(crate) fn switch_host_in_background(
+    op: DeviceOp,
+    ticket: WriteTicket,
+    slot: u8,
+    unit_id: [u8; 4],
+) {
     let index = op.route.device_index();
-    op.spawn_write(
+    let turn = op.access.transport_turns.turn_for(&op.route);
+    op.spawn_timed_write_in_order(
         "Easy-Switch host switch",
-        move |c| async move { Ok(openlogi_hid::switch_host_on(&c, slot).await?) },
+        ticket,
+        move |op| async move {
+            after_transport_turn(&turn, async {
+                tokio::time::timeout(WRITE_TIMEOUT, async {
+                    let shared = op.resolve()?;
+                    Ok(openlogi_hid::switch_host_on_unit(&shared, slot, unit_id).await?)
+                })
+                .await
+            })
+            .await
+        },
         move |result| {
             log_outcome(index, "Easy-Switch host switch", result, |sent| {
-                debug!(index, slot, sent, "Easy-Switch host switch done");
+                if sent {
+                    info!(index, slot, "Easy-Switch host switch sent");
+                } else {
+                    debug!(index, slot, "device already on the channel — nothing sent");
+                }
             });
         },
     );

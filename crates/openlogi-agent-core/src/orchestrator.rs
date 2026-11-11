@@ -204,6 +204,9 @@ pub struct SharedHandles {
     backlight_order: WriteOrder,
     /// Orders host renames per device.
     host_name_order: WriteOrder,
+    /// Orders the Easy-Switch actions' channel switches per device, so a
+    /// later request never lands before an earlier one.
+    host_switch_order: WriteOrder,
     /// Orders the `ChangeHost` cookie writes per linked device.
     follower_cookie_order: WriteOrder,
     /// Saved policy and manual writes share intent identity, not retry order.
@@ -921,6 +924,7 @@ impl Orchestrator {
             sidetone_order: WriteOrder::default(),
             backlight_order: WriteOrder::default(),
             host_name_order: WriteOrder::default(),
+            host_switch_order: WriteOrder::default(),
             follower_cookie_order: WriteOrder::default(),
             disabled_keys_order: WriteOrder::default(),
             inventory_refresh: Arc::new(RwLock::new(None)),
@@ -1266,18 +1270,20 @@ impl Orchestrator {
     /// device linked to a keyboard, moves with the rest of its link, as when
     /// the keyboard's host key is pressed: `slot` is then the keyboard's.
     ///
-    /// An action that names no device is dropped: the selected device is not
-    /// a stand-in for the one that was pressed.
+    /// A press the OS input hook delivers names no device: the hook's maps
+    /// are the selected device's, so the selected device is the one that
+    /// fired. A global function key reaches the hook too, but its binding
+    /// never carries these actions (`Action::needs_firing_device`).
     pub fn switch_host_for_action(&self, device_key: Option<&str>, slot: u8) {
-        let Some(key) = device_key else {
+        let Some(key) = device_key.or_else(|| self.current_key()) else {
             debug!(slot, "Easy-Switch action without a device — ignored");
             return;
         };
-        let Some(route) = self
+        let Some((route, unit_id)) = self
             .devices
             .iter()
             .find(|device| device.config_key == key && device.online)
-            .and_then(|device| device.route.clone())
+            .and_then(|device| Some((device.route.clone()?, device.unit_id)))
         else {
             debug!(
                 key,
@@ -1289,8 +1295,14 @@ impl Orchestrator {
             info!(key, slot, "Easy-Switch action → switching linked devices");
             return;
         }
-        info!(key, slot, "Easy-Switch action → switching host");
-        crate::hardware::switch_host_in_background(self.device(&route), slot);
+        debug!(key, slot, "Easy-Switch action → switching host");
+        let ticket = self.shared.host_switch_order.request(&route);
+        crate::hardware::switch_host_in_background(
+            self.shared.device(&route),
+            ticket,
+            slot,
+            unit_id,
+        );
     }
 
     /// Rewrite every shared map from the current config + selected device.

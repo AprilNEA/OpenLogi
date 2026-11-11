@@ -67,7 +67,7 @@ pub use session::host_switch::{
     HostSwitchSessionFailure, HostSwitchSessionOutcome, HostSwitchStopReason, LeadCookie,
     PendingHostSwitchRestore, PreparedHostSwitch, link_follower_cookies_on, prepare_host_switch,
     prepare_host_switch_on, release_follower_cookies_on, run_host_switch_session, switch_host_on,
-    switch_linked_hosts,
+    switch_host_on_unit, switch_linked_hosts,
 };
 pub use session::keyboard::{
     GamingWanted, KeyboardWanted, RESERVED_KEYBOARD_CONTROLS, is_reserved_keyboard_control,

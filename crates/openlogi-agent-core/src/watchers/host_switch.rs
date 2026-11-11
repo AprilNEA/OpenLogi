@@ -313,6 +313,16 @@ impl HostSwitchManagerState {
             debug!(route = %request.route, "a host transition is already switching — request dropped");
             return;
         }
+        // A session that ended on a key press may still be restoring the
+        // keyboard's host keys with the key's host. The newest request wins,
+        // so the restore's completion must not queue the older one over it.
+        for slot in &mut self.slots {
+            if let HostSwitchSlot::Recovering(recovery) = slot
+                && recovery.link.keyboard == link.keyboard
+            {
+                recovery.requested_host = None;
+            }
+        }
         self.transition = Some(TransitionPhase::Waiting(TransitionIntent {
             link: link.clone(),
             host: request.host,
@@ -928,6 +938,54 @@ mod tests {
             matches!(state.transition, Some(TransitionPhase::Running)),
             "a running switch is not replaced"
         );
+    }
+
+    #[test]
+    fn a_newer_linked_switch_request_outlives_the_restore_of_an_older_one() {
+        // A key press asked for host 1 and the session is still restoring the
+        // keyboard's host keys when an action asks for host 2.
+        let mut state = HostSwitchManagerState::new();
+        state.slots.push(HostSwitchSlot::Recovering(Recovery {
+            link: link(2),
+            epoch: SessionEpoch(1),
+            requested_host: Some(1),
+            restore: RestorePhase::Restoring,
+        }));
+        state.request_switch(
+            &[link(2)],
+            &LinkedSwitchRequest {
+                route: route(2),
+                host: 2,
+            },
+        );
+
+        state.handle_restore_completion(
+            RestoreCompletion {
+                epoch: SessionEpoch(1),
+                result: Ok(HostSwitchRestoreOutcome::Restored),
+            },
+            &[link(2)],
+            false,
+        );
+
+        assert_eq!(
+            state.begin_transition(false).map(|intent| intent.host),
+            Some(2),
+            "the older request does not replace the newer one"
+        );
+    }
+
+    #[test]
+    fn a_linked_switch_request_for_an_unpublished_link_is_refused() {
+        let mut state = HostSwitchManagerState::new();
+        state.request_switch(
+            &[],
+            &LinkedSwitchRequest {
+                route: route(2),
+                host: 1,
+            },
+        );
+        assert!(state.transition.is_none());
     }
 
     #[test]

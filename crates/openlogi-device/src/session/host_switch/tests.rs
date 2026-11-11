@@ -11,7 +11,7 @@ use super::{
     PendingHostSwitchRestore, ReportingMode, announced_host, host_change_required, host_channel,
     key_trigger, monitor_host_switch, prepare_host_change_on, prepare_host_switch_on,
     queued_departure, restoration_change, rollback_host_switch_start, run_host_switch_session,
-    shares_channel, switch_host_on,
+    shares_channel, switch_host_on, switch_host_on_unit,
 };
 use crate::ChannelPool;
 use crate::backend::NodeId;
@@ -211,6 +211,89 @@ fn wrote_set_current_host(handle: &ReplayChannelHandle, host: u8) -> bool {
             && report[3] >> 4 == 1
             && report[4] == host
     })
+}
+
+/// The unit ID of the unit the scripted keyboard stands for.
+const UNIT: [u8; 4] = [0, 1, 0xe2, 0x40];
+/// The unit ID of the device that replaced it on the receiver slot.
+const REPLACEMENT_UNIT: [u8; 4] = [0, 9, 0x00, 0x01];
+/// The `0x0003 DeviceInformation` feature index of the scripted keyboard.
+const DEVICE_INFORMATION_INDEX: u8 = 0x09;
+
+/// `keyboard_with_an_empty_third_slot` that also answers `0x0003` with `unit`.
+fn keyboard_reporting(request: &[u8], unit: [u8; 4]) -> Option<Vec<u8>> {
+    if request.len() >= 7 && matches!(request[0], 0x10 | 0x11) {
+        match (request[2], request[3] >> 4) {
+            (0x00, 0x00) if request[4..6] == [0x00, 0x03] => {
+                return Some(vec![
+                    0x10,
+                    request[1],
+                    request[2],
+                    request[3],
+                    DEVICE_INFORMATION_INDEX,
+                    0,
+                    0,
+                ]);
+            }
+            (DEVICE_INFORMATION_INDEX, 0x00) => {
+                let mut response = vec![0u8; 20];
+                response[0] = 0x11;
+                response[1..4].copy_from_slice(&request[1..4]);
+                response[5..9].copy_from_slice(&unit);
+                return Some(response);
+            }
+            _ => {}
+        }
+    }
+    keyboard_with_an_empty_third_slot(request)
+}
+
+fn keyboard_with_the_expected_unit(request: &[u8]) -> Option<Vec<u8>> {
+    keyboard_reporting(request, UNIT)
+}
+
+fn keyboard_replaced_by_another_unit(request: &[u8]) -> Option<Vec<u8>> {
+    keyboard_reporting(request, REPLACEMENT_UNIT)
+}
+
+#[tokio::test]
+async fn a_device_that_kept_its_unit_id_is_switched() {
+    let (shared, handle) = shared_device(keyboard_with_the_expected_unit).await;
+
+    let changed = switch_host_on_unit(&shared, 1, UNIT)
+        .await
+        .expect("the same unit must be switchable");
+
+    assert!(changed);
+    assert!(wrote_set_current_host(&handle, 1));
+}
+
+#[tokio::test]
+async fn a_replacement_device_on_the_route_is_not_switched() {
+    // A receiver slot paired to another device between the request and the
+    // write answers on the same route; only its unit ID tells it apart.
+    let (shared, handle) = shared_device(keyboard_replaced_by_another_unit).await;
+
+    let error = switch_host_on_unit(&shared, 1, UNIT)
+        .await
+        .expect_err("another device must be refused");
+
+    assert!(
+        matches!(error, HostSwitchError::DeviceChanged),
+        "got {error:?}"
+    );
+    assert!(!wrote_set_current_host(&handle, 1));
+}
+
+#[tokio::test]
+async fn an_unknown_unit_id_skips_the_comparison() {
+    let (shared, handle) = shared_device(keyboard_replaced_by_another_unit).await;
+
+    switch_host_on_unit(&shared, 1, [0; 4])
+        .await
+        .expect("a zero unit ID names nothing to compare against");
+
+    assert!(wrote_set_current_host(&handle, 1));
 }
 
 #[tokio::test]
