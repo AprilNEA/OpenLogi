@@ -44,6 +44,7 @@ mod os_layout;
 mod pointer_speed;
 mod publication;
 mod reapply;
+mod saved_settings;
 
 /// An orchestrator wired to a state cell nobody subscribes to. The publishing
 /// paths still run, so a mutator that stops republishing shows up here rather

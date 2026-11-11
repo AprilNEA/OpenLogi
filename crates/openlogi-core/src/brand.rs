@@ -10,7 +10,12 @@
 //! a helper is looked up at runtime by the name packaging gave it, and a rename
 //! touches one file.
 
+use std::borrow::Cow;
 use std::path::Path;
+
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
+
+use crate::device_order::PhysicalDeviceKey;
 
 /// The OpenLogi GitHub repository.
 pub const REPO_URL: &str = "https://github.com/AprilNEA/OpenLogi";
@@ -265,13 +270,14 @@ pub fn release_tag_url(version: &str) -> String {
 }
 
 /// A GUI action the agent's tray (or any external caller) requests by opening
-/// an `openlogi://<name>` URL. macOS delivers it to the running GUI via an
-/// Apple Event; the GUI parses it back into this enum and dispatches.
+/// an `openlogi://<name>` URL, or `openlogi://<name>/<argument>` for a command
+/// that names its target. macOS delivers it to the running GUI via an Apple
+/// Event; the GUI parses it back into this enum and dispatches.
 ///
 /// The agent builds URLs with [`DeeplinkCommand::to_url`]; the GUI reads them
-/// with [`DeeplinkCommand::parse_url`]. The command names are defined once, in
-/// [`DeeplinkCommand::as_name`], so the two sides cannot disagree.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// with [`DeeplinkCommand::parse_url`]. Both go through this one type, so the
+/// command names and the argument encoding cannot drift apart.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DeeplinkCommand {
     /// Show / foreground the main window.
     Show,
@@ -284,52 +290,130 @@ pub enum DeeplinkCommand {
     CheckForUpdates,
     /// Quit the GUI.
     Quit,
+    /// Open one device's detail page. A GUI launched by the link opens it once
+    /// the agent's device list arrives.
+    OpenDevice(DeviceLink),
+    /// Open the Add Device window.
+    AddDevice,
+    /// Open the per-application profile the selected device runs this
+    /// application under — a [`ForegroundApp::id`], never empty.
+    ///
+    /// [`ForegroundApp::id`]: crate::app::ForegroundApp::id
+    OpenAppProfile(String),
+    /// Open the Flow window.
+    OpenFlow,
+    /// Open a camera's page on its device information, which leaves the
+    /// camera off — by the camera's settings key (`camera:…`), never empty.
+    OpenCamera(String),
+    /// Open a camera's live preview, which turns the camera on — by the
+    /// camera's settings key (`camera:…`), never empty.
+    PreviewCamera(String),
 }
+
+/// A device an `openlogi://` link may open: a [`PhysicalDeviceKey`] that names
+/// the device itself. A receiver's pairing-slot key is refused, because it
+/// passes to whichever device is paired into that slot next, and a link holding
+/// one could open the replacement.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeviceLink(PhysicalDeviceKey);
+
+impl DeviceLink {
+    /// `key` as a link target, or `None` for a pairing-slot key.
+    #[must_use]
+    pub fn new(key: PhysicalDeviceKey) -> Option<Self> {
+        (!key.names_pairing_slot()).then_some(Self(key))
+    }
+
+    /// The configuration key the link names.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+/// What a command argument escapes in its path segment: everything outside
+/// RFC 3986's unreserved set except `:`, so a `/`, `?`, `#` or `%` in a serial
+/// number or an executable path cannot end the segment early.
+const ARGUMENT: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~')
+    .remove(b':');
 
 impl DeeplinkCommand {
     /// The URL scheme OpenLogi registers with LaunchServices.
     pub const SCHEME: &str = "openlogi";
 
-    /// The wire name for this command — the host component of its URL.
-    #[must_use]
-    pub const fn as_name(self) -> &'static str {
+    /// The command's wire name, which is its URL's host component, and the
+    /// argument that follows as the URL's one path segment.
+    fn wire(&self) -> (&'static str, Option<&str>) {
         match self {
-            Self::Show => "show",
-            Self::OpenSettings => "open-settings",
-            Self::OpenAbout => "open-about",
-            Self::CheckForUpdates => "check-for-updates",
-            Self::Quit => "quit",
+            Self::Show => ("show", None),
+            Self::OpenSettings => ("open-settings", None),
+            Self::OpenAbout => ("open-about", None),
+            Self::CheckForUpdates => ("check-for-updates", None),
+            Self::Quit => ("quit", None),
+            Self::OpenDevice(device) => ("open-device", Some(device.as_str())),
+            Self::AddDevice => ("add-device", None),
+            Self::OpenAppProfile(app) => ("open-app-profile", Some(app)),
+            Self::OpenFlow => ("open-flow", None),
+            Self::OpenCamera(camera) => ("open-camera", Some(camera)),
+            Self::PreviewCamera(camera) => ("preview-camera", Some(camera)),
         }
     }
 
-    /// Build the `openlogi://<name>` URL for this command.
-    #[must_use]
-    pub fn to_url(self) -> String {
-        format!("{}://{}", Self::SCHEME, self.as_name())
+    /// The inverse of [`Self::wire`]. A command without an argument ignores
+    /// any it is given.
+    fn from_wire(name: &str, argument: Option<String>) -> Option<Self> {
+        Some(match (name, argument) {
+            ("show", _) => Self::Show,
+            ("open-settings", _) => Self::OpenSettings,
+            ("open-about", _) => Self::OpenAbout,
+            ("check-for-updates", _) => Self::CheckForUpdates,
+            ("quit", _) => Self::Quit,
+            ("open-device", Some(key)) => {
+                Self::OpenDevice(DeviceLink::new(PhysicalDeviceKey::parse(&key)?)?)
+            }
+            ("add-device", _) => Self::AddDevice,
+            ("open-app-profile", Some(app)) => Self::OpenAppProfile(app),
+            ("open-flow", _) => Self::OpenFlow,
+            ("open-camera", Some(camera)) => Self::OpenCamera(camera),
+            ("preview-camera", Some(camera)) => Self::PreviewCamera(camera),
+            _ => return None,
+        })
     }
 
-    /// Parse a command from its wire name (the part after `openlogi://`).
+    /// Build the `openlogi://…` URL for this command.
     #[must_use]
-    pub fn from_name(name: &str) -> Option<Self> {
-        match name {
-            "show" => Some(Self::Show),
-            "open-settings" => Some(Self::OpenSettings),
-            "open-about" => Some(Self::OpenAbout),
-            "check-for-updates" => Some(Self::CheckForUpdates),
-            "quit" => Some(Self::Quit),
-            _ => None,
+    pub fn to_url(&self) -> String {
+        match self.wire() {
+            (name, None) => format!("{}://{name}", Self::SCHEME),
+            (name, Some(argument)) => format!(
+                "{}://{name}/{}",
+                Self::SCHEME,
+                utf8_percent_encode(argument, ARGUMENT)
+            ),
         }
     }
 
     /// Parse a full `openlogi://…` URL. The command lives in the URL's host
-    /// component, so any trailing path or query (`openlogi://show/`,
-    /// `openlogi://show?x=1`) is ignored. Returns `None` for a foreign scheme
-    /// or an unknown command.
+    /// component and its argument, if it takes one, in the single path segment
+    /// after it. A query or fragment is ignored, and so is the path of a
+    /// command that takes no argument (`openlogi://show/`,
+    /// `openlogi://show?x=1`). Returns `None` for a foreign scheme, an unknown
+    /// command, or a missing, empty, multi-segment or invalid argument.
     #[must_use]
     pub fn parse_url(url: &str) -> Option<Self> {
         let rest = url.strip_prefix(Self::SCHEME)?.strip_prefix("://")?;
-        let name = rest.split(['/', '?']).next().unwrap_or(rest);
-        Self::from_name(name)
+        let rest = rest.split(['?', '#']).next().unwrap_or(rest);
+        let (name, path) = rest.split_once('/').unwrap_or((rest, ""));
+        let segment = path.strip_suffix('/').unwrap_or(path);
+        let argument = (!segment.is_empty() && !segment.contains('/'))
+            .then(|| percent_decode_str(segment).decode_utf8().ok())
+            .flatten()
+            .map(Cow::into_owned);
+        Self::from_wire(name, argument)
     }
 }
 
@@ -338,23 +422,61 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        AGENT_ID, APP_ID, DeeplinkCommand, Helper, OVERLAY_ID, dev_id, helper_bundle_root,
-        is_dev_id, is_openlogi_foreground_id,
+        AGENT_ID, APP_ID, DeeplinkCommand, DeviceLink, Helper, OVERLAY_ID, dev_id,
+        helper_bundle_root, is_dev_id, is_openlogi_foreground_id,
     };
+    use crate::device_order::PhysicalDeviceKey;
 
-    const ALL: [DeeplinkCommand; 5] = [
-        DeeplinkCommand::Show,
-        DeeplinkCommand::OpenSettings,
-        DeeplinkCommand::OpenAbout,
-        DeeplinkCommand::CheckForUpdates,
-        DeeplinkCommand::Quit,
-    ];
+    fn device(key: &str) -> DeeplinkCommand {
+        let key = PhysicalDeviceKey::parse(key).expect("a physical key");
+        DeeplinkCommand::OpenDevice(DeviceLink::new(key).expect("names a device"))
+    }
+
+    fn app(id: &str) -> DeeplinkCommand {
+        DeeplinkCommand::OpenAppProfile(id.to_owned())
+    }
 
     #[test]
     fn url_round_trips() {
-        for cmd in ALL {
-            assert_eq!(DeeplinkCommand::parse_url(&cmd.to_url()), Some(cmd));
+        let commands = [
+            DeeplinkCommand::Show,
+            DeeplinkCommand::OpenSettings,
+            DeeplinkCommand::OpenAbout,
+            DeeplinkCommand::CheckForUpdates,
+            DeeplinkCommand::Quit,
+            DeeplinkCommand::AddDevice,
+            DeeplinkCommand::OpenFlow,
+            device("unit:4f4c4401"),
+            // A serial carries whatever the firmware reported, including the
+            // characters that would end a path segment or a URL.
+            device("serial:ab/c d?e#f%20g"),
+            device("direct:046d:b034:unit:4f4c4403"),
+            device("raw:046d:c900:ff43:0202:serial:litra 01"),
+            app("com.apple.Safari"),
+            app(r"c:\program files\adobe\photoshop 2026\photoshop.exe"),
+            app("/Applications/Zed.app/Contents/MacOS/zed"),
+            app("org.example.Ünïcødé"),
+            DeeplinkCommand::OpenCamera("camera:046d:0893:serial:a1/b2 c3".into()),
+            DeeplinkCommand::PreviewCamera("camera:046d:085e".into()),
+        ];
+        for command in commands {
+            let url = command.to_url();
+            assert_eq!(DeeplinkCommand::parse_url(&url), Some(command), "{url}");
         }
+    }
+
+    #[test]
+    fn a_targeted_command_carries_its_argument_as_one_escaped_path_segment() {
+        assert_eq!(
+            device("unit:4f4c4401").to_url(),
+            "openlogi://open-device/unit:4f4c4401"
+        );
+        assert_eq!(
+            app(r"c:\apps\my app.exe").to_url(),
+            "openlogi://open-app-profile/c:%5Capps%5Cmy%20app.exe"
+        );
+        assert_eq!(DeeplinkCommand::AddDevice.to_url(), "openlogi://add-device");
+        assert_eq!(DeeplinkCommand::OpenFlow.to_url(), "openlogi://open-flow");
     }
 
     #[test]
@@ -367,6 +489,10 @@ mod tests {
             DeeplinkCommand::parse_url("openlogi://open-settings?from=tray"),
             Some(DeeplinkCommand::OpenSettings)
         );
+        assert_eq!(
+            DeeplinkCommand::parse_url("openlogi://open-device/unit:4f4c4401/?from=tray#x"),
+            Some(device("unit:4f4c4401"))
+        );
     }
 
     #[test]
@@ -374,6 +500,41 @@ mod tests {
         assert_eq!(DeeplinkCommand::parse_url("https://example.com/show"), None);
         assert_eq!(DeeplinkCommand::parse_url("openlogi://bogus"), None);
         assert_eq!(DeeplinkCommand::parse_url("openlogi://"), None);
+    }
+
+    #[test]
+    fn a_link_never_names_a_pairing_slot() {
+        // Whoever is paired into slot 1 next would answer to this key.
+        let slot = PhysicalDeviceKey::parse("receiver:ol-bolt-uid-0001:slot:1")
+            .expect("a slot key is a physical key");
+        assert_eq!(DeviceLink::new(slot), None);
+        assert_eq!(
+            DeeplinkCommand::parse_url("openlogi://open-device/receiver:ol-bolt-uid-0001:slot:1"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_targeted_command_without_a_valid_argument_is_rejected() {
+        for url in [
+            "openlogi://open-device",
+            "openlogi://open-device/",
+            // Not a key that names one physical device.
+            "openlogi://open-device/wpid:b034",
+            "openlogi://open-device/unit:00000000",
+            // An unescaped `/` splits the argument; a guess at either half
+            // could open the wrong device or application.
+            "openlogi://open-device/serial:ab/cd",
+            "openlogi://open-app-profile",
+            "openlogi://open-app-profile/?app=com.apple.Safari",
+            "openlogi://open-app-profile//Applications/Zed.app",
+            // Not UTF-8 once unescaped.
+            "openlogi://open-app-profile/%FF",
+            "openlogi://open-camera",
+            "openlogi://preview-camera/",
+        ] {
+            assert_eq!(DeeplinkCommand::parse_url(url), None, "{url}");
+        }
     }
 
     #[test]

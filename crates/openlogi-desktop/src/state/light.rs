@@ -493,7 +493,7 @@ impl AppState {
         }
         let mut accepted = setup.rollback_settings;
         for &command in &applied {
-            apply_light_command(&mut accepted, command);
+            accepted.apply(command);
         }
         if let Some(persistent_key) = setup.persistent_key {
             if let Some(entry) = self.devices.sessions.get_mut(key) {
@@ -857,19 +857,6 @@ fn read_back_light(state: &LightState) -> LightSettings {
             .unwrap_or(defaults.brightness_percent),
         temperature_kelvin: state.temperature_kelvin.or(defaults.temperature_kelvin),
         ..defaults
-    }
-}
-
-fn apply_light_command(settings: &mut LightSettings, command: LightCommand) {
-    match command {
-        LightCommand::Power(enabled) => settings.enabled = enabled,
-        LightCommand::BrightnessPercent(brightness_percent) => {
-            settings.brightness_percent = brightness_percent;
-        }
-        LightCommand::TemperatureKelvin(temperature_kelvin) => {
-            settings.temperature_kelvin = Some(temperature_kelvin);
-        }
-        LightCommand::BrightnessNative(_) => {}
     }
 }
 

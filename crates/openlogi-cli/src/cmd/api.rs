@@ -206,13 +206,7 @@ async fn execute(
             "devices": devices(&snapshot),
         })),
         ApiCommand::Dpi { device, set } => {
-            dpi(
-                client,
-                select_device(&snapshot, &device)?,
-                set,
-                save.as_mut(),
-            )
-            .await
+            dpi(client, select_device(&snapshot, &device)?, set).await
         }
         ApiCommand::Smartshift(args) => smartshift(client, &snapshot, &args, save.as_mut()).await,
         ApiCommand::FnLock { device, set } => {
@@ -241,7 +235,7 @@ async fn execute(
                 ));
             }
             let keep = set.is_on();
-            save.keep_os_layout(keep);
+            save.keep_os_layout(keep)?;
             Ok(json!({
                 "device": device,
                 "persistence": "not_saved",
@@ -289,12 +283,12 @@ async fn fn_lock(
         Some(set) => {
             let requested = set.is_on();
             if let Some(save) = save {
-                save.fn_lock(requested);
+                save.fn_lock(requested)?;
             }
             let observed =
                 agent::call(client.set_fn_lock(context::current(), route, requested)).await??;
-            // A superseded agent request reads instead of writing; Ok alone
-            // does not guarantee that our requested state won.
+            // A superseded request answers `WriteSuperseded`; a keyboard
+            // that answers with another state did not take the requested one.
             if observed.fn_lock != requested {
                 return Err(ApiError::new(
                     "readback_mismatch",
@@ -313,11 +307,12 @@ async fn fn_lock(
     }))
 }
 
+/// Read the DPI, or set it to `set` first and check that it took. A save
+/// staged the requested DPI when it was prepared.
 async fn dpi(
     client: &AgentClient,
     route: DeviceRoute,
     set: Option<u16>,
-    save: Option<&mut Save>,
 ) -> Result<Value, ApiError> {
     let device = route.to_string();
     let mut info = agent::call(client.read_dpi(context::current(), route.clone())).await??;
@@ -328,9 +323,6 @@ async fn dpi(
                 "invalid_value",
                 "DPI is not in the device-reported supported values",
             ));
-        }
-        if let Some(save) = save {
-            save.dpi(requested);
         }
         agent::call(client.set_dpi(context::current(), route.clone(), requested)).await??;
         info = agent::call(client.read_dpi(context::current(), route)).await??;
@@ -367,7 +359,7 @@ async fn report_rate(
             ));
         }
         if let Some(save) = save {
-            save.report_rate(requested);
+            save.report_rate(requested)?;
         }
         info = agent::call(client.set_report_rate(context::current(), route, requested)).await??;
         // A superseded agent request reads instead of writing; Ok alone does

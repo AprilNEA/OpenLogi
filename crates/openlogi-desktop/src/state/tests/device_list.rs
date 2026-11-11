@@ -69,6 +69,7 @@ pub(crate) fn snapshot_candidate(profile: &DeviceProfile) -> AgentSnapshot {
         },
         lights: Vec::new(),
         flow: openlogi_ipc::FlowStatus::default(),
+        config_revision: openlogi_core::config::ConfigRevision::default(),
     }
 }
 

@@ -171,9 +171,10 @@ impl AppState {
     /// answer still records what the device did, but only the newest write's
     /// answer changes the shown DPI.
     ///
-    /// The agent also answers `Ok` for a write that a newer one at the mouse,
-    /// such as a precision-mode press, superseded before its turn. That write
-    /// is saved too, because the answer cannot tell the two apart.
+    /// A write that a newer one at the mouse, such as a precision-mode press,
+    /// superseded before its turn answers [`WriteError::WriteSuperseded`]. It
+    /// wrote nothing, so it is not saved, and the device is read again for
+    /// the DPI the newer write left.
     pub fn apply_dpi_written(
         &mut self,
         key: &DeviceKey,

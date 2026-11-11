@@ -812,8 +812,9 @@ impl DeviceReads {
     }
 
     /// Re-read `key`'s sidetone level from the headset, keeping the last value
-    /// on screen while it answers. The fallback after a write the headset
-    /// refused, when the shown value is no longer known to be its own.
+    /// on screen while it answers: after a write the headset refused, or a
+    /// change the agent announced, when the shown value is no longer known to
+    /// be its own.
     pub(crate) fn refresh_sidetone(&mut self, key: &DeviceKey) {
         if let Some(read) = self.sidetone.get_mut(key) {
             read.query.revalidate();
@@ -1309,9 +1310,10 @@ impl DeviceReads {
 
     /// Re-read `key`'s settings after the device or agent announced a change,
     /// keeping the shown values while it answers. Covers the settings
-    /// such a report can concern — DPI, Fn lock, report rate, backlight and
-    /// the SmartShift wheel mode (see [`PairedDevice::settings_revision`]); a
-    /// read nothing subscribed to stays unsubscribed.
+    /// such a report can concern — DPI, Fn lock, report rate, backlight,
+    /// sidetone and the SmartShift wheel mode (see
+    /// [`PairedDevice::settings_revision`]); a read nothing subscribed to
+    /// stays unsubscribed.
     ///
     /// [`PairedDevice::settings_revision`]: openlogi_core::device::PairedDevice::settings_revision
     pub(crate) fn revalidate_device_settings(&mut self, key: &DeviceKey) {
@@ -1327,6 +1329,7 @@ impl DeviceReads {
             client.invalidate(query_key(SMARTSHIFT, key));
         }
         self.refresh_fn_lock(key);
+        self.refresh_sidetone(key);
         if let Some(read) = self.report_rate.get_mut(key) {
             read.query.revalidate();
         }

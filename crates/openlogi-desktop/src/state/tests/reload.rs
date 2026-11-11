@@ -1,7 +1,7 @@
 //! Persisting a change: the rollback on a read-only config and the agent reload that follows.
 
 use super::*;
-use openlogi_core::config::{ConfigFile, ConfigRevision, MouseProfileTarget};
+use openlogi_core::config::{ConfigEdit, ConfigFile, ConfigRevision, MouseProfileTarget};
 use openlogi_core::update_feed::UpdateChannel;
 
 #[test]
@@ -442,4 +442,160 @@ fn an_update_channel_pick_adds_only_its_line_to_a_user_file() {
             .update_channel,
         Some(UpdateChannel::Beta)
     );
+}
+
+/// What the agent reports once it loaded `config.toml` at `revision`. It is
+/// still scanning, so nothing else in the snapshot changes the state.
+fn agent_loaded(revision: ConfigRevision) -> AgentSnapshot {
+    AgentSnapshot {
+        status: AgentStatus {
+            accessibility_granted: true,
+            hook_installed: true,
+            launch_at_login: false,
+            inventory: InventoryHealth::Scanning,
+            protocol_version: PROTOCOL_VERSION,
+            agent_version: "reload-test".to_string(),
+            input_monitoring_granted: true,
+            hid_open_failures: false,
+            secure_input: openlogi_ipc::SecureInput::Off,
+            virtual_keyboard: openlogi_ipc::VirtualKeyboardStatus::Unsupported,
+        },
+        inventory: Vec::new(),
+        standalone: Vec::new(),
+        camera_active: false,
+        pairing: None,
+        foreground: ForegroundApps::default(),
+        lights: Vec::new(),
+        flow: openlogi_ipc::FlowStatus::default(),
+        config_revision: revision,
+    }
+}
+
+/// A file-backed state at `path` holding the known mouse, and its commands
+/// with the startup ones drained.
+fn file_backed_mouse(
+    path: &std::path::Path,
+    resolver: &AssetResolver,
+) -> (
+    AppState,
+    tokio::sync::mpsc::UnboundedReceiver<crate::services::ipc::Command>,
+) {
+    let (config, file) = ConfigFile::load_from_path(path).unwrap();
+    let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let state = AppState::new(Sources {
+        inventories: &[direct_inventory([0xa3, 0x93, 0xca, 0xe0])],
+        persistence: ConfigPersistence::UserFile(file),
+        ..Sources::in_memory(config, resolver, commands)
+    });
+    super::fn_lock::drain(&mut receiver);
+    (state, receiver)
+}
+
+/// Another writer's save that the agent reports it loaded is adopted: the
+/// window shows it, has the agent confirm that revision, and its next save
+/// builds on it instead of conflicting with it. A report of a file this
+/// window has already saved over — the agent is behind — adopts nothing.
+#[test]
+fn a_save_another_writer_made_is_adopted_once_the_agent_loads_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(openlogi_core::paths::CONFIG_FILE);
+    let resolver = AssetResolver::new();
+    let (mut state, mut receiver) = file_backed_mouse(&path, &resolver);
+    let before = state.config.revision();
+    let _ = state.commit_animate_desktop_switch(false);
+    super::fn_lock::drain(&mut receiver);
+
+    let behind = state.apply_agent_snapshot(&agent_loaded(before), &resolver, &[]);
+    assert!(!behind.events.contains(&StateEvent::SettingsChanged));
+    assert!(
+        receiver.try_recv().is_err(),
+        "the file is this window's save"
+    );
+
+    // The menu-bar item saves.
+    let mut edit = ConfigEdit::load(&path).unwrap();
+    edit.config_mut().app_settings.smooth_scroll = true;
+    let elsewhere = edit.commit().unwrap();
+    let adopted = state.apply_agent_snapshot(&agent_loaded(elsewhere), &resolver, &[]);
+
+    assert!(adopted.events.contains(&StateEvent::SettingsChanged));
+    assert!(state.app_settings().smooth_scroll);
+    assert!(!state.app_settings().animate_desktop_switch);
+    let Ok(crate::services::ipc::Command::ReloadConfig(reload)) = receiver.try_recv() else {
+        panic!("the agent confirms the adopted revision");
+    };
+    assert_eq!(reload.revision, elsewhere);
+    assert!(receiver.try_recv().is_err());
+    let again = state.apply_agent_snapshot(&agent_loaded(elsewhere), &resolver, &[]);
+    assert!(!again.events.contains(&StateEvent::SettingsChanged));
+
+    let _ = state.commit_animate_desktop_switch(true);
+    assert_eq!(state.config_issue(), None);
+    let saved = Config::load_from_path(&path).unwrap();
+    assert!(
+        saved.app_settings.smooth_scroll,
+        "the other writer's save stays"
+    );
+    assert!(saved.app_settings.animate_desktop_switch);
+}
+
+/// A report of another writer's save whose file could not be read is
+/// looked at again with the next snapshot, not forgotten.
+#[test]
+fn another_writers_save_is_adopted_after_a_failed_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(openlogi_core::paths::CONFIG_FILE);
+    let resolver = AssetResolver::new();
+    let (mut state, _receiver) = file_backed_mouse(&path, &resolver);
+    let mut edit = ConfigEdit::load(&path).unwrap();
+    edit.config_mut().app_settings.smooth_scroll = true;
+    let elsewhere = edit.commit().unwrap();
+    let saved = std::fs::read(&path).unwrap();
+
+    std::fs::write(&path, "not [toml").unwrap();
+    let unread = state.apply_agent_snapshot(&agent_loaded(elsewhere), &resolver, &[]);
+    assert!(!unread.events.contains(&StateEvent::SettingsChanged));
+
+    std::fs::write(&path, saved).unwrap();
+    let adopted = state.apply_agent_snapshot(&agent_loaded(elsewhere), &resolver, &[]);
+    assert!(adopted.events.contains(&StateEvent::SettingsChanged));
+    assert!(state.app_settings().smooth_scroll);
+}
+
+/// A DPI the mouse has not answered yet is not saved: adopting another
+/// writer's save keeps showing it, and the mouse's answer saves it on top
+/// of the adopted file.
+#[test]
+fn adopting_another_writers_save_keeps_a_dpi_the_mouse_has_not_answered() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(openlogi_core::paths::CONFIG_FILE);
+    let mut seed = Config::default();
+    seed.set_dpi(KNOWN_MOUSE_KEY, Dpi::new(800));
+    seed.save_to_path(&path).unwrap();
+    let resolver = AssetResolver::new();
+    let (mut state, mut receiver) = file_backed_mouse(&path, &resolver);
+    let key = state.current_record().unwrap().device_key();
+    let requested = Dpi::new(2400);
+    let _ = state.commit_dpi(requested);
+    let write = super::fn_lock::drain(&mut receiver)
+        .into_iter()
+        .find_map(|command| match command {
+            crate::services::ipc::Command::SetDpi(set) => Some(set.write),
+            _ => None,
+        })
+        .expect("a DPI write");
+
+    let mut edit = ConfigEdit::load(&path).unwrap();
+    edit.config_mut().set_invert_scroll(KNOWN_MOUSE_KEY, true);
+    let elsewhere = edit.commit().unwrap();
+    let _ = state.apply_agent_snapshot(&agent_loaded(elsewhere), &resolver, &[]);
+
+    assert!(state.config.invert_scroll(KNOWN_MOUSE_KEY), "adopted");
+    assert_eq!(state.dpi(), requested, "the requested DPI keeps showing");
+
+    let _ = state.apply_dpi_written(&key, write, requested, Ok(()));
+    assert_eq!(state.config_issue(), None);
+    let saved = Config::load_from_path(&path).unwrap();
+    assert_eq!(saved.dpi(KNOWN_MOUSE_KEY), Some(requested));
+    assert!(saved.invert_scroll(KNOWN_MOUSE_KEY));
 }

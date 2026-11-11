@@ -1,10 +1,25 @@
 //! Exact-revision confirmation after adopting an externally changed file.
 
+use openlogi_core::config::ConfigRevision;
+
 use crate::services::ipc::{ConfigReloadContext, ReloadConfig};
 
 use super::{AppState, ConfigReconciliation, DisableKeysError, StateEvent, StateEvents};
 
 impl AppState {
+    /// Adopt `config.toml` when the agent reports it loaded a save another
+    /// writer made — the menu-bar item, `openlogi api --save`, Flow pairing
+    /// — so the next save here builds on it instead of conflicting with it.
+    /// A DPI write still waiting for its device keeps showing, and saves on
+    /// top of the adopted file once the device takes it.
+    pub(super) fn adopt_saved_elsewhere(&mut self, reported: ConfigRevision) -> StateEvents {
+        if self.config.saved_elsewhere(reported) {
+            self.reconcile_saved_config()
+        } else {
+            StateEvents::none()
+        }
+    }
+
     /// Adopt the external file and request acknowledgement of that exact revision.
     pub(super) fn reconcile_saved_config(&mut self) -> StateEvents {
         let events = match self.reconcile_external_config() {

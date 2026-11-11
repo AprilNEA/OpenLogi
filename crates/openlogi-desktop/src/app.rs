@@ -203,6 +203,23 @@ impl DetailTab {
             .unwrap_or(Self::Device)
     }
 
+    /// Whether this tab, on `state`'s selected device, edits per-application
+    /// profiles.
+    fn edits_app_profiles(self, state: &AppState) -> bool {
+        match self {
+            Self::Buttons | Self::ActionsRing => true,
+            // A keypad's keys all bind per app profile; a keyboard's F-row
+            // binds globally, and a profile selector there would mislead.
+            Self::Keys => state.current_keypad().is_some(),
+            Self::Pointer
+            | Self::Lighting
+            | Self::Camera
+            | Self::Light
+            | Self::Audio
+            | Self::Device => false,
+        }
+    }
+
     fn label(self) -> gpui::SharedString {
         match self {
             Self::Buttons => tr!("device.buttons"),

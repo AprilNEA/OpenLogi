@@ -31,6 +31,17 @@ refused rather than overwriting the external edit. Relaunch to load that
 revision. Opening the GUI also tells the resident agent to reload the current
 file, so hand edits and runtime behavior converge immediately.
 
+On macOS, a change made from the menu-bar menu is saved by the agent, the way
+`openlogi api --save` saves: an online device takes the change first, so a
+value it refuses is never saved, and the file is saved only while it is still
+at the revision the agent read. When another writer saved in between, nothing
+is saved and the device's submenu says so; choose the change again. The agent
+then reloads the file, and an open GUI picks up the change without a relaunch.
+A sleeping mouse's DPI preset and wheel mode, and whether OpenLogi manages a
+device, are saved and applied when the device reconnects; the other menu
+controls need the device online. The backlight and sidetone stay on the device
+and are not saved.
+
 Schema versions newer than the running build are rejected before their fields
 are parsed. v1 binding maps and the v2–v3 gesture-owner layout migrate on load.
 The v3 physical-device-key transition cannot safely assign older model-scoped

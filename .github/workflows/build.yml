@@ -106,7 +106,7 @@ jobs:
   # the previous one, but this job fails the gate and all build jobs skip.
   should-build:
     name: Should build
-    runs-on: ubuntu-latest
+    runs-on: nscloud-ubuntu-24.04-amd64-2x4
     outputs:
       run: ${{ steps.gate.outputs.run }}
     steps:
@@ -154,9 +154,10 @@ jobs:
     needs: should-build
     if: ${{ needs.should-build.outputs.run == 'true' }}
     # Apple Silicon compiles both slices. Building the Intel slice on the arm64
-    # runner is supported by Rust and Xcode and avoids the much slower hosted
-    # Intel runner; every bundled Mach-O is checked below before it can ship.
-    runs-on: macos-latest
+    # runner is supported by Rust and Xcode; every bundled Mach-O is checked
+    # below before it can ship.
+    # The slim image pre-grants the Finder automation create-dmg needs.
+    runs-on: nscloud-macos-tahoe-slim-arm64-6x14
     # Bound a stuck brew/linker/notarize hang so it can't hold a PR build slot
     # for the 6-hour runner default (the signed path also notarizes).
     timeout-minutes: 60
@@ -457,7 +458,7 @@ jobs:
     # Both arches build on the x86_64 runner — arm64 as an MSVC cross-compile.
     # Native Arm runners are not an option: artifact-signing-action refuses to
     # run on them, while the signing itself is arch-agnostic over the PE file.
-    runs-on: windows-2025
+    runs-on: nscloud-windows-2022-amd64-8x16
     strategy:
       fail-fast: false
       matrix:
@@ -470,8 +471,7 @@ jobs:
     # tolerates), not a 6-hour stall: publish waits for this job to reach a
     # terminal state before its own gate is even evaluated. The GUI release
     # build (thin LTO, codegen-units=1, the whole GPUI stack) dominates the
-    # runtime on the 4-core runner, hence a looser budget than the ~8-minute
-    # CLI-only runs needed.
+    # runtime, hence a looser budget than the ~8-minute CLI-only runs needed.
     timeout-minutes: 60
     env:
       # Static CRT: a bare exe must not depend on the VC++ Redistributable —
@@ -691,7 +691,7 @@ jobs:
 
   windows-msi:
     name: Windows MSI (${{ matrix.arch }})
-    runs-on: windows-2025
+    runs-on: nscloud-windows-2022-amd64-4x8
     needs: [should-build, windows]
     # `needs` only orders the jobs; this gate runs the MSI legs even when the
     # windows matrix AGGREGATE failed. The by-name artifact download below
@@ -764,8 +764,13 @@ jobs:
         # The UI extension (the progress-only dialog flow) and Util extension
         # (util:CloseApplication in OpenLogi.wxs) are pinned to the same version
         # — WiX extensions release in lockstep with wix.
+        # The job runs as SYSTEM, whose global dotnet tools are not on PATH.
+        shell: pwsh
         run: |
-          dotnet tool install --global wix --version 6.0.2
+          $tools = Join-Path $env:RUNNER_TEMP wix
+          dotnet tool install wix --version 6.0.2 --tool-path $tools
+          Add-Content $env:GITHUB_PATH $tools
+          $env:PATH = "$tools;$env:PATH"
           wix extension add --global WixToolset.UI.wixext/6.0.2
           wix extension add --global WixToolset.Util.wixext/6.0.2
 
@@ -879,10 +884,10 @@ jobs:
           # The native build host defines the oldest GLIBC these binaries can
           # load against. Keep both architectures on the documented 2.35 floor.
           - arch: amd64
-            runner: ubuntu-22.04
+            runner: nscloud-ubuntu-22.04-amd64-8x32
             nfpm_sha256: "d6417f99d5fa32bba7a4e007084615d3897651498c2e443118c26b9ec3b698a8"
           - arch: arm64
-            runner: ubuntu-22.04-arm
+            runner: nscloud-ubuntu-22.04-arm64-16x32;linux-on-apple-silicon=true
             nfpm_sha256: "dc63aa7228ec70490bae67ad3146883055a055639dcf0dffc82fa965bac75a31"
     permissions:
       contents: read
@@ -1043,11 +1048,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # bwrap needs a privileged runner container for pivot_root.
         include:
           - arch: amd64
-            runner: ubuntu-latest
+            runner:
+              - nscloud-ubuntu-24.04-amd64-16x32-with-features
+              - namespace-features:container.privileged=true
           - arch: arm64
-            runner: ubuntu-24.04-arm
+            runner:
+              - nscloud-ubuntu-24.04-arm64-16x32-with-features
+              - namespace-features:linux-on-apple-silicon=true;container.privileged=true
     permissions:
       contents: read
     steps:
@@ -1178,7 +1188,7 @@ jobs:
     name: Build results
     if: ${{ always() }}
     needs: [should-build, macos, windows, windows-msi, linux-packages, linux-flatpak]
-    runs-on: ubuntu-latest
+    runs-on: nscloud-ubuntu-24.04-amd64-2x4
     outputs:
       macos: ${{ needs.macos.result }}
       windows: ${{ needs.windows.result }}

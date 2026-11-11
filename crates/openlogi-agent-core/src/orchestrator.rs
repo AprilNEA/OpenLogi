@@ -30,9 +30,9 @@ use openlogi_core::device::{
 use openlogi_core::device_order::{DeviceIdentity, DeviceStableId, PhysicalDeviceKey};
 use openlogi_hid::{
     BacklightChange, BacklightState, CaptureChannelSlot, ChannelPool, ChannelRegistry,
-    DeviceIoGate, DeviceRoute, DisableKeysMask, Dpi, EasySwitchHosts, FnLockState,
+    DeviceIoGate, DeviceRoute, DisableKeysMask, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
     ForceSensingInfo, GamingWanted, HidppOperation, HostOs, PointerSpeed, ReportRate,
-    ReportRateInfo, SidetoneLevel, WriteError, commands_for_light_settings,
+    ReportRateInfo, SidetoneLevel, SmartShiftStatus, WriteError, commands_for_light_settings,
     is_reserved_keyboard_control, key_display_for,
 };
 #[cfg(test)]
@@ -67,8 +67,12 @@ use crate::{DpiCycleState, DpiCycles, PointerSpeeds};
 
 mod devices;
 mod lights;
+mod settings;
 
-pub use lights::{ConfigSource, LightWriteClaim, TakenLightChange, write_light};
+pub use lights::{
+    ConfigSource, LightWriteClaim, TakenLightChange, write_light, write_manual_light_power,
+};
+pub use settings::{ConfigReload, DeviceSettings, RoutedDevice, SettingError};
 
 use devices::reapply_targets;
 use devices::{
@@ -204,6 +208,10 @@ pub struct SharedHandles {
     /// The running inventory watcher's refresh handle, published at arming;
     /// `None` while no watcher runs.
     inventory_refresh: Arc<RwLock<Option<InventoryRefresh>>>,
+    /// The `0x0003` unit ID of the one device these handles' device
+    /// operations reach (see [`Self::reaching`]); `None` for the agent's own
+    /// handles, which reach whichever device is on a route.
+    reaching: Option<[u8; 4]>,
 }
 
 impl SharedHandles {
@@ -239,16 +247,32 @@ impl SharedHandles {
         }
     }
 
+    /// These handles, with every device operation built through
+    /// [`Self::device`] and [`Self::keyboard_device`] bound to the device
+    /// that reports `unit` through HID++ `0x0003`, for a change asked for
+    /// one device: a write confirms that device is still the one on the
+    /// route before it writes, and refuses another one with
+    /// [`WriteError::DeviceNotFound`] (see `DeviceOp::confirming`). An
+    /// all-zero `unit`, which a device never probed has, names no device:
+    /// the operations then reach whichever device is on the route.
+    #[must_use]
+    pub fn reaching(&self, unit: [u8; 4]) -> Self {
+        Self {
+            reaching: crate::hardware::known_unit(unit),
+            ..self.clone()
+        }
+    }
+
     /// Bind a device operation to `route` through [`Self::device_access`].
     #[must_use]
     pub fn device(&self, route: &DeviceRoute) -> DeviceOp {
-        self.device_access().op(route)
+        self.device_access().op(route).confirming(self.reaching)
     }
 
     /// Bind a device operation to `route` through [`Self::keyboard_access`].
     #[must_use]
     pub fn keyboard_device(&self, route: &DeviceRoute) -> DeviceOp {
-        self.keyboard_access().op(route)
+        self.keyboard_access().op(route).confirming(self.reaching)
     }
 
     /// Return the `0x8071` software control this session's lighting writes
@@ -260,11 +284,61 @@ impl SharedHandles {
         crate::hardware::release_session_rgb_control(&self.device_access()).await;
     }
 
+    /// Read the Fn-lock state of the keyboard at `route`, through the
+    /// keyboard's own capture channel, as its writes go.
+    pub async fn read_fn_lock(&self, route: &DeviceRoute) -> Result<FnLockState, WriteError> {
+        self.keyboard_device(route)
+            .run(HidppOperation::ReadFnLock, |c| async move {
+                openlogi_hid::get_fn_lock_on(&c).await
+            })
+            .await
+    }
+
+    /// Read the backlight of the keyboard at `route`.
+    pub async fn read_backlight(&self, route: &DeviceRoute) -> Result<BacklightState, WriteError> {
+        self.device(route)
+            .run(HidppOperation::ReadBacklight, |c| async move {
+                openlogi_hid::get_backlight_on(&c).await
+            })
+            .await
+    }
+
+    /// Read the sidetone level of the headset at `route`.
+    pub async fn read_sidetone(&self, route: &DeviceRoute) -> Result<SidetoneLevel, WriteError> {
+        self.device(route)
+            .run(HidppOperation::ReadSidetone, |c| async move {
+                openlogi_hid::get_sidetone_on(&c).await
+            })
+            .await
+    }
+
+    /// Read the DPI and the DPI values of the mouse at `route`.
+    pub async fn read_dpi(&self, route: &DeviceRoute) -> Result<DpiInfo, WriteError> {
+        self.device(route)
+            .run(HidppOperation::ReadDpiCapabilities, |c| async move {
+                openlogi_hid::get_dpi_info_on(&c).await
+            })
+            .await
+    }
+
+    /// Read the SmartShift wheel of the mouse at `route`.
+    pub async fn read_smartshift(
+        &self,
+        route: &DeviceRoute,
+    ) -> Result<SmartShiftStatus, WriteError> {
+        self.device(route)
+            .run(HidppOperation::ReadSmartShift, |c| async move {
+                openlogi_hid::get_smartshift_status_on(&c).await
+            })
+            .await
+    }
+
     /// Write `fn_lock` to the keyboard at `route` and return its echo. When a
     /// newer Fn-lock write for the keyboard is requested before this one gets
-    /// its turn, this one reads the keyboard instead of writing a value that
-    /// is about to be replaced. Waiting for the turn does not count against
-    /// the write's deadline.
+    /// its turn, this one writes nothing and answers
+    /// [`WriteError::WriteSuperseded`], so its caller saves nothing: the
+    /// newer write decides the state. Waiting for the turn does not count
+    /// against the write's deadline.
     pub async fn set_fn_lock(
         &self,
         route: &DeviceRoute,
@@ -276,7 +350,11 @@ impl SharedHandles {
                 HidppOperation::WriteFnLock,
                 &ticket,
                 |c| async move { openlogi_hid::set_fn_lock_on(&c, fn_lock).await },
-                |c| async move { openlogi_hid::get_fn_lock_on(&c).await },
+                |_| async {
+                    Err(WriteError::WriteSuperseded {
+                        operation: HidppOperation::WriteFnLock,
+                    })
+                },
             )
             .await
     }
@@ -390,7 +468,8 @@ impl SharedHandles {
     /// shows, and darkens the DPI LED when the precision speed ends with it.
     /// It is ordered with the precision button, the DPI preset actions and
     /// the reconnect reapply. A write superseded before its turn writes
-    /// nothing.
+    /// nothing and answers [`WriteError::WriteSuperseded`], so its caller
+    /// saves nothing: the newer write decides the DPI.
     pub async fn set_dpi(&self, route: &DeviceRoute, dpi: Dpi) -> Result<(), WriteError> {
         let AppWrite { ticket, restore } = self
             .pointer_speeds
@@ -416,17 +495,35 @@ impl SharedHandles {
                     }
                     Ok(())
                 },
-                |_| async { Ok(()) },
+                |_| async {
+                    Err(WriteError::WriteSuperseded {
+                        operation: HidppOperation::WriteDpi,
+                    })
+                },
             )
             .await;
-        // A rejected write leaves the mouse where it was, which only a
-        // reading of it can tell.
+        // A rejected write leaves the mouse where it was, and a superseded
+        // one where the newer write puts it, which only a reading of it can
+        // tell.
         if result.is_err()
             && let Ok(mut cycles) = self.dpi_cycle.write()
         {
             cycles.rejected_at(route, dpi);
         }
         result
+    }
+
+    /// Write `status` to the SmartShift wheel of the mouse at `route`.
+    pub async fn set_smartshift(
+        &self,
+        route: &DeviceRoute,
+        status: SmartShiftStatus,
+    ) -> Result<(), WriteError> {
+        self.device(route)
+            .run(HidppOperation::WriteSmartShift, |c| async move {
+                openlogi_hid::set_smartshift_on(&c, status).await
+            })
+            .await
     }
 
     /// Apply `change` to the backlight of the keyboard at `route` and return
@@ -823,6 +920,7 @@ impl Orchestrator {
             follower_cookie_order: WriteOrder::default(),
             disabled_keys_order: WriteOrder::default(),
             inventory_refresh: Arc::new(RwLock::new(None)),
+            reaching: None,
         };
         let orch = Self {
             config,

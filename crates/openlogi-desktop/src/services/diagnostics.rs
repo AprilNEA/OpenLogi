@@ -3,12 +3,10 @@
 use std::path::Path;
 
 use gpui::App;
-use openlogi_core::device::{DeviceModelInfo, ModelTransport};
 use openlogi_core::diagnostics::{
     AppInfo, AssetInfo, AssetSource, ConnectionKind, DeviceDiag, DiagnosticsReport, InventoryState,
     ReceiverDiag, RenderState,
 };
-use openlogi_core::hid::{DeviceRoute, ReceiverBrand};
 use openlogi_core::update_feed::UpdateChannel;
 use openlogi_ipc::{InventoryHealth, PROTOCOL_VERSION, VirtualKeyboardStatus};
 
@@ -144,7 +142,7 @@ fn collect_devices(state: &AppState) -> Vec<DeviceDiag> {
                 display_name: record.display_name.clone(),
                 kind: record.kind,
                 codename: record.codename.clone(),
-                connection: connection_for(record.route.as_ref(), record.receiver_brand, model),
+                connection: ConnectionKind::of(record.route.as_ref(), record.receiver_brand, model),
                 online: record.is_online(),
                 battery: record.battery.clone(),
                 capabilities: record.capabilities,
@@ -164,50 +162,6 @@ fn collect_devices(state: &AppState) -> Vec<DeviceDiag> {
             }
         })
         .collect()
-}
-
-/// Refine the HID++ route into a user-facing connection type.
-///
-/// A `Direct` route carries the vendor/product id of the HID node this
-/// session actually enumerated, which — for a multi-transport device —
-/// pinpoints the transport that's live *right now* via
-/// [`DeviceModelInfo::transport_for_product_id`]. Falling back to the
-/// static, unordered transport flags (as this used to do unconditionally)
-/// mislabels a USB-connected multi-transport device as Bluetooth, since a
-/// device that supports both always has both flags set: see issue #1218.
-fn connection_for(
-    route: Option<&DeviceRoute>,
-    receiver_brand: Option<ReceiverBrand>,
-    model: Option<&DeviceModelInfo>,
-) -> ConnectionKind {
-    match route {
-        Some(DeviceRoute::Bolt { .. }) => ConnectionKind::BoltReceiver,
-        Some(DeviceRoute::Unifying { .. }) => match receiver_brand {
-            Some(ReceiverBrand::Nano) => ConnectionKind::NanoReceiver,
-            Some(ReceiverBrand::Lightspeed) => ConnectionKind::LightspeedReceiver,
-            Some(ReceiverBrand::Bolt | ReceiverBrand::Unifying) | None => {
-                ConnectionKind::UnifyingReceiver
-            }
-        },
-        Some(DeviceRoute::Direct { product_id, .. }) => {
-            match model.and_then(|m| m.transport_for_product_id(*product_id)) {
-                Some(ModelTransport::Bluetooth | ModelTransport::Btle) => {
-                    ConnectionKind::BluetoothDirect
-                }
-                Some(ModelTransport::Equad | ModelTransport::Usb) => ConnectionKind::Wired,
-                // Product id didn't match a known slot (no model info yet, or
-                // an unrecognized PID) — fall back to the old best-effort
-                // guess from the static capability flags.
-                None => match model.map(|m| m.transports) {
-                    Some(t) if t.bluetooth || t.btle => ConnectionKind::BluetoothDirect,
-                    Some(t) if t.usb => ConnectionKind::Wired,
-                    _ => ConnectionKind::Unknown,
-                },
-            }
-        }
-        Some(DeviceRoute::RawHid { .. }) => ConnectionKind::Wired,
-        None => ConnectionKind::Unknown,
-    }
 }
 
 fn dpi_summary(load: DpiLoad) -> Option<String> {
@@ -242,139 +196,6 @@ fn arch_label() -> &'static str {
     match std::env::consts::ARCH {
         "aarch64" => "arm64",
         other => other,
-    }
-}
-
-#[cfg(test)]
-mod connection_for_tests {
-    use openlogi_core::device::DeviceTransports;
-
-    use super::{ConnectionKind, DeviceModelInfo, DeviceRoute, ReceiverBrand, connection_for};
-
-    /// G915 X LS from issue #1218: reports all three transports (USB, eQuad,
-    /// BTLE), model_ids packed BTLE/eQuad/USB per the ascending-bit-order
-    /// contract in [`DeviceModelInfo::model_ids`].
-    fn g915_x_ls_model() -> DeviceModelInfo {
-        DeviceModelInfo {
-            entity_count: 3,
-            serial_number: None,
-            unit_id: [0, 0, 0, 0],
-            transports: DeviceTransports {
-                usb: true,
-                equad: true,
-                btle: true,
-                bluetooth: false,
-            },
-            model_ids: [0xb38a, 0x40b5, 0xc356],
-            extended_model_id: 0x01,
-        }
-    }
-
-    #[test]
-    fn multi_transport_device_over_usb_direct_is_wired() {
-        let model = g915_x_ls_model();
-        let route = DeviceRoute::Direct {
-            vendor_id: 0x046d,
-            product_id: 0xc356, // the USB slot in model_ids
-        };
-        assert_eq!(
-            connection_for(Some(&route), None, Some(&model)),
-            ConnectionKind::Wired,
-            "a device plugged in over USB must be labeled wired even though \
-             it also supports Bluetooth/BTLE"
-        );
-    }
-
-    #[test]
-    fn multi_transport_device_over_btle_direct_is_bluetooth() {
-        let model = g915_x_ls_model();
-        let route = DeviceRoute::Direct {
-            vendor_id: 0x046d,
-            product_id: 0xb38a, // the BTLE slot in model_ids
-        };
-        assert_eq!(
-            connection_for(Some(&route), None, Some(&model)),
-            ConnectionKind::BluetoothDirect,
-            "the same multi-transport device connected over BTLE must be \
-             labeled Bluetooth, proving the label follows the live route \
-             rather than a fixed preference order"
-        );
-    }
-
-    #[test]
-    fn unrecognized_product_id_falls_back_to_capability_guess() {
-        let model = g915_x_ls_model();
-        let route = DeviceRoute::Direct {
-            vendor_id: 0x046d,
-            product_id: 0xdead, // matches none of model_ids
-        };
-        // No live match: falls back to the old best-effort guess from the
-        // static transport flags (bluetooth/btle preferred there too).
-        assert_eq!(
-            connection_for(Some(&route), None, Some(&model)),
-            ConnectionKind::BluetoothDirect
-        );
-    }
-
-    #[test]
-    fn missing_model_info_falls_back_to_unknown() {
-        let route = DeviceRoute::Direct {
-            vendor_id: 0x046d,
-            product_id: 0xc356,
-        };
-        assert_eq!(
-            connection_for(Some(&route), None, None),
-            ConnectionKind::Unknown
-        );
-    }
-
-    #[test]
-    fn bolt_and_unifying_routes_are_unaffected_by_transports() {
-        let model = g915_x_ls_model();
-        assert_eq!(
-            connection_for(
-                Some(&DeviceRoute::Bolt {
-                    receiver_uid: "r1".to_string(),
-                    slot: 1,
-                }),
-                None,
-                Some(&model)
-            ),
-            ConnectionKind::BoltReceiver
-        );
-        assert_eq!(
-            connection_for(
-                Some(&DeviceRoute::Unifying {
-                    receiver_uid: "r1".to_string(),
-                    slot: 1,
-                }),
-                None,
-                Some(&model)
-            ),
-            ConnectionKind::UnifyingReceiver
-        );
-    }
-
-    #[test]
-    fn receiver_product_families_use_the_registered_brand() {
-        let route = DeviceRoute::Unifying {
-            receiver_uid: "r1".to_string(),
-            slot: 1,
-        };
-        for (brand, expected) in [
-            (None, ConnectionKind::UnifyingReceiver),
-            (
-                Some(ReceiverBrand::Unifying),
-                ConnectionKind::UnifyingReceiver,
-            ),
-            (Some(ReceiverBrand::Nano), ConnectionKind::NanoReceiver),
-            (
-                Some(ReceiverBrand::Lightspeed),
-                ConnectionKind::LightspeedReceiver,
-            ),
-        ] {
-            assert_eq!(connection_for(Some(&route), brand, None), expected);
-        }
     }
 }
 

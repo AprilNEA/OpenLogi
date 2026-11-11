@@ -67,6 +67,9 @@ impl AppState {
         cameras: &[Camera],
     ) -> SnapshotChanges {
         let inventory_ready = snapshot.status.inventory == InventoryHealth::Ready;
+        // Before anything below saves: a save on top of a file another
+        // writer changed would conflict with it.
+        let config = self.adopt_saved_elsewhere(snapshot.config_revision);
         // Merge only completed enumerations. A scanning agent serves an empty
         // pre-enumeration list, which must not burn the GUI's miss grace or
         // replace the last known device set.
@@ -92,7 +95,8 @@ impl AppState {
 
         SnapshotChanges {
             inventory_ready,
-            events: inventory
+            events: config
+                .and(inventory)
                 .and(agent)
                 .and(camera)
                 .and(foreground)

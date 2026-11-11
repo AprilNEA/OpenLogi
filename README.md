@@ -88,6 +88,7 @@ Things OpenLogi does that Options+ won't:
 - Logi Bolt and Unifying receivers, Bluetooth, and wired connections, with battery level and charge state
 - Low-battery notices at the bottom of the screen, once per discharge, with no OS notification permission
 - An on-screen indicator when a keyboard turns Caps Lock on or off, plus Num Lock and Scroll Lock on Windows and Linux
+- On macOS, a menu-bar menu that lists each device with its battery or light state, flags a missing permission, and changes the settings you reach for most without opening the app: DPI preset, wheel mode, Fn lock, backlight, disabled keys, headset sidetone, and a light's power, brightness, and color temperature. Hold ⌥ to see how each device connects
 
 <table>
     <tr>
@@ -166,7 +167,8 @@ Feature coverage depends on what each device reports; the app shows only the con
 | Media keys | Native | Native | D-Bus MPRIS |
 | Window-manager actions (desktops, Mission Control, …) | Native | Native equivalents | GNOME, KDE (KWin), Hyprland; some macOS-only actions do nothing |
 | Menu-bar / tray icon | ✓ | ✓ | — |
-| In-app updates | Sparkle | Built-in | `.deb`, `.rpm`, and Arch packages, with a polkit prompt ([details](docs/INSTALL-linux.md#updating)) |
+| Device controls in the menu-bar / tray menu | ✓ | — | — |
+| In-app updates | Sparkle | Built-in | Built-in |
 
 ## Install
 
