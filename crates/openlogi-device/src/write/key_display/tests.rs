@@ -240,3 +240,112 @@ async fn a_key_off_the_panel_writes_nothing() {
             .any(|report| report.first() == Some(&IMAGE_HEADER[0]))
     );
 }
+
+/// An image waits for the HID++ request in flight: the keypad drops a request
+/// that is in flight when an image arrives, and can restart a few seconds
+/// later (#2281).
+#[tokio::test]
+async fn an_image_waits_for_the_request_in_flight() {
+    use std::sync::Arc;
+
+    use hidpp::channel::HidppMessage;
+    use openlogi_fixture::RequestMatch;
+
+    use crate::channel::scripted::ping_reply;
+
+    let (raw, handle) = ScriptedRawHidChannel::with_dynamic_responder(|request| {
+        if request.first() == Some(&IMAGE_HEADER[0]) {
+            Some(hardware_ack())
+        } else {
+            ping_reply(request)
+        }
+    });
+    let channel = scripted_channel(raw).await;
+    let shared = SharedChannel::new(Arc::clone(&channel), KEYPAD);
+    let ping = [0xff, 0x00, 0x11, 0x00, 0x00, 0x5a];
+    let held = handle.hold_next_response(
+        RequestMatch::Hidpp20,
+        &[0x10, ping[0], ping[1], ping[2], ping[3], ping[4], ping[5]],
+    );
+    let request = tokio::spawn({
+        let channel = Arc::clone(&channel);
+        async move {
+            channel
+                .send(
+                    HidppMessage::Short(ping),
+                    |reply| matches!(reply, HidppMessage::Short(bytes) if bytes[1] == 0x00),
+                )
+                .await
+        }
+    });
+    held.request_written().await;
+    let image = tokio::spawn(async move {
+        write_key_image_on(&shared, display(), GridKey::TopLeft, &jpeg(900)).await
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let is_image = |report: &Vec<u8>| report.first() == Some(&IMAGE_HEADER[0]);
+    assert!(
+        !handle.written_reports().iter().any(is_image),
+        "the image went out while a request awaited its reply"
+    );
+
+    held.release();
+    request.await.unwrap().unwrap();
+    image.await.unwrap().unwrap();
+    let written = handle.written_reports();
+    let ping_at = written.iter().position(|report| report[2] == 0x00).unwrap();
+    let image_at = written.iter().position(is_image).unwrap();
+    assert!(ping_at < image_at);
+}
+
+/// A caller that gives up after the packets went out does not end the
+/// pause: requests still wait until the image is acknowledged or its
+/// acknowledgement times out.
+#[tokio::test(start_paused = true)]
+async fn a_cancelled_image_holds_requests_until_its_ack_times_out() {
+    use std::sync::Arc;
+
+    use hidpp::channel::HidppMessage;
+
+    use crate::channel::scripted::ping_reply;
+
+    // Never acknowledges an image; answers the protocol ping.
+    let (raw, handle) = ScriptedRawHidChannel::with_dynamic_responder(|request| {
+        (request.first() != Some(&IMAGE_HEADER[0]))
+            .then(|| ping_reply(request))
+            .flatten()
+    });
+    let channel = scripted_channel(raw).await;
+    let shared = SharedChannel::new(Arc::clone(&channel), KEYPAD);
+    let is_image = |report: &Vec<u8>| report.first() == Some(&IMAGE_HEADER[0]);
+    let is_ping = |report: &Vec<u8>| report[2] == 0x00;
+
+    let cancelled = tokio::time::timeout(
+        Duration::from_millis(100),
+        write_key_image_on(&shared, display(), GridKey::TopLeft, &jpeg(900)),
+    )
+    .await;
+    assert!(cancelled.is_err(), "the image is still awaiting its ack");
+    assert!(handle.written_reports().iter().any(is_image));
+
+    let request = tokio::spawn({
+        let channel = Arc::clone(&channel);
+        async move {
+            channel
+                .send(
+                    HidppMessage::Short([0xff, 0x00, 0x11, 0x00, 0x00, 0x5a]),
+                    |reply| matches!(reply, HidppMessage::Short(bytes) if bytes[1] == 0x00),
+                )
+                .await
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        !handle.written_reports().iter().any(is_ping),
+        "a request went out before the image's ack timed out"
+    );
+
+    tokio::time::sleep(ACK_TIMEOUT).await;
+    request.await.unwrap().unwrap();
+    assert!(handle.written_reports().iter().any(is_ping));
+}
