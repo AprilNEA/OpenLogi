@@ -9,6 +9,7 @@ use openlogi_core::device::DeviceKind;
 use openlogi_core::hid::{DeviceRoute, KeypadDescriptor};
 use std::path::PathBuf;
 
+mod dialpad;
 mod gaming;
 mod native_function;
 /// The MX Creative Keypad, as its wired route names it.
@@ -52,11 +53,16 @@ fn picking_an_action_sets_or_replaces_the_binding() {
 }
 
 #[test]
-fn hover_or_selection_highlights_a_key() {
-    assert!(key_is_highlighted(2, Some(2), None));
-    assert!(key_is_highlighted(2, None, Some(2)));
-    assert!(key_is_highlighted(2, Some(2), Some(7)));
-    assert!(!key_is_highlighted(2, Some(1), Some(7)));
+fn the_selected_key_stands_apart_from_the_hovered_one() {
+    assert_eq!(KeyState::of(2, Some(2), None), KeyState::Selected);
+    assert_eq!(KeyState::of(2, None, Some(2)), KeyState::Hovered);
+    // Selection wins over hover on the same key, so the key being configured
+    // keeps its selected look while the pointer rests on it.
+    assert_eq!(KeyState::of(2, Some(2), Some(2)), KeyState::Selected);
+    assert_eq!(KeyState::of(2, Some(1), Some(7)), KeyState::Rest);
+    assert!(KeyState::Selected.is_highlighted());
+    assert!(KeyState::Hovered.is_highlighted());
+    assert!(!KeyState::Rest.is_highlighted());
 }
 
 #[test]
@@ -168,9 +174,12 @@ fn the_stock_keypad_render_puts_every_key_on_the_photo() {
     let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
     rust_i18n::set_locale("en");
 
-    let KeySurface::Photo(stock) =
-        key_surface(Some(&stock_keypad_asset((935, 1105))), mx_keypad(), None)
-    else {
+    let KeySurface::Photo(stock) = key_surface(
+        Some(&stock_keypad_asset((935, 1105))),
+        mx_keypad(),
+        None,
+        None,
+    ) else {
         panic!("the stock render maps the keys onto the photo");
     };
 
@@ -202,7 +211,12 @@ fn a_restaged_keypad_render_falls_back_to_the_keycap_map() {
     let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
     rust_i18n::set_locale("en");
 
-    let surface = key_surface(Some(&stock_keypad_asset((1057, 1227))), mx_keypad(), None);
+    let surface = key_surface(
+        Some(&stock_keypad_asset((1057, 1227))),
+        mx_keypad(),
+        None,
+        None,
+    );
 
     assert!(matches!(surface, KeySurface::Keypad(_)));
 }
@@ -1025,7 +1039,7 @@ fn every_key_name_shows_whole_in_the_longest_translation(cx: &mut gpui::TestAppC
         .map(|(&cid, column)| (cid, 4. + 5. * column, 10.))
         .collect();
     let slots = key_slots_from_layouts(
-        key_surface(Some(&asset_with_controls(&markers)), None, None).slots(),
+        key_surface(Some(&asset_with_controls(&markers)), None, None, None).slots(),
         None,
         KeyEditScope {
             page: KeypadPage::FIRST,
@@ -1186,7 +1200,7 @@ fn only_grid_targets_move_to_the_edited_page() {
     let paging = KeyTarget::Control(ButtonId::Control(Cid::RIGHT_PAGING));
     assert_eq!(paging.clone().on_page(second), paging);
     // Every keypad layout slot starts on page 1, whatever page is edited.
-    let keypad = key_surface(None, mx_keypad(), None).slots();
+    let keypad = key_surface(None, mx_keypad(), None, None).slots();
     assert!(
         keypad
             .iter()

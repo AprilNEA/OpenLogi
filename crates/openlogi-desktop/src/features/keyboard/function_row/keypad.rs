@@ -25,7 +25,8 @@ use super::key_points::{
 };
 use super::{
     FALLBACK_KEYBOARD_SIZE, FunctionRowView, KEYBOARD_MIN_IMG_H, KEYBOARD_W, KEYS_VERTICAL_RESERVE,
-    KeySlot, binding_line, image_or_fallback, key_is_highlighted,
+    KeySlot, KeyState, KeySurfaceStyle as _, binding_line, device_highlight, device_scrim,
+    image_or_fallback,
 };
 use crate::features::mouse::geometry::asset_dimensions_for_png;
 use crate::services::assets::ResolvedAsset;
@@ -191,15 +192,12 @@ impl RenderOnce for KeypadPane {
                 .relative()
                 .w(px(canvas.0))
                 .h(px(canvas.1))
-                .children(self.slots.into_iter().map(move |slot| {
-                    let highlighted = key_is_highlighted(slot.idx, selected, hovered);
-                    KeyCap {
-                        cap: (KEYCAP_W, keycap_height(&slot.target)),
-                        slot,
-                        highlighted,
-                        canvas,
-                        view: view.clone(),
-                    }
+                .children(self.slots.into_iter().map(move |slot| KeyCap {
+                    cap: (KEYCAP_W, keycap_height(&slot.target)),
+                    state: KeyState::of(slot.idx, selected, hovered),
+                    slot,
+                    canvas,
+                    view: view.clone(),
                 }));
         // The render keeps the device's identity; the keycaps, sized to the
         // same height, form the aligned pair that replaces photo-plus-band.
@@ -288,26 +286,8 @@ const LCD_GLYPH_FRAC: f32 = 0.38;
 /// Gap between a key's edge and its selection ring, in px.
 const PHOTO_RING_GAP: f32 = 3.;
 const PHOTO_RING_W: f32 = 2.;
-
-/// How a key on the render is drawn right now.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum KeyState {
-    Rest,
-    Hovered,
-    Selected,
-}
-
-impl KeyState {
-    fn of(idx: usize, selected: Option<usize>, hovered: Option<usize>) -> Self {
-        if selected == Some(idx) {
-            Self::Selected
-        } else if hovered == Some(idx) {
-            Self::Hovered
-        } else {
-            Self::Rest
-        }
-    }
-}
+/// The selected key's heavier ring on the photo, in px.
+const PHOTO_SELECTED_RING_W: f32 = 3.;
 
 /// One key mapped onto the keypad render: a selection ring around the
 /// physical key and, for an LCD grid key, the face the device shows.
@@ -333,13 +313,14 @@ impl RenderOnce for PhotoKey {
         let tooltip = self.slot.summary();
         let ring = match state {
             KeyState::Selected => rgb(ACCENT_BLUE).into(),
-            KeyState::Hovered => hsla(0., 0., 1., 0.55),
-            KeyState::Rest => hsla(0., 0., 0., 0.),
+            KeyState::Hovered => device_highlight(0.55),
+            KeyState::Rest => device_scrim(0.),
         };
         let face = matches!(self.slot.target, KeyTarget::Grid(_))
             .then(|| lcd_face(self.slot.lcd_icon, self.slot.binding.clone(), shape, state));
         // The ring follows the key's own curve, one gap further out.
-        let [tl, tr, br, bl] = shape.radii.map(|r| px(r + outer));
+        let ring_radii = shape.radii.map(|r| r + outer);
+        let [tl, tr, br, bl] = ring_radii.map(px);
         let view_hover = self.view.clone();
         let view_click = self.view;
 
@@ -358,6 +339,11 @@ impl RenderOnce for PhotoKey {
             .rounded_bl(bl)
             .border(px(PHOTO_RING_W))
             .border_color(ring)
+            // The key being configured carries a heavier ring and a halo.
+            .when(state == KeyState::Selected, |key| {
+                key.border(px(PHOTO_SELECTED_RING_W))
+                    .child(super::selected_picture_halo(ring_radii, PHOTO_SELECTED_RING_W))
+            })
             .cursor_pointer()
             .children(face)
             .on_hover(move |hovered, _window, cx| {
@@ -445,7 +431,7 @@ pub(super) fn keypad_photo_render_size(
 #[derive(IntoElement)]
 struct KeyCap {
     slot: KeySlot,
-    highlighted: bool,
+    state: KeyState,
     canvas: (f32, f32),
     cap: (f32, f32),
     view: Entity<FunctionRowView>,
@@ -458,7 +444,8 @@ impl RenderOnce for KeyCap {
         let pal = theme::palette(cx);
         let idx = self.slot.idx;
         let glyph = keycap_glyph(&self.slot.target);
-        let highlighted = self.highlighted;
+        let state = self.state;
+        let highlighted = state.is_highlighted();
         let tooltip = self.slot.label.clone();
         let legend = self.slot.label;
         let binding = self.slot.binding;
@@ -482,17 +469,7 @@ impl RenderOnce for KeyCap {
             .justify_center()
             .gap(px(1.))
             .rounded_md()
-            .border_1()
-            .border_color(if highlighted {
-                rgb(ACCENT_BLUE).into()
-            } else {
-                pal.border
-            })
-            .bg(if highlighted {
-                theme::accent_tint()
-            } else {
-                pal.control
-            })
+            .key_state_surface(state, &pal)
             .cursor_pointer()
             .pressable_fill(highlighted, pal)
             .child(

@@ -208,9 +208,10 @@ impl DetailTab {
     fn edits_app_profiles(self, state: &AppState) -> bool {
         match self {
             Self::Buttons | Self::ActionsRing => true,
-            // A keypad's keys all bind per app profile; a keyboard's F-row
-            // binds globally, and a profile selector there would mislead.
-            Self::Keys => state.current_keypad().is_some(),
+            // A keypad's and a dialpad's controls all bind per app profile; a
+            // keyboard's F-row binds globally, and a profile selector there
+            // would mislead.
+            Self::Keys => state.current_keypad().is_some() || state.current_dialpad().is_some(),
             Self::Pointer
             | Self::Lighting
             | Self::Camera

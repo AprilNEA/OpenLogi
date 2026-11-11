@@ -35,8 +35,9 @@ use openlogi_core::binding::{
     ButtonId, Cid, GKey, GKeyProfile, GKeySlot, GridKey, GridSlot, KeypadPage, ModeKey,
 };
 use openlogi_core::config::{FunctionKey, GamingKeyMode, KeyModifiers, KeyTrigger};
-use openlogi_core::hid::KeypadDescriptor;
+use openlogi_core::hid::{DialpadDescriptor, KeypadDescriptor};
 
+use super::dialpad::{DialpadRender, dialpad_render, dialpad_slots};
 use crate::services::assets::ResolvedAsset;
 use crate::state::GamingKeys;
 
@@ -190,17 +191,27 @@ pub(super) enum KeySurface {
     /// A keypad's own keycap map: every key binds this device, the
     /// positions come from the device model, and no photo participates.
     Keypad(Vec<KeySlotLayout>),
+    /// A dialpad's turning directions and keys (see [`super::dialpad`]): on
+    /// its measured render when the tab shows one, else drawn from its model.
+    Dialpad(
+        &'static DialpadDescriptor,
+        Option<&'static DialpadRender>,
+        Vec<KeySlotLayout>,
+    ),
 }
 
 impl KeySurface {
     pub(super) fn slots(self) -> Vec<KeySlotLayout> {
         match self {
-            Self::Photo(slots) | Self::Keypad(slots) => slots,
+            Self::Photo(slots) | Self::Keypad(slots) | Self::Dialpad(_, _, slots) => slots,
         }
     }
 }
 
-/// Which keys the tab shows, and where. A depot with control markers is
+/// Which keys the tab shows, and where. The known `dialpad` goes on its
+/// render when OpenLogi measured it, else onto a drawing from its model —
+/// never onto depot markers, which name no turning direction. A depot with
+/// control markers is
 /// the keyboard's own answer (photo path); the known `keypad` goes on
 /// its render when the depot marks its grid or the render is the stock one
 /// OpenLogi measured, else onto the device-model keycap map; any other
@@ -210,8 +221,13 @@ impl KeySurface {
 pub(super) fn key_surface(
     asset: Option<&ResolvedAsset>,
     keypad: Option<&KeypadDescriptor>,
+    dialpad: Option<&'static DialpadDescriptor>,
     gaming: Option<GamingKeys>,
 ) -> KeySurface {
+    if let Some(dialpad) = dialpad {
+        let render = asset.and_then(dialpad_render);
+        return KeySurface::Dialpad(dialpad, render, dialpad_slots(dialpad, render));
+    }
     if asset.is_some_and(shows_g_keys) {
         return KeySurface::Photo(g913_slots(gaming));
     }
@@ -250,7 +266,7 @@ pub(super) fn key_slots(
     asset: Option<&ResolvedAsset>,
     keypad: Option<&KeypadDescriptor>,
 ) -> Vec<KeySlotLayout> {
-    key_surface(asset, keypad, None).slots()
+    key_surface(asset, keypad, None, None).slots()
 }
 
 /// The depots that ship the render [`g913_slots`] was measured on: the

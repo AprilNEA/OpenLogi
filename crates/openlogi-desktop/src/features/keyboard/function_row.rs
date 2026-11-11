@@ -15,7 +15,9 @@
 //! or whose render is the stock one OpenLogi measured, has its keys drawn on
 //! the device render itself, the way Options+ shows it; any other keypad
 //! shows its own keycaps drawn from the device model beside the render, bound
-//! the same per-device way; any other markerless device shows the OS-hook F-row,
+//! the same per-device way; a dialpad is drawn from its model — the dial's and
+//! the roller's turning directions and its four keys — bound per device too;
+//! any other markerless device shows the OS-hook F-row,
 //! bound globally through [`AppState::commit_keyboard_binding`]. The panel
 //! lists the same action catalog the mouse picker uses, plus a Power User
 //! section.
@@ -29,13 +31,14 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, AppContext as _, Bounds, Context, Entity, FontWeight, Hsla,
+    AnyElement, App, AppContext as _, Bounds, BoxShadow, Context, Entity, FontWeight, Hsla,
     InteractiveElement, IntoElement, ParentElement, PathBuilder, Refineable as _, Render,
     RenderOnce, Role, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled,
     Subscription, TextStyle, Window, canvas, div, hsla, linear_color_stop, linear_gradient, point,
     prelude::FluentBuilder as _, px, rems, rgb, svg,
 };
 use gpui_kit::base::ElementExt as _;
+use gpui_kit::component::slider::{Slider, SliderState};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
     Selectable as _, h_flex, input::InputState, scroll::ScrollableElement as _, v_flex,
@@ -43,7 +46,7 @@ use gpui_kit::component::{
 use openlogi_core::binding::{
     Action, ActionRingIcon, ButtonId, GKeyProfile, KeypadPage, WorkflowStep,
 };
-use openlogi_core::config::GamingKeyMode;
+use openlogi_core::config::{GamingKeyMode, ThumbwheelSensitivity};
 
 use super::editors::{
     PowerUserKind, text_editor_placeholder, text_editor_seed, workflow_editor_seed,
@@ -58,19 +61,22 @@ use crate::features::profiles::profile_name;
 use crate::services::assets::{GlowGeometry, ResolvedAsset};
 use crate::state::{AppState, DeviceKey, DeviceRecord, GamingKeys, StateEvent, StateEvents};
 use crate::ui::action::localized_action_label;
+use crate::ui::commit_slider::{CommitSlider, SliderRange};
 use crate::ui::components::{MenuRow, control_button};
 use crate::ui::theme::{
     self, ACCENT_BLUE, Palette, PressableStyle as _, SCREEN_PAD, Typography as _,
 };
 use gpui::{Animation, AnimationExt, ease_out_quint, img};
-use openlogi_core::hid::KeypadDescriptor;
+use openlogi_core::hid::{DialpadDescriptor, KeypadDescriptor};
 
 mod callout_layout;
+mod dialpad;
 mod gaming;
 mod key_points;
 mod keypad;
 
 use callout_layout::{CalloutLayout, CardRect, callout_layout, side_bands_width};
+use dialpad::{DialpadPane, DialpadPhotoPane, DialpadRender, dialpad_canvas};
 use gaming::gaming_bar;
 pub(crate) use key_points::KeyTarget;
 #[cfg(test)]
@@ -155,6 +161,8 @@ const KEY_HOTSPOT_DOT: f32 = 12.;
 /// The glyph for a key on its own function, as the panel's Native function
 /// row shows it.
 const NATIVE_FUNCTION_ICON: &str = "action-icons/keyboard.svg";
+/// Width of a setting slider above the device (dial speed).
+const SETTING_SLIDER_W: f32 = 180.;
 
 /// The function-row remapper view.
 pub struct FunctionRowView {
@@ -194,6 +202,9 @@ pub struct FunctionRowView {
     inspector_room: Option<f32>,
     overview_h: Option<f32>,
     overview_scroll: ScrollHandle,
+    /// A dialpad's dial and roller speed: the device's thumb-wheel
+    /// sensitivity, which the agent applies to both rotary controls.
+    dial_speed: CommitSlider<ThumbwheelSensitivity>,
     _state_obs: Subscription,
 }
 
@@ -209,8 +220,28 @@ struct EditScope {
 impl FunctionRowView {
     /// Create the view.
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let state_obs =
-            AppState::repaint_on(cx, |event| matches!(event, StateEvent::BindingsChanged(_)));
+        let state_obs = AppState::repaint_on(cx, |event| {
+            matches!(
+                event,
+                StateEvent::BindingsChanged(_) | StateEvent::DeviceConfigChanged(_)
+            )
+        });
+        // Writes on release only: a drag would stream config saves.
+        let dial_speed = CommitSlider::new(
+            SliderRange::new(ThumbwheelSensitivity::MIN, ThumbwheelSensitivity::MAX),
+            ThumbwheelSensitivity::DEFAULT,
+            cx,
+            |_, sensitivity, cx| {
+                AppState::apply(cx, |state| {
+                    state
+                        .current_record()
+                        .map(DeviceRecord::device_key)
+                        .map_or_else(StateEvents::none, |key| {
+                            state.commit_device_thumbwheel_sensitivity(&key, sensitivity)
+                        })
+                });
+            },
+        );
         Self {
             selected_key: None,
             hovered_key: None,
@@ -226,8 +257,28 @@ impl FunctionRowView {
             inspector_room: None,
             overview_h: None,
             overview_scroll: ScrollHandle::new(),
+            dial_speed,
             _state_obs: state_obs,
         }
+    }
+
+    /// The dialpad's dial and roller speed, re-seated on a device switch or
+    /// an outside config change but never mid-drag.
+    fn dial_speed_control(
+        &self,
+        committed: ThumbwheelSensitivity,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> gpui::Div {
+        self.dial_speed.sync(committed, window, cx);
+        let shown = self.dial_speed.shown(committed);
+        setting_slider(
+            tr!("dialpad.speed"),
+            shown.to_string(),
+            self.dial_speed.slider(),
+            &theme::palette(cx),
+        )
+        .debug_selector(|| "dial-speed".into())
     }
 
     /// Select a key (or deselect with `None`), opening/closing the panel.
@@ -389,25 +440,6 @@ impl FunctionRowView {
         )
     }
 
-    /// The bar over the device: a keypad's binding pages, or a G-series
-    /// keyboard's gaming cluster.
-    fn device_bar(
-        &self,
-        keypad: bool,
-        last_page: LastPage,
-        gaming: Option<GamingKeys>,
-        view: &Entity<Self>,
-        pal: &Palette,
-        cx: &App,
-    ) -> Option<AnyElement> {
-        if keypad {
-            return Some(
-                keypad_page_bar(self.keypad_page, last_page, view, pal, cx).into_any_element(),
-            );
-        }
-        gaming.map(|gaming| gaming_bar(gaming, self.g_profile, view, pal, cx).into_any_element())
-    }
-
     /// Edit the G-keys of `profile`, dropping any open editor when it moves.
     /// A selected M1–M3 card is deselected: it names the profile it selects,
     /// and would switch the editor straight back on the next render.
@@ -487,6 +519,9 @@ impl Render for FunctionRowView {
         // Without a record there is no device surface to trust, and the F-row
         // fallback is as honest as anything that shows.
         let known_keypad = state.and_then(AppState::current_keypad);
+        let known_dialpad = state.and_then(AppState::current_dialpad);
+        // Read before the view borrows `cx` mutably below.
+        let settings = DeviceSettings::read(state);
         let glow = state.and_then(|state| {
             state
                 .current_record()
@@ -496,23 +531,19 @@ impl Render for FunctionRowView {
         let viewport = window.viewport_size();
         let viewport_h = f32::from(viewport.height);
         let image_path = asset.map(|asset| asset.image_path.clone());
-        let (surface, gaming) = device_keys(state, asset, known_keypad);
-        let keypad = matches!(surface, KeySurface::Keypad(_));
-        // A keypad on its photo draws its keys on the render itself: the
-        // keyboard's callout band cannot lay eleven bubbles across a
-        // portrait render, and the keys sit under the user's eyes already.
-        let keypad_photo = matches!(surface, KeySurface::Photo(_)) && known_keypad.is_some();
+        let (surface, gaming) = device_keys(state, asset, known_keypad, known_dialpad);
+        let pane = PaneKind::of(&surface, known_keypad.is_some());
         // The schematic keeps photo and keycaps on one alignment line.
         let photo = asset
             .filter(|asset| asset.png_height > 0)
             .map_or((0., 0.), |asset| {
-                asset_dimensions_for_png(asset, keypad_canvas().1, 360.)
+                let (max_w, h) = pane.photo_box();
+                asset_dimensions_for_png(asset, h, max_w)
             });
         let last_page = self.sync_edit_scope(state);
-        let pal = theme::palette(cx);
         let slots = self.edited_slots(surface.slots(), state, gaming);
         let panel_w = inspector_width(&slots, window);
-        let render_size = if keypad_photo {
+        let render_size = if pane.on_picture() {
             keypad_photo_render_size(asset, viewport_h)
         } else {
             let markers: Vec<(f32, f32)> = slots
@@ -569,39 +600,34 @@ impl Render for FunctionRowView {
             }
         }
         let view = cx.entity();
-        // The same selection, panel, and editor machinery on either surface:
-        // the keyboard's photo with callouts, or the keypad's photo beside
-        // drawn keycaps.
-        let device = if keypad {
-            KeypadPane::new(slots.clone(), image_path, photo, view.clone())
-                .selected(selected)
-                .hovered(hovered)
-                .into_any_element()
-        } else if keypad_photo {
-            KeypadPhotoPane::new(slots.clone(), image_path, render_size, view.clone())
-                .selected(selected)
-                .hovered(hovered)
-                .into_any_element()
-        } else {
-            KeyboardPane::new(slots.clone(), image_path, glow, render_size, view.clone())
-                .selected(selected)
-                .hovered(hovered)
-                .into_any_element()
-        };
-        let (inspector, column_h) = self.inspector(selected, &slots, &view, &pal, cx);
-        let page_bar = self.device_bar(keypad || keypad_photo, last_page, gaming, &view, &pal, cx);
-
-        let row = InspectorRow::new(device, inspector, (panel_w, column_h));
-        keys_tab_content(page_bar, row, &view)
+        let device = pane.render(
+            slots.clone(),
+            PaneVisuals {
+                image_path,
+                photo,
+                render_size,
+                glow,
+            },
+            (selected, hovered),
+            &view,
+        );
+        let (inspector, column_h) =
+            self.inspector(selected, &slots, &view, &theme::palette(cx), cx);
+        let toolbar = self.setting_toolbar(pane, settings, last_page, gaming, window, cx);
+        keys_tab_content(
+            toolbar,
+            InspectorRow::new(device, inspector, (panel_w, column_h)),
+            &view,
+        )
     }
 }
 
-/// The Keys tab's content — a keypad's page bar over the device and its
+/// The Keys tab's content — the device's setting bar over the device and its
 /// inspector column — reporting to `view` the room the tab's visible height
 /// leaves the column once this frame laid it out: the tab body clips to that
 /// height, inset by its padding. The next frame fits the column to it.
 fn keys_tab_content(
-    page_bar: Option<impl IntoElement>,
+    page_bar: Option<gpui::Div>,
     row: InspectorRow,
     view: &Entity<FunctionRowView>,
 ) -> gpui::Div {
@@ -625,17 +651,200 @@ fn keys_tab_content(
     )
 }
 
+/// Which pane draws the device: the same selection, panel, and editor
+/// machinery on every surface.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum PaneKind {
+    /// The keyboard's photo with callouts.
+    Keyboard,
+    /// The keypad's drawn keycaps beside its photo.
+    Keypad,
+    /// The keypad's keys on its photo: the keyboard's callout band cannot
+    /// lay eleven bubbles across a portrait render, and the picture itself
+    /// is the selector.
+    KeypadPhoto,
+    /// The dialpad drawn from its model beside its photo.
+    Dialpad(&'static DialpadDescriptor),
+    /// The dialpad's parts on its measured render.
+    DialpadPhoto(&'static DialpadDescriptor, &'static DialpadRender),
+}
+
+impl PaneKind {
+    fn of(surface: &KeySurface, known_keypad: bool) -> Self {
+        match surface {
+            KeySurface::Dialpad(dialpad, Some(render), _) => Self::DialpadPhoto(dialpad, render),
+            KeySurface::Dialpad(dialpad, None, _) => Self::Dialpad(dialpad),
+            KeySurface::Keypad(_) => Self::Keypad,
+            KeySurface::Photo(_) if known_keypad => Self::KeypadPhoto,
+            KeySurface::Photo(_) => Self::Keyboard,
+        }
+    }
+
+    /// Whether the keys sit on the device's picture, which is then sized to
+    /// the viewport rather than to a schematic beside it.
+    fn on_picture(self) -> bool {
+        matches!(self, Self::KeypadPhoto | Self::DialpadPhoto(..))
+    }
+
+    /// The box a photo beside the drawn schematic fits in: as tall as the
+    /// schematic, and narrow enough that the panel still fits beside both —
+    /// the dialpad's drawing is wider than the keypad's keycaps.
+    fn photo_box(self) -> (f32, f32) {
+        match self {
+            Self::Dialpad(_) | Self::DialpadPhoto(..) => (280., dialpad_canvas().1),
+            Self::Keyboard | Self::Keypad | Self::KeypadPhoto => (360., keypad_canvas().1),
+        }
+    }
+
+    fn render(
+        self,
+        slots: Vec<KeySlot>,
+        visuals: PaneVisuals,
+        (selected, hovered): (Option<usize>, Option<usize>),
+        view: &Entity<FunctionRowView>,
+    ) -> AnyElement {
+        let PaneVisuals {
+            image_path,
+            photo,
+            render_size,
+            glow,
+        } = visuals;
+        let view = view.clone();
+        match self {
+            Self::Dialpad(dialpad) => DialpadPane::new(slots, dialpad, image_path, photo, view)
+                .selected(selected)
+                .hovered(hovered)
+                .into_any_element(),
+            Self::Keypad => KeypadPane::new(slots, image_path, photo, view)
+                .selected(selected)
+                .hovered(hovered)
+                .into_any_element(),
+            Self::KeypadPhoto => KeypadPhotoPane::new(slots, image_path, render_size, view)
+                .selected(selected)
+                .hovered(hovered)
+                .into_any_element(),
+            Self::DialpadPhoto(dialpad, render) => {
+                DialpadPhotoPane::new(slots, (dialpad, render), image_path, render_size, view)
+                    .selected(selected)
+                    .hovered(hovered)
+                    .into_any_element()
+            }
+            Self::Keyboard => KeyboardPane::new(slots, image_path, glow, render_size, view)
+                .selected(selected)
+                .hovered(hovered)
+                .into_any_element(),
+        }
+    }
+}
+
+/// What a pane draws the device from beside its keys.
+struct PaneVisuals {
+    image_path: Option<std::path::PathBuf>,
+    /// The photo's size beside a drawn schematic.
+    photo: (f32, f32),
+    /// The render's size when the keys sit on it.
+    render_size: (f32, f32),
+    glow: Option<(Arc<GlowGeometry>, Hsla)>,
+}
+
+/// The selected device's settings the setting bar shows, read before the
+/// view borrows its context mutably.
+#[derive(Clone, Copy, Debug)]
+struct DeviceSettings {
+    dial_speed: ThumbwheelSensitivity,
+}
+
+impl DeviceSettings {
+    fn read(state: Option<&AppState>) -> Self {
+        let device = state.and_then(|state| Some((state, &state.current_record()?.config_key)));
+        Self {
+            dial_speed: device.map_or(ThumbwheelSensitivity::DEFAULT, |(state, key)| {
+                state.device_thumbwheel_sensitivity(key)
+            }),
+        }
+    }
+}
+
+impl FunctionRowView {
+    /// The device's own settings above it: a keypad's pages, a dialpad's
+    /// rotary speed, a G-series keyboard's gaming cluster.
+    fn setting_toolbar(
+        &self,
+        pane: PaneKind,
+        settings: DeviceSettings,
+        last_page: LastPage,
+        gaming: Option<GamingKeys>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::Div> {
+        let view = cx.entity();
+        let pal = theme::palette(cx);
+        match pane {
+            PaneKind::Dialpad(_) | PaneKind::DialpadPhoto(..) => {
+                Some(setting_bar().child(self.dial_speed_control(settings.dial_speed, window, cx)))
+            }
+            PaneKind::Keypad | PaneKind::KeypadPhoto => Some(setting_bar().child(keypad_page_bar(
+                self.keypad_page,
+                last_page,
+                &view,
+                &pal,
+                cx,
+            ))),
+            PaneKind::Keyboard => gaming.map(|gaming| {
+                setting_bar().child(gaming_bar(gaming, self.g_profile, &view, &pal, cx))
+            }),
+        }
+    }
+}
+
+/// The row of device settings above the device: wraps onto a second line
+/// when the window is too narrow for all of them.
+fn setting_bar() -> gpui::Div {
+    h_flex()
+        .flex_wrap()
+        .justify_center()
+        .items_center()
+        .gap_x_6()
+        .gap_y_2()
+}
+
+/// One titled slider in the setting bar with the value it shows; the title
+/// also names the slider.
+fn setting_slider(
+    label: SharedString,
+    value: String,
+    slider: &Entity<SliderState>,
+    pal: &Palette,
+) -> gpui::Div {
+    let slider = Slider::new(slider)
+        .horizontal()
+        .accessibility_label(label.clone());
+    h_flex()
+        .gap_2()
+        .items_center()
+        .child(div().text_caption().text_color(pal.text_muted).child(label))
+        .child(div().w(px(SETTING_SLIDER_W)).child(slider))
+        .child(
+            div()
+                .min_w(px(36.))
+                .text_caption()
+                .text_color(pal.text_primary)
+                .child(value),
+        )
+}
+
 /// The keys the selected device shows, and its gaming cluster when the
 /// render places its G-keys.
 fn device_keys(
     state: Option<&AppState>,
     asset: Option<&ResolvedAsset>,
     keypad: Option<&KeypadDescriptor>,
+    dialpad: Option<&'static DialpadDescriptor>,
 ) -> (KeySurface, Option<GamingKeys>) {
     let gaming = state
         .and_then(AppState::current_gaming_keys)
         .filter(|_| asset.is_some_and(shows_g_keys));
-    (key_surface(asset, keypad, gaming), gaming)
+    (key_surface(asset, keypad, dialpad, gaming), gaming)
 }
 
 fn binding_line(
@@ -1227,14 +1436,11 @@ impl RenderOnce for KeyboardPane {
             .children({
                 let view_for_callouts = view_clone.clone();
                 let cards = layout.cards.clone();
-                self.slots.iter().cloned().map(move |slot| {
-                    let highlighted = key_is_highlighted(slot.idx, selected, hovered);
-                    KeyCallout {
-                        card: cards[slot.idx],
-                        slot,
-                        highlighted,
-                        view: view_for_callouts.clone(),
-                    }
+                self.slots.iter().cloned().map(move |slot| KeyCallout {
+                    card: cards[slot.idx],
+                    state: KeyState::of(slot.idx, selected, hovered),
+                    slot,
+                    view: view_for_callouts.clone(),
                 })
             })
             // Click-targets overlay, centered on each key's marker point.
@@ -1246,8 +1452,8 @@ impl RenderOnce for KeyboardPane {
                     .w(px(img_w))
                     .h(px(img_h))
                     .children(self.slots.into_iter().map(|slot| {
-                    let highlighted = key_is_highlighted(slot.idx, selected, hovered);
-                    key_click_target(slot, highlighted, (img_w, img_h), &view_clone)
+                    let state = KeyState::of(slot.idx, selected, hovered);
+                    key_click_target(slot, state, (img_w, img_h), &view_clone)
                 })),
             )
     }
@@ -1261,7 +1467,7 @@ impl RenderOnce for KeyboardPane {
 struct KeyCallout {
     slot: KeySlot,
     card: CardRect,
-    highlighted: bool,
+    state: KeyState,
     view: Entity<FunctionRowView>,
 }
 
@@ -1272,7 +1478,8 @@ impl RenderOnce for KeyCallout {
         let CardRect { left, top, width } = self.card;
         let view_hover = self.view.clone();
         let view_click = self.view;
-        let highlighted = self.highlighted;
+        let state = self.state;
+        let highlighted = state.is_highlighted();
         let summary = self.slot.summary();
         let tooltip = summary.clone();
         let icon_color = if highlighted {
@@ -1297,17 +1504,7 @@ impl RenderOnce for KeyCallout {
             .justify_center()
             .items_center()
             .rounded_md()
-            .border_1()
-            .border_color(if highlighted {
-                rgb(ACCENT_BLUE).into()
-            } else {
-                pal.border
-            })
-            .bg(if highlighted {
-                theme::accent_tint()
-            } else {
-                pal.control
-            })
+            .key_state_surface(state, &pal)
             .cursor_pointer()
             .pressable_fill(highlighted, pal)
             .child(if self.slot.bound {
@@ -1338,7 +1535,7 @@ impl RenderOnce for KeyCallout {
 /// panel; hover/selection draws only a subtle keycap ring on the photo.
 fn key_click_target(
     slot: KeySlot,
-    highlighted: bool,
+    state: KeyState,
     (img_w, img_h): (f32, f32),
     view: &Entity<FunctionRowView>,
 ) -> impl IntoElement {
@@ -1362,7 +1559,7 @@ fn key_click_target(
         .items_center()
         .justify_center()
         .cursor_pointer()
-        .when(highlighted, |el| {
+        .when(state.is_highlighted(), |el| {
             el.child(
                 div()
                     .w_full()
@@ -1382,7 +1579,12 @@ fn key_click_target(
                     .rounded_full()
                     .border_1()
                     .border_color(theme::accent_tint_hover())
-                    .bg(theme::accent_tint()),
+                    .bg(theme::accent_tint())
+                    .when(state == KeyState::Selected, |ring| {
+                        ring.border_2()
+                            .border_color(rgb(ACCENT_BLUE))
+                            .shadow(selected_ring())
+                    }),
             )
         })
         .on_hover(move |hovered, _window, cx| {
@@ -1450,8 +1652,12 @@ fn paint_keyboard_leaders(
     window: &mut Window,
 ) {
     for (idx, corners) in leaders.iter().enumerate() {
-        let highlighted = key_is_highlighted(idx, selected, hovered);
-        let mut path = PathBuilder::stroke(if highlighted { px(2.) } else { px(1.) });
+        let state = KeyState::of(idx, selected, hovered);
+        let mut path = PathBuilder::stroke(match state {
+            KeyState::Selected => px(3.),
+            KeyState::Hovered => px(1.5),
+            KeyState::Rest => px(1.),
+        });
         for (i, &(x, y)) in corners.iter().enumerate() {
             let corner = bounds.origin + point(px(x), px(y));
             if i == 0 {
@@ -1461,10 +1667,10 @@ fn paint_keyboard_leaders(
             }
         }
         if let Ok(path) = path.build() {
-            if highlighted {
-                window.paint_path(path, rgb(ACCENT_BLUE));
-            } else {
-                window.paint_path(path, hsla(0., 0., 0.55, 0.35));
+            match state {
+                KeyState::Selected => window.paint_path(path, rgb(ACCENT_BLUE)),
+                KeyState::Hovered => window.paint_path(path, accent_alpha(0.6)),
+                KeyState::Rest => window.paint_path(path, hsla(0., 0., 0.55, 0.35)),
             }
         }
     }
@@ -1474,8 +1680,134 @@ fn next_selection_after_click(current: Option<usize>, clicked: usize) -> Option<
     (current != Some(clicked)).then_some(clicked)
 }
 
-fn key_is_highlighted(idx: usize, selected: Option<usize>, hovered: Option<usize>) -> bool {
-    selected == Some(idx) || hovered == Some(idx)
+/// How a bindable key is drawn right now. One key is selected — its panel is
+/// open — while the pointer may preview another.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum KeyState {
+    Rest,
+    Hovered,
+    Selected,
+}
+
+impl KeyState {
+    pub(super) fn of(idx: usize, selected: Option<usize>, hovered: Option<usize>) -> Self {
+        if selected == Some(idx) {
+            Self::Selected
+        } else if hovered == Some(idx) {
+            Self::Hovered
+        } else {
+            Self::Rest
+        }
+    }
+
+    /// Whether the key draws its text and glyph in the accent: selected, or
+    /// previewed under the pointer.
+    pub(super) fn is_highlighted(self) -> bool {
+        self != Self::Rest
+    }
+}
+
+/// Spread of the accent ring around a selected key button, in px.
+const SELECTED_BUTTON_RING: f32 = 3.;
+/// Spread of the solid accent ring around the selected key on the device
+/// picture, in px — stronger than on a button, since a ring on a photo has no
+/// fill to carry it.
+const SELECTED_PICTURE_RING: f32 = 4.;
+
+/// The one look of a bindable key's surface in each [`KeyState`], shared by
+/// keyboard callouts, keypad keycaps and dialpad parts: the selected key —
+/// the one being configured — carries a 2px accent border, a deeper tint and
+/// a thin accent ring, so it stays recognisable while the pointer previews
+/// another key with the lighter hover look. The key on the device picture
+/// gets the stronger [`selected_ring`].
+pub(super) trait KeySurfaceStyle: Styled + Sized {
+    #[must_use]
+    fn key_state_surface(self, state: KeyState, pal: &Palette) -> Self {
+        match state {
+            KeyState::Rest => self.border_1().border_color(pal.border).bg(pal.control),
+            KeyState::Hovered => self
+                .border_1()
+                .border_color(rgb(ACCENT_BLUE))
+                .bg(theme::accent_tint()),
+            KeyState::Selected => self
+                .border_2()
+                .border_color(rgb(ACCENT_BLUE))
+                .bg(theme::accent_tint_hover())
+                .shadow(vec![BoxShadow {
+                    color: accent_alpha(0.35),
+                    offset: point(px(0.), px(0.)),
+                    blur_radius: px(0.),
+                    spread_radius: px(SELECTED_BUTTON_RING),
+                    inset: false,
+                }]),
+        }
+    }
+}
+
+impl<E: Styled> KeySurfaceStyle for E {}
+
+/// The accent at `alpha`.
+fn accent_alpha(alpha: f32) -> Hsla {
+    Hsla::from(rgb(ACCENT_BLUE)).opacity(alpha)
+}
+
+/// A light wash over the hardware, which is dark in either theme: a hovered
+/// control's outline, or text laid over the device.
+fn device_highlight(alpha: f32) -> Hsla {
+    hsla(0., 0., 1., alpha)
+}
+
+/// A dark wash behind text laid over the hardware; at `0.` nothing is drawn.
+fn device_scrim(alpha: f32) -> Hsla {
+    hsla(0., 0., 0., alpha)
+}
+
+/// Width of the translucent halo just outside a selected key's ring on the
+/// device picture, in px.
+const PICTURE_HALO_W: f32 = 5.;
+
+/// The translucent accent halo around the selected key on the device
+/// picture, laid just outside its `ring_w` px ring and following its
+/// corners `radii` (top left, top right, bottom right, bottom left) one halo
+/// further out. The keys on a picture are transparent where the photo shows
+/// the physical key, so a box shadow — painted under the whole box — would
+/// cover the key; this halo is a ring and leaves it visible.
+pub(super) fn selected_picture_halo(radii: [f32; 4], ring_w: f32) -> gpui::Div {
+    let out = px(-PICTURE_HALO_W - ring_w);
+    let [tl, tr, br, bl] = radii.map(|r| px(if r > 0. { r + PICTURE_HALO_W } else { 0. }));
+    div()
+        .absolute()
+        .top(out)
+        .left(out)
+        .right(out)
+        .bottom(out)
+        .rounded_tl(tl)
+        .rounded_tr(tr)
+        .rounded_br(br)
+        .rounded_bl(bl)
+        .border(px(PICTURE_HALO_W))
+        .border_color(accent_alpha(0.35))
+}
+
+/// The solid accent ring and the soft glow drawn around the selected key on
+/// the device picture, without shifting layout.
+pub(super) fn selected_ring() -> Vec<BoxShadow> {
+    vec![
+        BoxShadow {
+            color: accent_alpha(0.6),
+            offset: point(px(0.), px(0.)),
+            blur_radius: px(0.),
+            spread_radius: px(SELECTED_PICTURE_RING),
+            inset: false,
+        },
+        BoxShadow {
+            color: accent_alpha(0.35),
+            offset: point(px(0.), px(0.)),
+            blur_radius: px(14.),
+            spread_radius: px(SELECTED_PICTURE_RING),
+            inset: false,
+        },
+    ]
 }
 
 fn key_target_left_px(x_frac: f32, img_w: f32, target_w: f32) -> f32 {

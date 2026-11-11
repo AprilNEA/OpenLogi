@@ -1620,6 +1620,16 @@ fn unprobed_unknown_device_shows_only_device_tab() {
     assert_eq!(tabs, vec![DetailTab::Device]);
 }
 
+/// A keypad's and a dialpad's controls bind per app profile, so the Keys
+/// tab offers the profile selector for both.
+#[test]
+fn the_console_keys_tabs_edit_app_profiles() {
+    let (dialpad, _commands) = crate::state::tests::dialpad::dialpad_state();
+    assert!(DetailTab::Keys.edits_app_profiles(&dialpad));
+    let (keypad, _commands) = crate::state::tests::keypad_pages::keypad_state();
+    assert!(DetailTab::Keys.edits_app_profiles(&keypad));
+}
+
 mod corpus;
 
 /// A receiver-paired card names its slot, as a slot rather than the

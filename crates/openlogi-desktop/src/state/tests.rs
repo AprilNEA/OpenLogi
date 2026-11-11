@@ -52,6 +52,7 @@ mod bindings;
 mod camera;
 pub(crate) mod device_list;
 mod device_names;
+pub(crate) mod dialpad;
 mod dpi;
 mod easy_switch;
 mod flow;
