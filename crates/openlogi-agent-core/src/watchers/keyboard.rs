@@ -13,12 +13,14 @@
 //! excludes) both. Like the gesture watcher, this needs no macOS Accessibility
 //! permission — the key events arrive over HID++.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Weak};
 
-use openlogi_core::binding::{Binding, ButtonId, GKeyProfile};
+use std::time::Instant;
+
+use openlogi_core::binding::{Action, Binding, ButtonId, GKeyProfile, Rotary};
 use openlogi_core::bindings::{GamingPress, gaming_press};
-use openlogi_core::config::GamingKeyMode;
+use openlogi_core::config::{GamingKeyMode, ThumbwheelSensitivity};
 use openlogi_hid::{
     CaptureHost, CaptureSessionOutcome, CaptureSessionStop, CapturedInput, DeviceRoute,
     GamingWanted, KeyboardWanted, PendingCaptureRestore, run_keyboard_capture_session,
@@ -35,6 +37,10 @@ use super::shutdown::{ManagerCompletion, WatcherHandle};
 use crate::hardware::DeviceAccess;
 use crate::receiver_access::{ReceiverAccess, ReceiverRequestState, SessionReceiverLease};
 use crate::runtime::{ActionDispatcher, HidppSessionId};
+
+mod rotary;
+
+use rotary::{RotaryAccumulators, RotaryOutput, RotaryTurn};
 
 /// Everything the watcher needs to capture one keyboard: where it is, which
 /// `0x1b04` controls to divert and which keypad grid keys to observe (only
@@ -68,6 +74,12 @@ pub struct KeyboardSpec {
     pub gaming: GamingWanted,
     /// What M1–M3 do on a keyboard whose G-key row is taken.
     pub gaming_mode: GamingKeyMode,
+    /// A dialpad's rotary controls to divert, for exactly the ones with a
+    /// bound direction.
+    pub rotary: BTreeSet<Rotary>,
+    /// How many discrete steps (or how much scroll) a revolution of a rotary
+    /// control produces, relative to the default.
+    pub rotary_sensitivity: ThumbwheelSensitivity,
     /// Effective per-key immediate or threshold map (per-app overlay applied).
     pub bindings: BTreeMap<ButtonId, Binding>,
 }
@@ -99,6 +111,7 @@ struct KeyboardDispatchPlan {
     bindings: BTreeMap<ButtonId, Binding>,
     /// What M1–M3 do; see [`gaming_press`].
     gaming_mode: GamingKeyMode,
+    rotary_sensitivity: ThumbwheelSensitivity,
     /// The `0x1b04` controls to divert and grid keys to observe, for exactly
     /// the bound keys, and the gaming cluster to take.
     keys: KeyboardWanted,
@@ -134,6 +147,8 @@ struct KeyboardManagerState {
     keys: RouteKeys,
     /// The G-key profile each route's session last selected with M1–M3.
     profiles: GKeyProfiles,
+    /// Partial rotary steps per dialpad route.
+    rotary: HashMap<DeviceRoute, RotaryAccumulators>,
 }
 
 /// One captured-key publication per keyboard route.
@@ -189,8 +204,38 @@ fn dispatch_input(
     input: CapturedInput,
     bindings: &KeyboardDispatchPlan,
     dispatcher: &ActionDispatcher,
+    rotary: &mut RotaryAccumulators,
 ) {
     match input {
+        CapturedInput::Rotation {
+            rotary: control,
+            increments,
+            per_revolution,
+        } => {
+            let Some(turn) = RotaryTurn::new(control, increments, per_revolution) else {
+                return;
+            };
+            let action = bindings
+                .bindings
+                .get(&turn.button)
+                .map_or(Action::None, Binding::click_action);
+            match rotary.advance(turn, &action, bindings.rotary_sensitivity, Instant::now()) {
+                RotaryOutput::Idle => {}
+                // A diverted roller no longer scrolls by itself, and the
+                // keyboard plane has no smoothing runtime: post it directly.
+                RotaryOutput::Scroll(delta) => openlogi_inject::post_scroll(delta),
+                RotaryOutput::Fire(times) => {
+                    debug!(button = %turn.button, action = %action.label(), times, "dialpad rotary → action");
+                    for _ in 0..times {
+                        dispatcher.dispatch_pointer_action(
+                            &action,
+                            Some(&bindings.config_key),
+                            None,
+                        );
+                    }
+                }
+            }
+        }
         CapturedInput::ButtonDown(button) => {
             let binding = bindings.bindings.get(&button);
             if let Some(binding) = binding {
@@ -307,10 +352,12 @@ fn wanted_sessions(
                     config_key: spec.config_key.clone(),
                     bindings: spec.bindings.clone(),
                     gaming_mode: spec.gaming_mode,
+                    rotary_sensitivity: spec.rotary_sensitivity,
                     keys: KeyboardWanted {
                         controls: spec.wanted.clone(),
                         grid: spec.grid.clone(),
                         gaming: spec.gaming.clone(),
+                        rotary: spec.rotary.clone(),
                     },
                 },
             )
@@ -450,6 +497,7 @@ impl KeyboardManagerState {
             lease: Weak::new(),
             keys: HashMap::new(),
             profiles: GKeyProfiles::default(),
+            rotary: HashMap::new(),
         }
     }
 
@@ -621,9 +669,13 @@ impl KeyboardManagerState {
                     dispatch.gaming_mode,
                     input.input,
                 ) {
-                    Resolved::Dispatch(resolved) => {
-                        dispatch_input(running.id(), resolved, dispatch, &self.dispatcher);
-                    }
+                    Resolved::Dispatch(resolved) => dispatch_input(
+                        running.id(),
+                        resolved,
+                        dispatch,
+                        &self.dispatcher,
+                        self.rotary.entry(route.clone()).or_default(),
+                    ),
                     // G-keys held under the old profile would release as the
                     // new profile's: end them here instead. Other keys are
                     // bound the same in every profile and keep running.

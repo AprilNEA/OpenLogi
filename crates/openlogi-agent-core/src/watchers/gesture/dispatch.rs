@@ -285,6 +285,9 @@ impl InputDispatcher {
             ),
             CapturedInput::Interrupted => self.cancel_session(session),
             CapturedInput::HostModeEntered => self.outputs.actions.host_mode_entered(key),
+            // Dialpad rotation rides the keyboard plane; a pointer session
+            // never arms a roller.
+            CapturedInput::Rotation { .. } => {}
             CapturedInput::ButtonDiverted(_) => {
                 unreachable!("the session's forwarder records diverted buttons instead")
             }

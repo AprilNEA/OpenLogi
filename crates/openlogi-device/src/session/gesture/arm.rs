@@ -200,6 +200,7 @@ impl ArmedControls {
                 .map(|wheel| HiResWheelRestore::new(wheel.feature_index, wheel.restore_resolution)),
             onboard.as_ref().and_then(ArmedOnboard::restore),
             None,
+            None,
         )
     }
 

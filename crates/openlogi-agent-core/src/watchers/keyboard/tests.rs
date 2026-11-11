@@ -24,6 +24,8 @@ fn spec_at(config_key: &str, route: DeviceRoute) -> KeyboardSpec {
         grid: dispatch(Action::MissionControl).keys.grid,
         gaming: GamingWanted::default(),
         gaming_mode: GamingKeyMode::default(),
+        rotary: std::collections::BTreeSet::new(),
+        rotary_sensitivity: openlogi_core::config::ThumbwheelSensitivity::DEFAULT,
         bindings: dispatch(Action::MissionControl).bindings,
     }
 }
@@ -51,10 +53,12 @@ fn dispatch(action: Action) -> KeyboardDispatchPlan {
         config_key: "keyboard-a".to_owned(),
         bindings: BTreeMap::from([(SEARCH_KEY, Binding::Single(action))]),
         gaming_mode: GamingKeyMode::default(),
+        rotary_sensitivity: openlogi_core::config::ThumbwheelSensitivity::DEFAULT,
         keys: KeyboardWanted {
             controls: BTreeMap::from([(0x00d4, SEARCH_KEY)]),
             grid: BTreeMap::new(),
             gaming: GamingWanted::default(),
+            rotary: std::collections::BTreeSet::new(),
         },
     }
 }

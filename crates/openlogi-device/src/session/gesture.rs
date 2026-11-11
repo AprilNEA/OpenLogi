@@ -33,7 +33,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use hidpp::feature::hires_wheel::{self, HiResWheelEvent};
 use hidpp::protocol::v20;
-use openlogi_core::binding::{ButtonId, GestureDirection};
+use openlogi_core::binding::{ButtonId, GestureDirection, Rotary};
 use tokio::sync::mpsc;
 use tracing::{debug, info};
 
@@ -114,6 +114,15 @@ pub enum CapturedInput {
         /// Units of `delta` per wheel notch: 1 for a low-resolution report,
         /// the wheel's `0x2121` multiplier for a high-resolution one.
         per_notch: NonZeroU8,
+    },
+    /// A diverted dialpad rotary control turned, over `0x4610` MultiRoller.
+    Rotation {
+        /// The dial or the roller.
+        rotary: Rotary,
+        /// Increments turned; positive is clockwise (dial) or up (roller).
+        increments: i16,
+        /// The control's increments per full revolution, `0` when unknown.
+        per_revolution: u16,
     },
     /// The device power-cycled. Presses still held are over, but nobody let
     /// go: they end without the action a release would run. State the device

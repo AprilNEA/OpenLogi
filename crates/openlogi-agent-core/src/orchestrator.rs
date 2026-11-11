@@ -10,13 +10,14 @@
 //! [`DpiCycleState::capabilities`] stays `None` and presets cycle at their raw
 //! (still valid) values — exactly the GUI's "window never opened" behaviour.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{
     ActionRingIcon, Binding, ButtonId, GamingButtons, GamingLayout, GridKey, KeypadPage, ModeKey,
+    Rotary,
 };
 use openlogi_core::bindings::{bindings_on_page, button_bindings_for, oshook_gestures_for};
 use openlogi_core::config::{
@@ -1197,6 +1198,8 @@ impl Orchestrator {
                 grid: chosen.divert.grid,
                 gaming: chosen.gaming,
                 gaming_mode: self.config.gaming_key_mode(&chosen.dev.config_key),
+                rotary: chosen.divert.rotary,
+                rotary_sensitivity: self.config.thumbwheel_sensitivity(&chosen.dev.config_key),
                 bindings: chosen.bindings,
             });
         }
@@ -2593,12 +2596,14 @@ struct KeyboardDivertSet {
     wanted: BTreeMap<u16, ButtonId>,
     reserved: Vec<u16>,
     grid: BTreeMap<u8, ButtonId>,
+    /// A dialpad's rotary controls with a stored direction binding.
+    rotary: BTreeSet<Rotary>,
 }
 
 impl KeyboardDivertSet {
     /// Whether the session would capture no key at all.
     fn captures_nothing(&self) -> bool {
-        self.wanted.is_empty() && self.grid.is_empty()
+        self.wanted.is_empty() && self.grid.is_empty() && self.rotary.is_empty()
     }
 }
 
@@ -2641,6 +2646,12 @@ fn keyboard_divert_set(bindings: &BTreeMap<ButtonId, Binding>) -> KeyboardDivert
             if is_bound_key(binding) {
                 set.grid.insert(slot.key.index(), ButtonId::grid(slot.key));
             }
+            continue;
+        }
+        // A dialpad rotation direction diverts its whole roller; presence is
+        // an explicit choice, as for a control (no default is seeded).
+        if let Some(rotary) = Rotary::of(*button) {
+            set.rotary.insert(rotary);
             continue;
         }
         let Some(cid) = button.cid().map(openlogi_core::binding::Cid::raw) else {

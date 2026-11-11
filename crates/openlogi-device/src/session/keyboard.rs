@@ -41,8 +41,11 @@ use hidpp::feature::CreatableFeature as _;
 use hidpp::feature::gaming_g_keys::{GKeys, GamingGKeysEvent, GamingGKeysFeature};
 use hidpp::feature::gaming_m_keys::{self, GamingMKeysEvent, MKeys};
 use hidpp::feature::macro_record::{self, MacroRecordEvent};
+use hidpp::feature::multi_roller::{
+    MultiRollerFeature, RollerId, RollerReportingMode, RollerRotation,
+};
 use hidpp::protocol::v20;
-use openlogi_core::binding::{ButtonId, GKey, ModeKey};
+use openlogi_core::binding::{ButtonId, GKey, ModeKey, Rotary};
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, info, warn};
 
@@ -55,7 +58,9 @@ use super::capture::{
     ArmedCapture, CaptureHost, Liveness, ReportingChangeStream, open_device, run_capture,
     subscribe_reporting_changes,
 };
-use super::capture_restore::{ArmedReporting, GKeysRestore, ReprogRestore, divert_keyboard_key};
+use super::capture_restore::{
+    ArmedReporting, GKeysRestore, ReprogRestore, RollerRestore, divert_keyboard_key,
+};
 use super::gesture::{
     CaptureError, CaptureSessionFailure, CaptureSessionOutcome, CapturedInput,
     PendingCaptureRestore, enumerate_controls,
@@ -109,6 +114,12 @@ pub struct KeyboardWanted {
     /// The G-series gaming cluster: whether to take the G-key row, and
     /// which keys above it to listen to.
     pub gaming: GamingWanted,
+    /// Dialpad rotary controls to divert over `0x4610` MultiRoller. Only a
+    /// known dialpad ([`DeviceRoute::dialpad`]) says which roller is which
+    /// control; on any other device they are skipped with a debug log.
+    ///
+    /// [`DeviceRoute::dialpad`]: openlogi_core::hid::DeviceRoute::dialpad
+    pub rotary: BTreeSet<Rotary>,
 }
 
 /// What a session does with a G-series keyboard's gaming cluster.
@@ -182,6 +193,7 @@ async fn arm_keyboard(
     // Subscribed before the first diversion write (see
     // `subscribe_reporting_changes`).
     let reporting_changes = controls.as_ref().map(subscribe_reporting_changes);
+    let rollers = arm_rollers(shared, &device).await?;
     let mut armed = ArmedKeys {
         controls,
         table,
@@ -192,6 +204,7 @@ async fn arm_keyboard(
         channel: Arc::clone(shared.channel()),
         device_index: shared.device_index(),
         gaming: Arc::default(),
+        rollers,
         reporting_changes,
         wanted,
     };
@@ -201,6 +214,130 @@ async fn arm_keyboard(
         return Err(rollback_start(error, pending, registry).await);
     }
     Ok(armed)
+}
+
+/// Resolve a dialpad's `0x4610` rollers to its rotary controls. Writes
+/// nothing: a roller is diverted only once a binding wants it. `None` when
+/// the route is no known dialpad or the device lacks the feature.
+async fn arm_rollers(
+    shared: &SharedChannel,
+    device: &hidpp::device::Device,
+) -> Result<Option<ArmedRollers>, CaptureError> {
+    let Some(dialpad) = shared.route().dialpad() else {
+        return Ok(None);
+    };
+    let Some(info) = device
+        .root()
+        .get_feature(MultiRollerFeature::ID)
+        .await
+        .map_err(CaptureError::from)?
+    else {
+        warn!("dialpad exposes no 0x4610 MultiRoller — dial and roller stay native");
+        return Ok(None);
+    };
+    let feature = MultiRollerFeature::new(
+        Arc::clone(shared.channel()),
+        shared.device_index(),
+        info.index,
+    );
+    let mut rollers = BTreeMap::new();
+    for (rotary, id) in [
+        (Rotary::Dial, dialpad.dial_roller),
+        (Rotary::Roller, dialpad.roller_roller),
+    ] {
+        let id = RollerId(id);
+        // The resolution only scales continuous scrolling; an unreadable one
+        // degrades to unscaled increments rather than failing the session.
+        let per_revolution = match feature.get_roller_capabilities(id).await {
+            Ok(caps) => u16::from(caps.increments_per_revolution),
+            Err(error) => {
+                debug!(?rotary, %error, "roller resolution unreadable");
+                0
+            }
+        };
+        rollers.insert(rotary, (id, per_revolution));
+    }
+    Ok(Some(ArmedRollers {
+        feature,
+        feature_index: info.index,
+        rollers,
+        diverted: BTreeSet::new(),
+        dispatch: Arc::default(),
+    }))
+}
+
+/// A dialpad's `0x4610` rollers, and which of its rotary controls the session
+/// diverted.
+struct ArmedRollers {
+    feature: MultiRollerFeature,
+    feature_index: u8,
+    /// Each rotary control's roller and its increments per revolution.
+    rollers: BTreeMap<Rotary, (RollerId, u16)>,
+    /// Every rotary control whose diversion may have been written.
+    diverted: BTreeSet<Rotary>,
+    /// What the report handler dispatches, by the roller id events carry.
+    dispatch: Arc<Mutex<BTreeMap<RollerId, (Rotary, u16)>>>,
+}
+
+impl ArmedRollers {
+    fn dispatch(&self) -> MutexGuard<'_, BTreeMap<RollerId, (Rotary, u16)>> {
+        self.dispatch.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Hand back the rotary controls `wanted` drops, then divert the ones it
+    /// adds. A control in both is not written.
+    async fn follow(&mut self, wanted: &BTreeSet<Rotary>) -> Result<(), CaptureError> {
+        let hand_back: Vec<Rotary> = self.diverted.difference(wanted).copied().collect();
+        for rotary in hand_back {
+            if let Some(&(id, _)) = self.rollers.get(&rotary) {
+                self.dispatch().remove(&id);
+                self.feature
+                    .set_mode(id, RollerReportingMode::Native)
+                    .await
+                    .map_err(CaptureError::from)?;
+            }
+            // Forgotten only once the firmware has it back.
+            self.diverted.remove(&rotary);
+        }
+        let adds: Vec<Rotary> = wanted.difference(&self.diverted).copied().collect();
+        for rotary in adds {
+            let Some(&(id, per_revolution)) = self.rollers.get(&rotary) else {
+                continue;
+            };
+            // Recorded before the write, so a transport failure still hands
+            // it back; dispatched before it, so the first event is not lost.
+            self.diverted.insert(rotary);
+            self.dispatch().insert(id, (rotary, per_revolution));
+            self.feature
+                .set_mode(id, RollerReportingMode::Diverted)
+                .await
+                .map_err(CaptureError::from)?;
+        }
+        Ok(())
+    }
+
+    fn diverted_ids(&self) -> Vec<RollerId> {
+        self.diverted
+            .iter()
+            .filter_map(|rotary| self.rollers.get(rotary).map(|&(id, _)| id))
+            .collect()
+    }
+}
+
+/// Decode a channel message into a [`RollerRotation`] when it is the
+/// unsolicited `0x4610` rotation event (function `0`, software id `0`) for
+/// `(device_index, feature_index)`.
+fn decode_rotation(
+    msg: &v20::Message,
+    device_index: u8,
+    feature_index: u8,
+) -> Option<RollerRotation> {
+    let header = msg.header();
+    (header.device_index == device_index
+        && header.feature_index == feature_index
+        && header.software_id.to_lo() == 0
+        && header.function_id.to_lo() == 0)
+        .then(|| RollerRotation::from_payload(&msg.extend_payload()))
 }
 
 /// The keys a session dispatches, and which of them are held. The report
@@ -672,6 +809,8 @@ struct ArmedKeys {
     /// What the report handler dispatches for the gaming cluster, and who
     /// owns the G-key row.
     gaming: Arc<Mutex<GamingKeys>>,
+    /// A dialpad's rollers, when the device is one.
+    rollers: Option<ArmedRollers>,
     /// Other clients' reporting changes on `controls`, until the running
     /// session takes them.
     reporting_changes: Option<ReportingChangeStream>,
@@ -804,6 +943,7 @@ impl ArmedCapture for ArmedKeys {
             keys = self.keys().buttons.len(),
             grid_keys = self.grid().buttons.len(),
             g_row = self.gaming().row.owed().is_some(),
+            rotary = self.rollers.as_ref().map_or(0, |r| r.diverted.len()),
             wake_rearm,
             "keyboard key capture active"
         );
@@ -818,7 +958,30 @@ impl ArmedCapture for ArmedKeys {
         let keys = Arc::clone(&self.keys);
         let gaming = Arc::clone(&self.gaming);
         self.gaming().sink = Some(sink.clone());
+        let rollers = self
+            .rollers
+            .as_ref()
+            .map(|r| (r.feature_index, Arc::clone(&r.dispatch)));
         move |msg| {
+            if let Some((roller_index, dispatch)) = &rollers
+                && let Some(rotation) = decode_rotation(msg, device_index, *roller_index)
+            {
+                let target = dispatch
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .get(&rotation.roller)
+                    .copied();
+                if let Some((rotary, per_revolution)) = target
+                    && rotation.delta != 0
+                {
+                    let _ = sink.send(CapturedInput::Rotation {
+                        rotary,
+                        increments: i16::from(rotation.delta),
+                        per_revolution,
+                    });
+                }
+                return;
+            }
             gaming
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -869,6 +1032,21 @@ impl ArmedCapture for ArmedKeys {
                 }
             }
         }
+        if let Some(rollers) = &self.rollers {
+            for id in rollers.diverted_ids() {
+                if let Err(e) = rollers
+                    .feature
+                    .set_mode(id, RollerReportingMode::Diverted)
+                    .await
+                {
+                    warn!(
+                        roller = id.0,
+                        error = %e,
+                        "re-divert after wake failed — roller stays native until next wake"
+                    );
+                }
+            }
+        }
         // The keyboard forgets a taken row when it power-cycles. Left onboard,
         // every G-key would run its onboard action instead of its binding, so
         // a failed retake ends the session and capture arms again.
@@ -904,7 +1082,14 @@ impl ArmedCapture for ArmedKeys {
                 "keyboard divert set changed"
             );
         }
-        self.apply(change).await
+        self.apply(change).await?;
+        if let Some(rollers) = self.rollers.as_mut() {
+            return rollers.follow(&wanted.rotary).await;
+        }
+        if !wanted.rotary.is_empty() {
+            debug!("rotary controls requested on a device without dialpad rollers — skipped");
+        }
+        Ok(())
     }
 
     fn armed_reporting(&self) -> Option<(&ReprogControlsV4, &[ArmedReporting])> {
@@ -924,7 +1109,10 @@ impl ArmedCapture for ArmedKeys {
             .controls
             .as_ref()
             .and_then(|controls| ReprogRestore::new(controls.feature_index(), self.reporting));
-        PendingCaptureRestore::new(retired, reprog, None, None, None, g_keys)
+        let rollers = self
+            .rollers
+            .and_then(|r| RollerRestore::new(r.feature_index, r.diverted_ids()));
+        PendingCaptureRestore::new(retired, reprog, None, None, None, g_keys, rollers)
     }
 }
 
@@ -1441,6 +1629,7 @@ mod tests {
             channel,
             device_index: 0xff,
             gaming: Arc::default(),
+            rollers: None,
             reporting_changes: None,
             wanted: watch::channel(KeyboardWanted::default()).1,
         };

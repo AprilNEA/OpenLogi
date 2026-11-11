@@ -1,7 +1,7 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, RwLock};
 
-use openlogi_core::binding::ButtonId;
+use openlogi_core::binding::{ButtonId, Rotary};
 use openlogi_core::hid::PairingError;
 use openlogi_fixture::{
     CassetteExchange, FIXTURE_SCHEMA_VERSION, HidCassette, ReportSupport, RequestMatch,
@@ -108,6 +108,105 @@ async fn keyboard_capture_replay_restores_original_reporting_on_normal_shutdown(
         KEYBOARD_ARMED_FLAGS,
         KEYBOARD_RESTORED_FLAGS,
     );
+}
+
+/// The MX Creative Dialpad's product ID: a direct route with it is the
+/// dialpad its registry entry describes.
+const DIALPAD_PRODUCT_ID: u16 = 0xbc00;
+
+/// The `0x4610` feature index the dialpad replay places `MultiRoller` at.
+const MULTI_ROLLER_FEATURE_INDEX: u8 = 0x03;
+
+/// A dialpad session diverts the roller a bound direction names, reports its
+/// turns as rotations of that control, and hands it back to native reporting
+/// before it completes. The strict cassette fails on any other request: the
+/// unbound small roller is resolved but never written.
+#[tokio::test]
+async fn keyboard_capture_replay_diverts_and_hands_back_a_dialpad_roller() {
+    let roller = |function, payload| {
+        hidpp20_exchange(
+            hidpp20_short(0xff, MULTI_ROLLER_FEATURE_INDEX, function, payload),
+            hidpp20_short(0xff, MULTI_ROLLER_FEATURE_INDEX, function, payload),
+        )
+    };
+    let replay = ArmedReplay::enumerate_product(
+        keyboard_cassette(
+            "dialpad capture diverts the dial",
+            &[KEYBOARD_CID],
+            vec![
+                root_feature_lookup_exchange(0x4610, MULTI_ROLLER_FEATURE_INDEX, 0),
+                // Resolution of the dial (roller 1), then the roller (0).
+                hidpp20_exchange(
+                    hidpp20_short(0xff, MULTI_ROLLER_FEATURE_INDEX, 1, [1, 0, 0]),
+                    hidpp20_short(0xff, MULTI_ROLLER_FEATURE_INDEX, 1, [0xb4, 0, 0x1f]),
+                ),
+                hidpp20_exchange(
+                    hidpp20_short(0xff, MULTI_ROLLER_FEATURE_INDEX, 1, [0, 0, 0]),
+                    hidpp20_short(0xff, MULTI_ROLLER_FEATURE_INDEX, 1, [0x28, 0, 0x1f]),
+                ),
+                // Divert the dial.
+                roller(3, [1, 1, 0]),
+                root_feature_lookup_exchange(0x1d4b, 0, 0),
+                // Hand the dial back.
+                roller(3, [1, 0, 0]),
+            ],
+        ),
+        DIALPAD_PRODUCT_ID,
+    )
+    .await;
+    let (sink, mut captured) = mpsc::unbounded_channel();
+    let (shutdown, host) = replay.host(sink);
+    let capture = run_keyboard_capture_session(
+        replay.route.clone(),
+        watch::channel(KeyboardWanted {
+            rotary: BTreeSet::from([Rotary::Dial]),
+            ..KeyboardWanted::default()
+        })
+        .1,
+        host,
+    );
+    let turn_then_stop = async {
+        replay.wireless_lookup.request_written().await;
+        // Two increments counter-clockwise on the dial, then a turn of the
+        // undiverted roller that must not be reported.
+        for (roller, delta) in [(1, 0xfe), (0, 0x01)] {
+            let mut payload = [0; 16];
+            payload[0] = roller;
+            payload[1] = delta;
+            replay
+                .backend
+                .emit_channel_report(
+                    CAPTURE_CHANNEL,
+                    &hidpp20_long(0xff, MULTI_ROLLER_FEATURE_INDEX, 0, payload),
+                )
+                .expect("the rotation reaches the session");
+        }
+        assert_eq!(
+            captured.recv().await,
+            Some(CapturedInput::Rotation {
+                rotary: Rotary::Dial,
+                increments: -2,
+                per_revolution: 180,
+            })
+        );
+        replay.stop_after_arm(shutdown).await;
+        captured
+    };
+
+    let (outcome, mut captured) = tokio::join!(capture, turn_then_stop);
+
+    assert!(matches!(
+        outcome.expect("capture session shuts down cleanly"),
+        CaptureSessionOutcome::Restored
+    ));
+    assert!(
+        captured.try_recv().is_err(),
+        "the undiverted roller's turn was reported"
+    );
+    replay
+        .backend
+        .require_complete()
+        .expect("the dialpad cassette is strictly consumed");
 }
 
 /// The `0x8010` feature index the G-key replay places `GamingGKeys` at.
@@ -450,14 +549,23 @@ struct ArmedReplay {
 
 impl ArmedReplay {
     async fn enumerate(cassette: HidCassette) -> Self {
+        Self::enumerate_product(cassette, DIRECT_PRODUCT_ID).await
+    }
+
+    /// [`Self::enumerate`] for a direct device with `product_id`, so the
+    /// route names a known product.
+    async fn enumerate_product(cassette: HidCassette, product_id: u16) -> Self {
         let node_id = NodeId::from("capture-node".to_string());
         let route = DeviceRoute::Direct {
             vendor_id: crate::LOGITECH_VENDOR_ID,
-            product_id: DIRECT_PRODUCT_ID,
+            product_id,
         };
         let backend = Arc::new(
             ReplayBackend::new(
-                replay_topology(direct_capture_node(node_id.clone()), CAPTURE_CHANNEL),
+                replay_topology(
+                    replay_node(node_id.clone(), product_id, "Capture Device"),
+                    CAPTURE_CHANNEL,
+                ),
                 vec![cassette],
             )
             .expect("capture replay topology is valid"),
@@ -711,10 +819,6 @@ async fn bolt_pairing_replay_cancels_discovery_and_restores_notifications() {
         .expect("pairing cassette is strictly consumed");
 }
 
-fn direct_capture_node(id: NodeId) -> ReplayNode {
-    replay_node(id, DIRECT_PRODUCT_ID, "Capture Device")
-}
-
 fn bolt_pairing_node(id: NodeId) -> ReplayNode {
     replay_node(id, BOLT_PRODUCT_ID, "Logi Bolt Receiver")
 }
@@ -829,6 +933,7 @@ fn keyboard_keys(cids: &[u16]) -> KeyboardWanted {
             .collect(),
         grid: BTreeMap::new(),
         gaming: GamingWanted::default(),
+        rotary: BTreeSet::new(),
     }
 }
 
