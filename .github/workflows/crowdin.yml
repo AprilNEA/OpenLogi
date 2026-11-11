@@ -24,7 +24,7 @@ concurrency:
 jobs:
   synchronize:
     name: Synchronize translations
-    runs-on: ubuntu-latest
+    runs-on: nscloud-ubuntu-24.04-amd64-2x4
     if: github.repository == 'AprilNEA/OpenLogi'
 
     steps:
