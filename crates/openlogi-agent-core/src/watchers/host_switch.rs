@@ -34,8 +34,79 @@ pub struct HostSwitchLink {
 /// Read-only, lossless, coalescing view of resolved links.
 pub type HostSwitchLinks = watch::Receiver<std::sync::Arc<Vec<HostSwitchLink>>>;
 
+/// A request to move a whole link to another host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LinkedSwitchRequest {
+    /// The keyboard or one of its targets: the device whose action asked.
+    route: DeviceRoute,
+    /// The keyboard's zero-based slot. Each target moves to its slot for the
+    /// same computer, as when the keyboard's own host key is pressed.
+    host: u8,
+}
+
+/// Moves a keyboard and the pointing devices linked to it together, the way
+/// pressing one of the keyboard's host keys does: the manager restores the
+/// keyboard's host keys, moves the targets, and moves the keyboard last.
+///
+/// Only the latest request is kept, and a request no published link
+/// answers for is refused, so the caller can move the one device instead.
+#[derive(Clone)]
+pub struct LinkedHostSwitch {
+    links: HostSwitchLinks,
+    requests: std::sync::Arc<watch::Sender<Option<LinkedSwitchRequest>>>,
+}
+
+impl LinkedHostSwitch {
+    /// A handle over `links`, for the manager [`spawn`] starts.
+    #[must_use]
+    pub fn new(links: &HostSwitchLinks) -> Self {
+        Self {
+            links: links.clone(),
+            requests: std::sync::Arc::new(watch::channel(None).0),
+        }
+    }
+
+    /// Ask to move the link `route` belongs to, as its keyboard or one of
+    /// its targets, to the keyboard's slot `host`. Returns `false`, and
+    /// sends nothing, when no published link has `route`: its keyboard is
+    /// offline, or nothing links it.
+    #[must_use = "a refused request moves nothing, so the caller must move the device itself"]
+    pub fn request(&self, route: &DeviceRoute, host: u8) -> bool {
+        if link_for(&self.links.borrow(), route).is_none() {
+            return false;
+        }
+        self.requests.send_replace(Some(LinkedSwitchRequest {
+            route: route.clone(),
+            host,
+        }));
+        true
+    }
+
+    fn subscribe(&self) -> watch::Receiver<Option<LinkedSwitchRequest>> {
+        self.requests.subscribe()
+    }
+}
+
+impl Default for LinkedHostSwitch {
+    /// A handle with no links, which refuses every request.
+    fn default() -> Self {
+        Self::new(&watch::channel(std::sync::Arc::new(Vec::new())).1)
+    }
+}
+
+/// The published link that `route` belongs to, as its keyboard or a target.
+fn link_for<'a>(
+    published: &'a [HostSwitchLink],
+    route: &DeviceRoute,
+) -> Option<&'a HostSwitchLink> {
+    published
+        .iter()
+        .find(|link| link.keyboard == *route || link.targets.contains(route))
+}
+
 struct HostSwitchManagerContext {
     links: HostSwitchLinks,
+    switch_requests: watch::Receiver<Option<LinkedSwitchRequest>>,
     channel_pool: ChannelPool,
     registry: ChannelRegistry,
     receiver_access: ReceiverAccess,
@@ -44,20 +115,24 @@ struct HostSwitchManagerContext {
     shutdown: oneshot::Receiver<()>,
 }
 
-/// Spawn the host switch session manager.
+/// Spawn the host switch session manager. It also serves the requests made
+/// through `linked`.
 #[must_use]
 pub fn spawn(
     links: &HostSwitchLinks,
+    linked: &LinkedHostSwitch,
     channel_pool: ChannelPool,
     receiver_access: ReceiverAccess,
     registry: ChannelRegistry,
     device_io: DeviceIoGate,
 ) -> WatcherHandle {
     let links = links.clone();
+    let switch_requests = linked.subscribe();
     let receiver_requests = receiver_access.subscribe_requests();
     WatcherHandle::spawn("openlogi-host-switch-watcher", move |shutdown| {
         manage(HostSwitchManagerContext {
             links,
+            switch_requests,
             channel_pool,
             registry,
             receiver_access,
@@ -223,6 +298,25 @@ impl HostSwitchManagerState {
         ) {
             self.transition = None;
         }
+    }
+
+    /// Queue `request` as a transition of its link, as a diverted host key
+    /// queues one: every session then stops and restores its keyboard
+    /// before the link moves. A request no published link answers for, or
+    /// one that arrives while a transition is already switching, is dropped.
+    fn request_switch(&mut self, published: &[HostSwitchLink], request: &LinkedSwitchRequest) {
+        let Some(link) = link_for(published, &request.route) else {
+            debug!(route = %request.route, "linked host switch for an unlinked device — dropped");
+            return;
+        };
+        if matches!(self.transition, Some(TransitionPhase::Running)) {
+            debug!(route = %request.route, "a host transition is already switching — request dropped");
+            return;
+        }
+        self.transition = Some(TransitionPhase::Waiting(TransitionIntent {
+            link: link.clone(),
+            host: request.host,
+        }));
     }
 
     fn begin_transition(&mut self, terminal: bool) -> Option<TransitionIntent> {
@@ -465,6 +559,7 @@ impl HostSwitchManagerState {
 async fn manage(context: HostSwitchManagerContext) -> ManagerCompletion {
     let HostSwitchManagerContext {
         mut links,
+        mut switch_requests,
         channel_pool,
         registry,
         receiver_access,
@@ -483,6 +578,7 @@ async fn manage(context: HostSwitchManagerContext) -> ManagerCompletion {
     };
     let mut state = HostSwitchManagerState::new();
     let mut terminal = false;
+    let mut switch_requests_open = true;
 
     loop {
         let requests = *receiver_requests.borrow_and_update();
@@ -526,6 +622,13 @@ async fn manage(context: HostSwitchManagerContext) -> ManagerCompletion {
             result = links.changed() => {
                 if result.is_err() {
                     return ManagerCompletion::Unexpected;
+                }
+            }
+            result = switch_requests.changed(), if switch_requests_open && !terminal => {
+                if result.is_err() {
+                    switch_requests_open = false;
+                } else if let Some(request) = switch_requests.borrow_and_update().clone() {
+                    state.request_switch(&links.borrow(), &request);
                 }
             }
             result = receiver_requests.changed() => {
@@ -757,6 +860,94 @@ mod tests {
             HostSwitchStopReason::Graceful,
         );
         assert!(state.slots.iter().any(|slot| slot.keyboard() == &route(1)));
+    }
+
+    #[test]
+    fn a_linked_switch_request_from_either_end_queues_the_link() {
+        let published = [link(2), link(3)];
+        for asking in [route(1), route(3)] {
+            let mut state = HostSwitchManagerState::new();
+            state.request_switch(
+                &published,
+                &LinkedSwitchRequest {
+                    route: asking.clone(),
+                    host: 1,
+                },
+            );
+            let Some(TransitionPhase::Waiting(intent)) = &state.transition else {
+                panic!("{asking} queues a transition");
+            };
+            assert_eq!(intent.host, 1);
+            assert!(
+                intent.link.keyboard == route(1),
+                "the keyboard leads whichever device asked"
+            );
+        }
+        let mut state = HostSwitchManagerState::new();
+        state.request_switch(
+            &published,
+            &LinkedSwitchRequest {
+                route: route(9),
+                host: 1,
+            },
+        );
+        assert!(
+            state.transition.is_none(),
+            "an unlinked device is not queued"
+        );
+    }
+
+    #[test]
+    fn a_linked_switch_request_waits_for_sessions_and_never_preempts_a_running_switch() {
+        let (stop, mut stop_rx) = oneshot::channel();
+        let mut state = HostSwitchManagerState::new();
+        state.slots.push(HostSwitchSlot::Running(RunningSession {
+            link: link(2),
+            epoch: SessionEpoch(1),
+            phase: SessionPhase::Active(stop),
+        }));
+        let request = LinkedSwitchRequest {
+            route: route(2),
+            host: 2,
+        };
+        state.request_switch(&[link(2)], &request);
+        assert!(
+            state.begin_transition(false).is_none(),
+            "the keyboard's session restores its host keys first"
+        );
+        state.stop_sessions(&[], false);
+        assert!(stop_rx.try_recv().is_ok(), "the session is asked to stop");
+
+        state.slots.clear();
+        assert_eq!(
+            state.begin_transition(false).map(|intent| intent.host),
+            Some(2)
+        );
+        state.request_switch(&[link(2)], &LinkedSwitchRequest { host: 0, ..request });
+        assert!(
+            matches!(state.transition, Some(TransitionPhase::Running)),
+            "a running switch is not replaced"
+        );
+    }
+
+    #[test]
+    fn a_linked_switch_handle_refuses_devices_no_published_link_has() {
+        let (links_tx, links) = watch::channel(std::sync::Arc::new(vec![link(2)]));
+        let linked = LinkedHostSwitch::new(&links);
+        let mut requests = linked.subscribe();
+        assert!(!linked.request(&route(9), 1));
+        assert!(!requests.has_changed().unwrap_or(false));
+        assert!(linked.request(&route(2), 1));
+        assert_eq!(
+            requests.borrow_and_update().clone(),
+            Some(LinkedSwitchRequest {
+                route: route(2),
+                host: 1,
+            })
+        );
+        links_tx.send_replace(std::sync::Arc::new(Vec::new()));
+        assert!(!linked.request(&route(2), 1), "the keyboard went offline");
+        assert!(!LinkedHostSwitch::default().request(&route(1), 0));
     }
 
     #[test]

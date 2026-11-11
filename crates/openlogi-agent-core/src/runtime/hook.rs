@@ -629,6 +629,12 @@ fn handle_key(
     else {
         return EventDisposition::PassThrough;
     };
+    // The hook cannot say which keyboard sent the key, and the selected
+    // device is not a stand-in for it.
+    if action.needs_firing_device() {
+        info!(keycode, action = %action.label(), "key bound to a device-scoped action — passing through");
+        return EventDisposition::PassThrough;
+    }
 
     let action_target = capture_target();
     let queued = if action.is_held() {
