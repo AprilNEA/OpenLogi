@@ -13,6 +13,7 @@ devenv.local.yaml
 # Added by cargo
 
 /target
+/target-*
 
 # Bytecode Python writes when the i18n scripts import each other.
 __pycache__/
