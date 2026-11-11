@@ -262,6 +262,7 @@ const fn category(kind: DeviceKind) -> proto::DeviceCategory {
         // The keyboard family returned above.
         DeviceKind::Keyboard
         | DeviceKind::Numpad
+        | DeviceKind::Dialpad
         | DeviceKind::Remote
         | DeviceKind::Tablet
         | DeviceKind::Gamepad

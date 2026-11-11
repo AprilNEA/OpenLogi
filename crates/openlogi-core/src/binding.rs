@@ -34,7 +34,7 @@ pub use action_ring::{
     ActionRingSlot, RingAction, RingActionError,
 };
 pub use application_target::{ApplicationTarget, ApplicationTargetError};
-pub use button::{ButtonId, GridKey, GridSlot, KeypadPage, ParseButtonIdError};
+pub use button::{ButtonId, GridKey, GridSlot, KeypadPage, ParseButtonIdError, Rotary};
 pub use category::Category;
 pub use control::{Cid, KNOWN_CONTROLS, KnownControl, UNKNOWN_CONTROL_TRANSLATION_KEY};
 pub use defaults::{

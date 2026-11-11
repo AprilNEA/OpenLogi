@@ -186,6 +186,7 @@ direct_connection = "Direktverbindung"
 mouse = "Maus"
 keyboard = "Tastatur"
 numpad = "Ziffernblock"
+dialpad = "Dialpad"
 presenter = "Presenter"
 remote = "Fernbedienung"
 trackball = "Trackball"
@@ -1057,3 +1058,9 @@ change_not_reloaded = "Gespeichert, aber OpenLogi hat es noch nicht übernommen.
 camera_in_use = "In Verwendung"
 camera_idle = "Nicht in Verwendung"
 open_camera_preview = "Vorschau öffnen…"
+
+[dialpad]
+dial_left = "Rad links"
+dial_right = "Rad rechts"
+roller_up = "Roller hoch"
+roller_down = "Roller runter"

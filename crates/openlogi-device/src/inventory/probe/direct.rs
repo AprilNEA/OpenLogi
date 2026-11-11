@@ -28,6 +28,18 @@ pub(in crate::inventory) fn preferred_direct_codename(
         .to_string()
 }
 
+/// The name a direct device's inventory entry carries: the host's HID
+/// collection label, or the device's own name when the host gives none. On
+/// Windows a Bluetooth LE device's vendor collection has no product string, so
+/// the label is empty for the MX Creative Dialpad, MX Master and MX Keys.
+pub(in crate::inventory) fn direct_inventory_name(os_name: &str, codename: &str) -> String {
+    if os_name.trim().is_empty() {
+        codename.to_string()
+    } else {
+        os_name.to_string()
+    }
+}
+
 /// Probe a HID++ channel that doesn't host a Bolt receiver — for
 /// Bluetooth-direct, USB-C, or otherwise wired devices that present
 /// themselves as a HID++ device rather than a receiver (P2.4).
@@ -142,7 +154,7 @@ pub(super) async fn probe_direct(
     debug!(os_name = %info.name, name = %codename, "BT-direct / wired device recognised");
     let inventory = DeviceInventory {
         receiver: ReceiverInfo {
-            name: info.name.clone(),
+            name: direct_inventory_name(&info.name, &codename),
             vendor_id: info.vendor_id,
             product_id: info.product_id,
             unique_id: None,

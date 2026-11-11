@@ -1038,3 +1038,18 @@ fn a_key_shows_its_press_action_or_nothing_when_unbound() {
         assert_eq!(binding.key_action(), shown, "{binding:?}");
     }
 }
+
+#[test]
+fn dialpad_rotary_directions_roundtrip_and_pair_up() {
+    for rotary in Rotary::ALL {
+        for button in rotary.buttons() {
+            let name = button.config_name();
+            assert_eq!(name.parse::<ButtonId>().ok(), Some(button), "{name}");
+            assert_eq!(Rotary::of(button), Some(rotary));
+            assert_eq!(default_binding(button), Action::None);
+        }
+    }
+    assert_eq!(Rotary::Dial.positive(), ButtonId::DialRight);
+    assert_eq!(Rotary::Roller.negative(), ButtonId::RollerDown);
+    assert_eq!(Rotary::of(ButtonId::ThumbwheelScrollUp), None);
+}

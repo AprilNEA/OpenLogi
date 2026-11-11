@@ -186,6 +186,7 @@ direct_connection = "Прамое падключэнне"
 mouse = "Мыш"
 keyboard = "Клавіятура"
 numpad = "Лічбавы блок"
+dialpad = "Dialpad"
 presenter = "Прэзентэр"
 remote = "Пульт"
 trackball = "Трэкбол"
@@ -1057,3 +1058,9 @@ change_not_reloaded = "Захавана, але яшчэ не ўжыта ў Open
 camera_in_use = "Выкарыстоўваецца"
 camera_idle = "Не выкарыстоўваецца"
 open_camera_preview = "Адкрыць папярэдні прагляд…"
+
+[dialpad]
+dial_left = "Dial Left"
+dial_right = "Dial Right"
+roller_up = "Roller Up"
+roller_down = "Roller Down"

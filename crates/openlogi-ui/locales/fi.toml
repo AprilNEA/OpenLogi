@@ -186,6 +186,7 @@ direct_connection = "Suora yhteys"
 mouse = "Hiiri"
 keyboard = "Näppäimistö"
 numpad = "Numeronäppäimistö"
+dialpad = "Dialpad"
 presenter = "Esitin"
 remote = "Kaukosäädin"
 trackball = "Pallohiiri"
@@ -1057,3 +1058,9 @@ change_not_reloaded = "Tallennettu, mutta OpenLogi ei ole vielä ottanut sitä k
 camera_in_use = "Käytössä"
 camera_idle = "Ei käytössä"
 open_camera_preview = "Avaa esikatselu…"
+
+[dialpad]
+dial_left = "Dial Left"
+dial_right = "Dial Right"
+roller_up = "Roller Up"
+roller_down = "Roller Down"

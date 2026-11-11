@@ -186,6 +186,7 @@ direct_connection = "Απευθείας σύνδεση"
 mouse = "Ποντίκι"
 keyboard = "Πληκτρολόγιο"
 numpad = "Αριθμητικό πληκτρολόγιο"
+dialpad = "Dialpad"
 presenter = "Παρουσιαστής"
 remote = "Τηλεχειριστήριο"
 trackball = "Ιχνόσφαιρα"
@@ -1057,3 +1058,9 @@ change_not_reloaded = "Αποθηκεύτηκε, αλλά το OpenLogi δεν �
 camera_in_use = "Σε χρήση"
 camera_idle = "Εκτός χρήσης"
 open_camera_preview = "Άνοιγμα προεπισκόπησης…"
+
+[dialpad]
+dial_left = "Dial Left"
+dial_right = "Dial Right"
+roller_up = "Roller Up"
+roller_down = "Roller Down"

@@ -186,6 +186,7 @@ direct_connection = "직접 연결"
 mouse = "마우스"
 keyboard = "키보드"
 numpad = "숫자 키패드"
+dialpad = "Dialpad"
 presenter = "프레젠터"
 remote = "리모컨"
 trackball = "트랙볼"
@@ -1057,3 +1058,9 @@ change_not_reloaded = "저장되었지만 OpenLogi에 아직 적용되지 않았
 camera_in_use = "사용 중"
 camera_idle = "사용 안 함"
 open_camera_preview = "미리 보기 열기…"
+
+[dialpad]
+dial_left = "Dial Left"
+dial_right = "Dial Right"
+roller_up = "Roller Up"
+roller_down = "Roller Down"

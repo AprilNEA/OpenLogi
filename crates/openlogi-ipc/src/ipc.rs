@@ -190,6 +190,9 @@ pub use succession::Identity;
 ///      `AgentSnapshot::config_revision` appended — the revision of
 ///      `config.toml` the agent last loaded, so the settings app learns of
 ///      a save another writer made.
+///      `DeviceKind::Dialpad` appended, and `ButtonId` gains the
+///      `DialLeft`/`DialRight`/`RollerUp`/`RollerDown` names — the MX
+///      Creative Dialpad's dial and roller.
 pub const PROTOCOL_VERSION: u32 = 46;
 
 /// Environment variable through which the agent hands a supervised helper the

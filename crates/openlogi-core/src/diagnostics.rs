@@ -493,6 +493,7 @@ fn kind_label(kind: DeviceKind) -> &'static str {
         DeviceKind::Camera => "camera",
         DeviceKind::Unknown => "unknown",
         DeviceKind::Light => "light",
+        DeviceKind::Dialpad => "dialpad",
     }
 }
 

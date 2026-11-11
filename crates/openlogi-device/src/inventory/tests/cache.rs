@@ -9,6 +9,15 @@ fn direct_codename_prefers_hidpp_marketing_name_over_generic_os_name() {
         "Wireless Mouse MX Master 2S"
     );
     assert_eq!(preferred_direct_codename(None, "Mouse"), "Mouse");
+    // Windows gives a Bluetooth LE vendor collection no product string.
+    assert_eq!(
+        direct_inventory_name("", "MX Creative Dialpad"),
+        "MX Creative Dialpad"
+    );
+    assert_eq!(
+        direct_inventory_name("Keypad", "MX Creative Keypad"),
+        "Keypad"
+    );
 }
 
 #[test]

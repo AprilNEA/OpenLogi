@@ -186,6 +186,7 @@ direct_connection = "直接接続"
 mouse = "マウス"
 keyboard = "キーボード"
 numpad = "テンキー"
+dialpad = "Dialpad"
 presenter = "プレゼンター"
 remote = "リモコン"
 trackball = "トラックボール"
@@ -1057,3 +1058,9 @@ change_not_reloaded = "保存しましたが、OpenLogi にはまだ適用され
 camera_in_use = "使用中"
 camera_idle = "未使用"
 open_camera_preview = "プレビューを開く…"
+
+[dialpad]
+dial_left = "Dial Left"
+dial_right = "Dial Right"
+roller_up = "Roller Up"
+roller_down = "Roller Down"

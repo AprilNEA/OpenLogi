@@ -186,6 +186,7 @@ direct_connection = "Połączenie bezpośrednie"
 mouse = "Mysz"
 keyboard = "Klawiatura"
 numpad = "Klawiatura numeryczna"
+dialpad = "Dialpad"
 presenter = "Prezenter"
 remote = "Pilot"
 trackball = "Manipulator kulkowy"
@@ -1057,3 +1058,9 @@ change_not_reloaded = "Zapisano, ale zmiana nie została jeszcze zastosowana w O
 camera_in_use = "W użyciu"
 camera_idle = "Nieużywana"
 open_camera_preview = "Otwórz podgląd…"
+
+[dialpad]
+dial_left = "Dial Left"
+dial_right = "Dial Right"
+roller_up = "Roller Up"
+roller_down = "Roller Down"

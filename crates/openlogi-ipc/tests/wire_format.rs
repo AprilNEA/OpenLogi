@@ -890,6 +890,10 @@ fn device_inventory() {
     // `Light` was appended after `Unknown`; preserve every existing kind's
     // bincode discriminant.
     assert_wire(&DeviceKind::Light, "0d");
+    // `Dialpad` was appended after `Light`.
+    assert_wire(&DeviceKind::Dialpad, "0e");
+    // A dialpad rotation direction rides as its config name.
+    assert_wire(&ButtonId::DialLeft, "084469616c4c656674");
     // A level-only battery (no state-of-charge gauge) carries no percentage.
     assert_wire(
         &BatteryInfo {
