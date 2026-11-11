@@ -264,6 +264,9 @@ fn fill_gradient(pixmap: &mut tiny_skia::Pixmap, gradient: KeyGradient, side: f3
 /// breaks first, else one long multi-word line is broken at the space
 /// nearest its middle.
 fn label_lines(label: &str) -> Vec<String> {
+    // A key shows two short lines; a hand-edited label of any length is cut
+    // before it reaches text layout, which runs on every repaint.
+    let label: String = label.chars().take(MAX_LABEL_CHARS).collect();
     let mut lines: Vec<String> = label
         .lines()
         .map(str::trim)
@@ -364,7 +367,7 @@ fn fonts() -> &'static Arc<usvg::fontdb::Database> {
 /// be read or decoded is logged and left out, so the rest of the face still
 /// shows.
 fn draw_picture(pixmap: &mut tiny_skia::Pixmap, path: &Path) {
-    let picture = match image::open(path) {
+    let picture = match load_picture(path) {
         Ok(picture) => picture,
         Err(error) => {
             warn!(path = %path.display(), %error, "key picture could not be read — drawn without it");
@@ -395,6 +398,52 @@ fn draw_picture(pixmap: &mut tiny_skia::Pixmap, path: &Path) {
         tiny_skia::Transform::identity(),
         None,
     );
+}
+
+/// The most characters of a label a key face lays out.
+const MAX_LABEL_CHARS: usize = 64;
+
+/// The largest picture file a key face reads.
+const MAX_PICTURE_BYTES: u64 = 32 * 1024 * 1024;
+/// The largest picture side a key face decodes, in pixels.
+const MAX_PICTURE_SIDE: u32 = 8192;
+/// The most memory decoding one picture may allocate.
+const MAX_PICTURE_ALLOC: u64 = 128 * 1024 * 1024;
+
+/// Read the picture a key face names, within bounds: the path comes from a
+/// hand-editable config and is read by the agent on every repaint. A network
+/// or device path is refused before anything touches it (on Windows, opening
+/// `\\host\share\…` would connect to that host), only a regular file of
+/// at most [`MAX_PICTURE_BYTES`] is read — a FIFO would block the panel —
+/// and the decoder is held to [`MAX_PICTURE_SIDE`] and
+/// [`MAX_PICTURE_ALLOC`], so a decompression bomb fails instead of taking
+/// the agent's memory.
+pub(super) fn load_picture(path: &Path) -> Result<image::DynamicImage, String> {
+    use std::path::{Component, Prefix};
+    if let Some(Component::Prefix(prefix)) = path.components().next()
+        && matches!(
+            prefix.kind(),
+            Prefix::UNC(..) | Prefix::VerbatimUNC(..) | Prefix::DeviceNS(..) | Prefix::Verbatim(..)
+        )
+    {
+        return Err("network and device paths are not read".to_owned());
+    }
+    let metadata = std::fs::metadata(path).map_err(|error| error.to_string())?;
+    if !metadata.is_file() {
+        return Err("not a regular file".to_owned());
+    }
+    if metadata.len() > MAX_PICTURE_BYTES {
+        return Err(format!("larger than {MAX_PICTURE_BYTES} bytes"));
+    }
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_PICTURE_SIDE);
+    limits.max_image_height = Some(MAX_PICTURE_SIDE);
+    limits.max_alloc = Some(MAX_PICTURE_ALLOC);
+    let mut reader = image::ImageReader::open(path)
+        .and_then(image::ImageReader::with_guessed_format)
+        .map_err(|error| error.to_string())?;
+    reader.limits(limits);
+    reader.decode().map_err(|error| error.to_string())
 }
 
 /// Font families tried for an emoji, colour fonts first.

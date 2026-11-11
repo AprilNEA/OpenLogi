@@ -242,6 +242,12 @@ struct Tiles {
     rendered: HashMap<(KeyFace, u16), Arc<KeyImageJpeg>>,
 }
 
+/// The most tiles [`Tiles`] keeps. A live key's face carries its changing
+/// value, so a clock or a counter would otherwise add a tile per value for as
+/// long as the agent runs; full, the cache starts over and keeps only what
+/// is painted from then on. Far above what a few keypads' pages show at once.
+const MAX_TILES: usize = 512;
+
 impl Tiles {
     fn get(&mut self, face: &KeyFace, size: u16) -> Result<Arc<KeyImageJpeg>, RenderError> {
         let key = (face.clone(), size);
@@ -249,6 +255,9 @@ impl Tiles {
             return Ok(Arc::clone(tile));
         }
         let tile = Arc::new(render_tile(face, size)?);
+        if self.rendered.len() >= MAX_TILES {
+            self.rendered.clear();
+        }
         self.rendered.insert(key, Arc::clone(&tile));
         Ok(tile)
     }

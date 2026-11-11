@@ -178,8 +178,6 @@ pub async fn run(args: ApiArgs) -> Result<ExitCode> {
     })
 }
 
-/// Whether the agent measured the device at `route` and found that software
-/// cannot set its key layout. Unmeasured capabilities are not a refusal.
 /// Stage a keypad's LCD brightness. An agent setting: the agent writes it
 /// when it reloads the saved configuration, and on every reconnect.
 fn key_brightness(
@@ -212,6 +210,8 @@ fn key_brightness(
     }))
 }
 
+/// Whether the agent measured the device at `route` and found that software
+/// cannot set its key layout. Unmeasured capabilities are not a refusal.
 fn measured_without_os_layout(snapshot: &AgentSnapshot, route: &DeviceRoute) -> bool {
     snapshot.inventory.iter().any(|inventory| {
         inventory.paired.iter().any(|paired| {

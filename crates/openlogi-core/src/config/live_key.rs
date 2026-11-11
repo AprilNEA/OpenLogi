@@ -85,21 +85,43 @@ impl LiveKey {
         Duration::from_secs(u64::from(self.timeout_secs.clamp(2, 300)))
     }
 
+    /// What a press that activates the key runs: [`Self::on_press`], unless
+    /// it is one a live key may not run (see [`runnable`]).
+    #[must_use]
+    pub fn effective_on_press(&self) -> Option<Action> {
+        self.on_press.clone().and_then(runnable)
+    }
+
     /// What the left key runs while active: the configured action, else the
-    /// volume key for a volume source.
+    /// volume key for a volume source. An action a live key may not run
+    /// ([`runnable`]) runs nothing.
     #[must_use]
     pub fn effective_decrement(&self) -> Option<Action> {
-        self.decrement
-            .clone()
-            .or_else(|| (self.source == LiveSource::Volume).then_some(Action::VolumeDown))
+        match &self.decrement {
+            Some(action) => runnable(action.clone()),
+            None => (self.source == LiveSource::Volume).then_some(Action::VolumeDown),
+        }
     }
 
     /// What the right key runs while active; see [`Self::effective_decrement`].
     #[must_use]
     pub fn effective_increment(&self) -> Option<Action> {
-        self.increment
-            .clone()
-            .or_else(|| (self.source == LiveSource::Volume).then_some(Action::VolumeUp))
+        match &self.increment {
+            Some(action) => runnable(action.clone()),
+            None => (self.source == LiveSource::Volume).then_some(Action::VolumeUp),
+        }
+    }
+}
+
+/// `action`, unless a live key may not run it. A live key's actions run while
+/// it holds the page keys, so one that turns the page or activates a live key
+/// would come straight back to a live key: a hand-edited
+/// `increment = "NextKeypadPage"` would adjust itself forever, and two keys
+/// that activate each other would never stop.
+fn runnable(action: Action) -> Option<Action> {
+    match action {
+        Action::ActivateLiveKey(_) | Action::PreviousKeypadPage | Action::NextKeypadPage => None,
+        action => Some(action),
     }
 }
 
@@ -116,6 +138,22 @@ mod tests {
         assert_eq!(key.effective_increment(), Some(Action::NextTrack));
         let clock = LiveKey::new(LiveSource::Clock);
         assert_eq!(clock.effective_increment(), None);
+    }
+
+    /// A live key never runs an action that leads back to a live key, so a
+    /// hand-edited config cannot make the agent loop.
+    #[test]
+    fn a_live_key_never_runs_an_action_that_comes_back_to_a_live_key() {
+        use crate::binding::{ButtonId, GridKey};
+        let mut key = LiveKey::new(LiveSource::Volume);
+        key.on_press = Some(Action::ActivateLiveKey(ButtonId::grid(GridKey::Middle)));
+        key.increment = Some(Action::NextKeypadPage);
+        key.decrement = Some(Action::PreviousKeypadPage);
+        assert_eq!(key.effective_on_press(), None);
+        assert_eq!(key.effective_increment(), None);
+        assert_eq!(key.effective_decrement(), None);
+        key.on_press = Some(Action::MuteVolume);
+        assert_eq!(key.effective_on_press(), Some(Action::MuteVolume));
     }
 
     #[test]

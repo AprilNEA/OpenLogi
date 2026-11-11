@@ -17,6 +17,9 @@ use openlogi_core::device::BatteryInfo;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 /// The most output a source command's value is read from.
 const MAX_OUTPUT: usize = 4096;
+/// The most characters of a command's value a key shows, from a plain line
+/// or a JSON `label` alike.
+const MAX_VALUE_CHARS: usize = 24;
 
 /// What a live key shows.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -135,7 +138,7 @@ impl LiveKeys {
             id,
             until: now + key.timeout(),
         });
-        key.on_press.clone()
+        key.effective_on_press()
     }
 
     /// A paging key of `device` at `now`: while one of its live keys is
@@ -191,7 +194,9 @@ pub fn parse_output(output: &str) -> LiveValue {
             .get("label")
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default()
-            .to_owned();
+            .chars()
+            .take(MAX_VALUE_CHARS)
+            .collect();
         let progress = json
             .get("progress")
             .and_then(serde_json::Value::as_u64)
@@ -205,7 +210,7 @@ pub fn parse_output(output: &str) -> LiveValue {
             .find(|line| !line.is_empty())
             .unwrap_or_default()
             .chars()
-            .take(24)
+            .take(MAX_VALUE_CHARS)
             .collect::<String>(),
     )
 }
@@ -295,6 +300,8 @@ mod tests {
             }
         );
         assert_eq!(parse_output(""), LiveValue::text(""));
+        let long = format!(r#"{{"label":"{}"}}"#, "x".repeat(4000));
+        assert_eq!(parse_output(&long).label.chars().count(), MAX_VALUE_CHARS);
     }
 
     #[test]

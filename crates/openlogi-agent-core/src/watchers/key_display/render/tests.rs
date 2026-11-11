@@ -252,3 +252,39 @@ fn a_gradient_runs_from_its_start_colour_to_its_end_colour() {
     assert!(left[0] > 200 && left[2] < 60, "{left:?}");
     assert!(right[2] > 200 && right[0] < 60, "{right:?}");
 }
+/// A key picture is read only from a regular local file of bounded size and
+/// dimensions: a directory, a missing file and an oversized image are refused,
+/// and a network path is refused before anything opens it.
+#[test]
+fn a_key_picture_is_read_only_within_bounds() {
+    use super::{MAX_LABEL_CHARS, label_lines, load_picture};
+    let dir = tempfile::tempdir().expect("tempdir");
+    assert!(
+        load_picture(dir.path()).is_err(),
+        "a directory is not a picture"
+    );
+    assert!(load_picture(&dir.path().join("missing.png")).is_err());
+    #[cfg(windows)]
+    assert_eq!(
+        load_picture(std::path::Path::new(r"\\unreachable-host\share\x.png")),
+        Err("network and device paths are not read".to_owned())
+    );
+
+    let wide = dir.path().join("wide.png");
+    image::RgbImage::new(9000, 1)
+        .save(&wide)
+        .expect("encode a wide png");
+    assert!(
+        load_picture(&wide).is_err(),
+        "wider than the decoder allows"
+    );
+    let small = dir.path().join("small.png");
+    image::RgbImage::new(64, 64)
+        .save(&small)
+        .expect("encode a small png");
+    assert!(load_picture(&small).is_ok());
+
+    let long = "word ".repeat(1000);
+    let lines = label_lines(&long);
+    assert!(lines.iter().map(|line| line.chars().count()).sum::<usize>() <= MAX_LABEL_CHARS);
+}
