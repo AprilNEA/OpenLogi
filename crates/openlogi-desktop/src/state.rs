@@ -97,6 +97,7 @@ mod force_sensing;
 mod gaming_keys;
 mod host_switch;
 mod inventory;
+mod key_faces;
 mod light;
 mod lighting;
 mod load;

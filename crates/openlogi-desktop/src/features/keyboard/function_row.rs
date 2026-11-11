@@ -46,7 +46,9 @@ use gpui_kit::component::{
 use openlogi_core::binding::{
     Action, ActionRingIcon, ButtonId, GKeyProfile, KeypadPage, WorkflowStep,
 };
-use openlogi_core::config::{GamingKeyMode, KeyDisplayBrightness, ThumbwheelSensitivity};
+use openlogi_core::config::{
+    GamingKeyMode, KeyDisplayBrightness, KeyFaceStyle, ThumbwheelSensitivity,
+};
 
 use super::editors::{
     PowerUserKind, text_editor_placeholder, text_editor_seed, workflow_editor_seed,
@@ -72,12 +74,16 @@ use openlogi_core::hid::{DialpadDescriptor, KeypadDescriptor};
 mod callout_layout;
 mod dialpad;
 mod gaming;
+mod key_colors;
+mod key_face;
 mod key_points;
 mod keypad;
 
 use callout_layout::{CalloutLayout, CardRect, callout_layout, side_bands_width};
 use dialpad::{DialpadPane, DialpadPhotoPane, DialpadRender, dialpad_canvas};
 use gaming::gaming_bar;
+use key_colors::ColorField;
+use key_face::{FaceDraft, KeyPanelTab, panel_tabs};
 pub(crate) use key_points::KeyTarget;
 #[cfg(test)]
 use key_points::{EVEN_SPACING_END, EVEN_SPACING_START, key_x_fractions};
@@ -214,6 +220,16 @@ pub struct FunctionRowView {
     dial_speed: CommitSlider<ThumbwheelSensitivity>,
     /// A keypad's LCD brightness.
     key_brightness: CommitSlider<KeyDisplayBrightness>,
+    /// Whether a grid key's panel edits its action or its face.
+    panel_tab: KeyPanelTab,
+    /// The label and colour inputs of the grid key whose face is being
+    /// edited.
+    face: Option<FaceDraft>,
+    /// Whether the last picture chosen for a face was not one the keypad
+    /// can show.
+    face_image_rejected: bool,
+    /// Which colour chooser's custom hex input holds no colour.
+    face_hex_invalid: Option<ColorField>,
     _state_obs: Subscription,
 }
 
@@ -283,6 +299,10 @@ impl FunctionRowView {
             overview_scroll: ScrollHandle::new(),
             dial_speed,
             key_brightness,
+            panel_tab: KeyPanelTab::default(),
+            face: None,
+            face_image_rejected: false,
+            face_hex_invalid: None,
             _state_obs: state_obs,
         }
     }
@@ -344,6 +364,18 @@ impl FunctionRowView {
         self.text_state = None;
         self.workflow_draft.clear();
         self.application_invalid = false;
+        self.face = None;
+        self.face_image_rejected = false;
+        self.face_hex_invalid = None;
+    }
+
+    /// Show the selected grid key's action or its face.
+    fn set_panel_tab(&mut self, tab: KeyPanelTab, cx: &mut Context<Self>) {
+        if self.panel_tab != tab {
+            self.panel_tab = tab;
+            self.drop_editor();
+            cx.notify();
+        }
     }
 
     /// Edit the grid keys on `page`, dropping any open editor when it moves.
@@ -540,6 +572,41 @@ impl FunctionRowView {
         state
     }
 
+    /// Seed the open power-user editor from the key's current action: the
+    /// workflow's steps, or the text field and its localized placeholder.
+    fn seed_power_user_editor(
+        &mut self,
+        kind: PowerUserKind,
+        current_action: Option<&Action>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match kind {
+            PowerUserKind::Workflow => {
+                if self.workflow_draft.is_empty() {
+                    self.workflow_draft = workflow_editor_seed(current_action);
+                }
+            }
+            _ => {
+                if let Some(state) = self.text_state.clone() {
+                    crate::ui::components::localize_placeholder(
+                        &state,
+                        text_editor_placeholder(kind),
+                        window,
+                        cx,
+                    );
+                } else {
+                    self.new_text_state(
+                        text_editor_seed(current_action, kind),
+                        text_editor_placeholder(kind),
+                        window,
+                        cx,
+                    );
+                }
+            }
+        }
+    }
+
     pub(crate) fn workflow_draft(&self) -> &[WorkflowStep] {
         &self.workflow_draft
     }
@@ -619,30 +686,7 @@ impl Render for FunctionRowView {
             && let Some(slot) = slots.get(selected_idx)
         {
             let current_action = state.and_then(|state| bound_action(state, &slot.target));
-            match kind {
-                PowerUserKind::Workflow => {
-                    if self.workflow_draft.is_empty() {
-                        self.workflow_draft = workflow_editor_seed(current_action.as_ref());
-                    }
-                }
-                _ => {
-                    if let Some(state) = self.text_state.clone() {
-                        crate::ui::components::localize_placeholder(
-                            &state,
-                            text_editor_placeholder(kind),
-                            window,
-                            cx,
-                        );
-                    } else {
-                        self.new_text_state(
-                            text_editor_seed(current_action.as_ref(), kind),
-                            text_editor_placeholder(kind),
-                            window,
-                            cx,
-                        );
-                    }
-                }
-            }
+            self.seed_power_user_editor(kind, current_action.as_ref(), window, cx);
         }
         let view = cx.entity();
         let device = pane.render(
@@ -656,6 +700,14 @@ impl Render for FunctionRowView {
             (selected, hovered),
             &view,
         );
+        if active_editor.is_none()
+            && self.panel_tab == KeyPanelTab::Appearance
+            && let Some(KeyTarget::Grid(grid)) = selected
+                .and_then(|idx| slots.get(idx))
+                .map(|slot| &slot.target)
+        {
+            self.ensure_face_draft(*grid, window, cx);
+        }
         let (inspector, column_h) =
             self.inspector(selected, &slots, &view, &theme::palette(cx), cx);
         let toolbar = self.setting_toolbar(pane, settings, last_page, gaming, window, cx);
@@ -1033,6 +1085,9 @@ struct KeySlot {
     /// The glyph the keypad's LCD shows for this key's binding — the agent
     /// paints exactly this icon on the device, so the render mirrors it.
     lcd_icon: Option<&'static str>,
+    /// The face the user styled this LCD key with on the edited page, when
+    /// it differs from the default.
+    face: Option<KeyFaceStyle>,
 }
 
 impl KeySlot {
@@ -1093,6 +1148,7 @@ fn key_slots_from_layouts(
                     binding_icon: NATIVE_FUNCTION_ICON,
                     bound: profile == scope.g_profile,
                     lcd_icon: None,
+                    face: None,
                     target: layout.target,
                 };
             }
@@ -1106,6 +1162,15 @@ fn key_slots_from_layouts(
                 Some(action) => (localized_action_label(action), action_icon_path(action)),
                 None => unbound_binding(&layout.target),
             };
+            let face = match &layout.target {
+                KeyTarget::Grid(slot) => state
+                    .map(|state| state.current_key_face(*slot))
+                    .filter(|face| !face.is_default()),
+                KeyTarget::Control(_)
+                | KeyTarget::FunctionKey(_)
+                | KeyTarget::GKey(_)
+                | KeyTarget::ModeKey(_) => None,
+            };
             KeySlot {
                 idx,
                 label: layout.legend.into(),
@@ -1117,6 +1182,7 @@ fn key_slots_from_layouts(
                 lcd_icon: bound
                     .as_ref()
                     .map(|action| ActionRingIcon::for_action(action).asset_path()),
+                face,
                 target: layout.target,
             }
         })
@@ -1904,6 +1970,32 @@ impl FunctionRowView {
             );
         }
 
+        // A keypad's grid key also has a face: the panel offers it as a
+        // second tab. It belongs to the device, not to an app profile.
+        let grid = match &target {
+            KeyTarget::Grid(grid) => Some(*grid),
+            KeyTarget::Control(_)
+            | KeyTarget::FunctionKey(_)
+            | KeyTarget::GKey(_)
+            | KeyTarget::ModeKey(_) => None,
+        };
+        let tabs = grid.map(|_| {
+            div()
+                .px_2()
+                .pb_1()
+                .child(panel_tabs(self.panel_tab, view, cx))
+        });
+        if let Some(grid) = grid
+            && self.panel_tab == KeyPanelTab::Appearance
+        {
+            return compact_panel(pal)
+                .w(px(PANEL_W))
+                .child(title_header(&key_name, None, &pal))
+                .children(tabs)
+                .child(divider(pal))
+                .child(self.appearance_panel(grid, view, pal, cx));
+        }
+
         let state = AppState::try_read(cx);
         if let Some(panel) =
             state.and_then(|state| profile_key_panel(state, &target, &key_name, &pal))
@@ -1928,67 +2020,74 @@ impl FunctionRowView {
             view_for_pick.update(cx, |_, vcx| vcx.notify());
         });
 
-        let mut rows = Vec::new();
-        // Unbound is not a catalog action. A control rests on its firmware
-        // function (#1172); a function key rests on the key itself. The row
-        // clears the assignment, inheriting the device default in an app profile.
-        let view_for_native = view.clone();
-        let target_for_native = target.clone();
-        let (resting, resting_icon) = resting_row(&target);
-        rows.push(
-            v_flex().child(
-                MenuRow::new("panel-native")
-                    .debug_selector(|| "key-panel-native".into())
-                    .selected(uses_default)
-                    .role(Role::MenuItem)
-                    .child(
-                        h_flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                svg()
-                                    .path(resting_icon)
-                                    .size_4()
-                                    .flex_none()
-                                    .text_color(pal.text_muted),
-                            )
-                            .child(div().child(if app.is_some() {
-                                tr!("profiles.use_the_default_profile")
-                            } else {
-                                resting
-                            })),
-                    )
-                    .when(uses_default, |row| {
-                        row.child(
-                            div()
-                                .debug_selector(|| "key-panel-native-check".into())
-                                .flex_none()
-                                .size_3()
-                                .child(
-                                    gpui_kit::component::Icon::new(
-                                        gpui_kit::component::IconName::Check,
-                                    )
-                                    .size_3()
-                                    .text_color(rgb(ACCENT_BLUE)),
-                                ),
-                        )
-                    })
-                    .on_click(move |_ev, _window, cx| {
-                        AppState::apply(cx, |state| {
-                            commit_key_action(state, &target_for_native, None)
-                        });
-                        view_for_native.update(cx, |_, vcx| vcx.notify());
-                    }),
-            ),
-        );
+        let mut rows = vec![native_row(&target, uses_default, app.is_some(), view, &pal)];
         rows.extend(panel_action_rows(current.as_ref(), &on_pick, view, &pal));
 
         compact_panel(pal)
             .max_h_full()
             .child(title_header(&key_name, app.as_deref(), &pal))
+            .children(tabs)
             .child(divider(pal))
             .child(editor_scroll_list("key-panel-scroll", rows))
     }
+}
+
+/// The panel's first row: back to the key's own function. Unbound is not a
+/// catalog action. A control rests on its firmware function (#1172); a
+/// function key rests on the key itself. The row clears the assignment,
+/// inheriting the device default in an app profile.
+fn native_row(
+    target: &KeyTarget,
+    uses_default: bool,
+    in_app_profile: bool,
+    view: &Entity<FunctionRowView>,
+    pal: &Palette,
+) -> gpui::Div {
+    let view_for_native = view.clone();
+    let target_for_native = target.clone();
+    let (resting, resting_icon) = resting_row(target);
+    v_flex().child(
+        MenuRow::new("panel-native")
+            .debug_selector(|| "key-panel-native".into())
+            .selected(uses_default)
+            .role(Role::MenuItem)
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        svg()
+                            .path(resting_icon)
+                            .size_4()
+                            .flex_none()
+                            .text_color(pal.text_muted),
+                    )
+                    .child(div().child(if in_app_profile {
+                        tr!("profiles.use_the_default_profile")
+                    } else {
+                        resting
+                    })),
+            )
+            .when(uses_default, |row| {
+                row.child(
+                    div()
+                        .debug_selector(|| "key-panel-native-check".into())
+                        .flex_none()
+                        .size_3()
+                        .child(
+                            gpui_kit::component::Icon::new(gpui_kit::component::IconName::Check)
+                                .size_3()
+                                .text_color(rgb(ACCENT_BLUE)),
+                        ),
+                )
+            })
+            .on_click(move |_ev, _window, cx| {
+                AppState::apply(cx, |state| {
+                    commit_key_action(state, &target_for_native, None)
+                });
+                view_for_native.update(cx, |_, vcx| vcx.notify());
+            }),
+    )
 }
 
 /// The app profile `target` binds in: the open one for a per-device key,

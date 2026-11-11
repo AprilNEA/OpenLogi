@@ -7,8 +7,8 @@
 //! draw the keypad and report clicks and hovers back to it.
 
 use gpui::{
-    App, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement, RenderOnce,
-    SharedString, StatefulInteractiveElement as _, Styled, Window, div, hsla,
+    App, Entity, FontWeight, InteractiveElement, IntoElement, ObjectFit, ParentElement, RenderOnce,
+    SharedString, StatefulInteractiveElement as _, Styled, StyledImage as _, Window, div, img,
     prelude::FluentBuilder as _, px, rgb, svg,
 };
 use gpui_kit::component::button::{Button, ButtonGroup, ButtonVariant, ButtonVariants as _};
@@ -18,7 +18,9 @@ use gpui_kit::component::{
     Disableable as _, Icon, IconName, Selectable as _, Sizable as _, WindowExt as _, h_flex, v_flex,
 };
 use openlogi_core::binding::{Cid, GridKey, KeypadPage};
+use openlogi_core::config::KeyFaceStyle;
 
+use super::key_colors::{DEFAULT_COLOR, gradient_fill, icon_color};
 use super::key_points::{
     KEYCAP_H, KEYCAP_PAGING_H, KEYCAP_W, KeyShape, KeyTarget, is_paging_cid, keypad_canvas,
     photo_key_shape,
@@ -316,8 +318,15 @@ impl RenderOnce for PhotoKey {
             KeyState::Hovered => device_highlight(0.55),
             KeyState::Rest => device_scrim(0.),
         };
-        let face = matches!(self.slot.target, KeyTarget::Grid(_))
-            .then(|| lcd_face(self.slot.lcd_icon, self.slot.binding.clone(), shape, state));
+        let face = matches!(self.slot.target, KeyTarget::Grid(_)).then(|| {
+            lcd_face(
+                self.slot.lcd_icon,
+                self.slot.binding.clone(),
+                self.slot.face.as_ref(),
+                shape,
+                state,
+            )
+        });
         // The ring follows the key's own curve, one gap further out.
         let ring_radii = shape.radii.map(|r| r + outer);
         let [tl, tr, br, bl] = ring_radii.map(px);
@@ -360,16 +369,53 @@ impl RenderOnce for PhotoKey {
 /// black, carrying the bound action's glyph in white (the same icon the agent
 /// writes to the key) with the action's name beneath, or blank when the key
 /// does nothing — a blank key offers a faint plus while it is hovered or
-/// selected.
+/// selected. A styled face recolours the key, lays its picture under the
+/// glyph, drops the glyph when it is turned off, and shows its label in
+/// place of the action's name.
 fn lcd_face(
     icon: Option<&'static str>,
     binding: SharedString,
+    style: Option<&KeyFaceStyle>,
     key: KeyShape,
     state: KeyState,
 ) -> gpui::Div {
     let glyph = key.w * LCD_GLYPH_FRAC;
     let [tl, tr, br, bl] = key.radii.map(px);
+    // A gradient replaces the flat background.
+    let background: gpui::Background = match style {
+        Some(KeyFaceStyle {
+            gradient: Some(gradient),
+            ..
+        }) => gradient_fill(*gradient),
+        _ => style
+            .and_then(|style| style.background)
+            .map_or_else(|| device_scrim(1.), |color| rgb(color.packed()).into())
+            .into(),
+    };
+    let foreground: gpui::Hsla = style
+        .and_then(|style| style.color)
+        .map_or_else(|| device_highlight(1.), |color| rgb(color.packed()).into());
+    // The icon has its own colour, else the text's.
+    let icon_foreground: gpui::Hsla = rgb(style.map_or(DEFAULT_COLOR, icon_color).packed()).into();
+    let glyph_face = icon.filter(|_| style.is_none_or(|style| style.icon));
+    let label = style
+        .and_then(KeyFaceStyle::trimmed_label)
+        .map(|label| SharedString::from(label.to_owned()));
+    let picture = style
+        .and_then(|style| style.image.clone())
+        .filter(|path| path.exists());
+    let caption = |text: SharedString, alpha: f32| {
+        div()
+            .max_w(px(key.w - 16.))
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_ellipsis()
+            .text_caption()
+            .text_color(foreground.opacity(alpha))
+            .child(text)
+    };
     let face = v_flex()
+        .relative()
         .size_full()
         .items_center()
         .justify_center()
@@ -378,35 +424,44 @@ fn lcd_face(
         .rounded_tr(tr)
         .rounded_br(br)
         .rounded_bl(bl)
-        .bg(hsla(0., 0., 0., 1.))
-        .overflow_hidden();
-    match icon {
-        Some(icon) => face
-            .child(
-                svg()
-                    .path(icon)
-                    .size(px(glyph))
-                    .flex_none()
-                    .text_color(hsla(0., 0., 1., 1.)),
-            )
-            .child(
-                div()
-                    .max_w(px(key.w - 16.))
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .text_caption()
-                    .text_color(hsla(0., 0., 1., 0.72))
-                    .child(binding),
-            ),
-        None => face.when(state != KeyState::Rest, |face| {
+        .bg(background)
+        .overflow_hidden()
+        .when_some(picture, |face, path| {
             face.child(
-                Icon::new(IconName::Plus)
-                    .size(px(glyph * 0.6))
-                    .text_color(hsla(0., 0., 1., 0.45)),
+                img(path)
+                    .absolute()
+                    .inset_0()
+                    .size_full()
+                    .object_fit(ObjectFit::Cover),
             )
-        }),
-    }
+        });
+    let empty = glyph_face.is_none() && label.is_none();
+    let drawn = glyph_face.is_some();
+    face.when_some(glyph_face, |face, path| {
+        face.child(
+            svg()
+                .path(path)
+                .size(px(glyph))
+                .flex_none()
+                .text_color(icon_foreground),
+        )
+    })
+    .map(|face| match label {
+        Some(label) => face.children(
+            label
+                .split('\n')
+                .map(|line| caption(SharedString::from(line.to_owned()), 1.)),
+        ),
+        None if drawn => face.child(caption(binding, 0.72)),
+        None => face,
+    })
+    .when(empty && state != KeyState::Rest, |face| {
+        face.child(
+            Icon::new(IconName::Plus)
+                .size(px(glyph * 0.6))
+                .text_color(foreground.opacity(0.45)),
+        )
+    })
 }
 
 /// The overlay render size: the portrait keypad render as tall as the

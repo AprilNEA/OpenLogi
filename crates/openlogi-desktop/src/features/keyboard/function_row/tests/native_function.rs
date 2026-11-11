@@ -32,6 +32,7 @@ impl Render for CalculatorInspector {
                     binding_icon: action_icon_path(&Action::Copy),
                     bound: true,
                     lcd_icon: None,
+                    face: None,
                 }],
                 &self.view,
                 cx,

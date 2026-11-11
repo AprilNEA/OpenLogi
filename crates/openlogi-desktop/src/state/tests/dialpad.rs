@@ -1,5 +1,5 @@
 //! The MX Creative Console's per-device settings the Keys view shows: which
-//! device is the dialpad, and the keypad's LCD brightness.
+//! device is the dialpad, and the keypad's LCD brightness and key faces.
 
 use super::*;
 use crate::services::ipc::Command;
@@ -129,4 +129,62 @@ fn setting_the_key_brightness_saves_it_once() {
         0,
         "an unchanged level writes nothing"
     );
+}
+
+/// A key face is saved per grid key and page; restyling it the same way
+/// writes nothing, and resetting it to the default removes the entry.
+#[test]
+fn a_key_face_saves_per_key_and_page_and_resets_away() {
+    use openlogi_core::binding::{GridKey, GridSlot, KeypadPage};
+    use openlogi_core::config::KeyFaceStyle;
+
+    let (mut state, mut receiver) = super::keypad_pages::keypad_state();
+    let record = state.current_record().unwrap().clone();
+    let slot = GridSlot {
+        page: KeypadPage::FIRST,
+        key: GridKey::TopLeft,
+    };
+    assert!(state.current_key_face(slot).is_default());
+    let _ = reloads(&mut receiver);
+
+    let style = KeyFaceStyle {
+        label: Some("Export\nPNG".into()),
+        background: Some(openlogi_core::color::Rgb::new(0x20, 0x40, 0x80)),
+        ..KeyFaceStyle::default()
+    };
+    let events = state.commit_key_face(slot, style.clone());
+
+    assert_eq!(
+        events,
+        [StateEvent::DeviceConfigChanged(record.device_key())]
+    );
+    assert_eq!(state.current_key_face(slot), style);
+    assert!(
+        state
+            .current_key_face(GridSlot {
+                key: GridKey::Middle,
+                ..slot
+            })
+            .is_default(),
+        "another key keeps its own face"
+    );
+    assert_eq!(reloads(&mut receiver), 1, "the agent repaints the key");
+
+    let _ = state.commit_key_face(slot, style);
+    assert_eq!(
+        reloads(&mut receiver),
+        0,
+        "an unchanged face writes nothing"
+    );
+
+    let _ = state.commit_key_face(slot, KeyFaceStyle::default());
+    assert!(state.current_key_face(slot).is_default());
+    assert_eq!(
+        state
+            .config
+            .key_face_style(&record.config_key, ButtonId::Grid(slot)),
+        None,
+        "a default face leaves no entry behind"
+    );
+    assert_eq!(reloads(&mut receiver), 1);
 }

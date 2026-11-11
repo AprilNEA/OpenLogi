@@ -11,6 +11,8 @@ use std::path::PathBuf;
 
 mod dialpad;
 mod gaming;
+mod key_colors;
+mod key_face;
 mod native_function;
 /// The MX Creative Keypad, as its wired route names it.
 fn mx_keypad() -> Option<&'static KeypadDescriptor> {
