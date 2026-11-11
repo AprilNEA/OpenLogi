@@ -86,15 +86,16 @@ impl LiveKey {
     }
 
     /// What a press that activates the key runs: [`Self::on_press`], unless
-    /// it is one a live key may not run (see [`runnable`]).
+    /// it turns the keypad's page or activates a live key, which would come
+    /// straight back to a live key.
     #[must_use]
     pub fn effective_on_press(&self) -> Option<Action> {
         self.on_press.clone().and_then(runnable)
     }
 
     /// What the left key runs while active: the configured action, else the
-    /// volume key for a volume source. An action a live key may not run
-    /// ([`runnable`]) runs nothing.
+    /// volume key for a volume source. An action that turns the page or
+    /// activates a live key runs nothing (see [`Self::effective_on_press`]).
     #[must_use]
     pub fn effective_decrement(&self) -> Option<Action> {
         match &self.decrement {

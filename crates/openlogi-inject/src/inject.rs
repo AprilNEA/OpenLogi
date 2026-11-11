@@ -379,7 +379,7 @@ fn run_to_end(mut command: std::process::Command, kind: &'static str) {
 /// when it or its output ran past `timeout`; the shell is then killed.
 ///
 /// Blocking: call it off the async threads. Every process the command starts
-/// ends with it ([`shell_tree::ProcessTree`]): a pipeline stage or a
+/// ends with it (its process group or job object): a pipeline stage or a
 /// background child cannot outlive the answer or keep its reader waiting.
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 #[must_use]

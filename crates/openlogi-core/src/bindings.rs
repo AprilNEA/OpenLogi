@@ -46,8 +46,7 @@ pub fn bindings_for(
 /// A keypad grid slot that shows a live value
 /// ([`DeviceConfig::live_keys`](crate::config::DeviceConfig::live_keys))
 /// runs [`Action::ActivateLiveKey`] whatever it stores, and the keypad's
-/// paging buttons are seeded so they can adjust an active live key (see
-/// [`keypad_paging_defaults`]).
+/// paging buttons are seeded so they can adjust an active live key.
 #[must_use]
 pub fn button_bindings_for(
     config: &Config,

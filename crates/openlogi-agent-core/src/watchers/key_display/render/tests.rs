@@ -263,7 +263,7 @@ fn a_key_picture_is_read_only_within_bounds() {
         load_picture(dir.path()).is_err(),
         "a directory is not a picture"
     );
-    assert!(load_picture(&dir.path().join("missing.png")).is_err());
+    load_picture(&dir.path().join("missing.png")).expect_err("a missing file is not read");
     #[cfg(windows)]
     assert_eq!(
         load_picture(std::path::Path::new(r"\\unreachable-host\share\x.png")),
@@ -282,7 +282,7 @@ fn a_key_picture_is_read_only_within_bounds() {
     image::RgbImage::new(64, 64)
         .save(&small)
         .expect("encode a small png");
-    assert!(load_picture(&small).is_ok());
+    load_picture(&small).expect("a small local picture is read");
 
     let long = "word ".repeat(1000);
     let lines = label_lines(&long);
