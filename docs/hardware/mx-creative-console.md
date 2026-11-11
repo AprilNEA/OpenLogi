@@ -140,7 +140,7 @@ painted bound key faces and dispatched grid presses.
   as `00 1e`.
 
 Brightness was stepped 100 → 5 → 60 % through
-`openlogi api --save key-brightness`. The readbacks were `0x64`, `0x05` and
+`openlogi api key-brightness --save`. The readbacks were `0x64`, `0x05` and
 `0x3c`, and the user saw each change on the panel.
 
 ## Keypad LCD faces (HW)

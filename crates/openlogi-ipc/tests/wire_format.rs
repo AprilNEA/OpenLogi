@@ -391,6 +391,8 @@ fn sidetone_calls() {
     let level = SidetoneLevel::try_new(40).expect("a level in range");
     assert_wire(&HidppOperation::ReadSidetone, "1f");
     assert_wire(&HidppOperation::WriteSidetone, "20");
+    // `WriteKeyBrightness` was appended after `WriteSidetone`.
+    assert_wire(&HidppOperation::WriteKeyBrightness, "21");
     assert_wire(&level, "28");
     assert_wire(&Ok::<SidetoneLevel, WriteError>(level), "0028");
     assert_wire(

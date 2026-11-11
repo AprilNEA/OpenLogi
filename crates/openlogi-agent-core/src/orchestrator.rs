@@ -1930,6 +1930,16 @@ impl Orchestrator {
         if let Some(fn_lock) = self.config.fn_lock(key) {
             self.shared.write_fn_lock_in_background(&route, fn_lock);
         }
+        // A keypad's panel comes back at its firmware brightness after a
+        // power cycle, so the saved level is written on every reconnect.
+        if route.keypad().is_some()
+            && let Some(brightness) = self.config.key_display_brightness(key)
+        {
+            crate::hardware::write_key_brightness_in_background(
+                self.shared.device(&route),
+                brightness,
+            );
+        }
         if let Some(force) = configured_force_sensing(&self.config, dev) {
             self.shared.write_force_sensing_in_background(&route, force);
         }
@@ -2359,6 +2369,7 @@ impl Orchestrator {
         self.rebuild();
         self.apply_native_wheel_modes();
         self.apply_changed_fn_locks(&previous);
+        self.apply_changed_key_brightness(&previous);
         self.apply_changed_force_sensing(&previous);
         for dev in &self.devices {
             let was_enabled = dev
@@ -2434,6 +2445,27 @@ impl Orchestrator {
             }
             if let Some(fn_lock) = fn_lock {
                 self.shared.write_fn_lock_in_background(&route, fn_lock);
+            }
+        }
+    }
+
+    /// Push a changed keypad LCD brightness to the online keypad it belongs
+    /// to. An unrelated save writes nothing, as for
+    /// [`Self::apply_changed_fn_locks`].
+    fn apply_changed_key_brightness(&self, previous: &Config) {
+        for dev in self.devices.iter().filter(|dev| dev.online) {
+            let Some(route) = dev.route.clone().filter(|route| route.keypad().is_some()) else {
+                continue;
+            };
+            let brightness = self.config.key_display_brightness(&dev.config_key);
+            if brightness == previous.key_display_brightness(&dev.config_key) {
+                continue;
+            }
+            if let Some(brightness) = brightness {
+                crate::hardware::write_key_brightness_in_background(
+                    self.shared.device(&route),
+                    brightness,
+                );
             }
         }
     }

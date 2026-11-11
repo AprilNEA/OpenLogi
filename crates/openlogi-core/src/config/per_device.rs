@@ -10,8 +10,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
     CameraControls, CameraStreamMode, Config, DeviceIdentity, DisableKey, GKeyOwner, GamingKeyMode,
-    LightSettings, Lighting, MomentumScrolling, OnboardMemory, ScrollResolution, SmartShift,
-    ThumbwheelSensitivity,
+    KeyDisplayBrightness, LightSettings, Lighting, MomentumScrolling, OnboardMemory,
+    ScrollResolution, SmartShift, ThumbwheelSensitivity,
 };
 use crate::binding::{
     Action, ActionRingConfig, ActionRingIcon, ActionRingSize, ActionRingSlot, Binding, ButtonId,
@@ -697,6 +697,26 @@ impl Config {
                 .values()
                 .flatten()
                 .any(|(button, action)| on_page(button) && *action != Action::None)
+    }
+
+    /// `device_key`'s keypad LCD brightness, when the user set one.
+    #[must_use]
+    pub fn key_display_brightness(&self, device_key: &str) -> Option<KeyDisplayBrightness> {
+        self.devices
+            .get(device_key)
+            .and_then(|d| d.key_display_brightness)
+    }
+
+    /// Store `device_key`'s keypad LCD brightness; `None` stops managing it.
+    pub fn set_key_display_brightness(
+        &mut self,
+        device_key: &str,
+        brightness: Option<KeyDisplayBrightness>,
+    ) {
+        self.devices
+            .entry(device_key.to_owned())
+            .or_default()
+            .key_display_brightness = brightness;
     }
 
     /// The effective thumb-wheel sensitivity for `device_key`: the device's

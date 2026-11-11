@@ -31,6 +31,7 @@ mod fn_lock;
 mod force_sensing;
 mod haptic;
 mod hires_wheel;
+mod key_brightness;
 mod key_display;
 mod lighting;
 mod litra;
@@ -77,6 +78,7 @@ pub use hires_wheel::{
     get_scroll_wheel_mode_on, set_scroll_inversion, set_scroll_inversion_on, set_scroll_resolution,
     set_scroll_resolution_on, set_scroll_wheel_mode, set_scroll_wheel_mode_on,
 };
+pub use key_brightness::set_key_display_brightness_on;
 pub use key_display::{KeyDisplay, KeyImageJpeg, key_display_for, write_key_image_on};
 pub use lighting::{
     LightingMethod, LightingWrite, LitZone, RgbControlLease, ZoneWalkStep, release_rgb_control,

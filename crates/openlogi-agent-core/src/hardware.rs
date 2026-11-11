@@ -1618,6 +1618,29 @@ async fn write_native_wheel_mode(
     Ok(NativeWheelWrite::Written)
 }
 
+/// Write a keypad's LCD brightness in the background, logging the outcome.
+pub(crate) fn write_key_brightness_in_background(
+    op: DeviceOp,
+    brightness: openlogi_core::config::KeyDisplayBrightness,
+) {
+    let index = op.route.device_index();
+    op.spawn_timed_write(
+        "key brightness write",
+        move |op| async move {
+            tokio::time::timeout(WRITE_TIMEOUT, async {
+                let shared = op.resolve()?;
+                openlogi_hid::set_key_display_brightness_on(&shared, brightness).await
+            })
+            .await
+        },
+        move |result| {
+            log_outcome(index, "key brightness write", result, |level| {
+                debug!(index, level, "key brightness written");
+            });
+        },
+    );
+}
+
 /// Apply `lighting` to the keyboard at `op`'s device on a background thread.
 ///
 /// Resolves the configured colour (scaled by brightness, or black when the

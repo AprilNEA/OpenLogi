@@ -7,6 +7,7 @@ use std::process::ExitCode;
 
 use anyhow::Result;
 use clap::{Args, Subcommand, ValueEnum};
+use openlogi_core::config::KeyDisplayBrightness;
 use openlogi_core::hid::{
     DeviceRoute, Dpi, EasySwitchSlot, HostConnection, ReportRate, SmartShiftMode, WriteError,
 };
@@ -58,6 +59,15 @@ pub enum ApiCommand {
         /// On means bare function keys send F1–F12; off means media keys.
         #[arg(long, value_enum)]
         set: Option<Switch>,
+    },
+    /// Set a keypad's LCD key brightness in percent (requires --save).
+    KeyBrightness {
+        /// Exact opaque ID returned by `api devices`.
+        #[arg(long)]
+        device: String,
+        /// Brightness, 1–100 %.
+        #[arg(long, value_parser = clap::value_parser!(u8).range(1..=100))]
+        set: u8,
     },
     /// Keep a keyboard on the host OS's key layout (requires --save).
     OsLayout {
@@ -170,6 +180,38 @@ pub async fn run(args: ApiArgs) -> Result<ExitCode> {
 
 /// Whether the agent measured the device at `route` and found that software
 /// cannot set its key layout. Unmeasured capabilities are not a refusal.
+/// Stage a keypad's LCD brightness. An agent setting: the agent writes it
+/// when it reloads the saved configuration, and on every reconnect.
+fn key_brightness(
+    snapshot: &AgentSnapshot,
+    device: &str,
+    set: u8,
+    save: Option<&mut Save>,
+) -> Result<Value, ApiError> {
+    let route = select_device(snapshot, device)?;
+    let Some(save) = save else {
+        return Err(ApiError::new(
+            "invalid_value",
+            "key-brightness changes an agent setting; add --save",
+        ));
+    };
+    if route.keypad().is_none() {
+        return Err(ApiError::new(
+            "unsupported_feature",
+            "the device is not a keypad with LCD keys",
+        ));
+    }
+    let Ok(brightness) = KeyDisplayBrightness::try_new(set) else {
+        return Err(ApiError::new("invalid_value", "brightness must be 1-100"));
+    };
+    save.key_display_brightness(brightness)?;
+    Ok(json!({
+        "device": device,
+        "persistence": "not_saved",
+        "key_brightness": set,
+    }))
+}
+
 fn measured_without_os_layout(snapshot: &AgentSnapshot, route: &DeviceRoute) -> bool {
     snapshot.inventory.iter().any(|inventory| {
         inventory.paired.iter().any(|paired| {
@@ -217,6 +259,9 @@ async fn execute(
                 save.as_mut(),
             )
             .await
+        }
+        ApiCommand::KeyBrightness { device, set } => {
+            key_brightness(&snapshot, &device, set, save.as_mut())
         }
         ApiCommand::OsLayout { device, set } => {
             let route = select_device(&snapshot, &device)?;

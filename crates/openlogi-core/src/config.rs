@@ -55,10 +55,10 @@ pub use revision::ConfigRevision;
 pub use settings::LightSettings;
 pub use settings::{
     AppIcon, AppSettings, Appearance, AssetSourcePreference, CameraControls, CameraStreamMode,
-    DeviceViewMode, GKeyOwner, GamingKeyMode, GlideShape, Lighting, MomentumParams,
-    MomentumScrolling, MouseProfileTarget, OnboardMemory, SMARTSHIFT_AUTO_DISENGAGE_DEFAULT,
-    SMARTSHIFT_MIN_AUTO_DISENGAGE, ScrollResolution, SmartShift, ThumbwheelSensitivity, UiScale,
-    VerticalScrollSensitivity, WheelMode,
+    DeviceViewMode, GKeyOwner, GamingKeyMode, GlideShape, KeyDisplayBrightness, Lighting,
+    MomentumParams, MomentumScrolling, MouseProfileTarget, OnboardMemory,
+    SMARTSHIFT_AUTO_DISENGAGE_DEFAULT, SMARTSHIFT_MIN_AUTO_DISENGAGE, ScrollResolution, SmartShift,
+    ThumbwheelSensitivity, UiScale, VerticalScrollSensitivity, WheelMode,
 };
 
 use crate::app::AppAliases;
@@ -68,6 +68,12 @@ use crate::binding::{Binding, ButtonId, GestureDirection};
 /// The schema version the current build produces. Bumped whenever the
 /// persisted shape or enum vocabulary changes; readers inspect this value
 /// before consuming the rest of the file.
+///
+/// v12 adds the MX Creative Keypad's per-device LCD settings:
+/// [`DeviceConfig::key_display_brightness`]. Nothing older needs migrating,
+/// and a file without them leaves the panel as the device holds it. The bump
+/// makes a v11 build refuse a file that may hold them at the version check,
+/// instead of failing on the unknown field.
 ///
 /// v11 adds the `[flow]` section for cross-machine device handoff. Nothing
 /// older needs migrating, and a file without it loads as disabled Flow. The
@@ -132,7 +138,7 @@ use crate::binding::{Binding, ButtonId, GestureDirection};
 /// next save; [`Config::load_from_path`] accepts supported versions `1` through
 /// [`SCHEMA_VERSION`] so an invalid or forward file fails loudly instead of
 /// silently losing bindings.
-pub const SCHEMA_VERSION: u32 = 11;
+pub const SCHEMA_VERSION: u32 = 12;
 
 /// Top-level config document.
 #[derive(Debug, Clone, Serialize, Deserialize)]

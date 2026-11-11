@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 
 use super::button_map::{deserialize_button_map, deserialize_button_maps_by_app};
 use super::settings::{
-    CameraControls, CameraStreamMode, GKeyOwner, GamingKeyMode, GestureOwner, LightSettings,
-    Lighting, MomentumScrolling, OnboardMemory, ScrollResolution, SmartShift,
+    CameraControls, CameraStreamMode, GKeyOwner, GamingKeyMode, GestureOwner, KeyDisplayBrightness,
+    LightSettings, Lighting, MomentumScrolling, OnboardMemory, ScrollResolution, SmartShift,
     ThumbwheelSensitivity, deserialize_gesture_owner,
 };
 use crate::binding::{
@@ -401,6 +401,10 @@ pub struct DeviceConfig {
     /// One page is the default and is omitted from `config.toml`.
     #[serde(default, skip_serializing_if = "is_first_page")]
     pub keypad_pages: KeypadPage,
+    /// Brightness of a keypad's LCD keys. `None` leaves the panel at whatever
+    /// the device holds, and stays out of `config.toml`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_display_brightness: Option<KeyDisplayBrightness>,
     /// Who runs a G-series keyboard's G1–G5. The keyboard's onboard actions
     /// are the default and are omitted from `config.toml`.
     #[serde(default, skip_serializing_if = "is_default_g_key_owner")]
@@ -524,6 +528,7 @@ impl Default for DeviceConfig {
             onboard_memory: None,
             gshift_bindings: BTreeMap::new(),
             keypad_pages: KeypadPage::FIRST,
+            key_display_brightness: None,
             g_key_owner: GKeyOwner::Keyboard,
             gaming_key_mode: GamingKeyMode::Profiles,
             g_key_profile_names: BTreeMap::new(),
@@ -698,6 +703,8 @@ struct RawDeviceConfig {
     #[serde(default)]
     keypad_pages: KeypadPage,
     #[serde(default)]
+    key_display_brightness: Option<KeyDisplayBrightness>,
+    #[serde(default)]
     g_key_owner: GKeyOwner,
     #[serde(default)]
     gaming_key_mode: GamingKeyMode,
@@ -774,6 +781,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             onboard_memory: raw.onboard_memory,
             gshift_bindings: raw.gshift_bindings,
             keypad_pages: raw.keypad_pages,
+            key_display_brightness: raw.key_display_brightness,
             g_key_owner: raw.g_key_owner,
             gaming_key_mode: raw.gaming_key_mode,
             g_key_profile_names: raw.g_key_profile_names,
