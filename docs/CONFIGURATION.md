@@ -54,10 +54,13 @@ v10 adds the per-device `disabled_keys` policy. Older readers reject a v10
 header before parsing its fields. A v9 file without the policy still loads.
 v11 adds the `[flow]` section. Older readers reject a v11 header before
 parsing its fields. A v10 file without the section loads with Flow disabled.
+v12 adds the MX Creative Keypad's per-device `key_display_brightness`,
+`key_faces` and `live_keys`. Older readers reject a v12 header before parsing
+its fields. A v11 file without them loads unchanged.
 
 ## Shape
 
-`schema_version` is required and currently `11`. `selected_device` is an
+`schema_version` is required and currently `12`. `selected_device` is an
 optional physical device key.
 
 `[app_settings]` contains application-wide preferences:
@@ -403,6 +406,63 @@ ID, instead preserves active work and its remaining budget. Replacement cannot
 be detected from a slot alone when neither snapshot provides distinguishing
 identity, and a direct keyboard without a nonzero unit ID counts as new when its
 identity changes.
+
+### MX Creative Console
+
+The MX Creative Keypad and the MX Creative Dialpad are configured on their Keys
+tab. Their bindings live in the device's `bindings` like any other key:
+
+- Keypad grid keys are `gridTopLeft` … `gridBottomRight` on page 1 and
+  `page2:gridTopLeft` … on later pages (`keypad_pages` is the page count). The
+  two keys under the grid turn the page.
+- The dialpad's four keys are its `0x1b04` controls. Its dial and roller are
+  `DialLeft`/`DialRight` and `RollerUp`/`RollerDown`. A direction runs its
+  binding once per step, or scrolls when bound to a scroll action; only a
+  bound direction takes its control from the device, the others stay native.
+  The device's `thumbwheel_sensitivity` sets how many steps a turn makes.
+
+The keypad's LCD keys have three more per-device settings:
+
+- `key_display_brightness`, `1` through `100` (percent of the range the keypad
+  reports, never its bottom value). The agent writes it when the keypad
+  connects and when it changes; absent leaves the panel as it is.
+  `openlogi api key-brightness --save` sets it from the command line.
+- `key_faces`, by grid key: how a key is drawn instead of its action's icon.
+
+  ```toml
+  [devices."unit:01020304".key_faces.gridTopLeft]
+  label = "Build\nall"
+  background = "1e3a8a"
+  color = "ffffff"
+  icon = true
+  symbol = { lucide = "hammer" }
+  ```
+
+  `label` takes up to two lines, `background`/`color`/`icon_color` are
+  `RRGGBB` hex without `#`, `gradient` replaces the background with two colours and a
+  `direction` (`vertical`, `horizontal` or `diagonal`), `image` is a picture
+  file drawn behind the label, `symbol` is `{ lucide = "<icon name>" }` or an
+  `{ emoji = "…" }`, and `icon` keeps the action's icon. A key styled on a
+  page that `keypad_pages` later removes loses its style with its binding.
+- `live_keys`, by grid key: a key that shows a value instead of running a
+  binding.
+
+  ```toml
+  [devices."unit:01020304".live_keys.gridMiddle]
+  source = "Volume"
+  refresh_secs = 5
+  on_press = "MuteVolume"
+  ```
+
+  `source` is `"Volume"`, `"Clock"`, `{ Battery = "<device key>" }` or
+  `{ Command = "<shell command>" }`, whose first output line (or a JSON
+  object with `label` and `progress` 0–100) becomes the key's text and bar.
+  The command runs through the same shell as `RunShellCommand`, at most every
+  `refresh_secs` (1–3600) and for at most five seconds. Pressing the key runs
+  `on_press` and makes it active for `timeout_secs` (2–300, default 10):
+  meanwhile the two keys under the grid run `decrement` and `increment`
+  (the volume keys for a volume source) instead of turning the page. A second
+  press ends it. Volume is read on macOS and Linux only.
 
 ### Application aliases
 
