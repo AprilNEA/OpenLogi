@@ -6387,6 +6387,7 @@ version = "0.9.0"
 dependencies = [
  "gpui-pre",
  "openlogi-core",
+ "rust-embed",
 ]
 
 [[package]]
