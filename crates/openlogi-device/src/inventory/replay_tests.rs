@@ -1393,6 +1393,20 @@ async fn the_first_lock_key_broadcast_names_the_key_against_the_state_read_on_co
     // Lock keys are not inventory.
     assert_eq!(events.try_recv(), Err(mpsc::error::TryRecvError::Empty));
 }
+
+/// How long a HID++ 2.0 receiver test waits on the replay before failing.
+/// A guard against a hang only: far above every probe budget, so it never
+/// decides a test that asserts on elapsed time.
+const HIDPP20_RECEIVER_TEST_DEADLINE: Duration = Duration::from_secs(30);
+
+/// Bounds a receiver test's wait, so an open, probe or cleanup that never
+/// returns fails the test instead of holding the run until the job is killed.
+async fn before_deadline<T>(wait: impl Future<Output = T>) -> T {
+    tokio::time::timeout(HIDPP20_RECEIVER_TEST_DEADLINE, wait)
+        .await
+        .expect("the receiver replay finishes before the test deadline")
+}
+
 fn hidpp20_receiver_backend(tag: &str, passes: &[&[u8]]) -> Arc<ReplayBackend> {
     let fixture = hidpp20_receiver_fixture(tag, passes);
     Arc::new(
@@ -1424,8 +1438,7 @@ async fn hidpp20_receiver_lists_the_slots_that_answer_a_ping() {
     let backend = hidpp20_receiver_backend("answering-slot", &[&[1]]);
     let mut enumerator = Enumerator::with_backend(backend.clone());
 
-    let inventory = enumerator
-        .enumerate()
+    let inventory = before_deadline(enumerator.enumerate())
         .await
         .expect("receiver probe succeeds");
 
@@ -1453,8 +1466,12 @@ async fn hidpp20_receiver_keeps_a_known_slot_listed_offline_once_it_falls_silent
     let backend = hidpp20_receiver_backend("silent-known-slot", &[&[1], &[]]);
     let mut enumerator = Enumerator::with_backend(backend.clone());
 
-    let online = enumerator.enumerate().await.expect("first pass succeeds");
-    let silent = enumerator.enumerate().await.expect("second pass succeeds");
+    let online = before_deadline(enumerator.enumerate())
+        .await
+        .expect("first pass succeeds");
+    let silent = before_deadline(enumerator.enumerate())
+        .await
+        .expect("second pass succeeds");
 
     assert_eq!(
         online,
@@ -1478,8 +1495,7 @@ async fn hidpp20_receiver_skips_a_silent_slot_it_has_never_seen() {
     let backend = hidpp20_receiver_backend("empty-receiver", &[&[]]);
     let mut enumerator = Enumerator::with_backend(backend.clone());
 
-    let inventory = enumerator
-        .enumerate()
+    let inventory = before_deadline(enumerator.enumerate())
         .await
         .expect("receiver probe succeeds");
 
@@ -1509,7 +1525,7 @@ async fn hidpp20_receiver_route_reaches_its_slot_through_the_matching_receiver()
         slot: 1,
     };
 
-    let dpi = get_dpi(&*backend, &route)
+    let dpi = before_deadline(get_dpi(&*backend, &route))
         .await
         .expect("DPI read on slot 1");
 
@@ -1527,7 +1543,7 @@ async fn hidpp20_receiver_route_skips_a_receiver_with_another_unit_id() {
         slot: 1,
     };
 
-    get_dpi(&*backend, &route)
+    before_deadline(get_dpi(&*backend, &route))
         .await
         .expect_err("no connected receiver carries that unit id");
     backend
@@ -1552,8 +1568,7 @@ async fn hidpp20_receiver_stays_healthy_when_a_slot_stalls_mid_walk() {
     enumerator.timeouts.unifying_slot_probe = Duration::from_millis(200);
     let started = Instant::now();
 
-    let inventory = enumerator
-        .enumerate()
+    let inventory = before_deadline(enumerator.enumerate())
         .await
         .expect("receiver probe succeeds");
 
