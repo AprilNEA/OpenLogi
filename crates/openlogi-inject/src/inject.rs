@@ -370,6 +370,70 @@ fn run_to_end(mut command: std::process::Command, kind: &'static str) {
     }
 }
 
+/// Run `cmd` through the platform shell — the same process
+/// [`Action::RunShellCommand`] starts — and answer its standard output, at
+/// most `max_bytes` of it decoded lossily. `None` when it could not start, or
+/// when it or its output ran past `timeout`; the shell is then killed.
+///
+/// Blocking: call it off the async threads. A background child the command
+/// leaves holding its output open keeps one reader thread waiting until that
+/// child closes it; the answer does not wait for it.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[must_use]
+pub fn shell_output(cmd: &str, timeout: std::time::Duration, max_bytes: usize) -> Option<String> {
+    use std::io::Read as _;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    let deadline = Instant::now() + timeout;
+    let mut child = platform::shell_command(cmd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let stdout = child.stdout.take()?;
+    // Read on its own thread, so a command that writes more than the pipe
+    // holds is not stalled by a wait that never drains it.
+    let (sender, output) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let read = stdout
+            .take(u64::try_from(max_bytes).unwrap_or(u64::MAX))
+            .read_to_end(&mut bytes);
+        let _ = sender.send(read.map(|_| bytes));
+    });
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+    let bytes = output
+        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        .ok()?
+        .ok()?;
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// No platform shell: nothing runs.
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+#[must_use]
+pub fn shell_output(
+    _cmd: &str,
+    _timeout: std::time::Duration,
+    _max_bytes: usize,
+) -> Option<String> {
+    None
+}
+
 /// Wait for `command`'s process with no pipes: its stdin and stdout are
 /// null and its stderr is the agent's own. A child it leaves running in the
 /// background then cannot keep a workflow waiting for an end of output, and
@@ -939,6 +1003,40 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     use super::{HeldChordKind, HeldKey, HeldOutput, HoldTransition};
     use super::{QuantizedScroll, ScrollQuantizer};
+
+    /// A command's output comes back with its quotes as the shell got them:
+    /// on Windows `cmd.exe` keeps the inner quotes of a JSON value.
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn shell_output_answers_what_the_command_printed() {
+        use std::time::Duration;
+        #[cfg(windows)]
+        let cmd = r#"echo {"label":"OK","progress":42}"#;
+        #[cfg(not(windows))]
+        let cmd = r#"echo '{"label":"OK","progress":42}'"#;
+        let out = super::shell_output(cmd, Duration::from_secs(10), 4096).expect("the shell runs");
+        assert_eq!(out.trim(), r#"{"label":"OK","progress":42}"#);
+        let capped =
+            super::shell_output("echo 0123456789", Duration::from_secs(10), 4).expect("runs");
+        assert_eq!(capped, "0123");
+    }
+
+    /// A command that outlives its timeout is killed and answers nothing.
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn shell_output_gives_up_on_a_command_past_its_timeout() {
+        use std::time::{Duration, Instant};
+        #[cfg(windows)]
+        let cmd = "ping -n 30 127.0.0.1 >nul";
+        #[cfg(not(windows))]
+        let cmd = "sleep 30";
+        let started = Instant::now();
+        assert_eq!(
+            super::shell_output(cmd, Duration::from_millis(300), 4096),
+            None
+        );
+        assert!(started.elapsed() < Duration::from_secs(10));
+    }
 
     /// Synthetic high-resolution input: eight eighth-ticks must total exactly
     /// one Windows/Linux wheel detent (120 raw units). This is deterministic
