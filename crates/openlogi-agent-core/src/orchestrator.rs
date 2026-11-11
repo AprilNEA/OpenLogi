@@ -16,13 +16,14 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{
-    ActionRingIcon, Binding, ButtonId, GamingButtons, GamingLayout, GridKey, KeypadPage, ModeKey,
-    Rotary,
+    ActionRingIcon, Binding, ButtonId, GamingButtons, GamingLayout, GridKey, GridSlot, KeypadPage,
+    ModeKey, Rotary,
 };
 use openlogi_core::bindings::{bindings_on_page, button_bindings_for, oshook_gestures_for};
+use openlogi_core::color::Rgb;
 use openlogi_core::config::{
-    AppSettings, Config, ConfigRevision, GKeyOwner, GamingKeyMode, LightSettings,
-    MouseProfileTarget, canonical_device_key,
+    AppSettings, Config, ConfigRevision, GKeyOwner, GamingKeyMode, KeyFaceStyle, KeySymbol,
+    LightSettings, MouseProfileTarget, canonical_device_key,
 };
 use openlogi_core::device::{
     BatteryInfo, Capabilities, ChangedOnLight, DeviceInventory, DeviceKind, LightCapabilities,
@@ -61,7 +62,7 @@ use crate::runtime::scroll::ScrollPreferences;
 use crate::runtime::{PageTurn, PointerSelection};
 use crate::watchers::host_switch::{HostSwitchLink, HostSwitchLinks};
 use crate::watchers::inventory::InventoryRefresh;
-use crate::watchers::key_display::{KeyDisplaySpec, KeyFace, SharedKeyDisplaySpecs};
+use crate::watchers::key_display::{KeyDisplaySpec, KeyFace, SharedKeyDisplaySpecs, StyledFace};
 use crate::watchers::keyboard::{KeyboardSpec, SharedKeyboardSpecs};
 use crate::watchers::light::{WatchedLight, WatchedLights};
 use crate::{DpiCycleState, DpiCycles, PointerSpeeds};
@@ -1340,9 +1341,14 @@ impl Orchestrator {
                     &dev.config_key,
                     &self.foreground_key_bindings(&dev.config_key),
                 );
+                let page = self.keypad_page(&dev.config_key);
                 let faces = GridKey::ALL
                     .into_iter()
-                    .map(|key| (key, key_face(bindings.get(&ButtonId::grid(key)))))
+                    .map(|key| {
+                        let slot = ButtonId::Grid(GridSlot { page, key });
+                        let style = self.config.key_face_style(&dev.config_key, slot);
+                        (key, key_face(bindings.get(&ButtonId::grid(key)), style))
+                    })
                     .collect();
                 let generation = self.panel_generations.get(&route).copied().unwrap_or(0);
                 Some(KeyDisplaySpec {
@@ -2648,12 +2654,28 @@ fn is_bound_key(binding: &Binding) -> bool {
 
 /// What a keypad grid key shows for `binding`: blank exactly when the key does
 /// nothing, else the glyph of [`Binding::key_action`].
-fn key_face(binding: Option<&Binding>) -> KeyFace {
-    binding
+///
+/// A key the user styled ([`KeyFaceStyle`]) draws that style instead, with
+/// the action's icon only when the style asks for it.
+fn key_face(binding: Option<&Binding>, style: Option<&KeyFaceStyle>) -> KeyFace {
+    let icon = binding
         .and_then(Binding::key_action)
-        .map_or(KeyFace::Blank, |action| {
-            KeyFace::Icon(ActionRingIcon::for_action(&action))
-        })
+        .map(|action| ActionRingIcon::for_action(&action));
+    let Some(style) = style.filter(|style| !style.is_default()) else {
+        return icon.map_or(KeyFace::Blank, KeyFace::Icon);
+    };
+    KeyFace::Styled(Arc::new(StyledFace {
+        icon: icon.filter(|_| style.icon),
+        label: style.trimmed_label().map(str::to_owned),
+        background: style.background.unwrap_or(Rgb::new(0, 0, 0)),
+        foreground: style.color.unwrap_or(Rgb::WHITE),
+        icon_color: style.icon_color.or(style.color).unwrap_or(Rgb::WHITE),
+        gradient: style.gradient,
+        image: style.image.clone(),
+        symbol: style.symbol.as_ref().and_then(KeySymbol::normalized),
+        progress: None,
+        highlight: false,
+    }))
 }
 
 /// Which of `bindings` the keyboard capture session takes over.

@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
     CameraControls, CameraStreamMode, Config, DeviceIdentity, DisableKey, GKeyOwner, GamingKeyMode,
-    KeyDisplayBrightness, LightSettings, Lighting, MomentumScrolling, OnboardMemory,
+    KeyDisplayBrightness, KeyFaceStyle, LightSettings, Lighting, MomentumScrolling, OnboardMemory,
     ScrollResolution, SmartShift, ThumbwheelSensitivity,
 };
 use crate::binding::{
@@ -674,6 +674,7 @@ impl Config {
         let kept = |button: &ButtonId| button.grid_slot().is_none_or(|slot| slot.page <= last);
         device.bindings.retain(|button, _| kept(button));
         device.disabled_gestures.retain(|button, _| kept(button));
+        device.key_faces.retain(|button, _| kept(button));
         for overlay in device.per_app_bindings.values_mut() {
             overlay.retain(|button, _| kept(button));
         }
@@ -697,6 +698,37 @@ impl Config {
                 .values()
                 .flatten()
                 .any(|(button, action)| on_page(button) && *action != Action::None)
+    }
+
+    /// How `device_key` styles the LCD key at grid `slot`, if at all.
+    #[must_use]
+    pub fn key_face_style(&self, device_key: &str, slot: ButtonId) -> Option<&KeyFaceStyle> {
+        self.devices
+            .get(device_key)
+            .and_then(|d| d.key_faces.get(&slot))
+    }
+
+    /// Store `style` for the LCD key at grid `slot`; `None`, or a style that
+    /// changes nothing, removes the entry.
+    pub fn set_key_face_style(
+        &mut self,
+        device_key: &str,
+        slot: ButtonId,
+        style: Option<KeyFaceStyle>,
+    ) {
+        let faces = &mut self
+            .devices
+            .entry(device_key.to_owned())
+            .or_default()
+            .key_faces;
+        match style.filter(|style| !style.is_default()) {
+            Some(style) => {
+                faces.insert(slot, style);
+            }
+            None => {
+                faces.remove(&slot);
+            }
+        }
     }
 
     /// `device_key`'s keypad LCD brightness, when the user set one.

@@ -1469,7 +1469,7 @@ fn the_lcd_follows_the_current_page_and_turns_wrap() {
     use crate::watchers::key_display::KeyFace;
     use openlogi_core::binding::ActionRingIcon;
     let mut orch = paged_keypad();
-    let face = |orch: &Orchestrator, key| orch.key_display_specs_for()[0].faces[&key];
+    let face = |orch: &Orchestrator, key| orch.key_display_specs_for()[0].faces[&key].clone();
     let icon = |action: Action| KeyFace::Icon(ActionRingIcon::for_action(&action));
 
     assert_eq!(face(&orch, GridKey::Middle), icon(Action::Copy));

@@ -79,7 +79,9 @@ pub use hires_wheel::{
     set_scroll_resolution_on, set_scroll_wheel_mode, set_scroll_wheel_mode_on,
 };
 pub use key_brightness::set_key_display_brightness_on;
-pub use key_display::{KeyDisplay, KeyImageJpeg, key_display_for, write_key_image_on};
+pub use key_display::{
+    KEY_IMAGE_SINGLE_PACKET_MAX, KeyDisplay, KeyImageJpeg, key_display_for, write_key_image_on,
+};
 pub use lighting::{
     LightingMethod, LightingWrite, LitZone, RgbControlLease, ZoneWalkStep, release_rgb_control,
     set_keyboard_color, set_keyboard_color_on, set_keyboard_color_with, set_keyboard_color_with_on,

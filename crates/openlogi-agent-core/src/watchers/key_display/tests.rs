@@ -46,7 +46,7 @@ fn first_key(spec: &KeyDisplaySpec) -> Paint<'_> {
     Paint {
         spec,
         key: *key,
-        face: *face,
+        face: face.clone(),
     }
 }
 
@@ -166,12 +166,12 @@ fn panels_are_tracked_independently() {
 fn identical_faces_render_once() {
     let mut tiles = Tiles::default();
     let face = KeyFace::Icon(ActionRingIcon::Copy);
-    let first = tiles.get(face, 118).unwrap();
-    let second = tiles.get(face, 118).unwrap();
+    let first = tiles.get(&face, 118).unwrap();
+    let second = tiles.get(&face, 118).unwrap();
     assert!(Arc::ptr_eq(&first, &second));
     assert!(!Arc::ptr_eq(
         &first,
-        &tiles.get(KeyFace::Blank, 118).unwrap()
+        &tiles.get(&KeyFace::Blank, 118).unwrap()
     ));
 }
 

@@ -21,6 +21,7 @@ mod flow;
 mod function_key;
 mod gestures;
 mod identity;
+mod key_face;
 mod key_trigger;
 mod migrate;
 mod per_app;
@@ -50,6 +51,7 @@ pub use flow::{
 };
 pub use function_key::FunctionKey;
 pub use identity::canonical_device_key;
+pub use key_face::{GradientDirection, KeyFaceStyle, KeyGradient, KeySymbol};
 pub use key_trigger::{KeyModifiers, KeyTrigger, KeyboardConfig, ParseTriggerError};
 pub use revision::ConfigRevision;
 pub use settings::LightSettings;
@@ -70,8 +72,10 @@ use crate::binding::{Binding, ButtonId, GestureDirection};
 /// before consuming the rest of the file.
 ///
 /// v12 adds the MX Creative Keypad's per-device LCD settings:
-/// [`DeviceConfig::key_display_brightness`]. Nothing older needs migrating,
-/// and a file without them leaves the panel as the device holds it. The bump
+/// [`DeviceConfig::key_display_brightness`] and the styled faces of its LCD
+/// keys, [`DeviceConfig::key_faces`]. Nothing older needs migrating, and a
+/// file without them leaves the panel as the device holds it and draws each
+/// key's action icon. The bump
 /// makes a v11 build refuse a file that may hold them at the version check,
 /// instead of failing on the unknown field.
 ///

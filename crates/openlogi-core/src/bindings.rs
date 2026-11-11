@@ -637,6 +637,35 @@ mod tests {
         assert!(!cfg.keypad_page_binds("keypad", page(1)));
     }
 
+    /// Removing a page drops the key faces styled on it with its bindings.
+    #[test]
+    fn shrinking_the_pages_drops_their_key_faces() {
+        use crate::binding::GridKey;
+        use crate::config::KeyFaceStyle;
+        let page = |number| KeypadPage::new(number).unwrap();
+        let mut cfg = Config::default();
+        cfg.set_keypad_pages("keypad", page(3));
+        let labelled = |label: &str| {
+            Some(KeyFaceStyle {
+                label: Some(label.into()),
+                ..KeyFaceStyle::default()
+            })
+        };
+        cfg.set_key_face_style("keypad", slot(1, GridKey::TopLeft), labelled("kept"));
+        cfg.set_key_face_style("keypad", slot(3, GridKey::TopLeft), labelled("dropped"));
+
+        cfg.set_keypad_pages("keypad", page(2));
+
+        assert!(
+            cfg.key_face_style("keypad", slot(1, GridKey::TopLeft))
+                .is_some()
+        );
+        assert!(
+            cfg.key_face_style("keypad", slot(3, GridKey::TopLeft))
+                .is_none()
+        );
+    }
+
     #[test]
     fn gaming_presses_follow_the_cluster_mode() {
         use crate::binding::{GKey, ModeKey};

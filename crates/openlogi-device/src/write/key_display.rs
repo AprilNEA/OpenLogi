@@ -42,6 +42,12 @@ const IMAGE_HEADER: [u8; 4] = output_header(VendorFunction::Image);
 /// Every image packet is a full-width report.
 const PACKET_LEN: usize = 4095;
 const FIRST_HEADER_LEN: usize = 20;
+
+/// The largest JPEG a single image packet carries. Only single-packet writes
+/// are hardware-verified (every icon tile fits one); a renderer keeps its
+/// tiles within this so a write never depends on the unverified multi-packet
+/// path.
+pub const KEY_IMAGE_SINGLE_PACKET_MAX: usize = PACKET_LEN - FIRST_HEADER_LEN;
 const NEXT_HEADER_LEN: usize = 5;
 /// Marks every part byte; the acknowledgement echoes the part without it.
 const PART_MARKER: u8 = 0x20;

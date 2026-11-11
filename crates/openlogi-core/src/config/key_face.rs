@@ -1,0 +1,230 @@
+//! How a keypad's LCD key looks beyond its action's icon: a label, colours
+//! and a picture the user chose.
+
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+
+use crate::color::Rgb;
+
+/// The user's styling of one LCD key on one binding page.
+///
+/// Stored per grid slot in a device's `key_faces` table
+/// (`[devices."…".key_faces.gridTopLeft]`, `page2:gridTopLeft` on a later
+/// page). A key without an entry shows its action's icon, white on black.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeyFaceStyle {
+    /// Text drawn on the key. `\n` breaks a line; at most two lines are
+    /// shown, sized to fit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Tile background; black when unset. A `gradient` replaces it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<Rgb>,
+    /// Label colour, and the icon's too unless `icon_color` sets its own;
+    /// white when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<Rgb>,
+    /// A PNG or JPEG file drawn under the icon and label, cropped to fill the
+    /// key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<PathBuf>,
+    /// Whether the action's icon is drawn. On unless turned off, so a label
+    /// alone keeps the icon above it.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub icon: bool,
+    /// A symbol drawn in place of the action's icon: a Lucide icon by name, or
+    /// an emoji. Shown whatever `icon` says — choosing one is the request to
+    /// show it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol: Option<KeySymbol>,
+    /// Colour of the action icon or Lucide symbol, when it should differ from
+    /// the label's `color`. An emoji keeps its own colours.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon_color: Option<Rgb>,
+    /// A two-colour gradient drawn as the background instead of the flat
+    /// `background`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gradient: Option<KeyGradient>,
+}
+
+/// A linear two-colour background gradient.
+///
+/// Written `gradient = { from = "ff5a00", to = "7800c8", direction = "diagonal" }`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeyGradient {
+    /// The colour at the start of the gradient.
+    pub from: Rgb,
+    /// The colour at its end.
+    pub to: Rgb,
+    /// Which way it runs; top to bottom when unset.
+    #[serde(default, skip_serializing_if = "GradientDirection::is_default")]
+    pub direction: GradientDirection,
+}
+
+/// Which way a [`KeyGradient`] runs across the key.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GradientDirection {
+    /// Top to bottom.
+    #[default]
+    Vertical,
+    /// Left to right.
+    Horizontal,
+    /// Top left to bottom right.
+    Diagonal,
+}
+
+impl GradientDirection {
+    /// Every direction, in the order a picker offers them.
+    pub const ALL: [Self; 3] = [Self::Vertical, Self::Horizontal, Self::Diagonal];
+
+    #[expect(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "serde's skip_serializing_if passes a reference"
+    )]
+    fn is_default(&self) -> bool {
+        *self == Self::Vertical
+    }
+}
+
+/// A symbol a keypad key can show instead of its action's icon.
+///
+/// Written `symbol = { lucide = "camera" }` or `symbol = { emoji = "🎨" }`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase", deny_unknown_fields)]
+pub enum KeySymbol {
+    /// A [Lucide](https://lucide.dev) icon by its kebab-case name, drawn in
+    /// the key's text colour.
+    Lucide(String),
+    /// An emoji (or any short text), drawn in its own colours.
+    Emoji(String),
+}
+
+impl KeySymbol {
+    /// Longest emoji text kept, in characters: a family or flag sequence
+    /// joins several code points, but a key shows one symbol.
+    pub const MAX_EMOJI_CHARS: usize = 16;
+
+    /// This symbol with surrounding whitespace trimmed, or `None` when
+    /// nothing is left to draw. An over-long emoji is cut to
+    /// [`Self::MAX_EMOJI_CHARS`].
+    #[must_use]
+    pub fn normalized(&self) -> Option<Self> {
+        match self {
+            Self::Lucide(name) => {
+                let name = name.trim().to_ascii_lowercase();
+                (!name.is_empty()).then_some(Self::Lucide(name))
+            }
+            Self::Emoji(text) => {
+                let text: String = text.trim().chars().take(Self::MAX_EMOJI_CHARS).collect();
+                (!text.is_empty()).then_some(Self::Emoji(text))
+            }
+        }
+    }
+}
+
+impl Default for KeyFaceStyle {
+    fn default() -> Self {
+        Self {
+            label: None,
+            background: None,
+            color: None,
+            image: None,
+            icon: true,
+            symbol: None,
+            icon_color: None,
+            gradient: None,
+        }
+    }
+}
+
+impl KeyFaceStyle {
+    /// Whether this style changes nothing about the default face, so the entry
+    /// can be dropped.
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// The label with surrounding whitespace removed, or `None` when it is
+    /// empty.
+    #[must_use]
+    pub fn trimmed_label(&self) -> Option<&str> {
+        self.label
+            .as_deref()
+            .map(str::trim)
+            .filter(|label| !label.is_empty())
+    }
+}
+
+const fn default_true() -> bool {
+    true
+}
+
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's skip_serializing_if passes a reference"
+)]
+const fn is_true(value: &bool) -> bool {
+    *value
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_full_style_roundtrips_and_the_default_icon_stays_out_of_the_file() {
+        let style = KeyFaceStyle {
+            label: Some("Export\nPNG".into()),
+            background: Some(Rgb::new(0x20, 0x40, 0x80)),
+            color: None,
+            image: Some(PathBuf::from("C:/icons/export.png")),
+            icon: true,
+            symbol: Some(KeySymbol::Lucide("camera".into())),
+            icon_color: Some(Rgb::new(0xff, 0xcc, 0x00)),
+            gradient: Some(KeyGradient {
+                from: Rgb::new(0xff, 0x5a, 0x00),
+                to: Rgb::new(0x78, 0x00, 0xc8),
+                direction: GradientDirection::Diagonal,
+            }),
+        };
+        let toml = toml::to_string(&style).unwrap();
+        assert!(
+            !toml.lines().any(|line| line.starts_with("icon =")),
+            "{toml}"
+        );
+        assert_eq!(toml::from_str::<KeyFaceStyle>(&toml).unwrap(), style);
+        let emoji: KeyFaceStyle = toml::from_str("symbol = { emoji = \"🎨\" }").unwrap();
+        assert_eq!(emoji.symbol, Some(KeySymbol::Emoji("🎨".into())));
+        assert_eq!(
+            KeySymbol::Lucide(" Camera ".into()).normalized(),
+            Some(KeySymbol::Lucide("camera".into()))
+        );
+        assert_eq!(KeySymbol::Emoji("  ".into()).normalized(), None);
+        let vertical: KeyFaceStyle =
+            toml::from_str(r#"gradient = { from = "000000", to = "ffffff" }"#).unwrap();
+        assert_eq!(
+            vertical.gradient.map(|g| g.direction),
+            Some(GradientDirection::Vertical)
+        );
+        assert!(
+            !toml::to_string(&vertical).unwrap().contains("direction"),
+            "the default direction stays out of the file"
+        );
+        let hidden: KeyFaceStyle = toml::from_str("icon = false").unwrap();
+        assert!(!hidden.icon);
+        assert!(KeyFaceStyle::default().is_default());
+        assert_eq!(
+            KeyFaceStyle {
+                label: Some("  ".into()),
+                ..KeyFaceStyle::default()
+            }
+            .trimmed_label(),
+            None
+        );
+    }
+}

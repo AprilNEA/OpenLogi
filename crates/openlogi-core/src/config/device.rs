@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
+use super::KeyFaceStyle;
 use super::button_map::{deserialize_button_map, deserialize_button_maps_by_app};
 use super::settings::{
     CameraControls, CameraStreamMode, GKeyOwner, GamingKeyMode, GestureOwner, KeyDisplayBrightness,
@@ -405,6 +406,11 @@ pub struct DeviceConfig {
     /// the device holds, and stays out of `config.toml`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key_display_brightness: Option<KeyDisplayBrightness>,
+    /// The user's styling of a keypad's LCD keys, by grid slot (each binding
+    /// page has its own slots). A key without an entry shows its action's
+    /// icon, white on black.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub key_faces: BTreeMap<ButtonId, KeyFaceStyle>,
     /// Who runs a G-series keyboard's G1–G5. The keyboard's onboard actions
     /// are the default and are omitted from `config.toml`.
     #[serde(default, skip_serializing_if = "is_default_g_key_owner")]
@@ -529,6 +535,7 @@ impl Default for DeviceConfig {
             gshift_bindings: BTreeMap::new(),
             keypad_pages: KeypadPage::FIRST,
             key_display_brightness: None,
+            key_faces: BTreeMap::new(),
             g_key_owner: GKeyOwner::Keyboard,
             gaming_key_mode: GamingKeyMode::Profiles,
             g_key_profile_names: BTreeMap::new(),
@@ -705,6 +712,8 @@ struct RawDeviceConfig {
     #[serde(default)]
     key_display_brightness: Option<KeyDisplayBrightness>,
     #[serde(default)]
+    key_faces: BTreeMap<ButtonId, KeyFaceStyle>,
+    #[serde(default)]
     g_key_owner: GKeyOwner,
     #[serde(default)]
     gaming_key_mode: GamingKeyMode,
@@ -782,6 +791,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             gshift_bindings: raw.gshift_bindings,
             keypad_pages: raw.keypad_pages,
             key_display_brightness: raw.key_display_brightness,
+            key_faces: raw.key_faces,
             g_key_owner: raw.g_key_owner,
             gaming_key_mode: raw.gaming_key_mode,
             g_key_profile_names: raw.g_key_profile_names,
