@@ -90,7 +90,10 @@ use key_face::{FaceDraft, KeyPanelTab, panel_tabs};
 pub(crate) use key_points::KeyTarget;
 #[cfg(test)]
 use key_points::{EVEN_SPACING_END, EVEN_SPACING_START, key_x_fractions};
-use key_points::{KeySlotLayout, KeySurface, StoredAs, key_surface, keypad_canvas, shows_g_keys};
+use key_points::{
+    KeySlotLayout, KeySurface, KeypadRender, StoredAs, key_surface, keypad_canvas,
+    photo_keypad_render, shows_g_keys,
+};
 use key_shortcut::ShortcutDraft;
 use keypad::{KeypadPane, KeypadPhotoPane, LastPage, keypad_page_bar, keypad_photo_render_size};
 
@@ -661,7 +664,7 @@ impl Render for FunctionRowView {
         let viewport_h = f32::from(viewport.height);
         let image_path = asset.map(|asset| asset.image_path.clone());
         let (surface, gaming) = device_keys(state, asset, known_keypad, known_dialpad);
-        let pane = PaneKind::of(&surface, known_keypad.is_some());
+        let pane = PaneKind::of(&surface, known_keypad.is_some(), asset);
         // The schematic keeps photo and keycaps on one alignment line.
         let photo = asset
             .filter(|asset| asset.png_height > 0)
@@ -792,8 +795,9 @@ enum PaneKind {
     Keypad,
     /// The keypad's keys on its photo: the keyboard's callout band cannot
     /// lay eleven bubbles across a portrait render, and the picture itself
-    /// is the selector.
-    KeypadPhoto,
+    /// is the selector. Carries the measured render the keys are outlined
+    /// against.
+    KeypadPhoto(&'static KeypadRender),
     /// The dialpad drawn from its model beside its photo.
     Dialpad(&'static DialpadDescriptor),
     /// The dialpad's parts on its measured render.
@@ -801,12 +805,12 @@ enum PaneKind {
 }
 
 impl PaneKind {
-    fn of(surface: &KeySurface, known_keypad: bool) -> Self {
+    fn of(surface: &KeySurface, known_keypad: bool, asset: Option<&ResolvedAsset>) -> Self {
         match surface {
             KeySurface::Dialpad(dialpad, Some(render), _) => Self::DialpadPhoto(dialpad, render),
             KeySurface::Dialpad(dialpad, None, _) => Self::Dialpad(dialpad),
             KeySurface::Keypad(_) => Self::Keypad,
-            KeySurface::Photo(_) if known_keypad => Self::KeypadPhoto,
+            KeySurface::Photo(_) if known_keypad => Self::KeypadPhoto(photo_keypad_render(asset)),
             KeySurface::Photo(_) => Self::Keyboard,
         }
     }
@@ -814,7 +818,7 @@ impl PaneKind {
     /// Whether the keys sit on the device's picture, which is then sized to
     /// the viewport rather than to a schematic beside it.
     fn on_picture(self) -> bool {
-        matches!(self, Self::KeypadPhoto | Self::DialpadPhoto(..))
+        matches!(self, Self::KeypadPhoto(_) | Self::DialpadPhoto(..))
     }
 
     /// The box a photo beside the drawn schematic fits in: as tall as the
@@ -823,7 +827,7 @@ impl PaneKind {
     fn photo_box(self) -> (f32, f32) {
         match self {
             Self::Dialpad(_) | Self::DialpadPhoto(..) => (280., dialpad_canvas().1),
-            Self::Keyboard | Self::Keypad | Self::KeypadPhoto => (360., keypad_canvas().1),
+            Self::Keyboard | Self::Keypad | Self::KeypadPhoto(_) => (360., keypad_canvas().1),
         }
     }
 
@@ -850,10 +854,12 @@ impl PaneKind {
                 .selected(selected)
                 .hovered(hovered)
                 .into_any_element(),
-            Self::KeypadPhoto => KeypadPhotoPane::new(slots, image_path, render_size, view)
-                .selected(selected)
-                .hovered(hovered)
-                .into_any_element(),
+            Self::KeypadPhoto(render) => {
+                KeypadPhotoPane::new(slots, render, image_path, render_size, view)
+                    .selected(selected)
+                    .hovered(hovered)
+                    .into_any_element()
+            }
             Self::DialpadPhoto(dialpad, render) => {
                 DialpadPhotoPane::new(slots, (dialpad, render), image_path, render_size, view)
                     .selected(selected)
@@ -918,7 +924,7 @@ impl FunctionRowView {
             PaneKind::Dialpad(_) | PaneKind::DialpadPhoto(..) => {
                 Some(setting_bar().child(self.dial_speed_control(settings.dial_speed, window, cx)))
             }
-            PaneKind::Keypad | PaneKind::KeypadPhoto => Some(
+            PaneKind::Keypad | PaneKind::KeypadPhoto(_) => Some(
                 setting_bar()
                     .child(keypad_page_bar(
                         self.keypad_page,

@@ -1,5 +1,5 @@
 use super::callout_layout::{CalloutLayout, CardRect, callout_layout};
-use super::key_points::{KeyPoint, key_slots, photo_key_shape};
+use super::key_points::{KeyPoint, key_slots, photo_keypad_render};
 use super::*;
 use crate::ui::callouts::routes_cross;
 use openlogi_assets::{Assignment, Direction, ImageEntry, Metadata, Origin, Point};
@@ -216,7 +216,7 @@ fn a_restaged_keypad_render_falls_back_to_the_keycap_map() {
     rust_i18n::set_locale("en");
 
     let surface = key_surface(
-        Some(&stock_keypad_asset((1057, 1227))),
+        Some(&stock_keypad_asset((1200, 1400))),
         mx_keypad(),
         None,
         None,
@@ -281,8 +281,8 @@ fn photo_keys_keep_the_render_gaps_between_them() {
 
     for (a, b) in slots.iter().zip(&slots[1..]) {
         let (one, two) = (
-            photo_key_shape(&a.target, render.0),
-            photo_key_shape(&b.target, render.0),
+            photo_keypad_render(None).key_shape(&a.target, render.0),
+            photo_keypad_render(None).key_shape(&b.target, render.0),
         );
         let (w1, h1, w2, h2) = (one.w, one.h, two.w, two.h);
         let dx = (b.point.x_frac - a.point.x_frac).abs() * render.0;
@@ -1294,4 +1294,83 @@ fn switching_the_app_profile_drops_a_draft_for_the_old_one(cx: &mut gpui::TestAp
             assert_eq!(view.selected_key, Some(0));
         });
     });
+}
+
+/// The coloured configuration render the tab shows is measured too: every
+/// key lands on the photo at the centre measured off that render, in the
+/// schematic's order.
+#[test]
+fn the_config_keypad_render_puts_every_key_on_the_photo() {
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+
+    let KeySurface::Photo(config) = key_surface(
+        Some(&stock_keypad_asset((1057, 1227))),
+        mx_keypad(),
+        None,
+        None,
+    ) else {
+        panic!("the config render maps the keys onto the photo");
+    };
+
+    let schematic = key_slots(None, mx_keypad());
+    assert_eq!(
+        config.iter().map(|slot| &slot.target).collect::<Vec<_>>(),
+        schematic
+            .iter()
+            .map(|slot| &slot.target)
+            .collect::<Vec<_>>(),
+    );
+    let at = |slot: &super::key_points::KeySlotLayout| {
+        (slot.point.x_frac * 1057., slot.point.y_frac * 1227.)
+    };
+    let (x, y) = at(&config[0]);
+    assert!(
+        (x - 263.).abs() < 0.01 && (y - 260.).abs() < 0.01,
+        "{x},{y}"
+    );
+    let (x, y) = at(&config[8]);
+    assert!(
+        (x - 740.).abs() < 0.01 && (y - 736.).abs() < 0.01,
+        "{x},{y}"
+    );
+    let (x, y) = at(&config[10]);
+    assert!(
+        (x - 502.).abs() < 0.01 && (y - 937.).abs() < 0.01,
+        "{x},{y}"
+    );
+}
+
+/// Each measured keypad render outlines its keys with its own key size, not
+/// one scaled off another render: drawn at its own width, a grid key is the
+/// size measured on it, and no two keys overlap.
+#[test]
+fn each_keypad_render_outlines_its_keys_without_overlap() {
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    for (size, grid_key) in [((935_u32, 1105_u32), 200.), ((1057, 1227), 208.)] {
+        let asset = stock_keypad_asset(size);
+        let render = super::key_points::keypad_render(&asset).expect("a measured render");
+        #[expect(clippy::cast_precision_loss, reason = "test render sizes are small")]
+        let (w, h) = (size.0 as f32, size.1 as f32);
+        let slots = key_slots(Some(&asset), mx_keypad());
+        assert_eq!(slots.len(), 11);
+        assert_approx_eq(render.key_shape(&slots[4].target, w).w, grid_key);
+        for (i, a) in slots.iter().enumerate() {
+            for b in &slots[i + 1..] {
+                let (one, two) = (
+                    render.key_shape(&a.target, w),
+                    render.key_shape(&b.target, w),
+                );
+                let dx = (b.point.x_frac - a.point.x_frac).abs() * w;
+                let dy = (b.point.y_frac - a.point.y_frac).abs() * h;
+                assert!(
+                    2. * dx >= one.w + two.w || 2. * dy >= one.h + two.h,
+                    "{size:?}: {} and {} overlap",
+                    a.legend,
+                    b.legend
+                );
+            }
+        }
+    }
 }

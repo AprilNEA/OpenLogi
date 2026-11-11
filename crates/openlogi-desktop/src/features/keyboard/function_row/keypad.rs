@@ -23,8 +23,8 @@ use openlogi_ui::lucide;
 
 use super::key_colors::{DEFAULT_COLOR, gradient_fill, icon_color};
 use super::key_points::{
-    KEYCAP_H, KEYCAP_PAGING_H, KEYCAP_W, KeyShape, KeyTarget, is_paging_cid, keypad_canvas,
-    photo_key_shape,
+    KEYCAP_H, KEYCAP_PAGING_H, KEYCAP_W, KeyShape, KeyTarget, KeypadRender, is_paging_cid,
+    keypad_canvas,
 };
 use super::{
     FALLBACK_KEYBOARD_SIZE, FunctionRowView, KEYBOARD_MIN_IMG_H, KEYBOARD_W, KEYS_VERTICAL_RESERVE,
@@ -225,6 +225,8 @@ impl RenderOnce for KeypadPane {
 #[derive(IntoElement)]
 pub(super) struct KeypadPhotoPane {
     slots: Vec<KeySlot>,
+    /// The measured render the keys are outlined against.
+    render: &'static KeypadRender,
     image: Option<std::path::PathBuf>,
     render_size: (f32, f32),
     selected: Option<usize>,
@@ -235,12 +237,14 @@ pub(super) struct KeypadPhotoPane {
 impl KeypadPhotoPane {
     pub(super) fn new(
         slots: Vec<KeySlot>,
+        render: &'static KeypadRender,
         image: Option<std::path::PathBuf>,
         render_size: (f32, f32),
         view: Entity<FunctionRowView>,
     ) -> Self {
         Self {
             slots,
+            render,
             image,
             render_size,
             selected: None,
@@ -267,6 +271,7 @@ impl RenderOnce for KeypadPhotoPane {
         let (img_w, img_h) = self.render_size;
         let (selected, hovered) = (self.selected, self.hovered);
         let view = self.view;
+        let render = self.render;
         let pal = theme::palette(cx);
 
         div()
@@ -276,7 +281,7 @@ impl RenderOnce for KeypadPhotoPane {
             .child(image_or_fallback(self.image, img_w, img_h, &pal))
             .children(self.slots.into_iter().map(move |slot| PhotoKey {
                 state: KeyState::of(slot.idx, selected, hovered),
-                shape: photo_key_shape(&slot.target, img_w),
+                shape: render.key_shape(&slot.target, img_w),
                 render: (img_w, img_h),
                 slot,
                 view: view.clone(),
