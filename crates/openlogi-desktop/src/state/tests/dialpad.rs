@@ -1,9 +1,9 @@
 //! The MX Creative Console's per-device settings the Keys view shows: which
-//! device is the dialpad.
+//! device is the dialpad, and the keypad's LCD brightness.
 
 use super::*;
 use crate::services::ipc::Command;
-use openlogi_core::config::DeviceIdentity;
+use openlogi_core::config::{DeviceIdentity, KeyDisplayBrightness};
 use openlogi_core::device_order::PhysicalDeviceKey;
 
 /// A state whose one device is the MX Creative Dialpad, reached directly
@@ -43,6 +43,12 @@ pub(crate) fn dialpad_state() -> (AppState, tokio::sync::mpsc::UnboundedReceiver
         ..Sources::in_memory(Config::ephemeral(), &resolver, commands)
     });
     (state, receiver)
+}
+
+fn reloads(receiver: &mut tokio::sync::mpsc::UnboundedReceiver<Command>) -> usize {
+    std::iter::from_fn(|| receiver.try_recv().ok())
+        .filter(|command| matches!(command, Command::ReloadConfig(_)))
+        .count()
 }
 
 #[test]
@@ -91,4 +97,36 @@ fn an_offline_dialpad_is_still_the_dialpad() {
         Some("MX Creative Dialpad")
     );
     assert_eq!(offline("direct:046d:c548").current_dialpad(), None);
+}
+
+/// The keypad's brightness stays unmanaged until the user sets one; setting
+/// it saves it and has the agent reload, and setting it again is a no-op.
+#[test]
+fn setting_the_key_brightness_saves_it_once() {
+    let (mut state, mut receiver) = super::keypad_pages::keypad_state();
+    let record = state.current_record().unwrap().clone();
+    let key = record.device_key();
+    assert_eq!(
+        state.device_key_display_brightness(&record.config_key),
+        None
+    );
+    let _ = reloads(&mut receiver);
+
+    let dim = KeyDisplayBrightness::try_new(30).unwrap();
+    let events = state.commit_device_key_display_brightness(&key, dim);
+
+    assert_eq!(events, [StateEvent::DeviceConfigChanged(key.clone())]);
+    assert_eq!(
+        state.device_key_display_brightness(&record.config_key),
+        Some(dim)
+    );
+    assert_eq!(reloads(&mut receiver), 1, "the agent writes the new level");
+
+    let events = state.commit_device_key_display_brightness(&key, dim);
+    assert_eq!(events, [StateEvent::DeviceConfigChanged(key)]);
+    assert_eq!(
+        reloads(&mut receiver),
+        0,
+        "an unchanged level writes nothing"
+    );
 }

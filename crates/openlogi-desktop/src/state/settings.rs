@@ -6,8 +6,9 @@ use super::{AppState, StateEvent};
 use crate::platform::app_icon::AppIconExt as _;
 use gpui_kit::component::ThemeMode;
 use openlogi_core::config::{
-    AppIcon, AppSettings, Appearance, AssetSourcePreference, DeviceViewMode, MomentumScrolling,
-    MouseProfileTarget, ThumbwheelSensitivity, UiScale, VerticalScrollSensitivity,
+    AppIcon, AppSettings, Appearance, AssetSourcePreference, DeviceViewMode, KeyDisplayBrightness,
+    MomentumScrolling, MouseProfileTarget, ThumbwheelSensitivity, UiScale,
+    VerticalScrollSensitivity,
 };
 use openlogi_core::update_feed::UpdateChannel;
 
@@ -270,6 +271,33 @@ impl AppState {
             config.set_device_thumbwheel_sensitivity(key, override_value);
         });
         self.persist_and_reload("device thumbwheel sensitivity");
+        events
+    }
+
+    /// The keypad LCD brightness the user set for `key`, or `None` while
+    /// OpenLogi leaves the panel at whatever level it already shows.
+    #[must_use]
+    pub fn device_key_display_brightness(&self, key: &str) -> Option<KeyDisplayBrightness> {
+        self.config.key_display_brightness(key)
+    }
+
+    /// Set `key`'s keypad LCD brightness and persist it; the agent writes it
+    /// to the keypad when the reloaded config changes it. A stored value that
+    /// would not change writes nothing and is still reported.
+    pub fn commit_device_key_display_brightness(
+        &mut self,
+        key: &DeviceKey,
+        brightness: KeyDisplayBrightness,
+    ) -> StateEvents {
+        let events = StateEvent::DeviceConfigChanged(key.clone()).into();
+        let key = key.as_str();
+        if self.config.key_display_brightness(key) == Some(brightness) {
+            return events;
+        }
+        self.config.edit(|config| {
+            config.set_key_display_brightness(key, Some(brightness));
+        });
+        self.persist_and_reload("key display brightness");
         events
     }
 

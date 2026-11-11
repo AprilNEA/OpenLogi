@@ -367,10 +367,10 @@ fn open_keys_view(
     (view, cx)
 }
 
-/// The dialpad shows its rotary speed above it; the keypad, which has no
-/// rotary control, does not.
+/// Each device shows its own setting above it: the dialpad its rotary
+/// speed, the keypad its LCD brightness — which only showing does not save.
 #[gpui::test]
-fn only_the_dialpad_shows_its_rotary_speed(cx: &mut gpui::TestAppContext) {
+fn each_console_device_shows_its_own_setting(cx: &mut gpui::TestAppContext) {
     let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
     rust_i18n::set_locale("en");
 
@@ -378,12 +378,23 @@ fn only_the_dialpad_shows_its_rotary_speed(cx: &mut gpui::TestAppContext) {
     let (state, _commands) = crate::state::tests::dialpad::dialpad_state();
     let (view, window) = open_keys_view(cx, state);
     assert!(window.debug_bounds("dial-speed").is_some());
+    assert!(window.debug_bounds("key-brightness").is_none());
     drop(view);
     window.update(|window, _| window.remove_window());
 
     let (state, _commands) = crate::state::tests::keypad_pages::keypad_state();
     let (view, window) = open_keys_view(cx, state);
+    assert!(window.debug_bounds("key-brightness").is_some());
     assert!(window.debug_bounds("dial-speed").is_none());
+    window.update(|_, cx| {
+        let state = AppState::try_read(cx).unwrap();
+        let key = &state.current_record().unwrap().config_key;
+        assert_eq!(
+            state.device_key_display_brightness(key),
+            None,
+            "the keypad keeps its own level until the slider moves"
+        );
+    });
     drop(view);
     window.update(|window, _| window.remove_window());
     cx.run_until_parked();

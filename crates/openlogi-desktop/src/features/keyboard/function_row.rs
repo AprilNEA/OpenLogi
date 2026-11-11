@@ -46,7 +46,7 @@ use gpui_kit::component::{
 use openlogi_core::binding::{
     Action, ActionRingIcon, ButtonId, GKeyProfile, KeypadPage, WorkflowStep,
 };
-use openlogi_core::config::{GamingKeyMode, ThumbwheelSensitivity};
+use openlogi_core::config::{GamingKeyMode, KeyDisplayBrightness, ThumbwheelSensitivity};
 
 use super::editors::{
     PowerUserKind, text_editor_placeholder, text_editor_seed, workflow_editor_seed,
@@ -161,8 +161,15 @@ const KEY_HOTSPOT_DOT: f32 = 12.;
 /// The glyph for a key on its own function, as the panel's Native function
 /// row shows it.
 const NATIVE_FUNCTION_ICON: &str = "action-icons/keyboard.svg";
-/// Width of a setting slider above the device (dial speed).
+/// Width of a setting slider above the device (dial speed, key brightness).
 const SETTING_SLIDER_W: f32 = 180.;
+/// The LCD brightness a keypad shows until the user picks one here: the
+/// level it came with, which OpenLogi leaves alone while the config holds
+/// no brightness for it.
+const UNSET_KEY_BRIGHTNESS: KeyDisplayBrightness = match KeyDisplayBrightness::try_new(70) {
+    Ok(value) => value,
+    Err(_) => panic!("valid default key brightness"),
+};
 
 /// The function-row remapper view.
 pub struct FunctionRowView {
@@ -205,6 +212,8 @@ pub struct FunctionRowView {
     /// A dialpad's dial and roller speed: the device's thumb-wheel
     /// sensitivity, which the agent applies to both rotary controls.
     dial_speed: CommitSlider<ThumbwheelSensitivity>,
+    /// A keypad's LCD brightness.
+    key_brightness: CommitSlider<KeyDisplayBrightness>,
     _state_obs: Subscription,
 }
 
@@ -226,7 +235,7 @@ impl FunctionRowView {
                 StateEvent::BindingsChanged(_) | StateEvent::DeviceConfigChanged(_)
             )
         });
-        // Writes on release only: a drag would stream config saves.
+        // Both write on release only: a drag would stream config saves.
         let dial_speed = CommitSlider::new(
             SliderRange::new(ThumbwheelSensitivity::MIN, ThumbwheelSensitivity::MAX),
             ThumbwheelSensitivity::DEFAULT,
@@ -238,6 +247,21 @@ impl FunctionRowView {
                         .map(DeviceRecord::device_key)
                         .map_or_else(StateEvents::none, |key| {
                             state.commit_device_thumbwheel_sensitivity(&key, sensitivity)
+                        })
+                });
+            },
+        );
+        let key_brightness = CommitSlider::new(
+            SliderRange::new(KeyDisplayBrightness::MIN, KeyDisplayBrightness::MAX),
+            UNSET_KEY_BRIGHTNESS,
+            cx,
+            |_, brightness, cx| {
+                AppState::apply(cx, |state| {
+                    state
+                        .current_record()
+                        .map(DeviceRecord::device_key)
+                        .map_or_else(StateEvents::none, |key| {
+                            state.commit_device_key_display_brightness(&key, brightness)
                         })
                 });
             },
@@ -258,6 +282,7 @@ impl FunctionRowView {
             overview_h: None,
             overview_scroll: ScrollHandle::new(),
             dial_speed,
+            key_brightness,
             _state_obs: state_obs,
         }
     }
@@ -279,6 +304,26 @@ impl FunctionRowView {
             &theme::palette(cx),
         )
         .debug_selector(|| "dial-speed".into())
+    }
+
+    /// The keypad's LCD brightness. Until the user picks one the slider
+    /// rests on [`UNSET_KEY_BRIGHTNESS`] and nothing is saved.
+    fn key_brightness_control(
+        &self,
+        committed: Option<KeyDisplayBrightness>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> gpui::Div {
+        let committed = committed.unwrap_or(UNSET_KEY_BRIGHTNESS);
+        self.key_brightness.sync(committed, window, cx);
+        let shown = self.key_brightness.shown(committed);
+        setting_slider(
+            tr!("keyboard.key_brightness"),
+            format!("{shown}%"),
+            self.key_brightness.slider(),
+            &theme::palette(cx),
+        )
+        .debug_selector(|| "key-brightness".into())
     }
 
     /// Select a key (or deselect with `None`), opening/closing the panel.
@@ -752,6 +797,7 @@ struct PaneVisuals {
 #[derive(Clone, Copy, Debug)]
 struct DeviceSettings {
     dial_speed: ThumbwheelSensitivity,
+    key_brightness: Option<KeyDisplayBrightness>,
 }
 
 impl DeviceSettings {
@@ -761,13 +807,16 @@ impl DeviceSettings {
             dial_speed: device.map_or(ThumbwheelSensitivity::DEFAULT, |(state, key)| {
                 state.device_thumbwheel_sensitivity(key)
             }),
+            key_brightness: device
+                .and_then(|(state, key)| state.device_key_display_brightness(key)),
         }
     }
 }
 
 impl FunctionRowView {
-    /// The device's own settings above it: a keypad's pages, a dialpad's
-    /// rotary speed, a G-series keyboard's gaming cluster.
+    /// The device's own settings above it: a keypad's pages and LCD
+    /// brightness, a dialpad's rotary speed, a G-series keyboard's gaming
+    /// cluster.
     fn setting_toolbar(
         &self,
         pane: PaneKind,
@@ -783,13 +832,17 @@ impl FunctionRowView {
             PaneKind::Dialpad(_) | PaneKind::DialpadPhoto(..) => {
                 Some(setting_bar().child(self.dial_speed_control(settings.dial_speed, window, cx)))
             }
-            PaneKind::Keypad | PaneKind::KeypadPhoto => Some(setting_bar().child(keypad_page_bar(
-                self.keypad_page,
-                last_page,
-                &view,
-                &pal,
-                cx,
-            ))),
+            PaneKind::Keypad | PaneKind::KeypadPhoto => Some(
+                setting_bar()
+                    .child(keypad_page_bar(
+                        self.keypad_page,
+                        last_page,
+                        &view,
+                        &pal,
+                        cx,
+                    ))
+                    .child(self.key_brightness_control(settings.key_brightness, window, cx)),
+            ),
             PaneKind::Keyboard => gaming.map(|gaming| {
                 setting_bar().child(gaming_bar(gaming, self.g_profile, &view, &pal, cx))
             }),
