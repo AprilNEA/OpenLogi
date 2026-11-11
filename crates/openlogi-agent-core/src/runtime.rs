@@ -82,6 +82,13 @@ pub enum ActionRequest {
         /// Which way.
         turn: PageTurn,
     },
+    /// Activate or end a live keypad key.
+    ActivateLiveKey {
+        /// The pressing device.
+        device_key: Option<String>,
+        /// The key.
+        slot: ButtonId,
+    },
     /// A DPI or pointer-speed write an action made to the mouse at `route`
     /// settled. The mouse broadcasts nothing for a host write, so the agent
     /// announces it and clients read the mouse's settings again instead of
@@ -203,6 +210,10 @@ fn agent_request(action: &Action, device_key: Option<&str>) -> Option<ActionRequ
     let device_key = device_key.map(str::to_owned);
     match action {
         Action::ShowActionsRing => Some(ActionRequest::ShowActionsRing { device_key }),
+        Action::ActivateLiveKey(slot) => Some(ActionRequest::ActivateLiveKey {
+            device_key,
+            slot: *slot,
+        }),
         Action::PreviousKeypadPage => Some(ActionRequest::TurnKeypadPage {
             device_key,
             turn: PageTurn::Previous,

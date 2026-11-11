@@ -322,6 +322,7 @@ macro_rules! derive_action_icon {
                     | Action::HoldModifier(_) => Self::Keyboard,
                     Action::RunAppleScript(_) | Action::RunShellCommand(_) => Self::Terminal,
                     Action::OpenApplication(_) => Self::Applications,
+                    Action::ActivateLiveKey(_) => Self::Grid,
                 }
             }
         }

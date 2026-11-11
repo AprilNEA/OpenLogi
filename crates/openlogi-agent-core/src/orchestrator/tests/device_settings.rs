@@ -1508,3 +1508,48 @@ fn page_turns_need_pages_and_a_removed_page_falls_back_to_the_first() {
     orch.config.set_keypad_pages("keypad", page(1));
     assert_eq!(orch.keypad_page("keypad"), page(1));
 }
+
+/// A live key's press activates it and runs its press action; the page keys
+/// then adjust it instead of turning the page, and a second press ends it.
+#[test]
+fn a_live_key_takes_over_the_page_keys_while_active() {
+    use crate::runtime::PageTurn;
+    use openlogi_core::binding::{GridSlot, KeypadPage};
+    use openlogi_core::config::{LiveKey, LiveSource};
+    let slot = ButtonId::Grid(GridSlot {
+        page: KeypadPage::FIRST,
+        key: GridKey::Middle,
+    });
+    let mut volume = LiveKey::new(LiveSource::Volume);
+    volume.on_press = Some(Action::MuteVolume);
+    let mut config = Config::default();
+    config
+        .devices
+        .entry("pad".into())
+        .or_default()
+        .live_keys
+        .insert(slot, volume);
+    let mut orch = orchestrator(config);
+    let now = std::time::Instant::now();
+
+    assert_eq!(orch.turn_keypad_page(Some("pad"), PageTurn::Next), None);
+    assert_eq!(
+        orch.press_live_key(Some("pad"), slot, now),
+        Some(Action::MuteVolume)
+    );
+    assert_eq!(
+        orch.turn_keypad_page(Some("pad"), PageTurn::Next),
+        Some(Action::VolumeUp)
+    );
+    assert_eq!(
+        orch.turn_keypad_page(Some("pad"), PageTurn::Previous),
+        Some(Action::VolumeDown)
+    );
+    assert_eq!(orch.press_live_key(Some("pad"), slot, now), None);
+    assert_eq!(orch.turn_keypad_page(Some("pad"), PageTurn::Next), None);
+    assert_eq!(
+        orch.press_live_key(Some("pad"), ButtonId::Back, now),
+        None,
+        "no live key there"
+    );
+}

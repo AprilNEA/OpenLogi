@@ -411,6 +411,9 @@ pub struct DeviceConfig {
     /// icon, white on black.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub key_faces: BTreeMap<ButtonId, KeyFaceStyle>,
+    /// Keypad keys that show a live value, by (page-qualified) grid key.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub live_keys: BTreeMap<ButtonId, super::LiveKey>,
     /// Who runs a G-series keyboard's G1–G5. The keyboard's onboard actions
     /// are the default and are omitted from `config.toml`.
     #[serde(default, skip_serializing_if = "is_default_g_key_owner")]
@@ -536,6 +539,7 @@ impl Default for DeviceConfig {
             keypad_pages: KeypadPage::FIRST,
             key_display_brightness: None,
             key_faces: BTreeMap::new(),
+            live_keys: BTreeMap::new(),
             g_key_owner: GKeyOwner::Keyboard,
             gaming_key_mode: GamingKeyMode::Profiles,
             g_key_profile_names: BTreeMap::new(),
@@ -714,6 +718,8 @@ struct RawDeviceConfig {
     #[serde(default)]
     key_faces: BTreeMap<ButtonId, KeyFaceStyle>,
     #[serde(default)]
+    live_keys: BTreeMap<ButtonId, super::LiveKey>,
+    #[serde(default)]
     g_key_owner: GKeyOwner,
     #[serde(default)]
     gaming_key_mode: GamingKeyMode,
@@ -792,6 +798,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             keypad_pages: raw.keypad_pages,
             key_display_brightness: raw.key_display_brightness,
             key_faces: raw.key_faces,
+            live_keys: raw.live_keys,
             g_key_owner: raw.g_key_owner,
             gaming_key_mode: raw.gaming_key_mode,
             g_key_profile_names: raw.g_key_profile_names,

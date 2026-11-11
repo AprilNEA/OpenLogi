@@ -70,6 +70,8 @@ pub(crate) async fn bootstrap(config: Config) -> Option<Core> {
     // the IPC server (which the GUI polls); the janitor turns it back off.
     let event_monitor = Arc::new(EventMonitor::default());
     tokio::spawn(Arc::clone(&event_monitor).run_idle_janitor());
+    // Keypad keys that show a live value.
+    tokio::spawn(crate::live_keys::watch(Arc::clone(&orchestrator)));
 
     // Pairing runs in the agent (it owns device I/O); the GUI drives it over IPC.
     let pairing = Arc::new(pairing::PairingManager::new(

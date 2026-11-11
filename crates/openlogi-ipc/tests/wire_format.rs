@@ -512,6 +512,20 @@ fn hold_modifier_bits() {
     assert_wire(&Action::HoldModifier(ctrl_shift), "3d06");
 }
 
+/// A live keypad key's activation crosses the wire as its appended variant
+/// index and the key's persisted name.
+#[test]
+fn activate_live_key() {
+    use openlogi_core::binding::Action;
+    assert_wire(
+        &Action::ActivateLiveKey(ButtonId::Grid(GridSlot {
+            page: KeypadPage::new(2).expect("page 2 exists"),
+            key: GridKey::Middle,
+        })),
+        "3e1070616765323a677269644d6964646c65",
+    );
+}
+
 /// The agent identity is frozen: a helper from any build has to be able to
 /// decode it, so both halves stay plain `u64`s and this golden never changes.
 #[test]

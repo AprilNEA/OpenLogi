@@ -16,14 +16,14 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{
-    ActionRingIcon, Binding, ButtonId, GamingButtons, GamingLayout, GridKey, GridSlot, KeypadPage,
-    ModeKey, Rotary,
+    Action, ActionRingIcon, Binding, ButtonId, Cid, GamingButtons, GamingLayout, GridKey, GridSlot,
+    KeypadPage, ModeKey, Rotary,
 };
 use openlogi_core::bindings::{bindings_on_page, button_bindings_for, oshook_gestures_for};
 use openlogi_core::color::Rgb;
 use openlogi_core::config::{
     AppSettings, Config, ConfigRevision, GKeyOwner, GamingKeyMode, KeyFaceStyle, KeySymbol,
-    LightSettings, MouseProfileTarget, canonical_device_key,
+    LightSettings, LiveKey, LiveSource, MouseProfileTarget, canonical_device_key,
 };
 use openlogi_core::device::{
     BatteryInfo, Capabilities, ChangedOnLight, DeviceInventory, DeviceKind, LightCapabilities,
@@ -754,6 +754,8 @@ pub struct Orchestrator {
     observable: Arc<ObservableState>,
     /// Which devices' low batteries have been announced.
     low_battery: LowBatteryWatch,
+    /// The live keypad keys' values and the active one.
+    live: crate::live_keys::LiveKeys,
 }
 
 /// See [`Orchestrator::inventory`] (the field) — the agent-side superset of
@@ -959,6 +961,7 @@ impl Orchestrator {
             shared,
             observable,
             low_battery: LowBatteryWatch::default(),
+            live: crate::live_keys::LiveKeys::default(),
         };
         orch.rebuild();
         orch.observable
@@ -1210,12 +1213,118 @@ impl Orchestrator {
     /// `config_key`'s stored bindings for the foreground app, across every
     /// keypad page.
     fn foreground_key_bindings(&self, config_key: &str) -> BTreeMap<ButtonId, Binding> {
-        button_bindings_for(
+        let mut bindings = button_bindings_for(
             &self.config,
             Some(config_key),
             self.current_app.as_deref(),
             None,
-        )
+        );
+        // A live key is pressed to activate it, and the keys under the grid
+        // must reach the agent so they can adjust it.
+        if let Some(device) = self
+            .config
+            .devices
+            .get(config_key)
+            .filter(|device| !device.live_keys.is_empty())
+        {
+            for slot in device.live_keys.keys() {
+                bindings.insert(*slot, Binding::Single(Action::ActivateLiveKey(*slot)));
+            }
+            for (control, turn) in [
+                (Cid::LEFT_PAGING, Action::PreviousKeypadPage),
+                (Cid::RIGHT_PAGING, Action::NextKeypadPage),
+            ] {
+                bindings
+                    .entry(ButtonId::Control(control))
+                    .or_insert(Binding::Single(turn));
+            }
+        }
+        bindings
+    }
+
+    /// The live keys of the online, enabled devices with a key display.
+    fn configured_live_keys(&self) -> Vec<(crate::live_keys::LiveKeyId, LiveKey)> {
+        self.devices
+            .iter()
+            .filter(|dev| dev.online && self.config.device_enabled(&dev.config_key))
+            .filter(|dev| {
+                dev.route
+                    .as_ref()
+                    .is_some_and(|route| key_display_for(route).is_some())
+            })
+            .filter_map(|dev| {
+                self.config
+                    .devices
+                    .get(dev.config_key.as_str())
+                    .map(|config| (dev, config))
+            })
+            .flat_map(|(dev, config)| {
+                config
+                    .live_keys
+                    .iter()
+                    .map(|(slot, key)| ((dev.config_key.clone(), *slot), key.clone()))
+            })
+            .collect()
+    }
+
+    /// The live-key sources due for a read at `now`, with what each needs.
+    pub fn live_key_reads(&mut self, now: std::time::Instant) -> Vec<crate::live_keys::LiveRead> {
+        let keys = self.configured_live_keys();
+        let due = self
+            .live
+            .due(keys.iter().map(|(id, key)| (id.clone(), key)), now);
+        due.into_iter()
+            .map(|(id, source)| {
+                let battery = match &source {
+                    LiveSource::Battery(device) => self
+                        .devices
+                        .iter()
+                        .find(|dev| dev.config_key == *device)
+                        .and_then(|dev| dev.battery.clone()),
+                    _ => None,
+                };
+                crate::live_keys::LiveRead {
+                    id,
+                    source,
+                    battery,
+                }
+            })
+            .collect()
+    }
+
+    /// Take in read live values, end an active key whose time is up, and
+    /// repaint when anything shown changed.
+    pub fn set_live_values(
+        &mut self,
+        values: Vec<(crate::live_keys::LiveKeyId, crate::live_keys::LiveValue)>,
+        now: std::time::Instant,
+    ) {
+        let changed = self.live.set_values(values);
+        let expired = self.live.expire(now);
+        if changed || expired {
+            self.publish_device_runtime();
+        }
+    }
+
+    /// A press of the live key `slot` on `device_key`: activate or end it.
+    /// Answers the action to run.
+    pub fn press_live_key(
+        &mut self,
+        device_key: Option<&str>,
+        slot: ButtonId,
+        now: std::time::Instant,
+    ) -> Option<Action> {
+        let key = device_key?.to_owned();
+        let live = self
+            .config
+            .devices
+            .get(key.as_str())?
+            .live_keys
+            .get(&slot)?
+            .clone();
+        let action = self.live.press((key, slot), &live, now);
+        self.publish_device_runtime();
+        action
     }
 
     /// The part of `stored` that `config_key`'s keys act on now: its current
@@ -1241,11 +1350,33 @@ impl Orchestrator {
     /// Move `device_key`'s keypad one page in `turn`'s direction, wrapping
     /// within its configured pages, and republish what its keys dispatch and
     /// show. A device with a single page (or no key) has nothing to turn.
-    pub fn turn_keypad_page(&mut self, device_key: Option<&str>, turn: PageTurn) {
+    ///
+    /// While one of the keypad's live keys is active, the page keys adjust it
+    /// instead: the answer is the action to run then.
+    pub fn turn_keypad_page(&mut self, device_key: Option<&str>, turn: PageTurn) -> Option<Action> {
         let Some(key) = device_key else {
             debug!("keypad page turn without a device — ignored");
-            return;
+            return None;
         };
+        let live_keys = self
+            .config
+            .devices
+            .get(key)
+            .map(|device| device.live_keys.clone())
+            .unwrap_or_default();
+        if let crate::live_keys::Paging::Adjust(action) = self.live.paging(
+            key,
+            turn == PageTurn::Next,
+            |slot| live_keys.get(slot).cloned(),
+            std::time::Instant::now(),
+        ) {
+            return action;
+        }
+        self.turn_page(key, turn);
+        None
+    }
+
+    fn turn_page(&mut self, key: &str, turn: PageTurn) {
         let last = self.config.keypad_pages(key);
         if last == KeypadPage::FIRST {
             debug!(key, "keypad page turn on a single-page device — ignored");
@@ -1347,7 +1478,18 @@ impl Orchestrator {
                     .map(|key| {
                         let slot = ButtonId::Grid(GridSlot { page, key });
                         let style = self.config.key_face_style(&dev.config_key, slot);
-                        (key, key_face(bindings.get(&ButtonId::grid(key)), style))
+                        let live = self
+                            .config
+                            .devices
+                            .get(dev.config_key.as_str())
+                            .is_some_and(|device| device.live_keys.contains_key(&slot));
+                        let face = if live {
+                            let id = (dev.config_key.clone(), slot);
+                            live_face(style, self.live.value(&id), self.live.is_active(&id))
+                        } else {
+                            key_face(bindings.get(&ButtonId::grid(key)), style)
+                        };
+                        (key, face)
                     })
                     .collect();
                 let generation = self.panel_generations.get(&route).copied().unwrap_or(0);
@@ -2675,6 +2817,34 @@ fn key_face(binding: Option<&Binding>, style: Option<&KeyFaceStyle>) -> KeyFace 
         symbol: style.symbol.as_ref().and_then(KeySymbol::normalized),
         progress: None,
         highlight: false,
+    }))
+}
+
+/// A live key's face: its value over the user's colours and symbol, a bar for
+/// a percentage, and a frame while it is the active key.
+fn live_face(
+    style: Option<&KeyFaceStyle>,
+    value: Option<&crate::live_keys::LiveValue>,
+    active: bool,
+) -> KeyFace {
+    let accent = Rgb::new(0x6d, 0x5d, 0xfc);
+    KeyFace::Styled(Arc::new(StyledFace {
+        icon: None,
+        label: Some(value.map_or_else(|| "…".to_owned(), |value| value.label.clone())),
+        background: style
+            .and_then(|style| style.background)
+            .unwrap_or(Rgb::new(0x18, 0x1a, 0x22)),
+        foreground: style.and_then(|style| style.color).unwrap_or(Rgb::WHITE),
+        icon_color: style
+            .and_then(|style| style.icon_color.or(style.color))
+            .unwrap_or(accent),
+        gradient: style.and_then(|style| style.gradient),
+        image: None,
+        symbol: style
+            .and_then(|style| style.symbol.as_ref())
+            .and_then(KeySymbol::normalized),
+        progress: value.and_then(|value| value.progress),
+        highlight: active,
     }))
 }
 

@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::application_target::ApplicationTarget;
+use super::button::ButtonId;
 use super::category::Category;
 use super::key_combo::KeyCombo;
 use super::modifiers::BareModifiers;
@@ -250,6 +251,10 @@ pub enum Action {
     /// on its own Alt focuses the menu bar on Windows and Super opens the
     /// Start menu or the desktop's launcher.
     HoldModifier(BareModifiers),
+    /// Activate or end the live keypad key at this grid key (see
+    /// [`LiveKey`](crate::config::LiveKey)). Bound by the agent to a live
+    /// key, never picked by the user. Appended — variant order is wire format.
+    ActivateLiveKey(ButtonId),
 }
 
 /// Which of a held chord's keys stay down for the lifetime of the press.
@@ -406,6 +411,7 @@ macro_rules! derive_action_core {
                         None => format!("Tap {}", combo.rendered_key()),
                     },
                     Action::HoldModifier(mods) => format!("Hold {}", mods.rendered_label()),
+                    Action::ActivateLiveKey(_) => "Live Key".into(),
                 }
             }
 
@@ -427,7 +433,8 @@ macro_rules! derive_action_core {
                     | Action::OpenApplication(_)
                     | Action::HoldShortcut(_)
                     | Action::TapKeyHoldingModifiers(_)
-                    | Action::HoldModifier(_) => None,
+                    | Action::HoldModifier(_)
+                    | Action::ActivateLiveKey(_) => None,
                 }
             }
 
@@ -460,7 +467,7 @@ macro_rules! derive_action_core {
                     | Action::TapKeyHoldingModifiers(_)
                     | Action::HoldModifier(_) => Category::Editing,
                     Action::SetDpiPreset(_) => Category::Dpi,
-                    Action::OpenApplication(_) => Category::System,
+                    Action::OpenApplication(_) | Action::ActivateLiveKey(_) => Category::System,
                 }
             }
 

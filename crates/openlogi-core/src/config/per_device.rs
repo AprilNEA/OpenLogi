@@ -675,6 +675,7 @@ impl Config {
         device.bindings.retain(|button, _| kept(button));
         device.disabled_gestures.retain(|button, _| kept(button));
         device.key_faces.retain(|button, _| kept(button));
+        device.live_keys.retain(|button, _| kept(button));
         for overlay in device.per_app_bindings.values_mut() {
             overlay.retain(|button, _| kept(button));
         }

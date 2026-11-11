@@ -32,6 +32,9 @@ resvg = { version = "0.46", default-features = false, features = ["text", "syste
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+# Live keypad keys: the clock source, and a command's JSON value.
+chrono = { version = "0.4.44", default-features = false, features = ["clock"] }
+serde_json = { workspace = true }
 # The machine name Flow peers show for this computer.
 gethostname = "1.1.0"
 

@@ -194,6 +194,8 @@ pub use succession::Identity;
 ///      `DialLeft`/`DialRight`/`RollerUp`/`RollerDown` names — the MX
 ///      Creative Dialpad's dial and roller. `HidppOperation::WriteKeyBrightness`
 ///      appended — the MX Creative Keypad's LCD brightness.
+///      `Action::ActivateLiveKey` appended — a keypad key that shows a live
+///      value.
 pub const PROTOCOL_VERSION: u32 = 46;
 
 /// Environment variable through which the agent hands a supervised helper the

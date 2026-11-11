@@ -87,7 +87,9 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
         Action::NextTab | Action::NextKeypadPage => "action-icons/chevron-right.svg",
         Action::PrevTab | Action::PreviousKeypadPage => "action-icons/chevron-left.svg",
         Action::ReloadPage => "action-icons/rotate-cw.svg",
-        Action::MissionControl | Action::ShowActionsRing => "action-icons/layout-grid.svg",
+        Action::MissionControl | Action::ShowActionsRing | Action::ActivateLiveKey(_) => {
+            "action-icons/layout-grid.svg"
+        }
         Action::AppExpose | Action::GShift => "action-icons/layers.svg",
         Action::PreviousDesktop => "action-icons/square-arrow-left.svg",
         Action::NextDesktop => "action-icons/square-arrow-right.svg",
