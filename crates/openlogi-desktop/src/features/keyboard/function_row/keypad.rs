@@ -18,7 +18,8 @@ use gpui_kit::component::{
     Disableable as _, Icon, IconName, Selectable as _, Sizable as _, WindowExt as _, h_flex, v_flex,
 };
 use openlogi_core::binding::{Cid, GridKey, KeypadPage};
-use openlogi_core::config::KeyFaceStyle;
+use openlogi_core::config::{KeyFaceStyle, KeySymbol};
+use openlogi_ui::lucide;
 
 use super::key_colors::{DEFAULT_COLOR, gradient_fill, icon_color};
 use super::key_points::{
@@ -395,9 +396,16 @@ fn lcd_face(
     let foreground: gpui::Hsla = style
         .and_then(|style| style.color)
         .map_or_else(|| device_highlight(1.), |color| rgb(color.packed()).into());
-    // The icon has its own colour, else the text's.
+    // The icon or Lucide symbol has its own colour, else the text's.
     let icon_foreground: gpui::Hsla = rgb(style.map_or(DEFAULT_COLOR, icon_color).packed()).into();
-    let glyph_face = icon.filter(|_| style.is_none_or(|style| style.icon));
+    // A chosen symbol takes the action icon's place, whatever `icon` says.
+    let glyph_face = match style.and_then(|style| style.symbol.as_ref()) {
+        Some(KeySymbol::Lucide(name)) => Some(FaceGlyph::Svg(lucide::asset_path(name).into())),
+        Some(KeySymbol::Emoji(text)) => Some(FaceGlyph::Emoji(text.clone().into())),
+        None => icon
+            .filter(|_| style.is_none_or(|style| style.icon))
+            .map(|icon| FaceGlyph::Svg(icon.into())),
+    };
     let label = style
         .and_then(KeyFaceStyle::trimmed_label)
         .map(|label| SharedString::from(label.to_owned()));
@@ -437,14 +445,21 @@ fn lcd_face(
         });
     let empty = glyph_face.is_none() && label.is_none();
     let drawn = glyph_face.is_some();
-    face.when_some(glyph_face, |face, path| {
-        face.child(
-            svg()
+    face.when_some(glyph_face, |face, glyph_face| {
+        face.child(match glyph_face {
+            FaceGlyph::Svg(path) => svg()
                 .path(path)
                 .size(px(glyph))
                 .flex_none()
-                .text_color(icon_foreground),
-        )
+                .text_color(icon_foreground)
+                .into_any_element(),
+            // An emoji keeps its own colours.
+            FaceGlyph::Emoji(text) => div()
+                .text_size(px(glyph * 0.85))
+                .line_height(px(glyph))
+                .child(text)
+                .into_any_element(),
+        })
     })
     .map(|face| match label {
         Some(label) => face.children(
@@ -462,6 +477,13 @@ fn lcd_face(
                 .text_color(foreground.opacity(0.45)),
         )
     })
+}
+
+/// What an LCD face draws above its label: an SVG (the action's icon or a
+/// Lucide symbol, tinted with the face's colour) or an emoji.
+enum FaceGlyph {
+    Svg(SharedString),
+    Emoji(SharedString),
 }
 
 /// The overlay render size: the portrait keypad render as tall as the

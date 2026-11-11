@@ -120,6 +120,52 @@ fn the_appearance_tab_styles_the_key_on_the_edited_page(cx: &mut gpui::TestAppCo
     cx.run_until_parked();
 }
 
+/// A key whose face already carries a Lucide icon opens its Symbol section
+/// on the icon picker, the grid listing the catalog.
+#[gpui::test]
+fn a_key_with_a_lucide_symbol_opens_the_icon_picker(cx: &mut gpui::TestAppContext) {
+    use gpui::size;
+    use openlogi_core::config::KeySymbol;
+
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    let (mut state, _commands) = crate::state::tests::keypad_pages::keypad_state();
+    let top_left = GridSlot {
+        page: KeypadPage::FIRST,
+        key: GridKey::TopLeft,
+    };
+    let _ = state.commit_key_face(
+        top_left,
+        KeyFaceStyle {
+            symbol: Some(KeySymbol::Lucide("camera".into())),
+            ..KeyFaceStyle::default()
+        },
+    );
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        cx.set_reduce_motion(true);
+        let state = cx.new(|_| state);
+        AppState::set_global(state, cx);
+    });
+    let (view, cx) = cx.add_window_view(|_, cx| FunctionRowView::new(cx));
+    cx.simulate_resize(size(px(1400.), px(1000.)));
+    view.update(cx, |view, cx| {
+        view.select_key(Some(0), cx);
+        view.set_panel_tab(KeyPanelTab::Appearance, cx);
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    assert!(
+        cx.debug_bounds("key-symbol-grid").is_some(),
+        "the icon grid shows"
+    );
+    assert!(cx.debug_bounds("key-symbol-emoji-presets").is_none());
+
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}
+
 /// A key with a gradient background opens its background section on the
 /// gradient: the presets and both ends' choosers show.
 #[gpui::test]

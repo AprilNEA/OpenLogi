@@ -1,6 +1,6 @@
-//! The appearance of a keypad's LCD key: the panel tab that edits the label,
-//! colours (see [`super::key_colors`]), picture, and icon the agent paints on
-//! the key, and the small pure rules behind it.
+//! The appearance of a keypad's LCD key: the panel tab that edits the
+//! symbol (see [`super::key_symbol`]), label, colours, picture, and icon the
+//! agent paints on the key, and the small pure rules behind it.
 //!
 //! Each face belongs to one grid key on one binding page, like the key's
 //! binding, and is saved through [`AppState::commit_key_face`].
@@ -16,10 +16,11 @@ use gpui_kit::component::button::{Button, ButtonGroup, ButtonVariants as _};
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::{Disableable as _, Selectable as _, Sizable as _, h_flex, v_flex};
 use openlogi_core::binding::GridSlot;
-use openlogi_core::config::KeyFaceStyle;
+use openlogi_core::config::{KeyFaceStyle, KeySymbol};
 
 use super::FunctionRowView;
 use super::key_colors::{ColorField, background_section, text_and_icon_colors};
+use super::key_symbol::{SymbolMode, symbol_section};
 use crate::features::binding_editor::editor_section;
 use crate::state::AppState;
 use crate::ui::components::{Toggle, control_input};
@@ -38,12 +39,18 @@ pub(super) enum KeyPanelTab {
     Appearance,
 }
 
-/// The inputs of the grid key being styled: the label's two lines and the
-/// custom colours. Each is saved when its input loses focus or Enter is
-/// pressed in it, not per keystroke: every save repaints the key.
+/// The inputs of the grid key being styled: the label's two lines, the icon
+/// search, the emoji field, and the custom colours. The label, the emoji and
+/// a colour are saved when their input loses focus or Enter is pressed in
+/// it, not per keystroke: every save repaints the key.
 pub(super) struct FaceDraft {
     pub(super) slot: GridSlot,
     lines: [Entity<InputState>; 2],
+    /// The Lucide search query; the grid follows it as it is typed.
+    pub(super) search: Entity<InputState>,
+    pub(super) emoji: Entity<InputState>,
+    /// Which kind of symbol the Symbol section is choosing.
+    pub(super) symbol_mode: SymbolMode,
     /// Each colour chooser's custom hex input, in [`ColorField::ALL`] order.
     pub(super) hex: [Entity<InputState>; 5],
     _subscriptions: Vec<Subscription>,
@@ -118,7 +125,31 @@ impl FunctionRowView {
         };
         let (first, first_sub) = line(first, tr!("keyboard.key_label_first_line"), window, cx);
         let (second, second_sub) = line(second, tr!("keyboard.key_label_second_line"), window, cx);
-        let mut subscriptions = vec![first_sub, second_sub];
+        let search =
+            cx.new(|cx| InputState::new(window, cx).placeholder(tr!("keyboard.key_symbol_search")));
+        let search_sub = cx.subscribe(&search, |_, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
+        });
+        let emoji_seed = match &style.symbol {
+            Some(KeySymbol::Emoji(text)) => text.clone(),
+            Some(KeySymbol::Lucide(_)) | None => String::new(),
+        };
+        let emoji = cx.new(|cx| {
+            let mut input = InputState::new(window, cx)
+                .placeholder(tr!("keyboard.key_symbol_emoji_placeholder"));
+            if !emoji_seed.is_empty() {
+                input.set_value(emoji_seed, window, cx);
+            }
+            input
+        });
+        let emoji_sub = cx.subscribe(&emoji, |view, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                view.commit_face_emoji(cx);
+            }
+        });
+        let mut subscriptions = vec![first_sub, second_sub, search_sub, emoji_sub];
         let hex = ColorField::ALL.map(|field| {
             let input = cx.new(|cx| {
                 InputState::new(window, cx).placeholder(tr!("keyboard.key_color_custom"))
@@ -136,6 +167,9 @@ impl FunctionRowView {
         self.face = Some(FaceDraft {
             slot,
             lines: [first, second],
+            search,
+            emoji,
+            symbol_mode: SymbolMode::of(style.symbol.as_ref()),
             hex,
             _subscriptions: subscriptions,
         });
@@ -184,7 +218,7 @@ impl FunctionRowView {
     }
 
     /// The Appearance tab for grid key `slot`, scrolling within the panel:
-    /// with every colour chooser it is taller than the window allows.
+    /// with the icon grid open it is taller than the window allows.
     pub(super) fn appearance_panel(
         &self,
         slot: GridSlot,
@@ -196,6 +230,7 @@ impl FunctionRowView {
             .map(|state| state.current_key_face(slot))
             .unwrap_or_default();
         let draft = self.face.as_ref().filter(|draft| draft.slot == slot);
+        let symbol = draft.map(|draft| symbol_section(draft, style.symbol.as_ref(), view, pal, cx));
         let label = draft.map(|draft| {
             let [first, second] = &draft.lines;
             v_flex()
@@ -211,6 +246,9 @@ impl FunctionRowView {
             .gap_1()
             .px_1()
             .pb_1()
+            .child(editor_section(tr!("keyboard.key_symbol"), pal))
+            .children(symbol)
+            // Whether the action icon shows sits with the symbol that replaces it.
             .child(icon_row(slot, icon, pal))
             .child(editor_section(tr!("keyboard.key_label"), pal))
             .children(label.map(|label| div().px_2().child(label)))

@@ -77,6 +77,7 @@ mod gaming;
 mod key_colors;
 mod key_face;
 mod key_points;
+mod key_symbol;
 mod keypad;
 
 use callout_layout::{CalloutLayout, CardRect, callout_layout, side_bands_width};
