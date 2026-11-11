@@ -1,5 +1,7 @@
 //! Resolve captured HID++ inputs against the active per-device plan.
 
+#[cfg(any(target_os = "macos", test))]
+mod pinch;
 mod wheel;
 
 use std::collections::{HashMap, HashSet};
@@ -11,8 +13,12 @@ use openlogi_core::config::ThumbwheelSensitivity;
 use openlogi_core::scroll::ScrollDelta;
 use openlogi_hid::CapturedInput;
 use openlogi_hid::thumbwheel::WheelResolution;
+#[cfg(target_os = "macos")]
+use openlogi_inject::PinchGesture;
 use tracing::debug;
 
+#[cfg(target_os = "macos")]
+use self::pinch::PinchRamp;
 use self::wheel::{ScrollScale, WheelAccumulators, WheelOutput, WheelRotation};
 use super::GestureOutputs;
 use crate::capture_plan::DispatchPlan;
@@ -104,6 +110,15 @@ pub(super) struct InputDispatcher {
     wheels: SessionWheels,
     held_presses: HeldPresses,
     shift_held: HeldShift,
+    #[cfg(target_os = "macos")]
+    pinch: Option<ActivePinch>,
+}
+
+#[cfg(target_os = "macos")]
+struct ActivePinch {
+    owner: HidppSessionId,
+    gesture: PinchGesture,
+    ramp: PinchRamp,
 }
 
 impl InputDispatcher {
@@ -115,6 +130,8 @@ impl InputDispatcher {
             wheels: SessionWheels::default(),
             held_presses: HeldPresses::default(),
             shift_held: HeldShift::default(),
+            #[cfg(target_os = "macos")]
+            pinch: None,
         }
     }
 
@@ -126,6 +143,8 @@ impl InputDispatcher {
 
     /// Cancel every input lifecycle retained for one capture session.
     pub(super) fn cancel_session(&mut self, session: &HidppSessionId) {
+        #[cfg(target_os = "macos")]
+        self.end_pinch(session);
         self.outputs.cancel_session(session);
         self.wheels.cancel_session(session);
         self.held_presses.cancel_session(session);
@@ -228,6 +247,11 @@ impl InputDispatcher {
                     debug!(key, %button, ?direction, "gesture with no binding — ignored");
                 }
             }
+            CapturedInput::ButtonDown(ButtonId::DpiToggle)
+                if matches!(
+                    plan.bindings.get(&ButtonId::DpiToggle),
+                    Some(Binding::Single(Action::PinchZoom))
+                ) => {}
             CapturedInput::ButtonDown(button) => {
                 if self.start_gshift(session, plan, button) {
                     return;
@@ -257,12 +281,22 @@ impl InputDispatcher {
                 }
             }
             CapturedInput::ButtonUp(button) => {
+                #[cfg(target_os = "macos")]
+                if button == ButtonId::DpiToggle {
+                    self.end_pinch(session);
+                }
                 if self.end_gshift(session, button) {
                     return;
                 }
                 self.outputs.actions.try_hidpp_button_up(session, button);
                 self.held_presses.end(session, button);
             }
+            #[cfg(target_os = "macos")]
+            CapturedInput::PinchMotion { dy, captured_at } => {
+                self.dispatch_pinch(session, dy, captured_at);
+            }
+            #[cfg(not(target_os = "macos"))]
+            CapturedInput::PinchMotion { .. } => {}
             CapturedInput::ButtonPulse(button) => self.dispatch_button_pulse(session, plan, button),
             CapturedInput::Scroll {
                 increments,
@@ -288,6 +322,36 @@ impl InputDispatcher {
             CapturedInput::ButtonDiverted(_) => {
                 unreachable!("the session's forwarder records diverted buttons instead")
             }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn dispatch_pinch(&mut self, session: &HidppSessionId, dy: i16, captured_at: Instant) {
+        match &mut self.pinch {
+            Some(active) if &active.owner == session => {
+                active.gesture.update(active.ramp.advance(dy, captured_at));
+            }
+            Some(_) => {}
+            None => {
+                let mut ramp = PinchRamp::default();
+                let amount = ramp.advance(dy, captured_at);
+                self.pinch = PinchGesture::begin(amount).map(|gesture| ActivePinch {
+                    owner: session.clone(),
+                    gesture,
+                    ramp,
+                });
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn end_pinch(&mut self, session: &HidppSessionId) {
+        if self
+            .pinch
+            .as_ref()
+            .is_some_and(|active| &active.owner == session)
+        {
+            self.pinch = None;
         }
     }
 

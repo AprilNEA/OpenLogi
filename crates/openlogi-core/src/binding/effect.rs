@@ -285,7 +285,8 @@ impl Action {
             | Action::PreviousKeypadPage
             | Action::NextKeypadPage
             | Action::OpenApplication(_)
-            | Action::HoldModifier(_) => Effect::AgentSide,
+            | Action::HoldModifier(_)
+            | Action::PinchZoom => Effect::AgentSide,
 
             Action::ScrollUp => Effect::Scroll { dx: 0, dy: 1 },
             Action::ScrollDown => Effect::Scroll { dx: 0, dy: -1 },

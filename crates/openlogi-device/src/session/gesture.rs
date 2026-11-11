@@ -30,6 +30,7 @@ mod spy;
 
 use std::num::NonZeroU8;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Instant;
 
 use hidpp::feature::hires_wheel::{self, HiResWheelEvent};
 use hidpp::protocol::v20;
@@ -65,6 +66,13 @@ pub enum CapturedInput {
     /// tagged with the source control so dispatch resolves it against that
     /// button's own direction map.
     Gesture(ButtonId, GestureDirection),
+    /// Vertical raw motion from a DPI/ModeShift button in continuous pinch mode.
+    PinchMotion {
+        /// Signed vertical travel in raw device counts.
+        dy: i16,
+        /// Capture time, independent of the dispatch queue's delivery cadence.
+        captured_at: Instant,
+    },
     /// A diverted button's physical down edge.
     ButtonDown(ButtonId),
     /// Thumb-wheel rotation to re-synthesise on the configured scroll axis.
@@ -190,6 +198,8 @@ pub struct CaptureSpec {
     /// Standard-button CIDs requested as raw-XY gesture sources. A control is
     /// armed only when its HID++ capability flags advertise raw-XY support.
     pub divert_gesture_buttons: Vec<(u16, ButtonId)>,
+    /// Forward the DPI/ModeShift button's raw movement for continuous pinch zoom.
+    pub pinch_zoom: bool,
     /// Buttons to divert as plain presses (no raw-XY): the
     /// [`DIVERTABLE_STANDARD_BUTTONS`] and non-gesturing
     /// [`GESTURE_SOURCE_BUTTONS`] whose binding leaves the default.
@@ -246,7 +256,11 @@ pub async fn run_capture_session(
     {
         let _ = host.sink.send(CapturedInput::HostModeEntered);
     }
-    Ok(run_capture(shared, GestureCapture::new(armed), host).await)
+    let mut capture = GestureCapture::new(armed);
+    if spec.pinch_zoom {
+        capture.accum = Arc::new(Mutex::new(CaptureAccum::pinch_zoom()));
+    }
+    Ok(run_capture(shared, capture, host).await)
 }
 
 /// Gesture capture as [`run_capture`] drives it: the armed controls, and the
@@ -409,7 +423,10 @@ impl ArmedCapture for GestureCapture {
     }
 
     fn reset_input_state(&self) {
-        *self.accum.lock().unwrap_or_else(PoisonError::into_inner) = CaptureAccum::default();
+        self.accum
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .reset();
         // A power cycle ends any roll in progress; carrying it over would
         // swallow the first tap after the reconnect.
         *self

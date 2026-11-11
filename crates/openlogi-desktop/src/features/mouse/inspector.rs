@@ -43,6 +43,7 @@ pub(super) struct BindingInspectorData<'a> {
     pub layout: Option<&'a GamingLayout>,
     pub gesture_maps: &'a BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
     pub dpi_gestures: bool,
+    pub pinch_action: Option<&'a Action>,
     /// The device reports raw wheel on Back/Forward, so holding one can
     /// scroll sideways (`Capabilities::virtual_thumbwheel`).
     pub virtual_thumbwheel: bool,
@@ -187,6 +188,14 @@ fn empty_inspector(app: Option<&str>, override_count: usize, pal: Palette) -> gp
         .child(div().text_body().text_color(pal.text_muted).child(summary))
 }
 
+fn button_extra_actions(button: ButtonId, data: &BindingInspectorData<'_>) -> Vec<Action> {
+    let mut extra = data.extra_actions.to_vec();
+    if button == ButtonId::DpiToggle {
+        extra.extend(data.pinch_action.cloned());
+    }
+    extra
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "the button inspector lays out its rows inline"
@@ -292,12 +301,13 @@ fn button_inspector(
                 .map(|press_force| force_sensing_row(press_force, pal)),
         )
         .when(picker.open, |panel| {
+            let extra = button_extra_actions(button, data);
             panel.child(action_library(
                 "inspector-action",
                 Some(&action),
                 picker,
                 ActionOffer {
-                    extra: data.extra_actions,
+                    extra: &extra,
                     hidden: data.hidden_actions,
                 },
                 &on_pick,
@@ -432,6 +442,7 @@ fn inherited_gesture_inspector(
                 }),
         )
         .when(picker.open, |panel| {
+            let extra = button_extra_actions(button, data);
             panel.child(action_library(
                 "inspector-gesture-override",
                 None,
@@ -439,7 +450,7 @@ fn inherited_gesture_inspector(
                 // The pick replaces the gestures with a button binding,
                 // which gets a release, so held actions fit here.
                 ActionOffer {
-                    extra: data.extra_actions,
+                    extra: &extra,
                     hidden: data.hidden_actions,
                 },
                 &on_pick,
@@ -1087,6 +1098,7 @@ mod tests {
             layout: None,
             gesture_maps,
             dpi_gestures: false,
+            pinch_action: None,
             extra_actions: &[],
             hidden_actions: &[],
             virtual_thumbwheel: true,

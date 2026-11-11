@@ -250,6 +250,9 @@ pub enum Action {
     /// on its own Alt focuses the menu bar on Windows and Super opens the
     /// Start menu or the desktop's launcher.
     HoldModifier(BareModifiers),
+    /// Hold the DPI/ModeShift button and move the mouse vertically to send a
+    /// continuous macOS trackpad pinch. A press without motion has no effect.
+    PinchZoom,
 }
 
 /// Which of a held chord's keys stay down for the lifetime of the press.
@@ -370,6 +373,7 @@ macro_rules! for_each_unit_action {
             ScrollDown "Scroll Down" "actions.scroll_down" Scroll ArrowDown,
             HorizontalScrollLeft "Scroll Left" "actions.scroll_left" Scroll ScrollLeft,
             HorizontalScrollRight "Scroll Right" "actions.scroll_right" Scroll ScrollRight,
+            PinchZoom "Pinch Zoom" "actions.pinch_zoom" Scroll Search not_pickable,
         }
     };
 }
