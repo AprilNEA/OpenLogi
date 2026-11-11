@@ -1,9 +1,10 @@
 //! A keypad's LCD key faces: the label, colours, picture, and icon the user
-//! chose for one grid key on one binding page. The agent repaints the key
-//! when the reloaded config changes its face.
+//! chose for one grid key on one binding page, and the live value a key may
+//! show instead. The agent repaints the key when the reloaded config changes
+//! its face.
 
 use openlogi_core::binding::{ButtonId, GridSlot};
-use openlogi_core::config::KeyFaceStyle;
+use openlogi_core::config::{KeyFaceStyle, LiveKey};
 use tracing::debug;
 
 use super::events::StateEvents;
@@ -46,6 +47,63 @@ impl AppState {
         self.config
             .edit(|config| config.set_key_face_style(&key, button, style));
         self.persist_and_reload("key face");
+        events
+    }
+}
+
+impl AppState {
+    /// The live key at `slot` on the selected device, if it shows one.
+    #[must_use]
+    pub fn current_live_key(&self, slot: GridSlot) -> Option<LiveKey> {
+        let key = self.current_record()?.persistent_config_key()?;
+        self.config
+            .devices
+            .get(key)?
+            .live_keys
+            .get(&ButtonId::Grid(slot))
+            .cloned()
+    }
+
+    /// The devices a live key can show the battery of: each one with
+    /// persistent settings, as its config key and its name.
+    #[must_use]
+    pub fn live_battery_devices(&self) -> Vec<(String, String)> {
+        self.devices()
+            .iter()
+            .filter_map(|record| {
+                record
+                    .persistent_config_key()
+                    .map(|key| (key.to_owned(), record.display_name.clone()))
+            })
+            .collect()
+    }
+
+    /// Make `slot` on the selected device a live key showing `live`, or a
+    /// plain key again with `None`; the agent repaints it on reload.
+    pub fn commit_live_key(&mut self, slot: GridSlot, live: Option<LiveKey>) -> StateEvents {
+        let events = self.for_current_device(StateEvent::DeviceConfigChanged);
+        let Some(key) = self
+            .current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .map(str::to_owned)
+        else {
+            return events;
+        };
+        if self.current_live_key(slot) == live {
+            return events;
+        }
+        self.config.edit(|config| {
+            let live_keys = &mut config.devices.entry(key).or_default().live_keys;
+            match live {
+                Some(live) => {
+                    live_keys.insert(ButtonId::Grid(slot), live);
+                }
+                None => {
+                    live_keys.remove(&ButtonId::Grid(slot));
+                }
+            }
+        });
+        self.persist_and_reload("live key");
         events
     }
 }

@@ -1,5 +1,6 @@
 //! The MX Creative Console's per-device settings the Keys view shows: which
-//! device is the dialpad, and the keypad's LCD brightness and key faces.
+//! device is the dialpad, and the keypad's LCD brightness, key faces and
+//! live keys.
 
 use super::*;
 use crate::services::ipc::Command;
@@ -185,6 +186,46 @@ fn a_key_face_saves_per_key_and_page_and_resets_away() {
             .key_face_style(&record.config_key, ButtonId::Grid(slot)),
         None,
         "a default face leaves no entry behind"
+    );
+    assert_eq!(reloads(&mut receiver), 1);
+}
+
+/// A live key is saved per grid key: making it live has the agent reload,
+/// the same live key again writes nothing, and `None` makes it a plain key
+/// again without leaving an entry behind.
+#[test]
+fn a_live_key_saves_once_and_turns_back_into_a_plain_key() {
+    use openlogi_core::binding::{GridKey, GridSlot, KeypadPage};
+    use openlogi_core::config::{LiveKey, LiveSource};
+
+    let (mut state, mut receiver) = super::keypad_pages::keypad_state();
+    let record = state.current_record().unwrap().clone();
+    let slot = GridSlot {
+        page: KeypadPage::FIRST,
+        key: GridKey::Middle,
+    };
+    assert_eq!(state.current_live_key(slot), None);
+    let _ = reloads(&mut receiver);
+
+    let clock = LiveKey::new(LiveSource::Clock);
+    let events = state.commit_live_key(slot, Some(clock.clone()));
+    assert_eq!(
+        events,
+        [StateEvent::DeviceConfigChanged(record.device_key())]
+    );
+    assert_eq!(state.current_live_key(slot), Some(clock.clone()));
+    assert_eq!(reloads(&mut receiver), 1, "the agent starts the live key");
+
+    let _ = state.commit_live_key(slot, Some(clock));
+    assert_eq!(reloads(&mut receiver), 0, "an unchanged key writes nothing");
+
+    let _ = state.commit_live_key(slot, None);
+    assert_eq!(state.current_live_key(slot), None);
+    assert!(
+        state.config.devices[&record.config_key]
+            .live_keys
+            .is_empty(),
+        "a plain key leaves no entry behind"
     );
     assert_eq!(reloads(&mut receiver), 1);
 }

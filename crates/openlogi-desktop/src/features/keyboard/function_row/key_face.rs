@@ -37,6 +37,8 @@ pub(super) enum KeyPanelTab {
     Action,
     /// How the key's LCD face looks.
     Appearance,
+    /// Whether the key shows a live value.
+    Live,
 }
 
 /// The inputs of the grid key being styled: the label's two lines, the icon
@@ -407,14 +409,19 @@ fn file_name(path: &Path) -> SharedString {
         .into()
 }
 
-/// The panel's tabs for a grid key: what it does, and how it looks.
+/// The panel's tabs for a grid key: what it does, how it looks, and whether
+/// it shows a live value.
 pub(super) fn panel_tabs(
     tab: KeyPanelTab,
     view: &Entity<FunctionRowView>,
     cx: &App,
 ) -> impl IntoElement {
     let view = view.clone();
-    let tabs = [KeyPanelTab::Action, KeyPanelTab::Appearance];
+    let tabs = [
+        KeyPanelTab::Action,
+        KeyPanelTab::Appearance,
+        KeyPanelTab::Live,
+    ];
     ButtonGroup::new("key-panel-tabs")
         .outline()
         .small()
@@ -422,10 +429,12 @@ pub(super) fn panel_tabs(
             Button::new(match candidate {
                 KeyPanelTab::Action => "key-panel-tab-action",
                 KeyPanelTab::Appearance => "key-panel-tab-appearance",
+                KeyPanelTab::Live => "key-panel-tab-live",
             })
             .label(match candidate {
                 KeyPanelTab::Action => tr!("keyboard.key_tab_action"),
                 KeyPanelTab::Appearance => tr!("keyboard.key_appearance"),
+                KeyPanelTab::Live => tr!("keyboard.live_tab"),
             })
             .selected(*candidate == tab)
             .selected_segment(*candidate == tab, cx)

@@ -219,3 +219,53 @@ fn a_gradient_key_opens_the_gradient_chooser(cx: &mut gpui::TestAppContext) {
     cx.update(|window, _| window.remove_window());
     cx.run_until_parked();
 }
+
+/// A live key opens its Live tab on the live-key editor, its fields made
+/// for that key; leaving for another tab drops them.
+#[gpui::test]
+fn the_live_tab_edits_the_live_key(cx: &mut gpui::TestAppContext) {
+    use gpui::size;
+    use openlogi_core::config::{LiveKey, LiveSource};
+
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    let (mut state, _commands) = crate::state::tests::keypad_pages::keypad_state();
+    let top_left = GridSlot {
+        page: KeypadPage::FIRST,
+        key: GridKey::TopLeft,
+    };
+    let _ = state.commit_live_key(
+        top_left,
+        Some(LiveKey::new(LiveSource::Command("date +%H:%M".into()))),
+    );
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        cx.set_reduce_motion(true);
+        let state = cx.new(|_| state);
+        AppState::set_global(state, cx);
+    });
+    let (view, cx) = cx.add_window_view(|_, cx| FunctionRowView::new(cx));
+    cx.simulate_resize(size(px(1400.), px(1000.)));
+    view.update(cx, |view, cx| {
+        view.select_key(Some(0), cx);
+        view.set_panel_tab(KeyPanelTab::Live, cx);
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    assert!(
+        cx.debug_bounds("live-key").is_some(),
+        "the live editor shows"
+    );
+    view.read_with(cx, |view, _| {
+        assert!(view.live.is_some(), "the command fields edit the key");
+    });
+
+    view.update(cx, |view, cx| view.set_panel_tab(KeyPanelTab::Action, cx));
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(cx.debug_bounds("live-key").is_none());
+    view.read_with(cx, |view, _| assert!(view.live.is_none()));
+
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}

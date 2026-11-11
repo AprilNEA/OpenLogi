@@ -80,6 +80,7 @@ mod key_points;
 mod key_shortcut;
 mod key_symbol;
 mod keypad;
+mod live_key;
 
 use callout_layout::{CalloutLayout, CardRect, callout_layout, side_bands_width};
 use dialpad::{DialpadPane, DialpadPhotoPane, DialpadRender, dialpad_canvas};
@@ -233,6 +234,8 @@ pub struct FunctionRowView {
     face_image_rejected: bool,
     /// Which colour chooser's custom hex input holds no colour.
     face_hex_invalid: Option<ColorField>,
+    /// The Live tab's fields for the grid key being edited.
+    live: Option<live_key::LiveDraft>,
     /// The selected key's custom shortcut editor.
     shortcut: Option<ShortcutDraft>,
     /// The shortcut Record button's area, which holds focus while recording.
@@ -310,6 +313,7 @@ impl FunctionRowView {
             face: None,
             face_image_rejected: false,
             face_hex_invalid: None,
+            live: None,
             shortcut: None,
             shortcut_record_focus: cx.focus_handle(),
             _state_obs: state_obs,
@@ -377,6 +381,9 @@ impl FunctionRowView {
         self.face_image_rejected = false;
         self.face_hex_invalid = None;
         self.shortcut = None;
+        // A live-key draft belongs to the key it was opened on; the next key
+        // starts without it.
+        self.live = None;
     }
 
     /// Show the selected grid key's action or its face.
@@ -699,7 +706,7 @@ impl Render for FunctionRowView {
             .map(|slot| &slot.target)
             .filter(|target| {
                 active_editor.is_none()
-                    && !(self.panel_tab == KeyPanelTab::Appearance
+                    && !(matches!(self.panel_tab, KeyPanelTab::Appearance | KeyPanelTab::Live)
                         && matches!(target, KeyTarget::Grid(_)))
             })
             .map(|target| state.and_then(|state| selected_key_action(state, target)));
@@ -725,12 +732,15 @@ impl Render for FunctionRowView {
             &view,
         );
         if active_editor.is_none()
-            && self.panel_tab == KeyPanelTab::Appearance
             && let Some(KeyTarget::Grid(grid)) = selected
                 .and_then(|idx| slots.get(idx))
                 .map(|slot| &slot.target)
         {
-            self.ensure_face_draft(*grid, window, cx);
+            match self.panel_tab {
+                KeyPanelTab::Appearance => self.ensure_face_draft(*grid, window, cx),
+                KeyPanelTab::Live => self.ensure_live_draft(*grid, window, cx),
+                KeyPanelTab::Action => {}
+            }
         }
         let (inspector, column_h) =
             self.inspector(selected, &slots, &view, &theme::palette(cx), cx);
@@ -2018,6 +2028,16 @@ impl FunctionRowView {
                 .children(tabs)
                 .child(divider(pal))
                 .child(self.appearance_panel(grid, view, pal, cx));
+        }
+        if let Some(grid) = grid
+            && self.panel_tab == KeyPanelTab::Live
+        {
+            return compact_panel(pal)
+                .w(px(PANEL_W))
+                .child(title_header(&key_name, None, &pal))
+                .children(tabs)
+                .child(divider(pal))
+                .child(self.live_panel(grid, pal, cx));
         }
 
         let state = AppState::try_read(cx);
