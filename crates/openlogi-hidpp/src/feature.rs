@@ -47,6 +47,7 @@ pub mod mode_status;
 pub mod mouse_button_spy;
 pub mod mouse_pointer;
 pub mod multi_platform;
+pub mod multi_roller;
 pub mod onboard_profiles;
 pub mod per_key_lighting;
 pub mod persistent_remappable_action;
