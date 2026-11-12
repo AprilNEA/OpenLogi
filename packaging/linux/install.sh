@@ -135,6 +135,23 @@ need_command() {
   command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
 }
 
+# Whether an installed system package (not this script) owns $1. Checked
+# before touching a file at a path both a package and this installer can
+# write to, so a migration or removal here never strands a package-managed
+# file (dpkg/rpm reinstall, or pacman on an AUR build of the .deb).
+owned_by_package() {
+  if command -v dpkg >/dev/null 2>&1 && dpkg -S "$1" >/dev/null 2>&1; then
+    return 0
+  fi
+  if command -v rpm >/dev/null 2>&1 && rpm -qf "$1" >/dev/null 2>&1; then
+    return 0
+  fi
+  if command -v pacman >/dev/null 2>&1 && pacman -Qo "$1" >/dev/null 2>&1; then
+    return 0
+  fi
+  return 1
+}
+
 require_linux() {
   need_command uname
   [ "$(uname -s)" = Linux ] || die "this installer supports Linux only"
@@ -374,6 +391,25 @@ install_source_file() {
   fi
 }
 
+# Earlier installers wrote the rule to /etc/udev/rules.d, where udev lets it
+# shadow the copy under /usr/lib. Remove that copy only after the /usr/lib rule
+# is in place, and only when it is byte-identical to the bundled rule and no
+# package owns it. Any other file at that path is an administrator's override:
+# keep it and say that it takes precedence.
+LEGACY_UDEV_RULE=/etc/udev/rules.d/70-openlogi.rules
+migrate_legacy_udev_rule() {
+  bundled_rule=$1
+  [ -e "$LEGACY_UDEV_RULE" ] || return 0
+  owned_by_package "$LEGACY_UDEV_RULE" && return 0
+  if cmp -s "$bundled_rule" "$LEGACY_UDEV_RULE"; then
+    printf 'Removing the old copy of the udev rule from /etc/udev/rules.d...\n'
+    run_source_privileged rm -f "$LEGACY_UDEV_RULE"
+  else
+    printf '%s\n' "Keeping $LEGACY_UDEV_RULE: it differs from the bundled rule and" \
+      "takes precedence over /usr/lib/udev/rules.d. Remove it to use the bundled rule." >&2
+  fi
+}
+
 run_source_privileged() {
   if [ "$DRY_RUN" -eq 1 ]; then
     print_command sudo "$@"
@@ -421,7 +457,8 @@ install_source() {
   done
 
   install_source_file 644 "${SCRIPT_DIR}/udev/70-openlogi.rules" \
-    /etc/udev/rules.d/70-openlogi.rules
+    /usr/lib/udev/rules.d/70-openlogi.rules
+  migrate_legacy_udev_rule "${SCRIPT_DIR}/udev/70-openlogi.rules"
   install_source_file 644 "${TEMP_DIR}/openlogi-agent.service" \
     /usr/lib/systemd/user/openlogi-agent.service
   install_source_file 644 "${SCRIPT_DIR}/desktop/openlogi.desktop" \

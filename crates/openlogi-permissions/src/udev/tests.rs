@@ -49,6 +49,32 @@ fn writing_leaves_an_identical_file_in_place() {
     assert_eq!(fs::read_to_string(&destination).expect("rules"), RULES);
 }
 
+/// When a package already installed the same rules under `/usr/lib`, the root
+/// half writes no copy into `/etc`: udev would let that copy shadow the
+/// package's rules after every later upgrade. A missing or different packaged
+/// file still gets the `/etc` copy.
+#[test]
+fn placing_skips_the_admin_copy_when_the_package_ships_the_rules() {
+    let packaged = tempfile::tempdir().expect("packaged dir");
+    let admin = tempfile::tempdir().expect("admin dir");
+    let admin_rules = admin.path().join(RULES_FILE);
+
+    fs::write(packaged.path().join(RULES_FILE), RULES).expect("packaged rules");
+    super::place_rules(packaged.path(), admin.path()).expect("nothing to write");
+    assert!(!admin_rules.exists(), "no shadowing copy in the admin dir");
+
+    fs::write(packaged.path().join(RULES_FILE), "# older\n").expect("older rules");
+    super::place_rules(packaged.path(), admin.path()).expect("admin copy written");
+    assert_eq!(fs::read_to_string(&admin_rules).expect("rules"), RULES);
+
+    // A stale copy left in the admin dir would shadow the packaged rules, so
+    // it is refreshed even though the package ships identical ones.
+    fs::write(packaged.path().join(RULES_FILE), RULES).expect("packaged rules");
+    fs::write(&admin_rules, "# stale\n").expect("stale admin rules");
+    super::place_rules(packaged.path(), admin.path()).expect("admin copy refreshed");
+    assert_eq!(fs::read_to_string(&admin_rules).expect("rules"), RULES);
+}
+
 /// pkexec reserves 126 for a dismissed dialog and 127 for refusing; every
 /// other status is the root half's. A failure carries the first stderr line,
 /// without the prefix pkexec or `main` leads it with.
