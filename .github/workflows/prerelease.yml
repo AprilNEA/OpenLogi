@@ -32,7 +32,7 @@ jobs:
   cut:
     name: Cut a beta
     if: ${{ github.ref == 'refs/heads/master' }}
-    runs-on: ubuntu-latest
+    runs-on: nscloud-ubuntu-24.04-amd64-8x16
     permissions:
       contents: read
       pull-requests: read

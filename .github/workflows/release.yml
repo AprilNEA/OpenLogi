@@ -32,7 +32,7 @@ jobs:
   version:
     name: Release version
     if: ${{ github.ref_type == 'tag' }}
-    runs-on: ubuntu-latest
+    runs-on: nscloud-ubuntu-24.04-amd64-8x16
     # The run's one review gate. `release-approval` holds no secrets and only
     # requires a reviewer, so a tag run pauses once, here, before anything
     # builds. Every later job needs this one, so nothing signs or publishes
@@ -96,7 +96,7 @@ jobs:
 
   publish:
     name: Publish release
-    runs-on: ubuntu-latest
+    runs-on: nscloud-ubuntu-24.04-amd64-8x16
     needs: [version, build]
     # Wait for the Windows jobs (so the successful .zip/.msi set can be attached)
     # but do NOT let their failure block the macOS release. `!cancelled()` removes
@@ -513,7 +513,7 @@ jobs:
   # The installer site and `openlogi@latest` serve the newest stable release.
   installer-site:
     name: Dispatch installer site update
-    runs-on: ubuntu-latest
+    runs-on: nscloud-ubuntu-24.04-amd64-2x4
     needs: [version, publish]
     if: ${{ needs.version.outputs.channel == 'stable' && needs.publish.outputs.installer_published == 'true' }}
     permissions:
@@ -548,7 +548,7 @@ jobs:
   # `openlogi@latest`.
   homebrew-tap:
     name: Dispatch homebrew-tap update
-    runs-on: ubuntu-latest
+    runs-on: nscloud-ubuntu-24.04-amd64-2x4
     needs: [version, publish]
     if: ${{ needs.version.outputs.channel == 'stable' || needs.publish.outputs.beta_changed == 'true' }}
     permissions:
