@@ -62,7 +62,10 @@ optional physical device key.
 
 `[app_settings]` contains application-wide preferences:
 
-- startup, update, menu-bar / tray, input-capture, and asset-download toggles
+- startup, update, menu-bar / tray, input-capture, and asset-download toggles.
+  On Linux, `auto_install_updates` installs a found release package at once,
+  behind a polkit prompt, instead of staging it for the next restart; see
+  [Updating](INSTALL-linux.md#updating) for the supported installs
 - `asset_source`: `automatic`, `openlogi`, `cloudflare`, or `fastly`
 - `language`, `appearance`, `device_view_mode` (`grid`, `list`, or `carousel`),
   optional theme names, and optional UI radius

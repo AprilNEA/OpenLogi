@@ -41,6 +41,11 @@ contents:
     file_info:
       mode: 0755
 
+  - src: packaging/linux/openlogi-update-install
+    dst: /usr/libexec/openlogi-update-install
+    file_info:
+      mode: 0755
+
   # ── udev rules ──────────────────────────────────────────────────────────────
   - src: packaging/linux/udev/70-openlogi.rules
     dst: /etc/udev/rules.d/70-openlogi.rules
@@ -113,11 +118,24 @@ archlinux:
 overrides:
   deb:
     depends:
+      - curl
+      - minisign
+      # pkexec is split out of polkitd on current Debian/Ubuntu; require it
+      # explicitly so in-app updates can elevate. policykit-1 covers older releases.
+      - pkexec | policykit-1
       - libxkbcommon0
       - libxkbcommon-x11-0
       - libxcb1
+  rpm:
+    depends:
+      - curl
+      - minisign
+      - polkit
   archlinux:
     depends:
+      - curl
+      - minisign
+      - polkit
       - dbus
       - fontconfig
       - gcc-libs

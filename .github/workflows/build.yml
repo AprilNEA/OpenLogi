@@ -891,6 +891,11 @@ jobs:
             nfpm_sha256: "dc63aa7228ec70490bae67ad3146883055a055639dcf0dffc82fa965bac75a31"
     permissions:
       contents: read
+    # Same split as macOS/Windows: signed releases enter the `release`
+    # environment so openlogi-desktop can embed OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY
+    # (and the update host). Unsigned PR builds take no environment and keep
+    # the fail-closed no-key behaviour.
+    environment: ${{ inputs.sign && 'release' || '' }}
     steps:
       - uses: actions/checkout@v7
 
@@ -947,6 +952,24 @@ jobs:
             "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_${NFPM_ARCH}.deb"
           echo "${NFPM_SHA256}  /tmp/nfpm.deb" | sha256sum -c
           sudo dpkg -i /tmp/nfpm.deb
+
+      # The updater host and minisign public key openlogi-desktop embeds via
+      # option_env! — without them a release package cannot install in-app
+      # updates ("No trusted update signing key embedded").
+      - name: Load release secrets from 1Password
+        if: ${{ inputs.sign }}
+        uses: AprilNEA/actions/op-environment@3ffb3374a171f06ccfd28fcebc687c9f58516e9b # v1.0.0
+        with:
+          service-account-token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          environment-id: ${{ vars.OP_RELEASE_ENVIRONMENT_ID }}
+
+      - name: Validate updater config
+        if: ${{ inputs.sign }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${OPENLOGI_UPDATE_BASE_URL:?Configure OPENLOGI_UPDATE_BASE_URL in the release Environment}"
+          : "${OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY:?Configure OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY in the release Environment}"
 
       # A beta builds at its own version, so its bundles, packages and
       # update engine all report it. `cargo xtask release stamp-version`
