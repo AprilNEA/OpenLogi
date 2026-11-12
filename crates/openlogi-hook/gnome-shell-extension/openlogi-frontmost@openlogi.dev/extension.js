@@ -6,8 +6,10 @@
 // the focused window is otherwise not visible to ordinary clients.
 //
 // It also keeps Actions Ring surfaces out of GNOME's window animations so
-// their initial pointer coordinates stay valid. No titles, window contents,
-// or input are read. ESM module style; targets GNOME Shell 45+.
+// their initial pointer coordinates stay valid, and hands keyboard focus from
+// a ring back to the window it opened over so the shortcut a slot injects
+// reaches that window. No titles, window contents, or input are read. ESM
+// module style; targets GNOME Shell 45+.
 
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
@@ -15,6 +17,7 @@ import {Extension, InjectionManager} from 'resource:///org/gnome/shell/extension
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
 import {withoutRingAnimation} from './ringAnimation.js';
+import {ringFocusGuard} from './ringFocus.js';
 
 const DBUS_NAME = 'org.openlogi.Frontmost';
 const DBUS_PATH = '/org/openlogi/Frontmost';
@@ -40,9 +43,14 @@ export default class OpenLogiFrontmostExtension extends Extension {
             Gio.BusNameOwnerFlags.NONE,
             null,
             null);
+        const guardRingFocus = ringFocusGuard(
+            global.display.focus_window, () => global.get_current_time());
         this._focusChangedId = global.display.connect(
             'notify::focus-window',
-            () => this._emitFocusedWmClassChanged());
+            () => {
+                guardRingFocus(global.display.focus_window);
+                this._emitFocusedWmClassChanged();
+            });
 
         this._ringAnimations = new InjectionManager();
         this._ringAnimations.overrideMethod(
