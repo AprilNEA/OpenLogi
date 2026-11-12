@@ -15,7 +15,8 @@ use crate::update_feed::UpdateChannel;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AssetSource {
-    /// Read-only assets shipped inside the macOS `.app` bundle (release builds).
+    /// Read-only assets shipped inside the macOS `.app` bundle. Only an
+    /// offline bundle carries them; release bundles fetch assets on demand.
     Bundle,
     /// The per-user cache populated by the background asset sync.
     UserCache,
@@ -112,6 +113,33 @@ pub enum InventoryState {
     Ready,
     /// Enumeration failed and is no longer retried; details in the agent log.
     Unavailable,
+}
+
+/// Which package or distribution owns the running GUI copy, as the desktop's
+/// installation probe found it. Says nothing about the build profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InstallSource {
+    /// The `openlogi` cask from the official Homebrew repository.
+    HomebrewOfficial,
+    /// The `openlogi@latest` cask from `aprilnea/tap`.
+    HomebrewLatest,
+    /// A Debian-family package registered with dpkg.
+    Deb,
+    /// An RPM package.
+    Rpm,
+    /// An Arch package registered with pacman.
+    Arch,
+    /// An executable in the Nix store.
+    Nix,
+    /// The per-user Windows MSI.
+    WindowsMsi,
+    /// The Windows portable ZIP.
+    WindowsPortable,
+    /// A macOS app bundle that no Homebrew receipt owns.
+    MacAppBundle,
+    /// No ownership evidence, for example a source build or an unmarked copy.
+    Unknown,
 }
 
 /// A receiver, by model only — never its `unique_id`.
@@ -217,8 +245,8 @@ pub struct AppInfo {
     pub config_schema_version: Option<u32>,
     /// Number of device entries in the config, when known.
     pub configured_device_count: Option<usize>,
-    /// `true` for an installed app bundle, `false` for a source/dev build.
-    pub running_from_bundle: bool,
+    /// Owner of the running GUI copy, `None` while the probe is still running.
+    pub installation: Option<InstallSource>,
 }
 
 /// Asset-cache state behind device renders.
@@ -326,12 +354,8 @@ impl DiagnosticsReport {
             opt_state(a.check_for_updates, "on", "off"),
             a.update_channel.map_or("unknown", UpdateChannel::as_str),
         );
-        let source = if a.running_from_bundle {
-            "app bundle (release)"
-        } else {
-            "source build (dev)"
-        };
-        let _ = writeln!(out, "- Running from: {source}");
+        let installation = a.installation.map_or("detecting", install_source_label);
+        let _ = writeln!(out, "- Installation source: {installation}");
         let _ = writeln!(
             out,
             "- Config: schema {} · {} configured device(s) · thumbwheel {}\n",
@@ -477,6 +501,21 @@ fn asset_source_label(source: AssetSource) -> &'static str {
     }
 }
 
+fn install_source_label(source: InstallSource) -> &'static str {
+    match source {
+        InstallSource::HomebrewOfficial => "Homebrew (openlogi)",
+        InstallSource::HomebrewLatest => "Homebrew (openlogi@latest)",
+        InstallSource::Deb => "DEB (dpkg)",
+        InstallSource::Rpm => "RPM",
+        InstallSource::Arch => "Arch Linux (pacman)",
+        InstallSource::Nix => "Nix",
+        InstallSource::WindowsMsi => "Windows installer (MSI)",
+        InstallSource::WindowsPortable => "portable ZIP",
+        InstallSource::MacAppBundle => "macOS app bundle",
+        InstallSource::Unknown => "not identified",
+    }
+}
+
 fn kind_label(kind: DeviceKind) -> &'static str {
     match kind {
         DeviceKind::Mouse => "mouse",
@@ -585,7 +624,7 @@ fn opt_num<T: std::fmt::Display>(value: Option<T>) -> String {
 mod tests {
     use super::{
         AppInfo, AssetInfo, AssetSource, ConnectionKind, DeviceDiag, DiagnosticsReport,
-        InventoryState, ReceiverDiag, RenderState,
+        InstallSource, InventoryState, ReceiverDiag, RenderState,
     };
     use crate::device::{
         BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceKind, DeviceTransports,
@@ -615,7 +654,7 @@ mod tests {
             thumbwheel_sensitivity: Some(0),
             config_schema_version: Some(2),
             configured_device_count: Some(3),
-            running_from_bundle: true,
+            installation: Some(InstallSource::HomebrewOfficial),
         }
     }
 
@@ -731,7 +770,54 @@ mod tests {
         assert!(
             md.contains("- Source: app bundle · Index: loaded (142 models) · User cache: present")
         );
+        assert!(md.contains("- Installation source: Homebrew (openlogi)"));
         assert!(md.contains("- Config: schema 2 · 3 configured device(s) · thumbwheel 0"));
+    }
+
+    /// #2262: a release MSI without bundled assets was reported as a source build.
+    #[test]
+    fn a_release_without_bundled_assets_reports_its_installation_source() {
+        let mut report = sample();
+        report.app.os = "windows".to_string();
+        report.app.installation = Some(InstallSource::WindowsMsi);
+        report.assets.source = AssetSource::UserCache;
+        report.assets.bundle_present = false;
+        let md = report.to_markdown();
+        assert!(md.contains("- OpenLogi (GUI): v0.6.6 (release)"));
+        assert!(md.contains("- Installation source: Windows installer (MSI)"));
+        assert!(!md.contains("Running from"));
+        assert!(!md.contains("source build"));
+    }
+
+    #[test]
+    fn installation_source_renders_every_probe_result() {
+        let mut report = sample();
+        report.app.installation = None;
+        assert!(
+            report
+                .to_markdown()
+                .contains("- Installation source: detecting")
+        );
+        for (source, expected) in [
+            (InstallSource::HomebrewOfficial, "Homebrew (openlogi)"),
+            (InstallSource::HomebrewLatest, "Homebrew (openlogi@latest)"),
+            (InstallSource::Deb, "DEB (dpkg)"),
+            (InstallSource::Rpm, "RPM"),
+            (InstallSource::Arch, "Arch Linux (pacman)"),
+            (InstallSource::Nix, "Nix"),
+            (InstallSource::WindowsMsi, "Windows installer (MSI)"),
+            (InstallSource::WindowsPortable, "portable ZIP"),
+            (InstallSource::MacAppBundle, "macOS app bundle"),
+            (InstallSource::Unknown, "not identified"),
+        ] {
+            report.app.installation = Some(source);
+            assert!(
+                report
+                    .to_markdown()
+                    .contains(&format!("- Installation source: {expected}")),
+                "{source:?}"
+            );
+        }
     }
 
     #[test]
