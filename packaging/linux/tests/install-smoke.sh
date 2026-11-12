@@ -330,11 +330,13 @@ assert_contains "$OUTPUT" 'checksum verification failed'
 # rewriting the packaged unit to the requested prefix.
 reset_logs
 SOURCE_REPO=${WORK_DIR}/source-repo
+GNOME_EXTENSION_REL=crates/openlogi-hook/gnome-shell-extension/openlogi-frontmost@openlogi.dev
 mkdir -p \
   "${SOURCE_REPO}/packaging/linux/udev" \
   "${SOURCE_REPO}/packaging/linux/systemd" \
   "${SOURCE_REPO}/packaging/linux/desktop" \
   "${SOURCE_REPO}/design/icon" \
+  "${SOURCE_REPO}/${GNOME_EXTENSION_REL}" \
   "${SOURCE_REPO}/target/release"
 cp "$INSTALLER" "${SOURCE_REPO}/packaging/linux/install.sh"
 cp "${REPO_ROOT}/packaging/linux/udev/70-openlogi.rules" \
@@ -344,6 +346,9 @@ cp "${REPO_ROOT}/packaging/linux/systemd/openlogi-agent.service" \
 cp "${REPO_ROOT}/packaging/linux/desktop/openlogi.desktop" \
   "${SOURCE_REPO}/packaging/linux/desktop/openlogi.desktop"
 : >"${SOURCE_REPO}/design/icon/openlogi.png"
+for extension_file in metadata.json extension.js ringAnimation.js; do
+  : >"${SOURCE_REPO}/${GNOME_EXTENSION_REL}/${extension_file}"
+done
 for binary in openlogi openlogi-desktop openlogi-overlay openlogi-agent; do
   printf '#!/bin/sh\n' >"${SOURCE_REPO}/target/release/${binary}"
   chmod +x "${SOURCE_REPO}/target/release/${binary}"
@@ -359,6 +364,10 @@ assert_contains "$MOCK_LOG" '/etc/udev/rules.d/70-openlogi.rules'
 assert_contains "$MOCK_LOG" '/usr/lib/systemd/user/openlogi-agent.service'
 assert_contains "$MOCK_LOG" '/usr/share/applications/openlogi.desktop'
 assert_contains "$MOCK_LOG" '/usr/share/icons/hicolor/1024x1024/apps/openlogi.png'
+for extension_file in metadata.json extension.js ringAnimation.js; do
+  assert_contains "$MOCK_LOG" \
+    "/usr/share/gnome-shell/extensions/openlogi-frontmost@openlogi.dev/${extension_file}"
+done
 assert_contains "$MOCK_SERVICE_CAPTURE" "ExecStart=${SOURCE_PREFIX}/bin/openlogi-agent"
 assert_contains "$MOCK_LOG" 'systemctl --user enable --now openlogi-agent.service'
 
