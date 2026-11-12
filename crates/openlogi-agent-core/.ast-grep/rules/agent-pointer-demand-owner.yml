@@ -1,0 +1,29 @@
+# Owner: orchestrator::pointer_demand — the agent's one reading of
+# app_settings.mouse_profile_target. It decides both whether the effective
+# mouse bindings follow the pointer (Orchestrator::mouse_context) and whether
+# the pointer watcher samples at all (SharedHandles::pointer_demand).
+id: agent-pointer-demand-owner
+language: rust
+severity: error
+message: Read the mouse-profile policy through orchestrator::pointer_demand; a second reading of mouse_profile_target lets the pointer watcher sample while the bindings ignore it, or park while they read it.
+note: |
+  mouse_context and set_pointer_context each compared mouse_profile_target
+  with Focused, and the pointer watcher's demand would have been a third copy.
+  See "Single source of truth" in AGENTS.md.
+files:
+  - crates/openlogi-agent-core/src/**/*.rs
+  - crates/openlogi-agent/src/**/*.rs
+ignores:
+  - "**/tests.rs"
+  - "**/tests/**"
+rule:
+  all:
+    - kind: field_identifier
+    - regex: '^mouse_profile_target$'
+    - not:
+        inside:
+          kind: function_item
+          stopBy: end
+          has:
+            field: name
+            regex: '^pointer_demand$'
