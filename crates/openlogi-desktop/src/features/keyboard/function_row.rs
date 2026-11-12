@@ -2081,6 +2081,7 @@ impl FunctionRowView {
 
         let shortcut = self.shortcut_section(&target, current.as_ref(), view, pal);
         compact_panel(pal)
+            .debug_selector(|| "key-panel".into())
             .max_h_full()
             .child(title_header(&key_name, app.as_deref(), &pal))
             .children(tabs)

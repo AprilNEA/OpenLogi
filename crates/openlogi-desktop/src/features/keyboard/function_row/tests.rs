@@ -910,6 +910,34 @@ fn the_key_panel_list_scrolls_under_a_scrollbar(cx: &mut gpui::TestAppContext) {
     );
 }
 
+/// In a window too short for the panel's header, shortcut section and the
+/// list's full cap, the list gives up height and scrolls inside the panel.
+/// Capped only at its own height, it ran past the panel's bottom edge and
+/// drew its rows over the page: a keypad key's tab strip was enough.
+#[gpui::test]
+fn the_key_panel_list_stays_inside_its_panel_in_a_short_window(cx: &mut gpui::TestAppContext) {
+    use crate::features::binding_editor::EDITOR_LIST_MAX_H;
+
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+    let (view, cx) = keys_tab(cx);
+    view.update(cx, |view, cx| view.select_key(Some(1), cx));
+    cx.simulate_resize(gpui::size(px(1280.), px(520.)));
+    settle(cx);
+
+    let panel = cx.debug_bounds("key-panel").expect("the key panel shows");
+    let viewport = cx
+        .debug_bounds("scrollbar-overlay")
+        .expect("the key panel list has a scrollbar");
+    assert!(
+        viewport.bottom() <= panel.bottom(),
+        "the list ends inside the panel: {viewport:?} in {panel:?}"
+    );
+    assert!(
+        viewport.size.height < px(EDITOR_LIST_MAX_H),
+        "the list shrank below its cap: {viewport:?}"
+    );
+}
+
 /// The key overview lists every key in the same column. In a window too
 /// short for the column to grow to all of them, the list needs the same
 /// scrollbar. The scroll viewport must keep the rows' height: collapsed, it
