@@ -1,7 +1,7 @@
 //! General settings page.
 
 use super::{
-    App, AppState, Entity, FluentBuilder, IconName, InteractiveElement, ParentElement,
+    App, AppState, Disableable, Entity, FluentBuilder, IconName, InteractiveElement, ParentElement,
     SettingField, SettingGroup, SettingItem, SettingPage, SharedString, Slider, SliderState,
     Styled, ThumbwheelSensitivity, VerticalScrollSensitivity, theme,
 };
@@ -13,6 +13,7 @@ use crate::ui::theme::Typography as _;
 use gpui_kit::base::Button as BaseButton;
 use gpui_kit::component::Sizable as _;
 use gpui_kit::component::radio::{Radio, RadioGroup};
+use gpui_kit::component::switch::Switch;
 use openlogi_core::config::MouseProfileTarget;
 
 use crate::features::pointer::momentum::MomentumPanel;
@@ -96,7 +97,8 @@ pub(super) fn general_page(
 
     let group = group
         .item(low_battery_notifications_item())
-        .item(lock_key_notifications_item());
+        .item(lock_key_notifications_item())
+        .item(backlight_notifications_item());
 
     // Momentum scrolling's app-wide default. A mouse can set its own on its
     // Pointer tab; the card counts those.
@@ -211,6 +213,34 @@ fn lock_key_notifications_item() -> SettingItem {
     })
 }
 
+/// The switch for the overlay's backlight indicator. It renders the Kit switch
+/// the way `SettingField::switch` does, plus a selector the window test finds
+/// it by.
+fn backlight_notifications_item() -> SettingItem {
+    SettingItem::new(
+        tr!("app.backlight_notifications"),
+        SettingField::render(|options, _, cx| {
+            let enabled =
+                AppState::try_read(cx).is_some_and(|s| s.app_settings().backlight_notifications);
+            gpui::div()
+                .debug_selector(|| "backlight-notifications".into())
+                .child(
+                    Switch::new("backlight-notifications")
+                        .accessibility_label(tr!("app.backlight_notifications"))
+                        .checked(enabled)
+                        .disabled(options.is_disabled())
+                        .with_size(options.size())
+                        .on_click(|enabled: &bool, _, cx: &mut App| {
+                            AppState::apply(cx, |state| {
+                                state.commit_backlight_notifications(*enabled)
+                            });
+                        }),
+                )
+        }),
+    )
+    .description(tr!("app.backlight_notifications_description"))
+}
+
 /// A sensitivity slider laid out as the device pages lay theirs out — label
 /// and value on one line, the slider across the row — with "Default" beside
 /// the value while it rests there, in the kit items' type step so it matches
@@ -293,9 +323,32 @@ mod tests {
     use crate::state::{ConfigPersistence, Sources};
     use crate::windows::{WindowRegistry, settings};
     use gpui::{
-        AppContext as _, Bounds, Modifiers, TestAppContext, VisualTestContext, point, px, size,
+        AppContext as _, Bounds, Modifiers, ScrollDelta, ScrollEvent, TestAppContext,
+        VisualTestContext, point, px, size,
     };
     use openlogi_core::config::{Config, UiScale};
+
+    /// Open the settings window on the General page at the minimum window
+    /// size. A read-only config makes every save fail.
+    fn open_general(cx: &mut TestAppContext, scale: UiScale, read_only: bool) -> VisualTestContext {
+        let handle = cx.update(|cx| {
+            let mut config = Config::ephemeral();
+            config.app_settings.ui_scale = scale;
+            let (commands, _) = tokio::sync::mpsc::unbounded_channel();
+            let resolver = AssetResolver::new();
+            let mut sources = Sources::in_memory(config, &resolver, commands);
+            if read_only {
+                sources.persistence = ConfigPersistence::ReadOnly("read-only test".into());
+            }
+            AppState::set_global(cx.new(|_| AppState::new(sources)), cx);
+            settings::open(cx);
+            cx.global::<WindowRegistry>().settings.unwrap()
+        });
+        let mut visual = VisualTestContext::from_window(handle.into(), cx);
+        visual.simulate_resize(size(px(920.), px(640.)));
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        visual
+    }
 
     #[gpui::test]
     fn mouse_profile_target_choices_update_state_and_respect_failed_saves(cx: &mut TestAppContext) {
@@ -311,22 +364,7 @@ mod tests {
             ("en", UiScale::Normal, true),
         ] {
             rust_i18n::set_locale(locale);
-            let handle = cx.update(|cx| {
-                let mut config = Config::ephemeral();
-                config.app_settings.ui_scale = scale;
-                let (commands, _) = tokio::sync::mpsc::unbounded_channel();
-                let resolver = AssetResolver::new();
-                let mut sources = Sources::in_memory(config, &resolver, commands);
-                if read_only {
-                    sources.persistence = ConfigPersistence::ReadOnly("read-only test".into());
-                }
-                AppState::set_global(cx.new(|_| AppState::new(sources)), cx);
-                settings::open(cx);
-                cx.global::<WindowRegistry>().settings.unwrap()
-            });
-            let mut visual = VisualTestContext::from_window(handle.into(), cx);
-            visual.simulate_resize(size(px(920.), px(640.)));
-            visual.update(|window, cx| window.draw(cx).clear(cx));
+            let mut visual = open_general(cx, scale, read_only);
             let viewport = Bounds::new(point(px(0.), px(0.)), size(px(920.), px(640.)));
             let pointer = visual.debug_bounds("mouse-profile-pointer").unwrap();
             let focused = visual.debug_bounds("mouse-profile-focused").unwrap();
@@ -362,6 +400,60 @@ mod tests {
                 );
                 window.remove_window();
             });
+        }
+        rust_i18n::set_locale("en");
+    }
+
+    /// The backlight switch sits near the end of the page. At the minimum
+    /// window size the user scrolls to it and clicks it, and a failed save
+    /// leaves the setting on.
+    #[gpui::test]
+    fn backlight_switch_reachable_at_minimum_window(cx: &mut TestAppContext) {
+        fn enabled(visual: &mut VisualTestContext) -> bool {
+            visual.update(|_, cx| {
+                AppState::try_read(cx)
+                    .unwrap()
+                    .app_settings()
+                    .backlight_notifications
+            })
+        }
+
+        let _locale = LOCALE_LOCK.lock().unwrap();
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            theme::register_builtin_themes(cx);
+        });
+
+        for (locale, scale, read_only) in [
+            ("en", UiScale::Normal, false),
+            ("de", UiScale::ExtraLarge, false),
+            ("en", UiScale::ExtraLarge, true),
+        ] {
+            rust_i18n::set_locale(locale);
+            let mut visual = open_general(cx, scale, read_only);
+            // Twice, for the reason `updates::tests::scroll_to_sources` gives.
+            for _ in 0..2 {
+                visual.simulate_event(ScrollEvent {
+                    position: point(px(700.), px(500.)),
+                    delta: ScrollDelta::Pixels(point(px(0.), px(-1000.))),
+                    ..Default::default()
+                });
+                visual.update(|window, cx| window.draw(cx).clear(cx));
+            }
+            let viewport = Bounds::new(point(px(0.), px(0.)), size(px(920.), px(640.)));
+            assert!(enabled(&mut visual));
+
+            for expected in [read_only, true] {
+                let switch = visual.debug_bounds("backlight-notifications").unwrap();
+                assert!(
+                    viewport.contains(&switch.origin) && viewport.contains(&switch.bottom_right()),
+                    "{locale} {scale:?}: the switch must be on screen, at {switch:?}"
+                );
+                visual.simulate_click(switch.center(), Modifiers::default());
+                visual.update(|window, cx| window.draw(cx).clear(cx));
+                assert_eq!(enabled(&mut visual), expected, "{locale} {scale:?}");
+            }
+            visual.update(|window, _| window.remove_window());
         }
         rust_i18n::set_locale("en");
     }
