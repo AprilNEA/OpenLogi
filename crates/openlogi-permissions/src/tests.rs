@@ -142,9 +142,10 @@ mod capability_bits {
 mod event_node_selection {
     use std::io::ErrorKind;
 
+    use openlogi_core::udev::UdevMouse;
     use openlogi_core::uinput::Device;
 
-    use crate::linux::{EventNodes, EventProbe, UdevMouse, classify_event_nodes};
+    use crate::linux::{EventNodes, EventProbe, classify_event_nodes};
 
     const MOUSE_REL: &str = "1943\n";
     const MOUSE_KEY: &str = "ffff0000 0 0 0 0\n";
@@ -274,55 +275,6 @@ mod event_node_selection {
             ..PHYSICAL
         };
         assert_eq!(classify(&[PHYSICAL, mouse0]), EventProbe::Readable);
-    }
-}
-
-/// udev database records, trimmed to the lines that matter, in the format
-/// `/run/udev/data/c13:<minor>` holds them.
-mod udev_records {
-    use crate::linux::UdevMouse;
-
-    /// A Logitech mouse node behind a Unifying receiver.
-    const MOUSE: &str = "I:4211732\n\
-                         E:ID_INPUT=1\n\
-                         E:ID_INPUT_MOUSE=1\n\
-                         E:ID_BUS=usb\n\
-                         G:uaccess\n\
-                         G:seat\n";
-
-    /// The MX Keys after systemd's hwdb override: a keyboard, not a mouse.
-    const MX_KEYS: &str = "I:4211740\n\
-                           E:ID_INPUT=1\n\
-                           E:ID_INPUT_KEY=1\n\
-                           E:ID_INPUT_KEYBOARD=1\n\
-                           E:ID_INPUT_MOUSE=0\n\
-                           E:ID_BUS=usb\n\
-                           G:seat\n";
-
-    #[test]
-    fn a_mouse_record_is_a_mouse() {
-        assert_eq!(UdevMouse::from_record(MOUSE), UdevMouse::Mouse);
-    }
-
-    #[test]
-    fn an_overridden_keyboard_is_not_a_mouse() {
-        assert_eq!(UdevMouse::from_record(MX_KEYS), UdevMouse::NotMouse);
-    }
-
-    /// `input_id` leaves the property out entirely for a node it does not
-    /// call a mouse, and a longer name that merely starts with it is another
-    /// property.
-    #[test]
-    fn a_record_without_the_property_is_not_a_mouse() {
-        assert_eq!(
-            UdevMouse::from_record("E:ID_INPUT=1\nE:ID_INPUT_KEYBOARD=1\n"),
-            UdevMouse::NotMouse
-        );
-        assert_eq!(
-            UdevMouse::from_record("E:ID_INPUT_MOUSE_DPI=1\n"),
-            UdevMouse::NotMouse
-        );
-        assert_eq!(UdevMouse::from_record(""), UdevMouse::NotMouse);
     }
 }
 

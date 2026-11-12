@@ -10,6 +10,7 @@ use std::io::ErrorKind;
 use std::path::Path;
 
 use openlogi_core::hid::LOGITECH_VENDOR_ID;
+use openlogi_core::udev::UdevMouse;
 use openlogi_core::uinput;
 
 use crate::PermissionStatus;
@@ -173,7 +174,8 @@ fn probe_logitech_hidraw() -> HidrawProbe {
 /// whose receiver node also reports `REL_X`, `REL_Y` and `BTN_LEFT` — the MX
 /// Keys and the Craft on a Unifying receiver — so their nodes stay root-owned
 /// on a correctly configured machine, and their keystrokes stay private.
-/// Counting such a node reported `Denied` (#2365). See [`UdevMouse`].
+/// Counting such a node reported `Denied` (#2365). [`UdevMouse::allows_mouse`]
+/// decides, as it does for the hook's grab.
 fn probe_logitech_event() -> EventProbe {
     let Ok(entries) = fs::read_dir("/dev/input") else {
         return EventProbe::NonePresent;
@@ -207,14 +209,8 @@ impl EventNodes for SystemNodes {
         fs::read_to_string(format!("/sys/class/input/{node}/device/{attr}")).ok()
     }
 
-    /// udev keys its record of a character device by `c<major>:<minor>`, which
-    /// sysfs `dev` holds as `13:67`.
     fn udev_mouse(&self, node: &str) -> UdevMouse {
-        fs::read_to_string(format!("/sys/class/input/{node}/dev"))
-            .and_then(|dev| fs::read_to_string(format!("/run/udev/data/c{}", dev.trim())))
-            .map_or(UdevMouse::Unrecorded, |record| {
-                UdevMouse::from_record(&record)
-            })
+        UdevMouse::of_event_node(node)
     }
 
     fn open(&self, node: &str) -> Result<(), ErrorKind> {
@@ -223,40 +219,6 @@ impl EventNodes for SystemNodes {
             .open(Path::new("/dev/input").join(node))
             .map(|_| ())
             .map_err(|e| e.kind())
-    }
-}
-
-/// udev's answer to whether an event node is a mouse: the `ID_INPUT_MOUSE`
-/// property that `70-openlogi.rules` matches before it tags a node `uaccess`.
-///
-/// Only [`UdevMouse::NotMouse`] takes a node out of the probe. Without a record
-/// (no udev, or a sandbox that hides its database) the capability test decides
-/// alone, as it did before udev was consulted.
-///
-/// The hook does not consult udev, so on a setup that makes every input node
-/// readable (the `input`-group variant of the rules) it still grabs such a
-/// keyboard (#2367). That does not change the verdict: only a node that
-/// refuses `open()` reports `Denied`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum UdevMouse {
-    /// The record sets `ID_INPUT_MOUSE=1`.
-    Mouse,
-    /// The record does not: the `input_id` builtin, or an hwdb entry such as
-    /// the MX Keys' `ID_INPUT_MOUSE=0`, classified the node as something else.
-    NotMouse,
-    /// udev keeps no record of the node that this process can read.
-    Unrecorded,
-}
-
-impl UdevMouse {
-    /// Classify a udev database record, whose `E:` lines are the node's
-    /// properties.
-    pub(crate) fn from_record(record: &str) -> Self {
-        if record.lines().any(|line| line == "E:ID_INPUT_MOUSE=1") {
-            Self::Mouse
-        } else {
-            Self::NotMouse
-        }
     }
 }
 
@@ -273,7 +235,7 @@ pub(crate) fn classify_event_nodes<'a>(
             .filter(|node| {
                 node.starts_with("event")
                     && is_hookable_logitech_mouse(|attr| source.attr(node, attr))
-                    && source.udev_mouse(node) != UdevMouse::NotMouse
+                    && source.udev_mouse(node).allows_mouse()
             })
             .map(|node| source.open(node)),
     )
