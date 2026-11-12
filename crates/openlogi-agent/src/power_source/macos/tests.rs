@@ -680,3 +680,20 @@ async fn disabled_startup_consumes_initial_wake_then_stays_idle() {
         Poll::Pending
     ));
 }
+
+#[tokio::test(start_paused = true)]
+async fn the_first_retry_waits_one_full_period() {
+    let mut sources = PowerSources::new();
+    sources.enabled = true;
+    let started = tokio::time::Instant::now();
+    tokio::time::timeout(
+        RETRY_INTERVAL
+            .checked_sub(Duration::from_millis(1))
+            .unwrap(),
+        sources.wake(),
+    )
+    .await
+    .expect_err("startup reconciliation must not be followed by an immediate retry");
+    sources.wake().await;
+    assert_eq!(started.elapsed(), RETRY_INTERVAL);
+}

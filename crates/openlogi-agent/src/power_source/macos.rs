@@ -35,7 +35,8 @@ pub(crate) struct PowerSources {
 
 impl PowerSources {
     pub(crate) fn new() -> Self {
-        let mut retry = tokio::time::interval(RETRY_INTERVAL);
+        let mut retry =
+            tokio::time::interval_at(tokio::time::Instant::now() + RETRY_INTERVAL, RETRY_INTERVAL);
         retry.set_missed_tick_behavior(MissedTickBehavior::Skip);
         Self {
             publisher: PowerSourcePublisher::new(IoKitPowerSourceBackend::new()),
