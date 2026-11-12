@@ -61,10 +61,13 @@ test('a ring with no application to return to does nothing', () => {
 
 test('a window that went away is forgotten instead of throwing', () => {
     const gone = window('firefox');
+    let attempts = 0;
     gone.focus = () => {
+        attempts += 1;
         throw new Error('window unmanaged');
     };
     const onFocus = ringFocusGuard(gone, now);
     assert.doesNotThrow(() => onFocus(window('openlogi-action-ring')));
     assert.doesNotThrow(() => onFocus(window('openlogi-action-ring')));
+    assert.equal(attempts, 1, 'a failed target is not retried');
 });
