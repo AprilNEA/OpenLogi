@@ -2187,6 +2187,7 @@ fn tray_navigation_opens_exact_device_settings_cold_and_warm(cx: &mut gpui::Test
     use gpui::AppContext as _;
     use openlogi_fixture::{CANONICAL_DEVICE_PROFILE_JSON, DeviceProfile};
 
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
     cx.update(gpui_kit::init);
     cx.update(|cx| {
         let profile: DeviceProfile = serde_json::from_str(CANONICAL_DEVICE_PROFILE_JSON).unwrap();
@@ -2285,6 +2286,7 @@ fn tray_navigation_survives_adoption_with_existing_window(cx: &mut gpui::TestApp
     use gpui::AppContext as _;
     use openlogi_fixture::{CANONICAL_DEVICE_PROFILE_JSON, DeviceProfile};
 
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
     cx.update(gpui_kit::init);
     cx.update(|cx| {
         let profile: DeviceProfile = serde_json::from_str(CANONICAL_DEVICE_PROFILE_JSON).unwrap();
