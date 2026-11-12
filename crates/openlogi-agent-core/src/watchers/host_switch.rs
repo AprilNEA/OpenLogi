@@ -265,6 +265,21 @@ struct HostSwitchManagerState {
     task_failed: bool,
 }
 
+/// Why the sessions are stopped. Only a queued linked switch waits for a held
+/// host key before the keys are handed back: an exit, whose deadline has no
+/// room for the wait, and a receiver wanted elsewhere hand them back at once.
+fn stop_reason(
+    terminal: bool,
+    receiver_wanted_elsewhere: bool,
+    transition_queued: bool,
+) -> HostSwitchStopReason {
+    if !terminal && !receiver_wanted_elsewhere && transition_queued {
+        HostSwitchStopReason::Handoff
+    } else {
+        HostSwitchStopReason::Graceful
+    }
+}
+
 impl HostSwitchManagerState {
     fn new() -> Self {
         Self {
@@ -373,13 +388,19 @@ impl HostSwitchManagerState {
             .min()
     }
 
-    fn stop_sessions(&mut self, wanted: &[HostSwitchLink], terminal: bool) {
+    /// Stop the sessions that `wanted` does not list, or all when `terminal`.
+    fn stop_sessions(
+        &mut self,
+        wanted: &[HostSwitchLink],
+        terminal: bool,
+        reason: HostSwitchStopReason,
+    ) {
         for slot in &mut self.slots {
             let HostSwitchSlot::Running(session) = slot else {
                 continue;
             };
             if terminal || !wanted.contains(&session.link) {
-                session.stop(HostSwitchStopReason::Graceful);
+                session.stop(reason);
             }
         }
     }
@@ -601,7 +622,8 @@ async fn manage(context: HostSwitchManagerContext) -> ManagerCompletion {
             published.as_slice()
         };
         if io_allowed || terminal {
-            state.stop_sessions(wanted, terminal);
+            let reason = stop_reason(terminal, requests.any(), state.transition.is_some());
+            state.stop_sessions(wanted, terminal, reason);
         }
         if io_allowed {
             state.reconcile_recoveries(&published, requests, &services, terminal);
@@ -844,6 +866,29 @@ mod tests {
         }
     }
 
+    #[test]
+    fn only_a_queued_linked_switch_waits_for_a_held_key() {
+        assert_eq!(
+            stop_reason(false, false, true),
+            HostSwitchStopReason::Handoff
+        );
+        assert_eq!(
+            stop_reason(true, false, true),
+            HostSwitchStopReason::Graceful,
+            "an exit has no room for the wait"
+        );
+        assert_eq!(
+            stop_reason(false, true, true),
+            HostSwitchStopReason::Graceful,
+            "a receiver wanted elsewhere is not held up"
+        );
+        assert_eq!(
+            stop_reason(false, false, false),
+            HostSwitchStopReason::Graceful,
+            "a link that is only unpublished is not a handoff"
+        );
+    }
+
     fn link(target: u8) -> HostSwitchLink {
         HostSwitchLink {
             keyboard: route(1),
@@ -861,7 +906,7 @@ mod tests {
             phase: SessionPhase::Active(stop),
         }));
 
-        state.stop_sessions(&[link(3)], false);
+        state.stop_sessions(&[link(3)], false, HostSwitchStopReason::Graceful);
 
         assert_eq!(
             stop_rx
@@ -925,7 +970,7 @@ mod tests {
             state.begin_transition(false).is_none(),
             "the keyboard's session restores its host keys first"
         );
-        state.stop_sessions(&[], false);
+        state.stop_sessions(&[], false, HostSwitchStopReason::Graceful);
         assert!(stop_rx.try_recv().is_ok(), "the session is asked to stop");
 
         state.slots.clear();

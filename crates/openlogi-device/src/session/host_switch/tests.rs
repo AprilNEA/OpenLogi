@@ -1020,11 +1020,10 @@ impl RunningSession {
         }
     }
 
-    /// Ask the session to stop, as the host-switch manager does for a
-    /// software request.
-    fn stop_gracefully(&mut self) {
+    /// Ask the session to stop, as the host-switch manager does.
+    fn stop_for(&mut self, reason: super::HostSwitchStopReason) {
         let stop = self.stop.take().expect("the session is stopped once");
-        let _ = stop.send(super::HostSwitchStopReason::Graceful);
+        let _ = stop.send(reason);
     }
 
     /// Wait until the session has written `count` requests for function
@@ -1535,7 +1534,7 @@ async fn a_stop_waits_for_a_held_host_key_before_handing_it_back() {
     session.send(rename_reply());
     session.written(HOSTS_INFO_INDEX, 1, 6).await;
 
-    session.stop_gracefully();
+    session.stop_for(super::HostSwitchStopReason::Handoff);
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     assert!(
         !session.task.is_finished(),
@@ -1572,7 +1571,7 @@ async fn a_stop_waits_for_a_held_host_key_before_handing_it_back() {
 }
 
 #[tokio::test]
-async fn a_stop_without_a_held_host_key_restores_at_once() {
+async fn a_handoff_without_a_held_host_key_restores_at_once() {
     let keyboard = PairedKeyboard {
         change_host_version: 2,
         announces: false,
@@ -1581,7 +1580,7 @@ async fn a_stop_without_a_held_host_key_restores_at_once() {
     };
     let mut session = RunningSession::start(move |request| bolt_pair(request, keyboard)).await;
     session.written(REPROG_INDEX, 3, 1).await;
-    session.stop_gracefully();
+    session.stop_for(super::HostSwitchStopReason::Handoff);
     let (outcome, _) = session.outcome().await;
     assert!(
         matches!(
@@ -1592,6 +1591,35 @@ async fn a_stop_without_a_held_host_key_restores_at_once() {
         ),
         "nothing is held, so nothing is waited for"
     );
+}
+
+#[tokio::test]
+async fn a_graceful_stop_restores_a_held_host_key_without_waiting() {
+    // The process is exiting: its deadline has no room for the wait, and the
+    // keys must be back with the firmware before it goes.
+    let keyboard = PairedKeyboard {
+        change_host_version: 2,
+        announces: false,
+        hosts_info: true,
+        host_key: Some(HostKey::Divertable),
+    };
+    let mut session = RunningSession::start(move |request| bolt_pair(request, keyboard)).await;
+    session.written(REPROG_INDEX, 3, 1).await;
+    session.send(diverted_report(&[HOST_1_CID]));
+    session.send(rename_reply());
+    session.written(HOSTS_INFO_INDEX, 1, 6).await;
+
+    session.stop_for(super::HostSwitchStopReason::Graceful);
+    let (outcome, writes) = session.outcome().await;
+    assert!(
+        matches!(outcome, Ok(HostSwitchSessionOutcome::Restored { .. })),
+        "the session ends without a release"
+    );
+    let restored = writes
+        .iter()
+        .filter(|report| is_request(report, KEYBOARD_SLOT, REPROG_INDEX, 3))
+        .count();
+    assert_eq!(restored, 2, "the key is armed, then restored");
 }
 
 #[test]

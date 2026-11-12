@@ -21,8 +21,9 @@
 //!   hands the keys back to the firmware before anything moves, and a K580
 //!   whose keys were handed back while one was held left this host by itself,
 //!   before the linked devices could follow (#2352). A stop that a software
-//!   request asks for waits, for a bounded time, for a held key to come up
-//!   before it hands the keys back, for the same reason.
+//!   request asks for ([`HostSwitchStopReason::Handoff`]) waits, for a bounded
+//!   time, for a held key to come up before it hands the keys back, for the
+//!   same reason. Any other stop hands them back at once.
 //! - Analytics: the host keys keep their function and also report to
 //!   software.
 //!
@@ -80,8 +81,14 @@ use crate::{
 /// Why an armed host-switch session is being stopped externally.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostSwitchStopReason {
-    /// The keyboard remains reachable, so its controls must be restored.
+    /// The keyboard remains reachable, so its controls must be restored, at
+    /// once: the process is leaving, or the receiver is wanted elsewhere.
     Graceful,
+    /// As [`Self::Graceful`], for a linked switch that is about to move the
+    /// keyboard. A host key that is held is waited for first (see
+    /// [`HELD_KEY_RELEASE_TIMEOUT`]), because handing it back makes the
+    /// keyboard leave for the key's host before the linked devices move.
+    Handoff,
     /// The keyboard disappeared, so only local resources can be released.
     DeviceLost,
 }
@@ -102,10 +109,14 @@ const HIDPP_OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
 /// guard: the agent gives a whole `switch_host` 5 s, and Flow 1 s to prepare
 /// each device.
 const HOSTS_INFO_BUDGET: Duration = Duration::from_millis(500);
-/// How long a stop waits for a held host key to come up before it hands the
-/// keys back anyway. A key held down this long is not a tap that a software
-/// request raced.
-const HELD_KEY_RELEASE_TIMEOUT: Duration = Duration::from_secs(3);
+/// How long a [`HostSwitchStopReason::Handoff`] waits for a held host key to
+/// come up before it hands the keys back anyway. A key held down this long is
+/// not a tap that a software request raced.
+///
+/// The wait cannot be cut short by a later exit, so it and the restore that
+/// follows must fit in the agent's exit deadline; a test in `openlogi-agent`
+/// pins that.
+pub const HELD_KEY_RELEASE_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ReportingMode {
@@ -791,6 +802,9 @@ async fn watch_host_switch(
             reason = &mut shutdown => {
                 return match reason.unwrap_or(HostSwitchStopReason::DeviceLost) {
                     HostSwitchStopReason::Graceful => {
+                        HostSwitchStop::for_current_publication(registry, shared)
+                    }
+                    HostSwitchStopReason::Handoff => {
                         if held_host.is_some() {
                             // Handing a held key back makes the keyboard
                             // leave for its host before the linked devices
