@@ -884,7 +884,7 @@ impl Orchestrator {
         let (key_display_specs_tx, key_display_specs) = watch::channel(Arc::new(Vec::new()));
         let (host_switch_links_tx, host_switch_links) = watch::channel(Arc::new(Vec::new()));
         let (watched_lights_tx, watched_lights) = watch::channel(Arc::new(Vec::new()));
-        openlogi_inject::set_desktop_switch(desktop_switch(&config.app_settings));
+        publish_gesture_settings(&config.app_settings);
         let receiver_access = ReceiverAccess::default();
         let flow = FlowController::new(
             &config.flow,
@@ -2385,7 +2385,7 @@ impl Orchestrator {
             self.config.app_settings.smooth_scroll,
             self.config.app_settings.vertical_scroll_sensitivity,
         );
-        openlogi_inject::set_desktop_switch(desktop_switch(&self.config.app_settings));
+        publish_gesture_settings(&self.config.app_settings);
         self.observable
             .set_launch_at_login(self.config.app_settings.launch_at_login);
         let retained_overrides: HashSet<String> = self
@@ -2592,6 +2592,15 @@ struct LightWrite {
     route: DeviceRoute,
     light: LightSettings,
     capabilities: LightCapabilities,
+}
+
+/// Hand the desktop-switch and swipe settings to the input layers that read
+/// them on every action and report: how a switch slides, and whether each
+/// press is one switch that starts even while the last one still slides.
+fn publish_gesture_settings(settings: &AppSettings) {
+    openlogi_inject::set_desktop_switch(desktop_switch(settings));
+    openlogi_inject::set_desktop_chain(settings.one_gesture_per_press);
+    openlogi_core::binding::set_one_swipe_per_press(settings.one_gesture_per_press);
 }
 
 /// How Previous and Next Desktop switch under `settings`.

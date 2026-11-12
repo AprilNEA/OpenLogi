@@ -13,7 +13,7 @@
 use std::ffi::{c_int, c_void};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{LazyLock, mpsc};
+use std::sync::{LazyLock, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use block2::RcBlock;
@@ -35,17 +35,33 @@ use objc2_foundation::{
 
 use super::super::DesktopSwitch;
 use super::super::space_switch::{
-    self, Backend, Direction, Failure, Lease, Pace, PostGate, SlideFrame, SlidePhase, SpaceState,
+    self, Admission, Backend, Direction, Failure, Flight, Pace, PostGate, SlideFrame, SlidePhase,
+    SpaceState, Ticket,
 };
 use super::{app_services, app_services_symbol};
 
-static BUSY: AtomicBool = AtomicBool::new(false);
+/// The one switch in flight, and who may lead or follow it.
+static FLIGHT: Flight = Flight::new();
+/// Held while a switch's events are posted. Desktop switches reach this
+/// module from more than one dispatch thread (the hook's action worker and
+/// each HID++ gesture session), so a follow-up and the switch it follows
+/// take turns rather than interleave their frames at the Dock.
+static POSTING: Mutex<()> = Mutex::new(());
 /// Whether a switch slides. The host publishes the user's choice here
 /// through [`set_desktop_switch`]; until it does, switches stay instant.
 static SLIDE: AtomicBool = AtomicBool::new(false);
 
 pub(in crate::inject) fn set_desktop_switch(switch: DesktopSwitch) {
     SLIDE.store(switch == DesktopSwitch::Animated, Ordering::Relaxed);
+}
+
+/// Whether a request that finds a switch in flight on its display is posted
+/// at once. The host publishes the user's choice through
+/// [`set_desktop_chain`]; until it does, such a request is dropped.
+static CHAIN_SWITCHES: AtomicBool = AtomicBool::new(false);
+
+pub(in crate::inject) fn set_desktop_chain(enabled: bool) {
+    CHAIN_SWITCHES.store(enabled, Ordering::Relaxed);
 }
 
 fn desktop_switch() -> DesktopSwitch {
@@ -64,23 +80,38 @@ pub(super) fn next_desktop() {
 }
 
 fn start(direction: Direction) {
-    let Some(lease) = Lease::acquire(&BUSY) else {
-        tracing::debug!(?direction, "Space switch already pending — skipped");
-        return;
-    };
     // Capture the display before scheduling. A moved cursor must not retarget
     // a delayed action to another monitor; `post` checks it again.
     let Some(display_id) = cursor_display() else {
         tracing::warn!(?direction, "Space switch: cursor display unavailable");
         return;
     };
+    let chain = CHAIN_SWITCHES.load(Ordering::Relaxed);
+    let ticket = match FLIGHT.admit(display_id, chain, Instant::now()) {
+        Admission::Lead(ticket) => ticket,
+        Admission::Follow(follower) => {
+            if follow_up(display_id, direction) {
+                FLIGHT.followed(follower);
+            }
+            return;
+        }
+        Admission::Refused => {
+            tracing::info!(?direction, "Space switch already pending: skipped");
+            return;
+        }
+    };
     // Read once: a setting changed mid-switch applies to the next one.
     let switch = desktop_switch();
-    let result = space_switch::spawn_ordered(move |gate| {
-        let _lease = lease;
+    let deadline = ticket.deadline();
+    let result = space_switch::spawn_ordered(deadline, move |gate| {
         autoreleasepool(|_| {
-            let result = Native::new(display_id, switch)
-                .and_then(|mut native| space_switch::run(&mut native, direction, gate));
+            let (result, followed) = match Native::new(display_id, switch, ticket) {
+                Ok(mut native) => {
+                    let result = space_switch::run(&mut native, direction, gate);
+                    (result, native.ticket.followed())
+                }
+                Err(error) => (Err(error), false),
+            };
             match result {
                 Ok(outcome) => {
                     tracing::debug!(
@@ -91,6 +122,12 @@ fn start(direction: Direction) {
                         "Space switch result"
                     );
                 }
+                // A follow-up moved the Space on before this one saw its own.
+                Err(Failure::ContextChanged) if followed => tracing::debug!(
+                    display_id,
+                    ?direction,
+                    "Space switch overtaken by a follow-up"
+                ),
                 Err(error) => tracing::warn!(
                     display_id,
                     ?direction,
@@ -103,6 +140,38 @@ fn start(direction: Direction) {
     if let Err(error) = result {
         tracing::warn!(?error, "Space switch preparation failed — no retry");
     }
+}
+
+/// A switch requested while another is in flight on `display_id` and has
+/// posted. It is posted at once, the way a second key press reaches the Dock
+/// mid-slide, never waiting for the first Space to land. Nothing confirms
+/// it; the switch in flight already owns the one confirmation. True once it
+/// is posted.
+fn follow_up(display_id: u32, direction: Direction) -> bool {
+    let switch = desktop_switch();
+    let Some(output) = Output::prepare(switch, direction) else {
+        tracing::warn!(
+            ?direction,
+            "Space switch follow-up preparation failed — no retry"
+        );
+        return false;
+    };
+    if space_switch::post_on_display(&POSTING, display_id, cursor_display, || output.post())
+        .is_none()
+    {
+        tracing::info!(
+            ?direction,
+            "Space switch follow-up: cursor left the display"
+        );
+        return false;
+    }
+    tracing::info!(
+        display_id,
+        ?direction,
+        ?switch,
+        "Space switch follow-up posted"
+    );
+    true
 }
 
 fn cursor_display() -> Option<u32> {
@@ -214,6 +283,8 @@ struct Native {
     api: &'static Api,
     display: u32,
     switch: DesktopSwitch,
+    /// This switch's hold on the flight, released when the switch ends.
+    ticket: Ticket<'static>,
     uuid: String,
     started: Instant,
     changed: mpsc::Receiver<()>,
@@ -221,7 +292,7 @@ struct Native {
 }
 
 impl Native {
-    fn new(display: u32, switch: DesktopSwitch) -> Result<Self, Failure> {
+    fn new(display: u32, switch: DesktopSwitch, ticket: Ticket<'static>) -> Result<Self, Failure> {
         let api = API.as_ref().ok_or(Failure::Unavailable)?;
         // SAFETY: dynamically resolved CGDisplayCreateUUIDFromDisplayID accepts
         // a public CGDirectDisplayID and returns a Create-rule CFUUID or null.
@@ -238,6 +309,7 @@ impl Native {
             api,
             display,
             switch,
+            ticket,
             uuid,
             started: Instant::now(),
             changed,
@@ -259,10 +331,22 @@ impl Backend for Native {
 
     fn post(&mut self, direction: Direction, gate: PostGate) -> Result<(), Failure> {
         let output = Output::prepare(self.switch, direction).ok_or(Failure::PostFailed)?;
-        if cursor_display() != Some(self.display) {
-            return Err(Failure::ContextChanged);
-        }
-        gate.commit(|| output.post())
+        let ticket = &self.ticket;
+        space_switch::post_on_display(&POSTING, self.display, cursor_display, || {
+            if !ticket.begin_posting(Instant::now()) {
+                return Err(Failure::TimedOut);
+            }
+            let posted = gate.commit(|| output.post());
+            if posted.is_err() {
+                ticket.abandon_post();
+            }
+            posted
+        })
+        .unwrap_or(Err(Failure::ContextChanged))?;
+        // The posting lock is released by now, so a follow-up let through
+        // here can take it.
+        self.ticket.posted();
+        Ok(())
     }
 
     fn elapsed(&self) -> Duration {

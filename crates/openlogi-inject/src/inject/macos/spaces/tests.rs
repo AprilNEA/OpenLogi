@@ -374,10 +374,17 @@ fn every_live_unmirrored_display_is_its_own_root() {
 #[test]
 #[ignore = "changes the current macOS Space; requires explicit interactive execution"]
 fn interactive_space_round_trip() {
+    fn ticket(display_id: u32) -> Ticket<'static> {
+        let Admission::Lead(ticket) = FLIGHT.admit(display_id, false, Instant::now()) else {
+            panic!("no other Space switch may run during this test");
+        };
+        ticket
+    }
     for switch in [DesktopSwitch::Instant, DesktopSwitch::Animated] {
         autoreleasepool(|_| {
             let display_id = cursor_display().expect("one unambiguous pointer display");
-            let mut backend = Native::new(display_id, switch).expect("Space SPI available");
+            let mut backend =
+                Native::new(display_id, switch, ticket(display_id)).expect("Space SPI available");
             let before = backend.state().expect("read initial display state");
             let result = space_switch::run(&mut backend, Direction::Next, PostGate::for_test())
                 .expect("Space switch confirmed");
@@ -389,9 +396,11 @@ fn interactive_space_round_trip() {
             assert_eq!(after.current, target);
             assert_ne!(after.current, before.current);
             assert_eq!(cursor_display(), Some(display_id));
+            drop(backend);
             // Give the reverse transaction its own observer and deadline. The
             // expectation is the original native ID, not the direction encoder.
-            let mut reverse = Native::new(display_id, switch).expect("Space SPI available");
+            let mut reverse =
+                Native::new(display_id, switch, ticket(display_id)).expect("Space SPI available");
             assert_eq!(
                 space_switch::run(&mut reverse, Direction::Previous, PostGate::for_test())
                     .expect("reverse Space switch confirmed"),

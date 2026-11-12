@@ -514,6 +514,21 @@ pub fn set_desktop_switch(switch: DesktopSwitch) {
     }
 }
 
+/// Choose whether a Previous or Next Desktop requested while a switch on the
+/// same display is still under way is posted at once (`true`) or dropped
+/// (`false`, the default until a host calls this). Only macOS keeps a switch
+/// in flight; elsewhere a switch is instant.
+pub fn set_desktop_chain(enabled: bool) {
+    cfg_select! {
+        target_os = "macos" => {
+            macos::set_desktop_chain(enabled);
+        }
+        _ => {
+            let _ = enabled;
+        }
+    }
+}
+
 /// One synthetic held chord, released exactly once when dropped.
 ///
 /// Keep this value with the physical press lifecycle. Replacing its chord
