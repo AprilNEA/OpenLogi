@@ -30,6 +30,7 @@ use hidpp::{
         extended_report_rate::{
             ConnectionType, ExtendedReportRate, ExtendedReportRateFeature, ExtendedReportRateList,
         },
+        onboard_profiles::{self, OnboardProfilesFeature},
         report_rate::{ReportRateFeature, ReportRateList},
     },
 };
@@ -288,7 +289,19 @@ pub(crate) async fn set_report_rate_on_channel(
         debug!(index, %rate, "report rate already set");
         return Ok(before);
     }
-    control.write(rate).await?;
+    if let Err(write_err) = control.write(rate).await {
+        // G-series mice refuse report rate writes while in onboard memory mode.
+        // Transition to host mode and retry the write.
+        let mut device = Device::new(Arc::clone(channel), index)
+            .await
+            .map_err(|_| WriteError::DeviceUnreachable { index })?;
+        if let Ok(onboard) = open_feature::<OnboardProfilesFeature>(&mut device).await {
+            let _ = onboard.set_mode(onboard_profiles::OnboardMode::Host).await;
+            control.write(rate).await?;
+        } else {
+            return Err(write_err);
+        }
+    }
     match control.current(HidppOperation::WriteReportRate).await {
         Ok(actual) if actual == rate => {
             debug!(index, %rate, "report rate written");

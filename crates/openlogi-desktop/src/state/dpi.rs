@@ -75,10 +75,22 @@ impl AppState {
     /// when no device is selected. UI helper.
     #[must_use]
     pub fn dpi_presets(&self) -> Vec<Dpi> {
-        self.current_record()
+        let presets = self
+            .current_record()
             .and_then(DeviceRecord::persistent_config_key)
             .map(|key| self.config.dpi_presets(key))
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if presets.is_empty() {
+            if let Some(gaming) = self.current_gaming_layout() {
+                return gaming
+                    .stock_dpi_presets
+                    .iter()
+                    .copied()
+                    .map(Dpi::new)
+                    .collect();
+            }
+        }
+        presets
     }
     /// The active device's known DPI: the live capability read once it
     /// completes, else the persisted config value, else [`DEFAULT_DPI`] for a
