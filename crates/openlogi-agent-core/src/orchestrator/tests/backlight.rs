@@ -1,6 +1,7 @@
 //! The backlight indicator: whether the agent shows a keyboard's new level.
 
 use openlogi_core::config::Config;
+use openlogi_ipc::BacklightObservation;
 
 use super::orchestrator;
 use crate::backlight_overlay::BacklightOverlayManager;
@@ -43,5 +44,13 @@ async fn turning_the_indicator_on_again_shows_the_next_change() {
     orch.replace_config(config);
     orch.announce_backlight(&overlay, 4, 8, true);
 
-    assert_eq!(overlay.observe(0).await.current_level, 4);
+    assert_eq!(
+        overlay.observe(0).await,
+        BacklightObservation {
+            generation: 1,
+            current_level: 4,
+            levels: 8,
+            visible: true,
+        }
+    );
 }
