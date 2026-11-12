@@ -12,7 +12,9 @@
 use std::sync::Arc;
 
 use openlogi_core::device::{DeviceInventory, LightState, StandaloneDevice};
-use openlogi_core::hid::{FnLockState, LightCommand, OnboardState, PairingError, WriteError};
+use openlogi_core::hid::{
+    FnLockState, LightCommand, OnboardState, PairingError, ProfileIndex, WriteError,
+};
 
 use crate::probe_cache::FileProbeCacheStore;
 use crate::transport::native_backend;
@@ -27,8 +29,8 @@ use openlogi_device::inventory::{Enumerator, InventoryError};
 use openlogi_device::pairing::PairingReceiver;
 use openlogi_device::write::{
     self as device, Dpi, DpiInfo, FeatureEntry, FirmwareEntity, HapticWaveform, LightingMethod,
-    LitraModel, PointerScaling, ReprogControlEntry, ScrollResolution, ScrollWheelMode,
-    SidetoneLevel,
+    LitraModel, OnboardDefaultDpiChange, PointerScaling, ReprogControlEntry, ScrollResolution,
+    ScrollWheelMode, SidetoneLevel,
 };
 use openlogi_device::{ButtonSpyError, ButtonSpyWatch, LightWatch};
 use openlogi_device::{DeviceIoGate, DeviceIoSignal, DeviceRoute};
@@ -163,6 +165,16 @@ pub async fn set_scroll_wheel_mode(
 /// Read the onboard memory of the device on `route`.
 pub async fn get_onboard(route: &DeviceRoute) -> Result<OnboardState, WriteError> {
     device::get_onboard(&*native_backend(), route).await
+}
+
+/// Make `dpi` the startup DPI of onboard `profile` on the mouse `route`
+/// reaches, and read it back.
+pub async fn set_onboard_default_dpi(
+    route: &DeviceRoute,
+    profile: ProfileIndex,
+    dpi: Dpi,
+) -> Result<OnboardDefaultDpiChange, WriteError> {
+    device::set_onboard_default_dpi(&*native_backend(), route, profile, dpi).await
 }
 
 /// Read the HID++ `0x8110` slot mapping of the mouse `route` reaches and
