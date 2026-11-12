@@ -26,7 +26,7 @@ use super::button::PressControl;
 use super::scroll::ScrollInputHandle;
 use super::{
     ActionDispatchTarget, ActionDispatcher, PointerPress, PointerSelection, PressToken,
-    log_bound_action,
+    ReportThrottle, log_bound_action,
 };
 use crate::event_monitor::SharedEventMonitor;
 use crate::flow::FlowInput;
@@ -361,6 +361,9 @@ thread_local! {
     /// matching key-up ends the lifecycle. A button's repeated press is the
     /// opposite, a lost release, which is why keys stay out of `PRESSES`.
     static HELD_KEYS: RefCell<HashSet<u16>> = RefCell::new(HashSet::new());
+    /// Drops to a full action queue: while the worker is stuck, every bound
+    /// input meets one, so they are counted and reported once per interval.
+    static QUEUE_FULL: RefCell<ReportThrottle> = RefCell::new(ReportThrottle::default());
 }
 
 /// Whether a button event's physical source may be remapped/suppressed.
@@ -417,7 +420,12 @@ fn try_queue_action(
     control: PressControl,
 ) -> bool {
     if tx.try_send((action, target, control)).is_err() {
-        warn!("action queue full — dropping bound action to keep the input hook live");
+        if let Some(dropped) = QUEUE_FULL.with_borrow_mut(|full| full.occur(Instant::now())) {
+            warn!(
+                dropped,
+                "action queue full — dropping bound actions to keep the input hook live"
+            );
+        }
         false
     } else {
         true
