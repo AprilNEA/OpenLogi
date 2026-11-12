@@ -7,6 +7,111 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-11-12
+
+### Added
+
+- *(agent)* bind easy-switch channels to buttons and ring slots ([#2068](https://github.com/AprilNEA/OpenLogi/pull/2068))
+- *(i18n)* translate the menu-bar menu's newest strings in every locale
+- *(tray)* change device settings and list webcams from the menu-bar item
+- *(camera)* report which cameras another process captures from
+- *(gui)* open a camera's preview or its settings from an openlogi:// link
+- *(agent-core)* change and save Fn lock, disabled keys and lights from inside the agent
+- *(agent)* show issues, devices, the current app and Flow in the menu-bar menu
+- *(ipc)* tell the settings app which config revision the agent loaded
+- *(agent)* change and save device settings from inside the agent
+- *(gui)* open a device, Add Device, an app profile or Flow from openlogi:// links
+- *(core)* accept keypad keys in custom shortcuts ([#1963](https://github.com/AprilNEA/OpenLogi/pull/1963))
+- *(binding)* add HoldModifier for bare-modifier holds ([#1363](https://github.com/AprilNEA/OpenLogi/pull/1363))
+- *(gui)* guide the agent's macOS grants with a drag panel ([#2492](https://github.com/AprilNEA/OpenLogi/pull/2492))
+- *(device)* divert the Gestures2 thumb wheel without 0x2150 ([#2038](https://github.com/AprilNEA/OpenLogi/pull/2038))
+- *(gui)* give hand-rolled controls press feedback
+- *(cli)* add diag hidpp to call a hid++ 2.0 feature with raw parameters ([#2426](https://github.com/AprilNEA/OpenLogi/pull/2426))
+- *(gui)* edit linked Easy-Switch devices from the Device tab ([#2043](https://github.com/AprilNEA/OpenLogi/pull/2043))
+- *(cli)* add diag zones to map a keyboard's per-key zones ([#2384](https://github.com/AprilNEA/OpenLogi/pull/2384))
+- *(gui)* name G-key profiles from the M-key cards ([#1240](https://github.com/AprilNEA/OpenLogi/pull/1240))
+- *(keyboard)* bind G-series G-keys and M profiles over 0x8010 ([#1239](https://github.com/AprilNEA/OpenLogi/pull/1239))
+- *(core)* add the G903 LIGHTSPEED gaming layout ([#2186](https://github.com/AprilNEA/OpenLogi/pull/2186))
+- *(gui)* grant Linux input-device access from Settings
+- *(linux)* install the udev rules as root through pkexec
+
+### Fixed
+
+- *(agent-core)* count a Disable Keys write's device check against its deadline
+- *(tray)* write a menu change only to the device the menu listed
+- *(agent-core)* ask a keyboard to disable only the keys this version knows
+- *(agent-core)* report a superseded Fn-lock write instead of reading the keyboard
+- *(tray)* remember readings by device, not by receiver slot alone
+- *(core)* record a device's route when saving its settings under its identity
+- *(agent-core)* save no Fn lock a newer write superseded
+- *(gui)* look again at a config revision whose file could not be read
+- *(tray)* keep a menu change over a read that began before it
+- *(agent-core)* report a DPI write a newer one superseded
+- *(gui)* forget a dropped device's disable-keys snapshot with its card ([#2491](https://github.com/AprilNEA/OpenLogi/pull/2491))
+- *(linux)* press kwin's ctrl+meta chord when the desktop-switch call fails ([#2488](https://github.com/AprilNEA/OpenLogi/pull/2488))
+- *(linux)* switch workspaces with cosmic's super+ctrl chord ([#2486](https://github.com/AprilNEA/OpenLogi/pull/2486))
+- *(hid)* recognise the g613's lightspeed receiver 046d:c53d ([#2485](https://github.com/AprilNEA/OpenLogi/pull/2485))
+- *(gui)* decode a keyboard render by its bytes for the computed glow ([#2467](https://github.com/AprilNEA/OpenLogi/pull/2467))
+- *(linux)* run the nix package tests in the dev profile ([#2462](https://github.com/AprilNEA/OpenLogi/pull/2462))
+- *(gui)* read webp render sizes for the side and main views ([#2463](https://github.com/AprilNEA/OpenLogi/pull/2463))
+- *(overlay)* edge the notice card with a hairline
+- *(overlay)* keep the charge visible on a low-battery notice
+- *(gui)* ring the selected lighting swatch outside its colour
+- *(gui)* mark the active device in the home gallery and list
+- *(gui)* truncate detail rail labels with a tooltip
+- *(gui)* drop the on/off word from toggles
+- *(gui)* mark the chosen segment in every button group
+- *(device)* look up litra route locks under a std mutex ([#2447](https://github.com/AprilNEA/OpenLogi/pull/2447))
+- *(device)* give a slow unifying device's first-sight walk time to finish ([#2445](https://github.com/AprilNEA/OpenLogi/pull/2445))
+- *(inject)* post the phased thumb-wheel gesture as pixels on macos ([#2440](https://github.com/AprilNEA/OpenLogi/pull/2440))
+- *(agent)* scroll a push right after a momentum catch instead of swallowing it ([#2437](https://github.com/AprilNEA/OpenLogi/pull/2437))
+- *(device)* settle a direct hid++ 1.0 answer instead of retiring its channel ([#2433](https://github.com/AprilNEA/OpenLogi/pull/2433))
+- *(hid)* recognise the mx revolution's nano receiver 046d:c51a ([#2431](https://github.com/AprilNEA/OpenLogi/pull/2431))
+- *(agent)* announce dpi button writes so the gui re-reads the dpi ([#2427](https://github.com/AprilNEA/OpenLogi/pull/2427))
+- *(flow)* name the clippy lints the generated proto code needs ([#2424](https://github.com/AprilNEA/OpenLogi/pull/2424))
+- *(hidpp)* decode chunked device names as a whole ([#2184](https://github.com/AprilNEA/OpenLogi/pull/2184))
+- *(inject)* leave modifiers already down out of windows held chords ([#2418](https://github.com/AprilNEA/OpenLogi/pull/2418))
+- *(inject)* leave modifiers already down out of tapped chords ([#2416](https://github.com/AprilNEA/OpenLogi/pull/2416))
+- *(gui)* select the g512 render and key metadata in the g513 depot ([#2405](https://github.com/AprilNEA/OpenLogi/pull/2405))
+- *(cli)* say the input monitoring note only on macos ([#2406](https://github.com/AprilNEA/OpenLogi/pull/2406))
+- *(gui)* name a g512 that shares the g513 asset depot ([#2403](https://github.com/AprilNEA/OpenLogi/pull/2403))
+- *(device)* treat a dpi read rejected with invalid argument as unsupported ([#2391](https://github.com/AprilNEA/OpenLogi/pull/2391))
+- *(gui)* keep scrollbars drawn when the platform asks for them ([#2389](https://github.com/AprilNEA/OpenLogi/pull/2389))
+- *(agent)* keep another mouse's click native once the selected one diverts it ([#2387](https://github.com/AprilNEA/OpenLogi/pull/2387))
+- *(inject)* post wheel events as zooms while the macOS zoom modifier is held ([#2385](https://github.com/AprilNEA/OpenLogi/pull/2385))
+- *(device)* resend 0x8081 requests a keyboard answers busy ([#2382](https://github.com/AprilNEA/OpenLogi/pull/2382))
+- *(hid)* keep the linux kernel's hid++ software id out of the lease pool ([#2380](https://github.com/AprilNEA/OpenLogi/pull/2380))
+- *(gui)* draw the base model for a colour variant whose renders are not images ([#2379](https://github.com/AprilNEA/OpenLogi/pull/2379))
+- *(core)* match the pink g502 lightspeed to its gaming layout ([#2378](https://github.com/AprilNEA/OpenLogi/pull/2378))
+- *(fixture,hid)* drop unsolicited hid++ input from cassette captures ([#2377](https://github.com/AprilNEA/OpenLogi/pull/2377))
+- *(core)* match the purple g502 lightspeed to its gaming layout ([#2373](https://github.com/AprilNEA/OpenLogi/pull/2373))
+- *(permissions)* skip event nodes udev does not classify as a mouse ([#2368](https://github.com/AprilNEA/OpenLogi/pull/2368))
+- *(inject)* post windows modifiers and fixed keys with their scan code ([#2350](https://github.com/AprilNEA/OpenLogi/pull/2350))
+- *(device)* switch hosts when a diverted Easy-Switch key is released ([#2355](https://github.com/AprilNEA/OpenLogi/pull/2355))
+- *(gui)* consume the settings view on the macOS permissions page ([#2354](https://github.com/AprilNEA/OpenLogi/pull/2354))
+- *(device)* hear host keys from the moment they are armed ([#2348](https://github.com/AprilNEA/OpenLogi/pull/2348))
+- *(gui)* stack the Ring size segment under its caption
+- *(gui)* match the mouse profile radios to their setting's text size
+- *(gui)* size theme cards to the Appearance page width
+- *(gui)* make Done the primary action after pairing
+- *(gui)* keep Tab working after a pairing step replaces the clicked control
+- *(gui)* fit the Actions Ring page at larger scales and narrow widths
+- *(gui)* give the device name the header's free width
+- *(gui)* drop the Studio Light card title that repeats the tab name
+- *(gui)* let device tabs shrink beside the rail at narrow widths
+- *(gui)* lay out the camera controls with SliderRow
+- *(gui)* set the Settings sensitivity rows in the kit items' type step
+- *(gui)* lay out the press-force row with SliderRow
+- *(gui)* let a mouse label value wrap to three lines
+- *(gui)* keep every key name whole in the keys inspector
+- *(gui)* close Add Device and mark devices reconnecting while the agent is lost
+- *(gui)* give low-contrast theme accents a visible fallback
+- *(gui)* name every window before its first wayland commit ([#2344](https://github.com/AprilNEA/OpenLogi/pull/2344))
+- *(gui)* name OpenLogi Agent in the Input Monitoring row while it is denied ([#2113](https://github.com/AprilNEA/OpenLogi/pull/2113))
+- *(inject)* keep quotes in windows run command ([#2337](https://github.com/AprilNEA/OpenLogi/pull/2337))
+- *(overlay)* let go of the display on windows while nothing shows ([#2339](https://github.com/AprilNEA/OpenLogi/pull/2339))
+- *(device)* report a 0x1000 battery without mileage as a level ([#2333](https://github.com/AprilNEA/OpenLogi/pull/2333))
+
 ## [0.9.0] - 2026-11-03
 
 ### Added
