@@ -110,6 +110,8 @@ mod scroll;
 mod settings;
 mod sidetone;
 mod smartshift;
+mod transfer;
+pub use transfer::TransferSource;
 
 #[cfg(test)]
 pub(crate) mod tests;

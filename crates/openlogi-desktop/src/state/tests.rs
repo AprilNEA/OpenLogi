@@ -68,6 +68,7 @@ mod report_rate;
 mod sidetone;
 mod smartshift;
 mod smooth_wheel;
+mod transfer;
 mod transient_identity;
 mod wheel_hold;
 mod wheel_resolution;
