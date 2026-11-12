@@ -76,6 +76,17 @@ pub trait RawHidChannel: Sync + Send + 'static {
         true
     }
 
+    /// Whether the OS is refusing report transfers on this still-open
+    /// connection — on macOS, while another process holds Secure Input
+    /// (#1799). Such a spell ends on its own and a reopened connection would
+    /// be refused all the same, so callers should wait it out rather than
+    /// treat the channel as dead.
+    ///
+    /// Transports that cannot tell a refusal apart keep the default.
+    fn writes_refused(&self) -> bool {
+        false
+    }
+
     /// If the implementation already knows whether the underlying HID channel
     /// supports HID++ messages, it should return `Some((supports_short,
     /// supports_long))` from this method.
