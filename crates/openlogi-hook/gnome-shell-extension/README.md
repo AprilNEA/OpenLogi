@@ -37,7 +37,7 @@ No titles, window contents, or input are read, and the extension adds no UI.
 UUID=openlogi-frontmost@openlogi.dev
 DEST="$HOME/.local/share/gnome-shell/extensions/$UUID"
 mkdir -p "$DEST"
-cp metadata.json extension.js ringAnimation.js ringFocus.js "$DEST"/
+cp metadata.json extension.js ringWindow.js ringAnimation.js ringFocus.js "$DEST"/
 ```
 
 On Wayland the shell cannot be reloaded in place, so **log out and back in** to

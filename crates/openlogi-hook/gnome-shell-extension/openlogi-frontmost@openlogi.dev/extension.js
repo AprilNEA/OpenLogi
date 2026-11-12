@@ -48,8 +48,10 @@ export default class OpenLogiFrontmostExtension extends Extension {
         this._focusChangedId = global.display.connect(
             'notify::focus-window',
             () => {
-                guardRingFocus(global.display.focus_window);
-                this._emitFocusedWmClassChanged();
+                // Handing focus back re-enters this handler for the app,
+                // which emits; the ring itself is never published.
+                if (!guardRingFocus(global.display.focus_window))
+                    this._emitFocusedWmClassChanged();
             });
 
         this._ringAnimations = new InjectionManager();

@@ -3,22 +3,20 @@
 // a slot injects (Ctrl+C, Alt+Left, ...) goes to the focused window: the ring.
 // Hand keyboard focus straight back to the window the ring opened over.
 // `MetaWindow.focus()` does not raise, so the ring stays on top.
-const RING_WM_CLASS = 'openlogi-action-ring';
-
-function isRing(win) {
-    return win?.get_wm_class() === RING_WM_CLASS;
-}
+import {isRingWindow} from './ringWindow.js';
 
 // `initialFocus` is the window focused when the extension is enabled, so the
 // first ring after enabling already has a window to hand focus back to.
+// The returned handler reports whether it handed focus back, so the caller
+// never publishes the ring as the focused window.
 export function ringFocusGuard(initialFocus, timestamp) {
-    let lastApp = isRing(initialFocus) ? null : initialFocus ?? null;
+    let lastApp = isRingWindow(initialFocus) ? null : initialFocus;
     return function onFocusWindow(win) {
         if (!win)
-            return;
-        if (!isRing(win)) {
+            return false;
+        if (!isRingWindow(win)) {
             lastApp = win;
-            return;
+            return false;
         }
         try {
             lastApp?.focus(timestamp());
@@ -26,5 +24,6 @@ export function ringFocusGuard(initialFocus, timestamp) {
             // lastApp was unmanaged meanwhile; nothing to give focus back to.
             lastApp = null;
         }
+        return true;
     };
 }
