@@ -59,12 +59,13 @@ pub trait RawHidChannel: Sync + Send + 'static {
     ///
     /// Returns the exact amount or read bytes on success. An `Err` is treated
     /// as transient: the [`HidppChannel`](super::HidppChannel) read loop logs
-    /// it and retries, so an implementation must not surface a condition that
-    /// will never clear (it would busy-spin the loop). For a *permanent*
-    /// failure — the device is gone and no report will ever arrive — the future
-    /// may instead park forever. That is sound because the read loop always
-    /// races this future against the channel's close signal in a `select!`; any
-    /// other caller must do the same and must not await `read_report` bare.
+    /// it and retries after a pause that grows while failures repeat, so an
+    /// implementation must not surface a condition that will never clear (the
+    /// loop would keep retrying it for good). For a *permanent* failure — the
+    /// device is gone and no report will ever arrive — the future may instead
+    /// park forever. That is sound because the read loop always races this
+    /// future against the channel's close signal in a `select!`; any other
+    /// caller must do the same and must not await `read_report` bare.
     async fn read_report(&self, buf: &mut [u8]) -> Result<usize, Box<dyn Error + Sync + Send>>;
 
     /// Whether the underlying device connection is still usable.
