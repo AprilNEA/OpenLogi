@@ -113,7 +113,7 @@ pub(crate) fn navigate(cx: &mut App, to: impl FnOnce(&mut AppView, &mut Context<
 }
 
 /// Focus or create the main window, then show exactly the requested device.
-#[cfg(any(target_os = "windows", test))]
+#[cfg(any(target_os = "windows", all(test, target_os = "macos")))]
 pub(crate) fn open_device_settings(device_key: &str, cx: &mut App) -> bool {
     let record_key = crate::state::AppState::try_read(cx).and_then(|state| {
         state

@@ -473,7 +473,7 @@ impl AppView {
     }
 
     /// Open the device selected by the Windows tray.
-    #[cfg(any(target_os = "windows", test))]
+    #[cfg(any(target_os = "windows", all(test, target_os = "macos")))]
     pub(crate) fn open_device_settings(&mut self, record_key: String, cx: &mut Context<Self>) {
         self.open_device(record_key, cx);
         self.active_tab = DetailTab::Device;
