@@ -497,6 +497,44 @@ whitespace or control characters, two peers share a name or public key, two
 layout entries use the same edge, a layout entry or `peer_channels` names a
 peer that `[[flow.peers]]` does not define, two device entries share a key, a
 device has no `self` slot, or two machines share one slot.
+### Battery menu and warnings
+
+On Windows, online battery-reporting devices can appear in the tray menu with
+percentage badges and charging indicators. Missing, cached or held percentages
+appear as `?`. Clicking a row opens that device's settings.
+
+macOS keeps its native control-center menu, including its device submenus,
+battery glyphs and critical-battery attention mark. These options do not hide
+macOS device rows or replace its icon treatment. Linux has no tray integration.
+
+Each device has independent options, enabled by default:
+
+```toml
+[devices."<physical-key>".battery]
+show_in_menu = true # Windows menu rows only
+warn_low = true     # macOS and Windows battery notifications
+```
+
+On Windows, `warn_low` also controls the tray icon's orange and red warning
+colors, including for devices hidden from the menu. Charging/full devices and
+stale readings do not contribute. Current coarse low/critical levels can color
+the icon, but OS notifications require a measured percentage at 20% or less.
+
+Transient direct-attached devices without a stable physical identity use the
+default battery preferences and do not offer saved per-device options.
+
+A notification is sent once per low-battery episode, including when the app first
+observes an already-low device. The episode only resets after a current reading
+above 25%; reconnecting, restarting, or briefly charging does not reset it.
+Disabling `warn_low` also mutes that device's on-screen OpenLogi overlay notices.
+The global `low_battery_notifications` setting can mute all overlay notices
+without changing the tray icon or OS notifications.
+Notification delivery respects the operating system's notification permissions.
+Warning history is stored in `battery-warnings.json` in the profile's state
+directory. Devices without their own serial or unit ID use session-only history.
+That history is discarded when the pairing disappears or its reported model changes;
+an offline device that remains paired keeps its history.
+
 
 ## Actions
 

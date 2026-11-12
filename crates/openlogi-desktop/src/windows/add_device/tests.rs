@@ -49,6 +49,7 @@ fn snapshot(receivers: Vec<ReceiverInfo>) -> AgentSnapshot {
         lights: Vec::new(),
         flow: openlogi_ipc::FlowStatus::default(),
         config_revision: openlogi_core::config::ConfigRevision::default(),
+        device_selection: None,
     }
 }
 

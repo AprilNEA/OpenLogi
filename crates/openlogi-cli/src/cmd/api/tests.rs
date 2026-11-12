@@ -66,6 +66,7 @@ fn snapshot() -> AgentSnapshot {
         lights: Vec::new(),
         flow: FlowStatus::default(),
         config_revision: openlogi_core::config::ConfigRevision::default(),
+        device_selection: None,
     }
 }
 
@@ -180,6 +181,7 @@ async fn inventory_projects_mixed_devices_without_unrelated_private_state() {
         devices[0]["battery"],
         json!({
             "percentage": 80, "level": "good", "status": "discharging",
+            "freshness": "current",
         })
     );
     assert_eq!(devices[0]["capabilities"]["pointer"], true);

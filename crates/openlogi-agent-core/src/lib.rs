@@ -12,6 +12,7 @@
 
 pub mod action_ring;
 pub mod backlight_overlay;
+pub mod battery;
 pub mod capture_plan;
 mod dpi;
 pub mod event_monitor;

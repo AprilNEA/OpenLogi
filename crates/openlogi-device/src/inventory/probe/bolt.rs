@@ -24,7 +24,9 @@ use super::{
 };
 use crate::backend::NodeInfo;
 use crate::host_lock::ReceiverRegisterPhase;
-use crate::inventory::cache::{CacheKey, CacheOutcome, ProbeTarget, probe_or_reuse, seen};
+use crate::inventory::cache::{
+    CacheKey, CacheOutcome, ProbeTarget, cached_probe, probe_or_reuse, seen,
+};
 use crate::inventory::events::EventSubscriptionHandle;
 use crate::inventory::features::ProbedFeatures;
 use crate::inventory::mappings::{map_kind, resolve_device_kind};
@@ -290,7 +292,7 @@ async fn walk_bolt_slot(
     } else {
         debug!(slot, budget = ?slot_budget,
             "Bolt slot probe timed out; using cached data if available");
-        let probe = cached.map_or_else(ProbedFeatures::default, |c| c.probe.clone());
+        let probe = cached.map_or_else(ProbedFeatures::default, cached_probe);
         (probe, seen(id))
     };
     if matches!(outcome, CacheOutcome::Fresh(..))

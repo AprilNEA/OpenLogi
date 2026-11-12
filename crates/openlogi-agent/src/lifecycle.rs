@@ -329,10 +329,25 @@ impl Armed {
         let (mut watchers, inventory_refresh) = startup::spawn_state_watchers(&running.shared);
         let mut ring = running.inputs.ring.subscribe();
 
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let mut battery_expiry = {
+            let period = std::time::Duration::from_secs(30);
+            tokio::time::interval_at(tokio::time::Instant::now() + period, period)
+        };
         info!("openlogi-agent started");
         loop {
             tokio::select! {
                 biased;
+
+                () = async {
+                    #[cfg(any(target_os = "macos", target_os = "windows"))]
+                    battery_expiry.tick().await;
+                    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+                    std::future::pending::<()>().await;
+                } => {
+                    #[cfg(any(target_os = "macos", target_os = "windows"))]
+                    crate::battery::expire();
+                }
 
                 // Logout, a developer, or the stale-agent takeover — each
                 // means "stop". The takeover's successor would rather find
@@ -521,18 +536,26 @@ impl Running {
                 } else {
                     orchestrator.refresh_inventory(&inventories, &standalone, hid_open_failures);
                 }
+                #[cfg(any(target_os = "macos", target_os = "windows"))]
+                let batteries = orchestrator.battery_observations();
                 let confirm_settings = orchestrator.needs_reapply_confirmation();
+                #[cfg(any(target_os = "macos", target_os = "windows"))]
+                crate::battery::refresh_inventory(batteries);
                 drop(orchestrator);
                 if confirm_settings {
                     refresh.request_settings_confirmation();
                 }
             }
             InventoryEvent::Unavailable => {
+                #[cfg(any(target_os = "macos", target_os = "windows"))]
+                crate::battery::invalidate();
                 self.orchestrator.lock().await.mark_inventory_unavailable();
             }
             // Devices likely power-cycled during the sleep; the next snapshot
             // re-applies their volatile settings (#189).
             InventoryEvent::SystemWake => {
+                #[cfg(any(target_os = "macos", target_os = "windows"))]
+                crate::battery::invalidate();
                 self.orchestrator.lock().await.reapply_after_system_resume();
             }
             InventoryEvent::BacklightChanged {

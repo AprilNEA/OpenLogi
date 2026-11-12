@@ -8,7 +8,7 @@
 id: core-battery-attention-owner
 language: rust
 severity: error
-message: Whether and how urgently a battery reading needs attention is openlogi_core::device::BatteryInfo::attention's (needs_attention for the yes/no); call it instead of comparing a battery percentage or testing for the low or critical battery levels here.
+message: Whether and how urgently a battery reading needs attention is openlogi_core::device::BatteryInfo::attention's (needs_attention for the yes/no); use rearms_warning/rearms_overlay_notice for recovery; call these owners instead of comparing a battery percentage or testing for the low or critical battery levels here.
 note: |
   The rule lived in the settings app (ui/battery.rs) until the agent needed
   it for its low-battery notice. A second threshold would let the overlay
@@ -19,6 +19,7 @@ files:
   - crates/**/*.rs
 ignores:
   - crates/openlogi-core/src/device.rs
+  - crates/openlogi-core/src/battery.rs
   - "**/tests.rs"
   - "**/tests/**"
 rule:
@@ -32,3 +33,5 @@ rule:
       regex: '\bpercentage\s*<=?\s*[0-9A-Z]'
     - kind: binary_expression
       regex: '[=!]=\s*BatteryLevel::(Low|Critical)\b|BatteryLevel::(Low|Critical)\s*[=!]='
+    - kind: binary_expression
+      regex: '\b(percentage|charge)\s*(<=|<|>=|>)\s*(25|30)\b'

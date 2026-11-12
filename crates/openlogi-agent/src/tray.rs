@@ -74,7 +74,7 @@ use crate::status_item::{self, Trailing, TrailingTitles};
 use crate::tray_model::{
     AppRow, BatteryFill, CameraRow, Change, Detail, DeviceMemory, DeviceRow, Entry, Failure,
     FlowRow, Issue, Permission, Read, Reading, Reads, RoutedDevice, SeenCamera, TrayMenu,
-    battery_text, is_charging, needs_attention,
+    battery_text, needs_attention,
 };
 
 /// What the menu needs from the async core, handed over when the agent arms.
@@ -1093,7 +1093,7 @@ fn trailing(detail: Detail) -> Trailing {
 /// The battery glyph for `battery`: filled to its reading, bolted while it
 /// charges, orange when low and red when critical.
 fn battery_glyph(battery: &BatteryInfo) -> Option<Retained<NSImage>> {
-    let name = if is_charging(battery) {
+    let name = if battery.is_charging() {
         "battery.100.bolt"
     } else {
         match BatteryFill::of(battery) {
@@ -1201,6 +1201,11 @@ fn flow_item(target: &MenuTarget, flow: &FlowRow, title: &str) -> Retained<NSMen
     ));
     item.setSubmenu(Some(&submenu));
     item
+}
+
+/// Deliver a persistent battery alert using the agent notification identity.
+pub fn notify_battery(alert: &crate::battery::Alert) {
+    status_item::notify_battery(alert);
 }
 
 #[cfg(test)]

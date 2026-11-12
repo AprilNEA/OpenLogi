@@ -35,7 +35,9 @@ mod wheel_hold;
 #[cfg(feature = "fs")]
 mod tests;
 
-pub use device::{DeviceConfig, DeviceIdentity, DisableKey, LinkConfig, LinkOverrides};
+pub use device::{
+    BatteryPreferences, DeviceConfig, DeviceIdentity, DisableKey, LinkConfig, LinkOverrides,
+};
 #[cfg(feature = "fs")]
 pub use edit::{ConfigEdit, DeviceEdit, DeviceEditError, DeviceSetting};
 #[cfg(all(test, feature = "fs", unix))]

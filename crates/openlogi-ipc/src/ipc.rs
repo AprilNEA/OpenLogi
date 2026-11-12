@@ -181,7 +181,8 @@ pub use succession::Identity;
 ///      chooses on release, so the overlay reports the pointer leaving every
 ///      slot as well as entering one. `ActionRingInvocation::size` appended,
 ///      the size the overlay draws the ring at.
-/// v46: `Capabilities::{g_keys, m_keys, macro_record}` appended — a G-series
+/// v46: `BatteryInfo::freshness` appended for current versus cached telemetry.
+///      `Capabilities::{g_keys, m_keys, macro_record}` appended — a G-series
 ///      keyboard's HID++ `0x8010` G-keys, `0x8020` M-keys and `0x8030` MR
 ///      key. `ButtonId::{GKey, ModeKey}` appended — the G1–G5 slot of an M
 ///      profile and M1–M3/MR. `Capabilities::change_host` appended after
@@ -190,6 +191,8 @@ pub use succession::Identity;
 ///      `AgentSnapshot::config_revision` appended — the revision of
 ///      `config.toml` the agent last loaded, so the settings app learns of
 ///      a save another writer made.
+///      `AgentSnapshot::device_selection` and
+///      `Agent::acknowledge_device_selection` appended for retained, acknowledged Windows tray navigation.
 pub const PROTOCOL_VERSION: u32 = 46;
 
 /// Environment variable through which the agent hands a supervised helper the
@@ -343,6 +346,8 @@ pub struct AgentSnapshot {
     /// file at another revision reads the file to tell whether it is the one
     /// behind.
     pub config_revision: ConfigRevision,
+    /// Most recent unacknowledged tray request, retained across GUI launches.
+    pub device_selection: Option<DeviceSelection>,
 }
 
 /// A standalone light as it reported itself to the agent.
@@ -576,6 +581,17 @@ pub enum SavedConfigVerdict {
     /// Another writer changed the file after the GUI saved it. The agent
     /// applied that external revision without restoring the GUI's older save.
     FileChangedAfterSave,
+}
+
+/// A tray click addressed to one physical device and one agent publication.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceSelection {
+    /// Agent run, preventing a delayed acknowledgement from clearing a new run's request.
+    pub agent: Identity,
+    /// Publication generation, also distinguishing repeated clicks on the same device.
+    pub request_id: u64,
+    /// Agent-supplied navigation key matching the GUI's device record.
+    pub device_key: String,
 }
 
 /// The application the agent currently resolves per-app profiles against, and
@@ -1259,4 +1275,6 @@ pub trait Agent {
     /// held trigger cancels instead of choosing the slot last reported by
     /// [`Agent::action_ring_hover`].
     async fn action_ring_unhover(session_id: u64) -> Result<(), ActionRingCommandError>;
+    /// Acknowledge only the exact device selection the GUI has displayed.
+    async fn acknowledge_device_selection(request: DeviceSelection);
 }

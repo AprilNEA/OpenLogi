@@ -44,11 +44,13 @@ fn snapshot() -> AgentSnapshot {
         lights: Vec::new(),
         flow: FlowStatus::default(),
         config_revision: ConfigRevision::default(),
+        device_selection: None,
     }
 }
 
 fn discharging(percentage: u8) -> BatteryInfo {
     BatteryInfo {
+        freshness: openlogi_core::device::BatteryFreshness::Current,
         percentage: Some(percentage),
         level: BatteryLevel::Good,
         status: BatteryStatus::Discharging,
@@ -549,6 +551,7 @@ fn the_battery_glyph_fills_to_the_nearest_quarter() {
     assert_eq!(fill(88), BatteryFill::Full);
     let level = |level| {
         BatteryFill::of(&BatteryInfo {
+            freshness: openlogi_core::device::BatteryFreshness::Current,
             percentage: None,
             level,
             status: BatteryStatus::Discharging,

@@ -468,6 +468,7 @@ fn agent_loaded(revision: ConfigRevision) -> AgentSnapshot {
         lights: Vec::new(),
         flow: openlogi_ipc::FlowStatus::default(),
         config_revision: revision,
+        device_selection: None,
     }
 }
 

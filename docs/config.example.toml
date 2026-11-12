@@ -60,6 +60,11 @@ scroll_resolution = "high"
 # Ease this mouse's main wheel in software (needs Accessibility on macOS).
 smooth_wheel = true
 
+# Windows menu visibility and macOS/Windows warnings are independent.
+[devices."receiver:aabbccdd:slot:1".battery]
+show_in_menu = true
+warn_low = true
+
 [devices."receiver:aabbccdd:slot:1".bindings]
 Back = "BrowserBack"
 # Hold only the modifiers and tap the key once: the application switcher steps

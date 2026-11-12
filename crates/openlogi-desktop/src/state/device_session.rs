@@ -32,6 +32,9 @@ pub(crate) enum ObservedConnection {
 pub(super) struct DeviceSession {
     /// Last observed connection mode, for offline presentation only.
     pub(super) last_connection: Option<ObservedConnection>,
+    /// Last model with battery evidence; a reused receiver slot must not inherit it.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    pub(super) battery_model: Option<String>,
     pub(super) smartshift: SmartShiftDeviceState,
     pub(super) light: LightDeviceState,
     pub(super) disable_keys: DisableKeysDeviceState,

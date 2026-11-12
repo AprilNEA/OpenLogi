@@ -280,6 +280,9 @@ impl Agent for TestAgent {
         unreachable!("profile capture must not inspect pairing")
     }
 
+    async fn acknowledge_device_selection(self, _: TarpcContext, _: openlogi_ipc::DeviceSelection) {
+    }
+
     async fn snapshot(self, _: TarpcContext) -> AgentSnapshot {
         *self.snapshots.lock().expect("snapshot lock") += 1;
         self.snapshot
@@ -638,6 +641,7 @@ fn fixture_agent_with(edit: impl FnOnce(&mut DeviceProfile)) -> TestAgent {
         lights: Vec::new(),
         flow: FlowStatus::default(),
         config_revision: openlogi_core::config::ConfigRevision::default(),
+        device_selection: None,
     };
     TestAgent::from_profile(profile, snapshot)
 }

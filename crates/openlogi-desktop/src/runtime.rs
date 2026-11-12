@@ -262,6 +262,8 @@ struct Runtime {
     /// `openlogi://` commands, including a link waiting for the device list
     /// each snapshot refreshes.
     deeplinks: app::deeplink::Deeplinks,
+    #[cfg(target_os = "windows")]
+    displayed_selection: Option<openlogi_ipc::DeviceSelection>,
 }
 
 impl Runtime {
@@ -284,6 +286,8 @@ impl Runtime {
             inventories: Vec::new(),
             standalone: Vec::new(),
             deeplinks: app::deeplink::Deeplinks::default(),
+            #[cfg(target_os = "windows")]
+            displayed_selection: None,
         }
     }
 
@@ -468,6 +472,20 @@ impl Runtime {
                 app::menu::rebuild(cx);
             }
             self.deeplinks.retry(cx);
+            #[cfg(target_os = "windows")]
+            if let Some(request) = &snapshot.device_selection
+                && (self.displayed_selection.as_ref() == Some(request)
+                    || windows::main_window::open_device_settings(&request.device_key, cx))
+            {
+                self.displayed_selection = Some(request.clone());
+                let sender = AppState::global(cx).read(cx).ipc_sender();
+                if sender
+                    .send(ipc::AcknowledgeDeviceSelection(request.clone()).into())
+                    .is_err()
+                {
+                    warn!("could not acknowledge tray device selection");
+                }
+            }
             (auto_download, asset_source, models)
         });
         // Offer the merged set to the cache on every snapshot and let it decide:

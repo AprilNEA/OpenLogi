@@ -29,7 +29,7 @@ use super::{
 use crate::backend::NodeInfo;
 use crate::host_lock::ReceiverRegisterPhase;
 use crate::inventory::cache::{
-    CacheKey, CacheOutcome, Cached, ProbeTarget, is_stale, probe_or_reuse,
+    CacheKey, CacheOutcome, Cached, ProbeTarget, cached_probe, is_stale, probe_or_reuse,
 };
 use crate::inventory::events::EventSubscriptionHandle;
 use crate::inventory::features::ProbedFeatures;
@@ -355,7 +355,7 @@ pub(in crate::inventory) async fn probe_unifying_slot(
     } else {
         debug!(slot, budget = ?probe_budget,
             "Unifying slot probe timed out; using cached data if available");
-        let probe = cached.map_or_else(ProbedFeatures::default, |entry| entry.probe.clone());
+        let probe = cached.map_or_else(ProbedFeatures::default, cached_probe);
         (probe, CacheOutcome::Seen(id))
     };
 

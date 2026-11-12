@@ -48,6 +48,8 @@ use crate::ui::theme::{
 };
 
 mod backlight;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+mod battery;
 mod easy_switch;
 
 /// The preview plus the card's padding and its 1 px border. The border stays
@@ -956,32 +958,31 @@ fn device_tab(
         .and_then(AppState::current_record)
         .and_then(|record| record.capabilities)
         .is_some_and(|capabilities| capabilities.disable_keys);
-    tab_body(
-        DetailTab::Device,
-        ContentWidth::Small,
-        v_flex()
-            .w_full()
-            .gap_3()
-            .child(device_details_card(pal, cx))
-            .when(keyboard, |column| column.child(keyboard_card(pal, cx)))
-            .children(backlight::backlight_card(
-                backlight::BacklightFacts::current(cx),
-                pal,
+    let content = v_flex()
+        .w_full()
+        .gap_3()
+        .child(device_details_card(pal, cx))
+        .when(keyboard, |column| column.child(keyboard_card(pal, cx)))
+        .children(backlight::backlight_card(
+            backlight::BacklightFacts::current(cx),
+            pal,
+        ))
+        .children(easy_switch::easy_switch_card(
+            easy_switch::EasySwitchFacts::current(cx),
+            pal,
+        ))
+        .when(host_switch_keyboard, |column| {
+            column.child(PanelCard::new(
+                tr!("device.switch_together"),
+                Icon::empty().path("action-icons/refresh-cw.svg"),
+                crate::features::keyboard::host_switch::target_table(cx),
             ))
-            .children(easy_switch::easy_switch_card(
-                easy_switch::EasySwitchFacts::current(cx),
-                pal,
-            ))
-            .when(host_switch_keyboard, |column| {
-                column.child(PanelCard::new(
-                    tr!("device.switch_together"),
-                    Icon::empty().path("action-icons/refresh-cw.svg"),
-                    crate::features::keyboard::host_switch::target_table(cx),
-                ))
-            })
-            .child(configuration_card(pal, cx))
-            .children(show_disable_keys.then(|| disable_keys_panel.clone())),
-    )
+        })
+        .child(configuration_card(pal, cx))
+        .children(show_disable_keys.then(|| disable_keys_panel.clone()));
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    let content = content.children(battery::preferences_card(pal, cx));
+    tab_body(DetailTab::Device, ContentWidth::Small, content)
 }
 
 /// What the keyboard card knows: whether the keyboard has an Fn-lock control
