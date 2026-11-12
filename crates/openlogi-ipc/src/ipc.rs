@@ -16,7 +16,8 @@ use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{ActionRingIcon, ActionRingSize, ActionRingSlot};
 use openlogi_core::config::{ConfigRevision, FlowPeerName, FlowPublicKey, Lighting};
 use openlogi_core::device::{
-    BatteryInfo, ChangedOnLight, DeviceInventory, DeviceKind, LightState, LockKey, StandaloneDevice,
+    BatteryInfo, BatteryWidgetStatus, ChangedOnLight, DeviceInventory, DeviceKind, LightState,
+    LockKey, StandaloneDevice,
 };
 use openlogi_core::hid::{
     BacklightChange, BacklightState, DeviceRoute, DisableKeysMask, DisableKeysState, Dpi, DpiInfo,
@@ -190,6 +191,7 @@ pub use succession::Identity;
 ///      `AgentSnapshot::config_revision` appended — the revision of
 ///      `config.toml` the agent last loaded, so the settings app learns of
 ///      a save another writer made.
+///      `AgentStatus::battery_widget` appended.
 pub const PROTOCOL_VERSION: u32 = 46;
 
 /// Environment variable through which the agent hands a supervised helper the
@@ -288,6 +290,8 @@ pub struct AgentStatus {
     pub secure_input: SecureInput,
     /// See [`VirtualKeyboardStatus`].
     pub virtual_keyboard: VirtualKeyboardStatus,
+    /// Experimental macOS battery publisher state, including partial failures.
+    pub battery_widget: BatteryWidgetStatus,
 }
 
 impl AgentStatus {

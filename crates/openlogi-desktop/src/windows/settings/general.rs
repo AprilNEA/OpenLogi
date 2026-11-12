@@ -18,6 +18,9 @@ use openlogi_core::config::MouseProfileTarget;
 use crate::features::pointer::momentum::MomentumPanel;
 use crate::platform::registration::ServiceStatus;
 
+#[cfg(target_os = "macos")]
+mod battery_widget;
+
 /// The page's two sensitivity sliders, named so a call site cannot swap two
 /// same-typed `Entity<SliderState>`s without the compiler noticing.
 pub(super) struct SensitivitySliders {
@@ -104,11 +107,16 @@ pub(super) fn general_page(
         .title(tr!("pointer.momentum_title"))
         .description(tr!("pointer.momentum_general_description"))
         .item(SettingItem::render(move |_, _, _| momentum.clone()));
-    SettingPage::new(tr!("app.general"))
+    let page = SettingPage::new(tr!("app.general"))
         .icon(IconName::Settings)
         .resettable(false)
         .group(group)
-        .group(momentum_group)
+        .group(momentum_group);
+
+    #[cfg(target_os = "macos")]
+    let page = page.group(battery_widget::settings_group());
+
+    page
 }
 
 fn mouse_profile_target_item() -> SettingItem {
@@ -363,6 +371,63 @@ mod tests {
                 window.remove_window();
             });
         }
+        rust_i18n::set_locale("en");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    fn the_widget_remains_reachable_at_maximum_scale_in_the_minimum_window(
+        cx: &mut TestAppContext,
+    ) {
+        let _locale = LOCALE_LOCK.lock().unwrap();
+        rust_i18n::set_locale("zh-TW");
+        let handle = cx.update(|cx| {
+            gpui_kit::init(cx);
+            theme::register_builtin_themes(cx);
+            let mut config = Config::ephemeral();
+            config.app_settings.ui_scale = UiScale::ExtraLarge;
+            let (commands, _) = tokio::sync::mpsc::unbounded_channel();
+            let resolver = AssetResolver::new();
+            AppState::set_global(
+                cx.new(|_| AppState::new(Sources::in_memory(config, &resolver, commands))),
+                cx,
+            );
+            settings::open(cx);
+            cx.global::<WindowRegistry>().settings.unwrap()
+        });
+        let mut visual = VisualTestContext::from_window(handle.into(), cx);
+        visual.simulate_resize(size(px(920.), px(640.)));
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        let viewport = Bounds::new(point(px(0.), px(0.)), size(px(920.), px(640.)));
+        // Groups are virtualized, so wheel through them as they are measured.
+        for _ in 0..12 {
+            visual.simulate_event(gpui::ScrollEvent {
+                position: point(px(800.), px(500.)),
+                delta: gpui::ScrollDelta::Lines(point(0., -8.)),
+                modifiers: Modifiers::default(),
+                touch_phase: gpui::TouchPhase::Moved,
+                source: gpui::ScrollSource::Pointer,
+            });
+            visual.update(|window, cx| window.draw(cx).clear(cx));
+            if visual
+                .debug_bounds("macos-battery-widget-status")
+                .is_some_and(|bounds| {
+                    viewport.contains(&bounds.origin) && viewport.contains(&bounds.bottom_right())
+                })
+            {
+                break;
+            }
+        }
+        for selector in ["macos-battery-widget-toggle", "macos-battery-widget-status"] {
+            let bounds = visual
+                .debug_bounds(selector)
+                .expect("widget content renders");
+            assert!(
+                viewport.contains(&bounds.origin) && viewport.contains(&bounds.bottom_right()),
+                "{selector} must remain reachable after scrolling at 125% scale"
+            );
+        }
+        visual.update(|window, _| window.remove_window());
         rust_i18n::set_locale("en");
     }
 }

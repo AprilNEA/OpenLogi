@@ -35,6 +35,7 @@ fn snapshot() -> AgentSnapshot {
             hid_open_failures: false,
             secure_input: SecureInput::Off,
             virtual_keyboard: VirtualKeyboardStatus::Active,
+            battery_widget: openlogi_core::device::BatteryWidgetStatus::Disabled,
         },
         inventory: Vec::new(),
         standalone: Vec::new(),
