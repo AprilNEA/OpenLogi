@@ -88,6 +88,13 @@ pub(super) fn observations(config: &Config, inventories: &[DeviceInventory]) -> 
             if reading_priority(&observation) > reading_priority(existing) {
                 existing.battery = observation.battery;
             }
+            // A stale pairing must not override the addressable device's choices.
+            if observation.online && !existing.online {
+                existing.key = observation.key;
+                existing.session_key = observation.session_key;
+                existing.name = observation.name;
+                existing.preferences = observation.preferences;
+            }
             if existing.history_key.is_none() {
                 existing.history_key = observation.history_key;
             }
@@ -100,7 +107,7 @@ pub(super) fn observations(config: &Config, inventories: &[DeviceInventory]) -> 
 }
 
 // A current charging route outranks a receiver that still reports discharge.
-// Keep configuration identity and preferences from the canonical first route.
+// Reading quality is independent of which online route owns presentation choices.
 fn reading_priority(observation: &Observation) -> (bool, bool, bool, bool) {
     observation
         .battery
@@ -358,6 +365,40 @@ mod tests {
         assert_eq!(first.key, replacement.key);
         assert_ne!(first.session_key, replacement.session_key);
         assert_eq!(replacement.history_key, None);
+    }
+
+    #[test]
+    fn duplicate_pairing_preserves_battery_opt_out() {
+        let mut config = Config::default();
+        let old = config
+            .devices
+            .entry("receiver:receiver:slot:1".into())
+            .or_default();
+        old.dpi = Some(openlogi_core::hid::Dpi::new(1600));
+        old.custom_name = Some("Old pairing".into());
+        let live = config
+            .devices
+            .entry("receiver:receiver:slot:2".into())
+            .or_default();
+        live.custom_name = Some("Live pairing".into());
+        live.battery = BatteryPreferences {
+            show_in_menu: false,
+            warn_low: false,
+        };
+        let mut offline = inventory(0xc548, 1, [1, 2, 3, 4]);
+        offline.paired[0].online = false;
+        let mut online = inventory(0xc548, 2, [1, 2, 3, 4]);
+        online.paired[0].battery.as_mut().unwrap().percentage = Some(8);
+        for inventories in [vec![offline.clone(), online.clone()], vec![online, offline]] {
+            let rows = observations(&config, &inventories);
+            assert_eq!(rows.len(), 1);
+            assert!(rows[0].online);
+            assert_eq!(rows[0].key, "unit:01020304");
+            assert!(!rows[0].preferences.warn_low);
+            assert!(!rows[0].preferences.show_in_menu);
+            assert_eq!(rows[0].name, "Live pairing");
+            assert_eq!(rows[0].battery.as_ref().unwrap().percentage, Some(8));
+        }
     }
 
     #[test]
