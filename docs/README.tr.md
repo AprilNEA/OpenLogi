@@ -164,7 +164,7 @@ Uygulama başına profiller, odaktaki uygulamayla birlikte değişir. Bir `[apps
 | Medya tuşları | Yerel | Yerel | D-Bus MPRIS |
 | Pencere yöneticisi eylemleri (masaüstleri, Mission Control, …) | Yerel | Yerel karşılıklar | GNOME, KDE (KWin), Hyprland; macOS'a özel bazı eylemler hiçbir şey yapmaz |
 | Menü çubuğu / sistem tepsisi simgesi | ✓ | ✓ | — |
-| Uygulama içi güncellemeler | Sparkle | Yerleşik | Yerleşik |
+| Uygulama içi güncellemeler | Sparkle | Yerleşik | Sürüm paketleri, paket yöneticisiyle |
 
 ## Kurulum
 

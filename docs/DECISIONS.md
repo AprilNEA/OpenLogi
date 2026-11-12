@@ -4,6 +4,45 @@ Durable "why we did it this way" records that are not obvious from the code.
 Add a dated entry when a non-obvious architectural or dependency decision is
 made or revisited.
 
+## 2026-11: Linux packages update through the package manager, from the app
+
+Since 0.8.12, Settings → Updates on a `.deb`, `.rpm` or `.pkg.tar.zst` install
+showed "Update failed: no release asset matched the current platform
+(linux/x86_64)" on every check (#605, #1893). The engine's `latest.json`
+deliberately has no Linux asset: those installs are owned by dpkg, rpm or
+pacman, and an engine that swapped the binary in place would leave the package
+database describing files that are no longer there.
+
+- **A separate path, not a Linux asset in the manifest.** On Linux,
+  `platform::updater::linux` replaces the engine for every check. It reads
+  GitHub Releases, as `install.sh` does, and installs the release package
+  with the package manager through `pkexec`. The package manager stays the
+  owner of the files, the udev rules and the package scripts.
+- **The same trust chain as `install.sh`.** The package must verify against
+  the minisign key the build embeds, carry that exact file name in its signed
+  trusted comment, and match its `SHA256SUMS` entry. Only release builds embed
+  the key (from `install.sh`, which `release.yml` checks against the release
+  Environment), so a distribution or source build never offers an install and
+  never second-guesses the package manager that built it.
+- **Offered only when it can work.** The install button needs a detected
+  dpkg, rpm or pacman install, the key, and this host's package, `.minisig`
+  and `SHA256SUMS` in the release. A release still publishes when its Linux
+  leg fails; it then shows as available with no package for this system.
+- **The frontend `install.sh` would use.** On an RPM system that is dnf, then
+  yum, zypper, and plain `rpm -Uvh` last, so dependencies a new version adds
+  are resolved. Tools run from fixed paths, never from `PATH`.
+- **Never unattended.** Every install waits for the polkit prompt, so the
+  automatic-install setting does not apply to this path.
+- **Results carry their attempt.** `LinuxUpdate` is the path's only state and
+  does no I/O. It hands each check and install an attempt id and drops a
+  result whose id is no longer current.
+
+Verified by unit tests of the state machine, the install offer and every
+frontend choice, by a Settings test that renders the real view with an engine
+failing as it does on Linux, and by checking the real v0.9.0 RPM against the
+published key and `SHA256SUMS`. Not yet verified: a polkit-approved install
+on a real Fedora desktop.
+
 ## 2026-11: The agent saves a paired Flow computer in `config.toml`
 
 Until now the agent only read `config.toml`; the GUI and `openlogi api` wrote

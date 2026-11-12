@@ -164,7 +164,7 @@ A cobertura de recursos depende do que cada dispositivo informa; o app mostra s�
 | Teclas de mídia | Nativo | Nativo | D-Bus MPRIS |
 | Ações do gerenciador de janelas (áreas de trabalho, Mission Control, …) | Nativo | Equivalentes nativos | GNOME, KDE (KWin), Hyprland; algumas ações exclusivas do macOS não fazem nada |
 | Ícone na barra de menus / bandeja | ✓ | ✓ | — |
-| Atualizações no app | Sparkle | Embutido | Embutido |
+| Atualizações no app | Sparkle | Embutido | Pacotes das versões, pelo gerenciador de pacotes |
 
 ## Instalação
 

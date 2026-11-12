@@ -165,7 +165,7 @@ OpenLogi 能做、而 Options+ 做不到的事：
 | 媒体键 | 原生 | 原生 | D-Bus MPRIS |
 | 窗口管理动作（切换桌面、调度中心等） | 原生 | 原生对应功能 | GNOME、KDE（KWin）、Hyprland；部分 macOS 专属动作无效果 |
 | 菜单栏或托盘图标 | ✓ | ✓ | — |
-| 应用内更新 | Sparkle | 内置 | 内置 |
+| 应用内更新 | Sparkle | 内置 | 发布包，经由包管理器安装 |
 
 ## 安装
 

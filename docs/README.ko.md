@@ -165,7 +165,7 @@ OpenLogi는 되고 Options+는 안 되는 것들:
 | 미디어 키 | 네이티브 | 네이티브 | D-Bus MPRIS |
 | 창 관리자 액션(데스크톱, Mission Control 등) | 네이티브 | 네이티브 대응 기능 | GNOME, KDE (KWin), Hyprland; 일부 macOS 전용 액션은 동작하지 않음 |
 | 메뉴 막대 / 트레이 아이콘 | ✓ | ✓ | — |
-| 앱 내 업데이트 | Sparkle | 내장 | 내장 |
+| 앱 내 업데이트 | Sparkle | 내장 | 릴리스 패키지(패키지 관리자 사용) |
 
 ## 설치
 

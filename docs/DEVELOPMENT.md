@@ -488,20 +488,45 @@ dash packaging/linux/tests/install-smoke.sh
 ```
 
 The desktop app's Linux update path follows the same contract. The engine's
-`latest.json` carries no Linux asset, so on Linux the app checks GitHub
-Releases itself (`platform::updater::linux::release_check`): `stable` reads
-`/releases/latest`, and `beta` takes the highest version among the recent
-releases, prereleases included. When [installation-source
-detection](#installation-source-detection) reports a dpkg, rpm or pacman
-package, an explicit **Install Update** click downloads
-`openlogi-v<version>-linux-<arch>.<format>` with its `.minisig` and
-`SHA256SUMS`, refuses any release not strictly newer than the running one,
-verifies the checksum and the minisign signature in-process against the
-build's embedded `OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY`, and requires the signed
-trusted comment to name that exact file. A build without the key offers no
-**Install Update** and shows the package-manager hint instead.
-It then runs `/usr/bin/pkexec` with `/usr/bin/apt-get`, `/usr/bin/rpm` or
-`/usr/bin/pacman` at those fixed paths, never resolved through `PATH`.
+`latest.json` carries no Linux asset, so on Linux every update check — at
+launch, from the menu, or from Settings → Updates — runs on
+`platform::updater::linux` instead of the engine, and the engine's expected
+"no release asset matched" error is never shown. The check reads GitHub
+Releases (`release_check`): `stable` reads `/releases/latest`, and `beta`
+takes the highest version among the recent releases, prereleases included.
+`LinuxUpdate` owns the path's state and does no I/O; each check and install
+carries an attempt id, and a result whose id is no longer current is dropped.
+
+Settings → Updates offers **Download & Install** only when all of these hold:
+[installation-source detection](#installation-source-detection) reports a
+dpkg, rpm or pacman package; the build embeds
+`OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY`; and the release publishes this host's
+`openlogi-v<version>-linux-<arch>.<format>`, its `.minisig` and `SHA256SUMS`.
+The release workflow still publishes a release whose Linux leg failed, so a
+newer version alone is not enough: without the package the hero says that
+version has no package for this system yet. Nix, `Unknown` and a key-less
+build get a hint to update through the package manager instead.
+
+The click downloads the three files, refuses any release not strictly newer
+than the running one, verifies the checksum and the minisign signature
+in-process against the embedded key, and requires the signed trusted comment
+to name that exact file. It then runs `/usr/bin/pkexec` with the frontend
+`install.sh` would pick, at its fixed path and never resolved through `PATH`:
+`apt-get install -y` for a `.deb`; `dnf install -y`, `yum install -y`,
+`zypper --non-interactive install --allow-unsigned-rpm` or `rpm -Uvh`, in that
+order, for an `.rpm`; `pacman -U --noconfirm` for a `.pkg.tar.zst`. A missing
+`pkexec` or frontend is reported before anything downloads. pkexec's exit codes
+126 and 127 read as "administrator approval was not given". The hero shows a
+translated reason for every failure; the technical detail goes to the log.
+Restarting runs the new binary, which the package manager put at the same
+path. The automatic-install setting does not apply here: every install waits
+for the polkit prompt.
+
+Only release builds embed the key: `build.yml`'s `linux-packages` job reads it
+from `install.sh` when `inputs.sign` is set, and `release.yml` already checks
+that copy against the release Environment's. Distribution and source builds
+(AUR, Nix, `cargo build`) therefore never offer an in-app install and leave
+updates to the package manager that owns them; do not make the key a default.
 `openlogi_core::linux_package` owns the arch tag and the package file name for
 both this lookup and `xtask linux package`.
 
@@ -518,13 +543,13 @@ Settings → Updates displays the result as **Installation source**, separately
 from the update download source. An open window refreshes when detection
 completes or the interface language changes.
 This is an ownership snapshot, not download provenance. On Linux it gates the
-in-app package update: Settings → Updates offers **Install Update** (a
+in-app package update: Settings → Updates offers **Download & Install** (a
 root install through `pkexec`) only for `Detected(LinuxPackage(_))`, and only
 in a build that embeds the update signing key
-(`platform::updater::linux::installable_package`). Nix, `Unknown` and a
-still-`Detecting` probe get the release check and a hint to update through the
-package manager instead, never the install button. See the Linux packaging
-section.
+(`platform::updater::linux::LinuxUpdate::offer`). Nix and `Unknown` get the
+release check and a hint to update through the package manager instead, and a
+still-`Detecting` probe waits; none gets the install button. See the Linux
+packaging section.
 
 - **Homebrew:** matches the installed receipt and Caskroom app back-link to
   the running bundle, distinguishing `openlogi` from `openlogi@latest`. It
@@ -668,7 +693,8 @@ the R2/update settings:
 - `OPENLOGI_UPDATE_BASE_URL` — public HTTPS base URL, for example
   `https://updates.openlogi.org`.
 - `OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY` — base64 minisign public key embedded in
-  the app and used to verify updater artifacts.
+  the app and used to verify updater artifacts. The Linux packages embed the
+  copy in `packaging/linux/install.sh`, which must match this value.
 - `OPENLOGI_UPDATE_MINISIGN_SECRET_KEY` — the passwordless minisign secret key
   file, **base64-encoded** (`base64 < minisign.key`), used only in the release
   publish job to sign release artifacts before `latest.json` is generated. It
