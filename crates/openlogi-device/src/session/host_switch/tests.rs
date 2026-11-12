@@ -982,6 +982,7 @@ type SessionResult = Result<HostSwitchSessionOutcome, super::HostSwitchSessionFa
 /// [`MOUSE_SLOT`] linked, on a channel that a responder answers.
 struct RunningSession {
     task: tokio::task::JoinHandle<SessionResult>,
+    stop: Option<oneshot::Sender<super::HostSwitchStopReason>>,
     incoming: mpsc::UnboundedSender<Vec<u8>>,
     handle: crate::replay::ReplayChannelHandle,
 }
@@ -997,8 +998,8 @@ impl RunningSession {
             [bolt_route(KEYBOARD_SLOT), bolt_route(MOUSE_SLOT)],
             raw_scripted_channel(raw).await,
         );
+        let (stop, stopped) = oneshot::channel();
         let task = tokio::spawn(async move {
-            let (_stop, stopped) = oneshot::channel();
             let (_signal, gate) = device_io_channel();
             let pool = ChannelPool::with_backend(ScriptedBackend::new(Vec::new()));
             run_host_switch_session(
@@ -1013,9 +1014,17 @@ impl RunningSession {
         });
         Self {
             task,
+            stop: Some(stop),
             incoming,
             handle,
         }
+    }
+
+    /// Ask the session to stop, as the host-switch manager does for a
+    /// software request.
+    fn stop_gracefully(&mut self) {
+        let stop = self.stop.take().expect("the session is stopped once");
+        let _ = stop.send(super::HostSwitchStopReason::Graceful);
     }
 
     /// Wait until the session has written `count` requests for function
@@ -1498,6 +1507,90 @@ async fn a_held_host_key_stays_diverted_until_its_release() {
         reporting[1][6] & 1,
         0,
         "the restore stops diverting the key"
+    );
+}
+
+#[tokio::test]
+async fn a_stop_waits_for_a_held_host_key_before_handing_it_back() {
+    // A software request stops the session while a K580's host key is held.
+    // Handing the key back then would make the keyboard leave for the key's
+    // host before the request moved it (#2352).
+    let keyboard = PairedKeyboard {
+        change_host_version: 2,
+        announces: false,
+        hosts_info: true,
+        host_key: Some(HostKey::Divertable),
+    };
+    let reporting_writes = |writes: &[Vec<u8>]| -> Vec<Vec<u8>> {
+        writes
+            .iter()
+            .filter(|report| is_request(report, KEYBOARD_SLOT, REPROG_INDEX, 3))
+            .cloned()
+            .collect()
+    };
+    let mut session = RunningSession::start(move |request| bolt_pair(request, keyboard)).await;
+    session.written(REPROG_INDEX, 3, 1).await;
+    session.send(diverted_report(&[HOST_1_CID]));
+    // The rename is heard after the press, and its read shows the press was.
+    session.send(rename_reply());
+    session.written(HOSTS_INFO_INDEX, 1, 6).await;
+
+    session.stop_gracefully();
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(
+        !session.task.is_finished(),
+        "the session waits for the held key"
+    );
+    assert_eq!(
+        reporting_writes(&session.handle.written_reports()).len(),
+        1,
+        "the held key is not handed back to the firmware"
+    );
+
+    session.send(diverted_report(&[]));
+    let (outcome, writes) = session.outcome().await;
+    assert!(
+        matches!(
+            outcome,
+            Ok(HostSwitchSessionOutcome::Restored {
+                requested_host: None
+            })
+        ),
+        "the request wins over the key's own host"
+    );
+    let reporting = reporting_writes(&writes);
+    assert_eq!(
+        reporting.len(),
+        2,
+        "the key is armed, then restored once it is up"
+    );
+    assert_eq!(
+        reporting[1][6] & 1,
+        0,
+        "the restore stops diverting the key"
+    );
+}
+
+#[tokio::test]
+async fn a_stop_without_a_held_host_key_restores_at_once() {
+    let keyboard = PairedKeyboard {
+        change_host_version: 2,
+        announces: false,
+        hosts_info: true,
+        host_key: Some(HostKey::Divertable),
+    };
+    let mut session = RunningSession::start(move |request| bolt_pair(request, keyboard)).await;
+    session.written(REPROG_INDEX, 3, 1).await;
+    session.stop_gracefully();
+    let (outcome, _) = session.outcome().await;
+    assert!(
+        matches!(
+            outcome,
+            Ok(HostSwitchSessionOutcome::Restored {
+                requested_host: None
+            })
+        ),
+        "nothing is held, so nothing is waited for"
     );
 }
 

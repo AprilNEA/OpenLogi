@@ -20,7 +20,9 @@
 //!   A key counts when it is released, not when it is pressed. The session
 //!   hands the keys back to the firmware before anything moves, and a K580
 //!   whose keys were handed back while one was held left this host by itself,
-//!   before the linked devices could follow (#2352).
+//!   before the linked devices could follow (#2352). A stop that a software
+//!   request asks for waits, for a bounded time, for a held key to come up
+//!   before it hands the keys back, for the same reason.
 //! - Analytics: the host keys keep their function and also report to
 //!   software.
 //!
@@ -51,7 +53,7 @@ use tokio::{
     sync::{mpsc, oneshot},
     time::timeout,
 };
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 mod cookies;
 mod hosts;
@@ -100,6 +102,10 @@ const HIDPP_OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
 /// guard: the agent gives a whole `switch_host` 5 s, and Flow 1 s to prepare
 /// each device.
 const HOSTS_INFO_BUDGET: Duration = Duration::from_millis(500);
+/// How long a stop waits for a held host key to come up before it hands the
+/// keys back anyway. A key held down this long is not a tap that a software
+/// request raced.
+const HELD_KEY_RELEASE_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ReportingMode {
@@ -785,6 +791,13 @@ async fn watch_host_switch(
             reason = &mut shutdown => {
                 return match reason.unwrap_or(HostSwitchStopReason::DeviceLost) {
                     HostSwitchStopReason::Graceful => {
+                        if held_host.is_some() {
+                            // Handing a held key back makes the keyboard
+                            // leave for its host before the linked devices
+                            // move (#2352). The request that stops this
+                            // session wins over the key's own host.
+                            wait_for_key_release(triggers, registry, shared).await;
+                        }
                         HostSwitchStop::for_current_publication(registry, shared)
                     }
                     HostSwitchStopReason::DeviceLost => {
@@ -835,6 +848,38 @@ async fn watch_host_switch(
                 }
             }
         }
+    }
+}
+
+/// Wait until the diverted host key that is held down comes up. Gives up when
+/// the key stays down for [`HELD_KEY_RELEASE_TIMEOUT`], when inventory no
+/// longer publishes `shared`, and when the listener ends.
+async fn wait_for_key_release(
+    triggers: &mut mpsc::UnboundedReceiver<HostTrigger>,
+    registry: &ChannelRegistry,
+    shared: &SharedChannel,
+) {
+    let mut registry_changes = registry.subscribe();
+    let release = async {
+        loop {
+            tokio::select! {
+                trigger = triggers.recv() => match trigger {
+                    Some(HostTrigger::Released) | None => return,
+                    Some(_) => {}
+                },
+                changed = registry_changes.changed() => {
+                    if changed.is_err() || !registry.is_current(shared) {
+                        return;
+                    }
+                }
+            }
+        }
+    };
+    if timeout(HELD_KEY_RELEASE_TIMEOUT, release).await.is_err() {
+        warn!(
+            route = %shared.route(),
+            "a host key is still held; handing the host keys back anyway"
+        );
     }
 }
 
