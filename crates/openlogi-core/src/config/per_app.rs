@@ -1,7 +1,9 @@
 //! Per-application profiles: the button overrides a device stores for one
 //! application, and how the application in front is matched to them.
 //!
-//! An override replaces a whole button with a single action. Editing addresses
+//! An override replaces a whole button with a single action, except on a
+//! button that holds the wheel to scroll sideways: there an instantaneous
+//! action replaces only the click (see `app_override`). Editing addresses
 //! a profile by its exact key; matching goes through [`overlay_for`], which
 //! also falls back from a Windows executable path to that executable's
 //! `exe:<filename>` key, and then to the `app:<alias>` key of the
@@ -17,7 +19,9 @@ impl Config {
     /// Resolve the effective binding map for `device_key`, overlaying the
     /// per-app entry for `bundle_id` (if any) on top of the global per-device
     /// `bindings`. A per-app override replaces the whole button with a
-    /// [`Binding::Single`]; everything else falls through.
+    /// [`Binding::Single`], except that an instantaneous action on a
+    /// [`Binding::WheelHold`] button replaces only its click, so the button
+    /// still scrolls sideways while held. Everything else falls through.
     ///
     /// Returns an empty map when the device has no recorded bindings yet.
     /// Callers (the GUI / hook) layer their own defaults on top.
@@ -35,7 +39,8 @@ impl Config {
             && let Some(overlay) = overlay_for(&device.per_app_bindings, &self.apps, bid)
         {
             for (k, v) in overlay {
-                out.insert(*k, Binding::Single(v.clone()));
+                let binding = app_override(out.get(k), v);
+                out.insert(*k, binding);
             }
         }
         out
@@ -147,5 +152,23 @@ impl Config {
                 .find(|key| self.apps.is_undefined_reference(key))
                 .map(|key| (device_key.as_str(), key.as_str()))
         })
+    }
+}
+
+/// What a button does in an application profile that overrides it with
+/// `action`, given its device-wide `global` binding.
+///
+/// Holding the wheel to scroll sideways is a device-wide mode, set in the
+/// device profile, so an instantaneous `action` replaces only the
+/// [`WheelHold`](Binding::WheelHold) click and the button still scrolls while
+/// held. A held shortcut ([`Action::held_chord`]) needs the same press the
+/// wheel hold uses, so it replaces the whole button, as an override of any
+/// other binding does.
+fn app_override(global: Option<&Binding>, action: &Action) -> Binding {
+    match global {
+        Some(Binding::WheelHold(hold)) if action.held_chord().is_none() => {
+            Binding::WheelHold(hold.with_click(action.clone()))
+        }
+        _ => Binding::Single(action.clone()),
     }
 }
