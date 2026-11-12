@@ -1,7 +1,7 @@
 //! Space-switch transaction policy, independent of macOS FFI for regression tests.
 
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, mpsc};
 use std::time::{Duration, Instant};
 
 const PREPARATION_TIMEOUT: Duration = Duration::from_secs(2);
@@ -24,11 +24,26 @@ pub(super) enum Direction {
 }
 
 impl Direction {
-    pub(super) fn sign(self) -> f64 {
+    /// One Space in this direction, counted toward Next.
+    const fn step(self) -> i32 {
         match self {
-            Self::Previous => -1.0,
-            Self::Next => 1.0,
+            Self::Previous => -1,
+            Self::Next => 1,
         }
+    }
+
+    /// The direction of a net count of [`Self::step`]s, or `None` when they
+    /// cancel out.
+    const fn toward(steps: i32) -> Option<Self> {
+        match steps {
+            1.. => Some(Self::Next),
+            ..0 => Some(Self::Previous),
+            0 => None,
+        }
+    }
+
+    pub(super) fn sign(self) -> f64 {
+        f64::from(self.step())
     }
 }
 
@@ -229,9 +244,16 @@ struct PostWait {
 }
 
 impl PostGate {
-    #[cfg(test)]
-    pub(super) fn for_test() -> Self {
-        Self::new(Instant::now() + PREPARATION_TIMEOUT).0
+    /// A gate no caller waits on, for a step queued behind a switch. Its
+    /// preparation keeps the same deadline, so a stalled query still cannot
+    /// post late.
+    pub(super) fn unobserved() -> Self {
+        Self::preparing().0
+    }
+
+    /// A gate whose preparation must commit within [`PREPARATION_TIMEOUT`].
+    fn preparing() -> (Self, PostWait) {
+        Self::new(Instant::now() + PREPARATION_TIMEOUT)
     }
 
     fn new(deadline: Instant) -> (Self, PostWait) {
@@ -292,9 +314,9 @@ impl PostWait {
 
 /// Bound preparation, not native event posting. Return after irrevocable
 /// cancellation, posting acknowledgement, or worker exit. Confirmation stays
-/// detached; a canceled but stuck worker retains its single-flight lease.
+/// detached; a canceled but stuck worker retains its [`Run`].
 pub(super) fn spawn_ordered(work: impl FnOnce(PostGate) + Send + 'static) -> Result<(), Failure> {
-    let (gate, wait) = PostGate::new(Instant::now() + PREPARATION_TIMEOUT);
+    let (gate, wait) = PostGate::preparing();
     std::thread::Builder::new()
         .name("openlogi-spaces".into())
         .spawn(move || work(gate))
@@ -342,21 +364,114 @@ pub(super) fn run(
     }
 }
 
-/// Single in-flight transaction; no queue of relative actions that can run
-/// later on a different display. The owned lease also releases on spawn failure.
-pub(super) struct Lease<'a>(&'a AtomicBool);
+/// One switch at a time, and the presses that arrive during it. A press for
+/// the display being switched is kept as a step and taken once the switch
+/// reaches its Space, so pressing three times moves three Spaces. A press
+/// for another display is skipped: no step can run later on a display the
+/// cursor has left. The caller never waits for a switch under way: the
+/// worker that executes a press also releases held chords.
+pub(super) struct Queue(Mutex<Option<Pending>>);
 
-impl<'a> Lease<'a> {
-    pub(super) fn acquire(busy: &'a AtomicBool) -> Option<Self> {
-        busy.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .ok()
-            .map(|_| Self(busy))
+/// The display a [`Run`] switches and the net steps still to take there,
+/// counted toward Next, so opposite presses cancel out.
+struct Pending {
+    display: u32,
+    steps: i32,
+}
+
+impl Pending {
+    fn take(&mut self) -> Option<Direction> {
+        let direction = Direction::toward(self.steps)?;
+        self.steps -= direction.step();
+        Some(direction)
     }
 }
 
-impl Drop for Lease<'_> {
+/// Why a press started no switch of its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Busy {
+    /// A switch on the same display is under way: the press is a step after it.
+    Queued,
+    /// A switch on another display is under way: the press is dropped.
+    Skipped,
+}
+
+impl Queue {
+    pub(super) const fn new() -> Self {
+        Self(Mutex::new(None))
+    }
+
+    /// A [`Run`] for `display` when no switch is under way. The caller
+    /// switches first and hands the run to the worker that takes its steps.
+    pub(super) fn admit(&self, display: u32, direction: Direction) -> Result<Run<'_>, Busy> {
+        let mut pending = self.lock();
+        match pending.as_mut() {
+            None => {
+                *pending = Some(Pending { display, steps: 0 });
+                Ok(Run {
+                    queue: self,
+                    ended: false,
+                })
+            }
+            Some(under_way) if under_way.display == display => {
+                under_way.steps += direction.step();
+                Err(Busy::Queued)
+            }
+            Some(_) => Err(Busy::Skipped),
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Option<Pending>> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// The right to switch the queue's display. It ends when a switch misses its
+/// Space or no step is left, and when dropped by a failed spawn or an
+/// unwinding worker. Steps not taken by then are discarded.
+#[must_use]
+pub(super) struct Run<'a> {
+    queue: &'a Queue,
+    ended: bool,
+}
+
+impl Run<'_> {
+    /// Switch `first`, then every step queued while a switch was under way,
+    /// until one does not reach its Space.
+    pub(super) fn drain(
+        mut self,
+        first: Direction,
+        gate: PostGate,
+        mut switch: impl FnMut(Direction, PostGate) -> Result<Outcome, Failure>,
+    ) {
+        let mut result = switch(first, gate);
+        while matches!(result, Ok(Outcome::Reached(_))) {
+            let Some(direction) = self.next() else {
+                return;
+            };
+            result = switch(direction, PostGate::unobserved());
+        }
+        // A miss: dropping the run discards the steps left.
+    }
+
+    /// The next step, or `None` after ending the run under the same lock, so
+    /// a press cannot slip in between the last step and the end.
+    fn next(&mut self) -> Option<Direction> {
+        let mut pending = self.queue.lock();
+        let step = pending.as_mut().and_then(Pending::take);
+        if step.is_none() {
+            *pending = None;
+            self.ended = true;
+        }
+        step
+    }
+}
+
+impl Drop for Run<'_> {
     fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
+        if !self.ended {
+            *self.queue.lock() = None;
+        }
     }
 }
 
