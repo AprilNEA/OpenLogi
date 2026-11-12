@@ -147,7 +147,8 @@ body:
       description: |
         Re-run with verbose logging and paste the relevant output.
         CLI: `OPENLOGI_LOG=debug openlogi <command>`.
-        GUI: launch from a terminal with `OPENLOGI_LOG=debug /Applications/OpenLogi.app/Contents/MacOS/OpenLogi`.
+        GUI on macOS: close every OpenLogi window first (only one GUI runs at a time), then launch it from a terminal with `OPENLOGI_LOG=debug /Applications/OpenLogi.app/Contents/MacOS/openlogi-desktop`.
+        Agent (it reads and writes the device): paste the relevant lines from the newest `agent.<date>.log` in `~/.local/state/openlogi/` (or `$XDG_STATE_HOME/openlogi/`; Windows: `%USERPROFILE%\.local\state\openlogi\`).
       render: shell
 
   - type: checkboxes
