@@ -246,9 +246,11 @@ pub fn install_rules() -> Result<(), InstallError> {
     Ok(())
 }
 
-/// Write [`RULES`] into `admin_dir` unless `packaged_dir` already holds them.
+/// Write [`RULES`] into `admin_dir` unless `packaged_dir` already holds them
+/// and `admin_dir` has no copy to shadow them. An existing copy there is
+/// refreshed instead, since udev reads it in place of the packaged one.
 fn place_rules(packaged_dir: &Path, admin_dir: &Path) -> Result<(), InstallError> {
-    if holds_rules(packaged_dir) {
+    if holds_rules(packaged_dir) && !admin_dir.join(RULES_FILE).exists() {
         return Ok(());
     }
     write_rules(admin_dir)
