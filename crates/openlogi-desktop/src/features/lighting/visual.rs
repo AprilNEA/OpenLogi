@@ -4,9 +4,7 @@
 //! the protocol-neutral generated visual and never borrow another model's
 //! image or diffuser geometry.
 
-use gpui::{
-    BoxShadow, ParentElement, Styled, div, hsla, img, point, prelude::FluentBuilder as _, px,
-};
+use gpui::{BoxShadow, ParentElement, Styled, div, hsla, point, prelude::FluentBuilder as _, px};
 use gpui_kit::component::{Icon, IconName};
 use openlogi_core::config::LightSettings;
 
@@ -76,7 +74,11 @@ fn product_image(asset: &ResolvedAsset, width: f32, height: f32, online: bool) -
         // `size_full` lets transparent product artwork escape this slot when
         // its intrinsic aspect ratio differs from the slot. Keep the source
         // aspect ratio while bounding both dimensions to the slot.
-        .child(img(asset.image_path.clone()).max_w_full().max_h_full())
+        .child(crate::services::assets::ScaledImage::contain(
+            asset.image_path.clone(),
+            width,
+            height,
+        ))
 }
 
 fn visual_container() -> gpui::Div {

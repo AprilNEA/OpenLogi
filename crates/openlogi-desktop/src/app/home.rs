@@ -13,7 +13,7 @@ use std::sync::Arc;
 use gpui::{
     Anchor, AnyElement, App, AppContext as _, Context, Div, ElementId, Hsla, InteractiveElement,
     IntoElement, ParentElement, SharedString, StatefulInteractiveElement as _, Styled, Svg, Window,
-    canvas, div, fill, img, point, prelude::FluentBuilder as _, px, rgb, svg,
+    canvas, div, fill, point, prelude::FluentBuilder as _, px, rgb, svg,
 };
 use gpui_kit::base::Button as BaseButton;
 use gpui_kit::component::{
@@ -124,20 +124,17 @@ pub(crate) fn glow_canvas(geom: Arc<GlowGeometry>, color: Hsla) -> impl IntoElem
     canvas(
         move |_, _, _| (geom, color),
         move |bounds, (geom, color), window, _| {
-            let bw = f32::from(bounds.size.width);
-            let bh = f32::from(bounds.size.height);
-            if bw <= 0. || bh <= 0. {
+            // Contain-fit a `geom.aspect` box inside the bounds, sharing the
+            // exact helper with `ScaledImage::fill_stage` so the inter-key holes
+            // and the keyboard image register at any card width up to GALLERY_CARD_MAX_W.
+            let fit = crate::services::assets::contain_fit_bounds(bounds, geom.aspect);
+            let rw = f32::from(fit.size.width);
+            let rh = f32::from(fit.size.height);
+            if rw <= 0. || rh <= 0. {
                 return;
             }
-            // Contain-fit a `geom.aspect` box inside the bounds, matching the
-            // device image's object-fit so the holes line up with the keys.
-            let (rw, rh) = if bw / bh > geom.aspect {
-                (bh * geom.aspect, bh)
-            } else {
-                (bw, bw / geom.aspect)
-            };
-            let ox = f32::from(bounds.origin.x) + (bw - rw) / 2.;
-            let oy = f32::from(bounds.origin.y) + (bh - rh) / 2.;
+            let ox = f32::from(fit.origin.x);
+            let oy = f32::from(fit.origin.y);
             for s in &geom.segments {
                 let quad = gpui::Bounds {
                     origin: point(px(ox + s.x * rw), px(oy + s.y * rh)),
@@ -668,7 +665,7 @@ fn device_image(
         .as_ref()
         .and_then(|a| a.hero_image_path.clone())
     {
-        return img(path).max_w_full().max_h_full().into_any_element();
+        return crate::services::assets::ScaledImage::fill_stage(path).into_any_element();
     }
     // Cameras carry no depot asset, so give them a recognisable glyph on their
     // gallery card instead of the generic chip fallback.

@@ -2,7 +2,7 @@
 
 use super::language::{LanguageOption, language_select_field};
 use crate::ui::theme::FocusRingStyle as _;
-use gpui::{ElementId, img};
+use gpui::ElementId;
 use openlogi_core::config::AppIcon;
 
 use super::{
@@ -263,7 +263,7 @@ fn icon_card(icon: AppIcon, selected: bool, accent: Hsla, pal: Palette) -> impl 
                 // No preview means a bundle built before this icon existed;
                 // the card stays, empty, rather than shifting the row.
                 .when_some(preview, |this, path| {
-                    this.child(img(path).size(px(64.)))
+                    this.child(crate::services::assets::ScaledImage::exact(path, 64., 64.))
                 }),
         )
         .child(

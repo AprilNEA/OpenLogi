@@ -62,7 +62,7 @@ use crate::ui::components::{MenuRow, control_button};
 use crate::ui::theme::{
     self, ACCENT_BLUE, Palette, PressableStyle as _, SCREEN_PAD, Typography as _,
 };
-use gpui::{Animation, AnimationExt, ease_out_quint, img};
+use gpui::{Animation, AnimationExt, ease_out_quint};
 use openlogi_core::hid::KeypadDescriptor;
 
 mod callout_layout;
@@ -1817,7 +1817,9 @@ fn image_or_fallback(
     pal: &Palette,
 ) -> AnyElement {
     match img_path {
-        Some(path) if path.exists() => img(path).w(px(img_w)).h(px(img_h)).into_any_element(),
+        Some(path) if path.exists() => {
+            crate::services::assets::ScaledImage::exact(path, img_w, img_h).into_any_element()
+        }
         Some(_) | None => div()
             .w(px(img_w))
             .h(px(160.))
