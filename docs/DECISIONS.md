@@ -4,6 +4,25 @@ Durable "why we did it this way" records that are not obvious from the code.
 Add a dated entry when a non-obvious architectural or dependency decision is
 made or revisited.
 
+## 2026-11: An upgraded config starts the backlight indicator off
+
+The backlight indicator shipped in 0.8.15 with no setting (#1663), and
+`backlight_notifications` adds one. A new config has it on; a config from
+before schema v12 loads with it off (#1914).
+
+- **A saved default looks like a choice.** The notice switches fall back to
+  `default_true` when their key is absent, and the first save writes that
+  `true` to the file. After that, a value the user chose and one the default
+  filled in look the same. The lock-key and low-battery notices took that
+  path in 0.8.15, and users found cards they never turned on. For those two
+  it cannot be undone now.
+- **The schema version tells the cases apart.** v12 is the schema the key
+  ships in, so no released v11 or older file holds it. `parse_config` turns it
+  off for those files, the way it runs the other version-gated migrations. A
+  v12 file without the key keeps the default.
+- **On for new users.** A fresh install shows the indicator as before. Users
+  who already had a config turn it on in Settings → General if they want it.
+
 ## 2026-11: The agent saves a paired Flow computer in `config.toml`
 
 Until now the agent only read `config.toml`; the GUI and `openlogi api` wrote

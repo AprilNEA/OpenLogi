@@ -312,7 +312,9 @@ pub struct AppSettings {
     #[serde(default = "default_true")]
     pub lock_key_notifications: bool,
     /// Whether the overlay briefly shows a keyboard's backlight level when
-    /// the keyboard changes it, as with the backlight keys. **On by default.**
+    /// the keyboard changes it, as with the backlight keys. **On by default**
+    /// for a new config; a config written before v12 loads with it off (see
+    /// `Config::migrate_backlight_notifications_off`).
     #[serde(default = "default_true")]
     pub backlight_notifications: bool,
     /// Whether Previous Desktop and Next Desktop slide to the neighbouring

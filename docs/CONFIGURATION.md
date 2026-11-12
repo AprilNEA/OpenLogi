@@ -55,7 +55,7 @@ header before parsing its fields. A v9 file without the policy still loads.
 v11 adds the `[flow]` section. Older readers reject a v11 header before
 parsing its fields. A v10 file without the section loads with Flow disabled.
 v12 adds `backlight_notifications` under `[app_settings]`. Older readers reject
-a v12 header before parsing its fields.
+a v12 header before parsing its fields. A v11 or older file loads with it off.
 
 ## Shape
 
@@ -139,7 +139,8 @@ optional physical device key.
   shows the level in the centre of the screen for 1.5 seconds. A change
   replaces the one on screen. With the setting off the agent shows nothing,
   and an indicator already on screen still closes on its own. The keyboard
-  still changes its backlight either way.
+  still changes its backlight either way. A config from before schema v12
+  loads with the setting off, because the indicator had no setting until then.
 - `animate_desktop_switch` (default `true`, macOS only): Previous Desktop and
   Next Desktop slide to the neighbouring Space. The agent types the "Move left
   a space" or "Move right a space" shortcut from System Settings → Keyboard →
