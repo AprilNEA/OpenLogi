@@ -330,7 +330,10 @@ impl Armed {
         let mut ring = running.inputs.ring.subscribe();
 
         #[cfg(any(target_os = "macos", target_os = "windows"))]
-        let mut battery_expiry = tokio::time::interval(std::time::Duration::from_secs(30));
+        let mut battery_expiry = {
+            let period = std::time::Duration::from_secs(30);
+            tokio::time::interval_at(tokio::time::Instant::now() + period, period)
+        };
         info!("openlogi-agent started");
         loop {
             tokio::select! {
