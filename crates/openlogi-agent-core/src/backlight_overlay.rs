@@ -39,7 +39,8 @@ impl Default for BacklightOverlayManager {
 impl BacklightOverlayManager {
     /// Show a keyboard's new backlight level, unless the user turned
     /// [`AppSettings::backlight_notifications`] off. Answers whether the
-    /// level is shown.
+    /// level is shown: an event the keyboard reports as not visible still
+    /// reaches the cell, but only to hide the card.
     ///
     /// Call it inside a Tokio runtime: a task hides the level when its time
     /// is up.
@@ -55,7 +56,7 @@ impl BacklightOverlayManager {
             return false;
         }
         self.show(current_level, levels, visible);
-        true
+        visible
     }
 
     /// Show the latest event and hide it after the transient display lifetime.
@@ -162,5 +163,21 @@ mod tests {
         let shown = manager.observe(0).await;
         assert!(shown.visible);
         assert_eq!(shown.current_level, 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_level_the_keyboard_hides_is_published_but_not_shown() {
+        let manager = BacklightOverlayManager::default();
+
+        assert!(!manager.announce(3, 8, false, &AppSettings::default()));
+        assert_eq!(
+            manager.observe(0).await,
+            BacklightObservation {
+                generation: 1,
+                current_level: 3,
+                levels: 8,
+                visible: false,
+            }
+        );
     }
 }
