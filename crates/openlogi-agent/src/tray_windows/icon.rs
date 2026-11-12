@@ -1,6 +1,6 @@
 //! Owns the brand icon and recolors its alpha mask without replacing the logo.
 
-use openlogi_core::battery::Severity;
+use openlogi_core::device::BatteryAttention;
 use windows_sys::Win32::Graphics::Gdi::{
     BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, COLOR_WINDOWTEXT, DIB_RGB_COLORS, DeleteObject,
     GetDC, GetDIBits, GetObjectW, GetSysColor, HDC, ReleaseDC, SetDIBits,
@@ -27,7 +27,7 @@ impl Drop for Icon {
 }
 
 impl Icon {
-    pub(super) fn new(severity: Severity) -> Self {
+    pub(super) fn new(severity: Option<BatteryAttention>) -> Self {
         const BLACK: &[u8] = include_bytes!("../../assets/tray-icon@2x.png");
         const WHITE: &[u8] = include_bytes!("../../assets/tray-icon-white@2x.png");
         let png = if super::taskbar_is_light() {
@@ -66,9 +66,9 @@ impl Icon {
             Some([red, green, blue])
         } else {
             match severity {
-                Severity::Normal => None,
-                Severity::Low => Some([230, 145, 0]),
-                Severity::Critical => Some([220, 55, 55]),
+                None => None,
+                Some(BatteryAttention::Low) => Some([230, 145, 0]),
+                Some(BatteryAttention::Critical) => Some([220, 55, 55]),
             }
         };
         if let Some(color) = color {

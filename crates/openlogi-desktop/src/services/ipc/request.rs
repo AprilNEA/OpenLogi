@@ -1172,6 +1172,8 @@ commands! {
     StartPairing,
     PairDevice,
     CancelPairing,
+    #[cfg(target_os = "windows")]
+    AcknowledgeDeviceSelection,
     UnpairDevice,
     StartFlowPairing,
     PairFlowPeer,
@@ -1180,6 +1182,27 @@ commands! {
     StopFlowPairing,
     #[cfg(all(target_os = "macos", debug_assertions))]
     PollEventMonitor,
+}
+
+#[cfg(target_os = "windows")]
+/// Acknowledge a tray request after the selected device page is visible.
+pub struct AcknowledgeDeviceSelection(pub openlogi_ipc::DeviceSelection);
+
+#[cfg(target_os = "windows")]
+impl Request for AcknowledgeDeviceSelection {
+    type Answer = ();
+
+    async fn call(&self, client: &AgentClient) -> Result<(), RpcError> {
+        client
+            .acknowledge_device_selection(context::current(), self.0.clone())
+            .await
+    }
+
+    fn deliver(self, outcome: Result<(), Unavailable>, _: &UpdateSender) {
+        if outcome.is_err() {
+            debug!("device selection acknowledgement awaits the next snapshot");
+        }
+    }
 }
 
 #[cfg(test)]

@@ -427,6 +427,7 @@ fn notices() {
                     name: Some("MX".into()),
                     kind: DeviceKind::Mouse,
                     battery: BatteryInfo {
+                        freshness: openlogi_core::device::BatteryFreshness::Current,
                         percentage: Some(15),
                         level: BatteryLevel::Low,
                         status: BatteryStatus::Discharging,
@@ -435,7 +436,7 @@ fn notices() {
             }],
             language: Some("de".into()),
         },
-        "0301020001024d5800010f010001026465",
+        "0301020001024d5800010f01000001026465",
     );
     assert_wire(
         &NoticeObservation {
@@ -692,11 +693,11 @@ fn agent_snapshot() {
         flow: FlowStatus::default(),
         // A digest: 32 bytes as they are, with no length in front.
         config_revision: ConfigRevision::of(""),
+        device_selection: None,
     };
     assert_wire(
         &snapshot,
-        "010001010705302e362e360100000000000000000000000000\
-         e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "010001010705302e362e360100000000000000000000000000e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b85500",
     );
 
     // The observation is the snapshot with its generation in front.
@@ -706,8 +707,7 @@ fn agent_snapshot() {
     };
     assert_wire(
         &observed,
-        "03010001010705302e362e360100000000000000000000000000\
-         e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "03010001010705302e362e360100000000000000000000000000e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b85500",
     );
 }
 
@@ -893,11 +893,12 @@ fn device_inventory() {
     // A level-only battery (no state-of-charge gauge) carries no percentage.
     assert_wire(
         &BatteryInfo {
+            freshness: openlogi_core::device::BatteryFreshness::Current,
             percentage: None,
             level: BatteryLevel::Good,
             status: BatteryStatus::Discharging,
         },
-        "000200",
+        "00020000",
     );
     let inventory = vec![DeviceInventory {
         receiver: ReceiverInfo {
@@ -913,6 +914,7 @@ fn device_inventory() {
             kind: DeviceKind::Mouse,
             online: true,
             battery: Some(BatteryInfo {
+                freshness: openlogi_core::device::BatteryFreshness::Current,
                 percentage: Some(80),
                 level: BatteryLevel::Good,
                 status: BatteryStatus::Discharging,
@@ -963,7 +965,7 @@ fn device_inventory() {
     }];
     assert_wire(
         &inventory,
-        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b01010100000101010101000101010101010100000001000000000700",
+        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b0000101015002000001030106323134304c5a0102030400010100fb34b0fb8240000b01010100000101010101000101010101010100000001000000000700",
     );
 }
 
@@ -1494,5 +1496,34 @@ fn disable_keys_requests_are_appended() {
             desired: DisableKeysMask::CAPS_LOCK,
         },
         "2d000846303044434146450101",
+    );
+}
+
+#[test]
+fn battery_preferences_and_device_selection() {
+    use openlogi_core::config::BatteryPreferences;
+    use openlogi_core::device::BatteryFreshness;
+    use openlogi_ipc::DeviceSelection;
+
+    assert_wire(&BatteryFreshness::Current, "00");
+    assert_wire(&BatteryFreshness::Cached, "01");
+    assert_wire(&BatteryFreshness::HeldPercentage, "02");
+    assert_wire(&BatteryPreferences::default(), "0101");
+    assert_wire(
+        &BatteryPreferences {
+            show_in_menu: false,
+            warn_low: true,
+        },
+        "0001",
+    );
+    let request = DeviceSelection {
+        agent: Identity::new(Run::from_raw(7), Compat::from_raw(32)),
+        request_id: 2,
+        device_key: "unit:aa".into(),
+    };
+    assert_wire(&request, "07200207756e69743a6161");
+    assert_wire(
+        &AgentRequest::AcknowledgeDeviceSelection { request },
+        "3a07200207756e69743a6161",
     );
 }

@@ -35,11 +35,11 @@ mod wheel_hold;
 #[cfg(feature = "fs")]
 mod tests;
 
-#[cfg(feature = "fs")]
-pub use edit::{ConfigEdit, DeviceEdit, DeviceEditError, DeviceSetting};
 pub use device::{
     BatteryPreferences, DeviceConfig, DeviceIdentity, DisableKey, LinkConfig, LinkOverrides,
 };
+#[cfg(feature = "fs")]
+pub use edit::{ConfigEdit, DeviceEdit, DeviceEditError, DeviceSetting};
 #[cfg(all(test, feature = "fs", unix))]
 use file::resolve_symlinks;
 #[cfg(feature = "fs")]

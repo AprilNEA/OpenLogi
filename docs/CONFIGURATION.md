@@ -499,27 +499,26 @@ peer that `[[flow.peers]]` does not define, two device entries share a key, a
 device has no `self` slot, or two machines share one slot.
 ### Battery menu and warnings
 
-On macOS and Windows, each online battery-reporting device appears in the tray
-menu. The battery badge contains its percentage and a lightning bolt while
-charging. A missing, cached, or held percentage appears as `?`, including when
-the device reports only a coarse battery level. Clicking a device opens its
-settings. Linux has no tray integration and is unchanged by these options.
+On Windows, online battery-reporting devices can appear in the tray menu with
+percentage badges and charging indicators. Missing, cached or held percentages
+appear as `?`. Clicking a row opens that device's settings.
 
-Each device has two independent options, both enabled by default:
+macOS keeps its native control-center menu, including its device submenus,
+battery glyphs and critical-battery attention mark. These options do not hide
+macOS device rows or replace its icon treatment. Linux has no tray integration.
+
+Each device has independent options, enabled by default:
 
 ```toml
 [devices."<physical-key>".battery]
-show_in_menu = true
-warn_low = true
+show_in_menu = true # Windows menu rows only
+warn_low = true     # macOS and Windows battery notifications
 ```
 
-`warn_low` controls both OS notifications and the OpenLogi tray icon's warning
-color, including for a device hidden from the menu. The icon turns orange at 20%
-and red at 10%, using the lowest current battery among warning-enabled devices.
-A current coarse low or critical level also colors the icon when the device
-reports no percentage. Charging or fully charged devices and stale readings
-do not contribute. Notifications require a current percentage; a level-only
-reading does not produce a percentage notification.
+On Windows, `warn_low` also controls the tray icon's orange and red warning
+colors, including for devices hidden from the menu. Charging/full devices and
+stale readings do not contribute. Current coarse low/critical levels can color
+the icon, but OS notifications require a measured percentage at 20% or less.
 
 Transient direct-attached devices without a stable physical identity use the
 default battery preferences and do not offer saved per-device options.

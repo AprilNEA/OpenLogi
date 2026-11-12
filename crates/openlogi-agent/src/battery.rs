@@ -3,7 +3,7 @@
 //! Inventory and config reloads feed one synchronized owner. Native menus only
 //! clone its presentation snapshot; neither menu thread performs device I/O.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Write as _};
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use atomic_write_file::AtomicWriteFile;
 use openlogi_agent_core::battery::Observation;
-use openlogi_core::battery::Severity;
+use openlogi_core::device::BatteryAttention;
 use openlogi_core::device::BatteryInfo;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
@@ -26,11 +26,12 @@ pub(crate) struct DeviceBattery {
     pub(crate) name: String,
     pub(crate) percentage: Option<u8>,
     pub(crate) charging: bool,
-    pub(crate) severity: Severity,
+    pub(crate) severity: Option<BatteryAttention>,
 }
 
 impl DeviceBattery {
     /// Full semantic label retained even when the row draws a compact badge.
+    #[cfg(target_os = "windows")]
     pub(crate) fn accessible_label(&self) -> String {
         let value = self.percentage.map_or_else(
             || rust_i18n::t!("device.battery_unknown").to_string(),
@@ -40,9 +41,11 @@ impl DeviceBattery {
             rust_i18n::t!("device.battery_tray_charging").to_string()
         } else {
             match self.severity {
-                Severity::Normal => String::new(),
-                Severity::Low => rust_i18n::t!("device.battery_tray_low").to_string(),
-                Severity::Critical => rust_i18n::t!("device.battery_tray_critical").to_string(),
+                None => String::new(),
+                Some(BatteryAttention::Low) => rust_i18n::t!("device.battery_tray_low").to_string(),
+                Some(BatteryAttention::Critical) => {
+                    rust_i18n::t!("device.battery_tray_critical").to_string()
+                }
             }
         };
         if status.is_empty() {
@@ -57,7 +60,7 @@ impl DeviceBattery {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Snapshot {
     pub(crate) devices: Vec<DeviceBattery>,
-    pub(crate) severity: Severity,
+    pub(crate) severity: Option<BatteryAttention>,
 }
 
 /// An accepted transition into a low-battery episode.
@@ -90,6 +93,8 @@ struct State {
     persisted_history: History,
     path: Option<PathBuf>,
     session_warned: BTreeSet<String>,
+    /// A model-only route that named several devices cannot prove identity recovery.
+    ambiguous_sessions: BTreeSet<String>,
     session_batteries: BTreeSet<String>,
     observations: Vec<Observation>,
     observed_at: Option<Instant>,
@@ -119,6 +124,7 @@ impl State {
             history,
             path,
             session_warned: BTreeSet::new(),
+            ambiguous_sessions: BTreeSet::new(),
             session_batteries: BTreeSet::new(),
             observations: Vec::new(),
             observed_at: None,
@@ -141,12 +147,26 @@ impl State {
         let current = self
             .observed_at
             .is_some_and(|observed| now.saturating_duration_since(observed) <= MAX_READING_AGE);
+        let mut session_counts = BTreeMap::new();
+        for observation in &self.observations {
+            *session_counts.entry(&observation.session_key).or_insert(0) += 1;
+        }
+        self.ambiguous_sessions
+            .retain(|key| present.contains(key.as_str()));
+        for (session, count) in session_counts {
+            if count > 1 {
+                self.ambiguous_sessions.insert(session.clone());
+            }
+        }
         let mut next = Snapshot::default();
         let mut alerts = Vec::new();
         for observation in &self.observations {
             // The same pairing can gain an identity after an earlier probe
-            // failed. Keep its active episode when moving to durable history.
-            if let Some(key) = &observation.history_key {
+            // failed. A direct route names a model, so transfer only while
+            // the session has never named multiple observed devices.
+            if let Some(key) = &observation.history_key
+                && !self.ambiguous_sessions.contains(&observation.session_key)
+            {
                 if self.session_batteries.remove(&observation.session_key) {
                     self.history.battery_devices.insert(key.clone());
                 }
@@ -177,7 +197,7 @@ impl State {
             }
             let reading = current.then_some(observation.battery.as_ref()).flatten();
             let percentage = reading.and_then(BatteryInfo::usable_percentage);
-            let severity = reading.map_or(Severity::Normal, BatteryInfo::severity);
+            let severity = reading.and_then(BatteryInfo::attention);
             let charging = reading.is_some_and(|battery| {
                 battery.freshness != openlogi_core::device::BatteryFreshness::Cached
                     && battery.is_charging()
@@ -187,7 +207,7 @@ impl State {
             }
             if observation.preferences.warn_low {
                 next.severity = next.severity.max(severity);
-                if severity != Severity::Normal
+                if severity.is_some()
                     && let Some(percentage) = percentage
                     && warned.insert(id.clone())
                 {
@@ -262,6 +282,7 @@ fn state() -> &'static Mutex<State> {
 }
 
 /// The latest presentation, callable from either platform's native UI thread.
+#[cfg(target_os = "windows")]
 pub(crate) fn snapshot() -> Snapshot {
     state()
         .lock()
@@ -279,8 +300,6 @@ fn change(update: impl FnOnce(&mut State)) {
         state.reconcile(Instant::now())
     };
     if changed {
-        #[cfg(target_os = "macos")]
-        crate::tray::battery_changed();
         #[cfg(target_os = "windows")]
         crate::tray_windows::battery_changed();
     }
@@ -359,7 +378,7 @@ mod tests {
         let mut charging = observation(8);
         charging.battery.as_mut().unwrap().status = BatteryStatus::Charging;
         assert!(read(&mut state, charging, now).is_empty());
-        assert_eq!(state.snapshot.severity, Severity::Normal);
+        assert_eq!(state.snapshot.severity, None);
         assert!(read(&mut state, observation(8), now).is_empty());
         assert!(read(&mut state, observation(25), now).is_empty());
         assert!(read(&mut state, observation(20), now).is_empty());
@@ -375,12 +394,15 @@ mod tests {
         hidden.preferences.show_in_menu = false;
         assert_eq!(read(&mut state, hidden, now).len(), 1);
         assert!(state.snapshot.devices.is_empty());
-        assert_eq!(state.snapshot.severity, Severity::Critical);
+        assert_eq!(state.snapshot.severity, Some(BatteryAttention::Critical));
         let mut muted = observation(8);
         muted.preferences.warn_low = false;
         assert!(read(&mut state, muted, now).is_empty());
-        assert_eq!(state.snapshot.devices[0].severity, Severity::Critical);
-        assert_eq!(state.snapshot.severity, Severity::Normal);
+        assert_eq!(
+            state.snapshot.devices[0].severity,
+            Some(BatteryAttention::Critical)
+        );
+        assert_eq!(state.snapshot.severity, None);
     }
 
     #[test]
@@ -391,7 +413,7 @@ mod tests {
         battery.percentage = None;
         battery.level = BatteryLevel::Low;
         assert!(read(&mut state, reading, Instant::now()).is_empty());
-        assert_eq!(state.snapshot.severity, Severity::Low);
+        assert_eq!(state.snapshot.severity, Some(BatteryAttention::Low));
         assert_eq!(state.snapshot.devices[0].percentage, None);
         assert!(!state.history.warned.contains("unit:01020304"));
     }
@@ -417,7 +439,7 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(state.snapshot.devices[0].percentage, None);
-        assert_eq!(state.snapshot.severity, Severity::Normal);
+        assert_eq!(state.snapshot.severity, None);
         assert!(!state.history.warned.contains("unit:01020304"));
     }
 
@@ -451,6 +473,61 @@ mod tests {
     }
 
     #[test]
+    fn same_model_direct_devices_do_not_transfer_each_others_warning() {
+        let now = Instant::now();
+        let mut anonymous = observation(8);
+        anonymous.key = "direct:046d:b369:unit:00000000".into();
+        anonymous.history_key = None;
+        anonymous.session_key = "direct:046d:b369:None".into();
+        let mut identified = observation(8);
+        identified.session_key = anonymous.session_key.clone();
+        for reversed in [false, true] {
+            let mut state = State::new(None);
+            assert_eq!(read(&mut state, anonymous.clone(), now).len(), 1);
+            state.observations = if reversed {
+                vec![identified.clone(), anonymous.clone()]
+            } else {
+                vec![anonymous.clone(), identified.clone()]
+            };
+            let alerts = state.reconcile(now).1;
+            assert_eq!(
+                alerts.len(),
+                1,
+                "the identified device needs its own warning"
+            );
+            assert!(
+                state.reconcile(now).1.is_empty(),
+                "neither device should repeat"
+            );
+        }
+    }
+
+    #[test]
+    fn a_disappearing_anonymous_device_cannot_claim_its_identified_peers_warning() {
+        let now = Instant::now();
+        let mut anonymous = observation(8);
+        anonymous.key = "direct:046d:b369:unit:00000000".into();
+        anonymous.history_key = None;
+        anonymous.session_key = "direct:046d:b369:None".into();
+        let mut identified = observation(26);
+        identified.session_key = anonymous.session_key.clone();
+        for reversed in [false, true] {
+            let mut state = State::new(None);
+            assert_eq!(read(&mut state, anonymous.clone(), now).len(), 1);
+            state.observations = if reversed {
+                vec![identified.clone(), anonymous.clone()]
+            } else {
+                vec![anonymous.clone(), identified.clone()]
+            };
+            assert!(state.reconcile(now).1.is_empty());
+            let mut low = identified.clone();
+            low.battery.as_mut().unwrap().percentage = Some(8);
+            assert_eq!(read(&mut state, low.clone(), now).len(), 1);
+            assert!(read(&mut state, low, now).is_empty());
+        }
+    }
+
+    #[test]
     fn removed_anonymous_pairing_does_not_suppress_its_replacement() {
         let mut state = State::new(None);
         let now = Instant::now();
@@ -462,7 +539,7 @@ mod tests {
         sleeping.online = false;
         assert!(read(&mut state, sleeping, now).is_empty());
         assert!(state.snapshot.devices.is_empty());
-        assert_eq!(state.snapshot.severity, Severity::Normal);
+        assert_eq!(state.snapshot.severity, None);
         assert!(read(&mut state, anonymous.clone(), now).is_empty());
         state.observations.clear();
         state.reconcile(now);

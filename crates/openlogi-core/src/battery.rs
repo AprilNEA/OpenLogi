@@ -2,18 +2,6 @@
 
 use crate::device::{BatteryFreshness, BatteryInfo, BatteryLevel, BatteryStatus};
 
-/// The current warning level, ordered so the most urgent device wins.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Severity {
-    /// No current low-battery condition.
-    #[default]
-    Normal,
-    /// At most twenty percent remaining.
-    Low,
-    /// At most ten percent remaining.
-    Critical,
-}
-
 impl BatteryInfo {
     /// Whether power is actively charging the device.
     #[must_use]
@@ -33,33 +21,6 @@ impl BatteryInfo {
                 && percentage <= 100
                 && !(percentage == 0 && (self.is_charging() || self.level == BatteryLevel::Unknown))
         })
-    }
-
-    /// Warning state from a current reading; external power suppresses warnings.
-    #[must_use]
-    pub fn severity(&self) -> Severity {
-        if self.freshness != BatteryFreshness::Current
-            || self.is_charging()
-            || self.status == BatteryStatus::Full
-        {
-            return Severity::Normal;
-        }
-        match self.usable_percentage() {
-            Some(0..=10) => Severity::Critical,
-            Some(11..=20) => Severity::Low,
-            None if self.percentage.is_none() => match self.level {
-                BatteryLevel::Critical => Severity::Critical,
-                BatteryLevel::Low => Severity::Low,
-                _ => Severity::Normal,
-            },
-            _ => Severity::Normal,
-        }
-    }
-
-    /// Whether this reading warrants the low-battery visual treatment.
-    #[must_use]
-    pub fn needs_attention(&self) -> bool {
-        self.severity() != Severity::Normal
     }
 
     /// Whether the transient overlay may announce the next discharge.
@@ -95,17 +56,18 @@ impl BatteryInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::device::BatteryAttention;
 
     #[test]
     fn warning_policy_uses_current_percentage_not_firmware_bucket() {
         for (percentage, expected) in [
-            (0, Severity::Critical),
-            (10, Severity::Critical),
-            (11, Severity::Low),
-            (20, Severity::Low),
-            (21, Severity::Normal),
-            (100, Severity::Normal),
-            (255, Severity::Normal),
+            (0, Some(BatteryAttention::Critical)),
+            (10, Some(BatteryAttention::Critical)),
+            (11, Some(BatteryAttention::Low)),
+            (20, Some(BatteryAttention::Low)),
+            (21, None),
+            (100, None),
+            (255, None),
         ] {
             for level in [
                 BatteryLevel::Good,
@@ -118,19 +80,19 @@ mod tests {
                     status: BatteryStatus::Discharging,
                     freshness: BatteryFreshness::Current,
                 };
-                assert_eq!(battery.severity(), expected);
+                assert_eq!(battery.attention(), expected);
                 for status in [
                     BatteryStatus::Charging,
                     BatteryStatus::ChargingSlow,
                     BatteryStatus::Full,
                 ] {
                     battery.status = status;
-                    assert_eq!(battery.severity(), Severity::Normal);
+                    assert_eq!(battery.attention(), None);
                 }
                 battery.status = BatteryStatus::Discharging;
                 battery.freshness = BatteryFreshness::Cached;
                 assert_eq!(battery.usable_percentage(), None);
-                assert_eq!(battery.severity(), Severity::Normal);
+                assert_eq!(battery.attention(), None);
                 assert!(!battery.rearms_warning());
             }
         }
@@ -139,10 +101,10 @@ mod tests {
     #[test]
     fn level_only_readings_keep_attention_without_inventing_percentages() {
         for (level, severity) in [
-            (BatteryLevel::Critical, Severity::Critical),
-            (BatteryLevel::Low, Severity::Low),
-            (BatteryLevel::Good, Severity::Normal),
-            (BatteryLevel::Unknown, Severity::Normal),
+            (BatteryLevel::Critical, Some(BatteryAttention::Critical)),
+            (BatteryLevel::Low, Some(BatteryAttention::Low)),
+            (BatteryLevel::Good, None),
+            (BatteryLevel::Unknown, None),
         ] {
             let mut battery = BatteryInfo {
                 percentage: None,
@@ -150,14 +112,14 @@ mod tests {
                 status: BatteryStatus::Discharging,
                 freshness: BatteryFreshness::Current,
             };
-            assert_eq!(battery.severity(), severity);
+            assert_eq!(battery.attention(), severity);
             assert_eq!(battery.usable_percentage(), None);
             assert!(!battery.rearms_warning());
             battery.freshness = BatteryFreshness::Cached;
-            assert_eq!(battery.severity(), Severity::Normal);
+            assert_eq!(battery.attention(), None);
             battery.freshness = BatteryFreshness::Current;
             battery.status = BatteryStatus::Charging;
-            assert_eq!(battery.severity(), Severity::Normal);
+            assert_eq!(battery.attention(), None);
         }
     }
 

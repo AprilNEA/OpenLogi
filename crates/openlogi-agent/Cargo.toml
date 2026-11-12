@@ -63,7 +63,6 @@ objc2-security = { workspace = true, features = ["AuthSession"] }
 openlogi-camera = { path = "../openlogi-camera" }
 openlogi-inject = { path = "../openlogi-inject" }
 openlogi-permissions = { path = "../openlogi-permissions" }
-block2.workspace = true
 objc2-user-notifications = { workspace = true, features = ["UNUserNotificationCenter", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationSettings", "UNNotificationTrigger", "block2"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]

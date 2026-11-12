@@ -62,7 +62,7 @@ impl DeviceStore {
                     .entry(record.device_key())
                     .or_default()
                     .battery_model = Some(record.model_key.clone());
-            } else if (record.online || record.route.is_some())
+            } else if (record.model_info.is_some() || record.route.is_some())
                 && let Some(session) = self.sessions.get_mut(record.config_key.as_str())
                 && session.battery_model.as_deref() != Some(record.model_key.as_str())
             {

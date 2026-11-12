@@ -446,21 +446,25 @@ impl BatteryInfo {
     /// and caption, the agent's low-battery notice, and the menu bar.
     #[must_use]
     pub fn attention(&self) -> Option<BatteryAttention> {
-        if matches!(
-            self.status,
-            BatteryStatus::Charging | BatteryStatus::ChargingSlow | BatteryStatus::Full
-        ) {
+        if self.freshness != BatteryFreshness::Current
+            || matches!(
+                self.status,
+                BatteryStatus::Charging | BatteryStatus::ChargingSlow | BatteryStatus::Full
+            )
+        {
             return None;
         }
-        match (self.percentage, self.level) {
+        match (self.usable_percentage(), self.level) {
             (Some(percentage), _) if percentage <= CRITICAL_BATTERY_PERCENT => {
                 Some(BatteryAttention::Critical)
             }
             (Some(percentage), _) if percentage <= LOW_BATTERY_PERCENT => {
                 Some(BatteryAttention::Low)
             }
-            (None, BatteryLevel::Critical) => Some(BatteryAttention::Critical),
-            (None, BatteryLevel::Low) => Some(BatteryAttention::Low),
+            (None, BatteryLevel::Critical) if self.percentage.is_none() => {
+                Some(BatteryAttention::Critical)
+            }
+            (None, BatteryLevel::Low) if self.percentage.is_none() => Some(BatteryAttention::Low),
             _ => None,
         }
     }
@@ -842,6 +846,7 @@ mod tests {
     #[test]
     fn a_battery_at_ten_percent_or_less_is_critical() {
         let discharging = |percentage, level| BatteryInfo {
+            freshness: crate::device::BatteryFreshness::Current,
             percentage,
             level,
             status: BatteryStatus::Discharging,

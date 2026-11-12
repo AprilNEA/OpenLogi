@@ -956,32 +956,81 @@ fn device_tab(
         .and_then(AppState::current_record)
         .and_then(|record| record.capabilities)
         .is_some_and(|capabilities| capabilities.disable_keys);
-    tab_body(
-        DetailTab::Device,
-        ContentWidth::Small,
-        v_flex()
-            .w_full()
-            .gap_3()
-            .child(device_details_card(pal, cx))
-            .when(keyboard, |column| column.child(keyboard_card(pal, cx)))
-            .children(backlight::backlight_card(
-                backlight::BacklightFacts::current(cx),
-                pal,
+    let content = v_flex()
+        .w_full()
+        .gap_3()
+        .child(device_details_card(pal, cx))
+        .when(keyboard, |column| column.child(keyboard_card(pal, cx)))
+        .children(backlight::backlight_card(
+            backlight::BacklightFacts::current(cx),
+            pal,
+        ))
+        .children(easy_switch::easy_switch_card(
+            easy_switch::EasySwitchFacts::current(cx),
+            pal,
+        ))
+        .when(host_switch_keyboard, |column| {
+            column.child(PanelCard::new(
+                tr!("device.switch_together"),
+                Icon::empty().path("action-icons/refresh-cw.svg"),
+                crate::features::keyboard::host_switch::target_table(cx),
             ))
-            .children(easy_switch::easy_switch_card(
-                easy_switch::EasySwitchFacts::current(cx),
-                pal,
-            ))
-            .when(host_switch_keyboard, |column| {
-                column.child(PanelCard::new(
-                    tr!("device.switch_together"),
-                    Icon::empty().path("action-icons/refresh-cw.svg"),
-                    crate::features::keyboard::host_switch::target_table(cx),
-                ))
-            })
-            .child(configuration_card(pal, cx))
-            .children(show_disable_keys.then(|| disable_keys_panel.clone())),
-    )
+        })
+        .child(configuration_card(pal, cx))
+        .children(show_disable_keys.then(|| disable_keys_panel.clone()));
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    let content = content.children(battery_preferences_card(pal, cx));
+    tab_body(DetailTab::Device, ContentWidth::Small, content)
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn battery_preferences_card(pal: Palette, cx: &mut Context<AppView>) -> Option<impl IntoElement> {
+    let state = AppState::try_read(cx)?;
+    let record = state.current_record()?;
+    if !state.battery_preferences_available(record) {
+        return None;
+    }
+    let key = record.device_key();
+    let preferences = state.battery_preferences(key.as_str());
+    #[cfg(target_os = "windows")]
+    let menu_key = key.clone();
+    #[cfg(target_os = "windows")]
+    let menu = Toggle::new("battery-show-in-menu")
+        .label(Some(tr!("device.battery_show_in_menu")))
+        .selected(preferences.show_in_menu)
+        .on_change(move |checked, _, cx| {
+            AppState::apply(cx, |state| {
+                let mut next = state.battery_preferences(menu_key.as_str());
+                next.show_in_menu = *checked;
+                state.commit_battery_preferences(&menu_key, next)
+            });
+        });
+    let warning = Toggle::new("battery-warn-low")
+        .label(Some(tr!("device.battery_warn_low")))
+        .selected(preferences.warn_low)
+        .on_change(move |checked, _, cx| {
+            AppState::apply(cx, |state| {
+                let mut next = state.battery_preferences(key.as_str());
+                next.warn_low = *checked;
+                state.commit_battery_preferences(&key, next)
+            });
+        });
+    let controls = v_flex().gap_3();
+    #[cfg(target_os = "windows")]
+    let controls = controls.child(menu);
+    Some(PanelCard::new(
+        tr!("device.battery_preferences"),
+        Icon::new(IconName::Battery),
+        controls
+            .child(warning)
+            .child(
+                div()
+                    .text_caption()
+                    .text_color(pal.text_muted)
+                    .child(tr!("device.battery_warn_description")),
+            )
+            .into_any_element(),
+    ))
 }
 
 /// What the keyboard card knows: whether the keyboard has an Fn-lock control

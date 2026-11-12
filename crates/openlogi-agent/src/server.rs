@@ -150,6 +150,10 @@ impl AgentServer {
                 // Both tray menus rebuild each time they open and pick it up
                 // alone.
                 openlogi_core::locale::activate(language.as_deref());
+                #[cfg(any(target_os = "macos", target_os = "windows"))]
+                crate::battery::refresh_preferences(
+                    self.orchestrator.lock().await.battery_observations(),
+                );
                 Ok(revision)
             }
             Err(error) => {
@@ -179,6 +183,14 @@ fn saved_config_verdict(saved: &SavedConfig, revision: ConfigRevision) -> SavedC
               future off a dozen of them with `std::future::ready`"
 )]
 impl Agent for AgentServer {
+    async fn acknowledge_device_selection(
+        self,
+        _: Context,
+        request: openlogi_ipc::DeviceSelection,
+    ) {
+        self.observable.acknowledge_device_selection(&request);
+    }
+
     async fn protocol_version(self, _: Context) -> u32 {
         PROTOCOL_VERSION
     }

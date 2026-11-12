@@ -25,9 +25,9 @@ use openlogi_core::config::ConfigRevision;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_hook::Hook;
 use openlogi_ipc::{
-    AgentSnapshot, AgentStatus, FlowPairingPhase, FlowPeerStatus, FlowStatus, ForegroundApps,
-    Generation, InventoryHealth, OBSERVE_HOLD, Observation, ObservedLight, PROTOCOL_VERSION,
-    PairingPhase, RECENT_APPS, SecureInput, VirtualKeyboardStatus,
+    AgentSnapshot, AgentStatus, DeviceSelection, FlowPairingPhase, FlowPeerStatus, FlowStatus,
+    ForegroundApps, Generation, Identity, InventoryHealth, OBSERVE_HOLD, Observation,
+    ObservedLight, PROTOCOL_VERSION, PairingPhase, RECENT_APPS, SecureInput, VirtualKeyboardStatus,
 };
 use tokio::sync::watch;
 
@@ -82,6 +82,7 @@ impl ObservableState {
                 lights: Vec::new(),
                 flow: FlowStatus::default(),
                 config_revision: ConfigRevision::default(),
+                device_selection: None,
             },
         });
         Self {
@@ -101,6 +102,29 @@ impl ObservableState {
     #[must_use]
     pub fn lock_keys(&self) -> &LockKeyIndicator {
         &self.lock_keys
+    }
+
+    /// Retain a tray click until the GUI displays and acknowledges it.
+    pub fn request_device_selection(&self, agent: Identity, device_key: String) {
+        self.tx.send_modify(|state| {
+            state.generation += 1;
+            state.snapshot.device_selection = Some(DeviceSelection {
+                agent,
+                request_id: state.generation,
+                device_key,
+            });
+        });
+    }
+
+    /// A delayed acknowledgement must never discard a newer click.
+    pub fn acknowledge_device_selection(&self, request: &DeviceSelection) {
+        self.update(|snapshot| {
+            if snapshot.device_selection.as_ref() != Some(request) {
+                return false;
+            }
+            snapshot.device_selection = None;
+            true
+        });
     }
 
     /// Clone the whole current state.
@@ -400,6 +424,27 @@ mod tests {
             .into_iter()
             .map(|app| app.id)
             .collect()
+    }
+
+    #[test]
+    fn tray_selection_survives_gui_launch_and_stale_acknowledgements() {
+        let state = state();
+        let agent = openlogi_ipc::Identity::mine(openlogi_ipc::PROTOCOL_VERSION.into());
+        state.request_device_selection(agent, "unit:mouse".into());
+        let first = state.snapshot().device_selection.unwrap();
+        assert_eq!(first.device_key, "unit:mouse");
+        // A later observer gets the pending request, even without seeing its edge.
+        assert_eq!(
+            state.subscribe().borrow().snapshot.device_selection,
+            Some(first.clone())
+        );
+        state.request_device_selection(agent, "unit:mouse".into());
+        let second = state.snapshot().device_selection.unwrap();
+        assert_ne!(first.request_id, second.request_id);
+        state.acknowledge_device_selection(&first);
+        assert_eq!(state.snapshot().device_selection, Some(second.clone()));
+        state.acknowledge_device_selection(&second);
+        assert!(state.snapshot().device_selection.is_none());
     }
 
     #[test]

@@ -57,6 +57,7 @@ pub(crate) async fn bootstrap(config: Config) -> Option<Core> {
     // hook facts are published by the select loop, which owns the hook.
     let observable = Arc::new(ObservableState::new(env!("CARGO_PKG_VERSION").to_string()));
     #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(target_os = "windows")]
     crate::device_selection::init(Arc::clone(&observable));
     #[cfg(target_os = "macos")]
     seed_permission_facts(&observable);

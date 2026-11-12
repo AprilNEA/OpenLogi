@@ -15,8 +15,11 @@
 
 use block2::RcBlock;
 use objc2::rc::Retained;
+use objc2::runtime::ProtocolObject;
 use objc2::runtime::{AnyObject, Bool, Sel};
-use objc2::{AnyThread, ClassType, MainThreadMarker, MainThreadOnly, Message, sel};
+use objc2::{
+    AnyThread, ClassType, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel,
+};
 use objc2_app_kit::{
     NSAttributedStringAttachmentConveniences, NSAttributedStringNSStringDrawing, NSBezierPath,
     NSColor, NSCompositingOperation, NSFont, NSFontAttributeName, NSForegroundColorAttributeName,
@@ -26,7 +29,11 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{
     NSArray, NSAttributedString, NSAttributedStringKey, NSCopying, NSData, NSDictionary,
-    NSMutableAttributedString, NSPoint, NSRect, NSSize, NSString,
+    NSMutableAttributedString, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
+};
+use objc2_user_notifications::{
+    UNNotification, UNNotificationPresentationOptions, UNUserNotificationCenter,
+    UNUserNotificationCenterDelegate,
 };
 
 /// `NSVariableStatusItemLength` — a status item sized to its content.
@@ -357,4 +364,97 @@ fn attributed(text: &str, attributes: &Attributes) -> Retained<NSAttributedStrin
 /// Append a separator to `menu`.
 pub(crate) fn add_separator(menu: &NSMenu, mtm: MainThreadMarker) {
     menu.addItem(&NSMenuItem::separatorItem(mtm));
+}
+
+/// Deliver a persistent battery alert through UserNotifications.
+pub(crate) fn notify_battery(alert: &crate::battery::Alert) {
+    let title = alert.title();
+    let body = alert.body();
+    dispatch2::DispatchQueue::main().exec_async(move || {
+        use objc2_foundation::{NSBundle, NSError};
+        use objc2_user_notifications::{UNAuthorizationOptions, UNUserNotificationCenter};
+        // UNUserNotificationCenter requires an application bundle identity.
+        // Bare cargo executables must not attempt its exception-raising API.
+        if NSBundle::mainBundle().bundleIdentifier().is_none() {
+            tracing::warn!("battery notification unavailable outside an application bundle");
+            return;
+        }
+        NOTIFICATION_DELEGATE.with(|delegate| {
+            UNUserNotificationCenter::currentNotificationCenter()
+                .setDelegate(Some(ProtocolObject::from_ref(&**delegate)));
+        });
+        let completion = block2::RcBlock::new(move |granted: objc2::runtime::Bool, error: *mut NSError| {
+            if !error.is_null() {
+                // SAFETY: UserNotifications lends a valid NSError during this callback.
+                let error = unsafe { &*error };
+                tracing::warn!(error = %error.localizedDescription(), "battery notification authorization failed");
+            } else if granted.as_bool() {
+                let title = title.clone();
+                let body = body.clone();
+                dispatch2::DispatchQueue::main().exec_async(move || deliver_battery_notification(&title, &body));
+            }
+        });
+        UNUserNotificationCenter::currentNotificationCenter()
+            .requestAuthorizationWithOptions_completionHandler(UNAuthorizationOptions::Alert, &completion);
+    });
+}
+
+fn deliver_battery_notification(title: &str, body: &str) {
+    use objc2_foundation::{NSError, NSUUID};
+    use objc2_user_notifications::{
+        UNMutableNotificationContent, UNNotificationRequest, UNUserNotificationCenter,
+    };
+    let content = UNMutableNotificationContent::new();
+    content.setTitle(&NSString::from_str(title));
+    content.setBody(&NSString::from_str(body));
+    let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
+        &NSUUID::UUID().UUIDString(),
+        &content,
+        None,
+    );
+    let completion = block2::RcBlock::new(|error: *mut NSError| {
+        if !error.is_null() {
+            // SAFETY: UserNotifications lends a valid NSError during this callback.
+            let error = unsafe { &*error };
+            tracing::warn!(error = %error.localizedDescription(), "battery notification delivery failed");
+        }
+    });
+    UNUserNotificationCenter::currentNotificationCenter()
+        .addNotificationRequest_withCompletionHandler(&request, Some(&completion));
+}
+
+define_class!(
+    // SAFETY: NSObject subclass without ivars or custom Drop. The delegate may
+    // run on UserNotifications' background queue and has no AppKit state.
+    #[unsafe(super(NSObject))]
+    #[name = "OpenLogiBatteryNotificationDelegate"]
+    struct NotificationDelegate;
+
+    // SAFETY: the superclass provides NSObject's protocol implementation.
+    unsafe impl NSObjectProtocol for NotificationDelegate {}
+
+    // SAFETY: all arguments are borrowed only for the callback's duration.
+    unsafe impl UNUserNotificationCenterDelegate for NotificationDelegate {
+        #[unsafe(method(userNotificationCenter:willPresentNotification:withCompletionHandler:))]
+        fn will_present(
+            &self,
+            _center: &UNUserNotificationCenter,
+            _notification: &UNNotification,
+            completion: &block2::DynBlock<dyn Fn(UNNotificationPresentationOptions)>,
+        ) {
+            completion
+                .call((UNNotificationPresentationOptions::Banner
+                    | UNNotificationPresentationOptions::List,));
+        }
+    }
+);
+
+thread_local! {
+    // The center keeps a weak delegate. Installation and ownership stay on the
+    // main queue; callbacks contain no thread-affine state.
+    static NOTIFICATION_DELEGATE: Retained<NotificationDelegate> = {
+        let this = NotificationDelegate::alloc().set_ivars(());
+        // SAFETY: initialize the freshly allocated NSObject subclass.
+        unsafe { msg_send![super(this), init] }
+    };
 }

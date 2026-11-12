@@ -588,6 +588,7 @@ impl State {
             name: mouse.codename.as_deref().map(prettify_codename),
             kind: mouse.kind,
             battery: BatteryInfo {
+                freshness: openlogi_core::device::BatteryFreshness::Current,
                 percentage: Some(15),
                 level: BatteryLevel::Low,
                 status: BatteryStatus::Discharging,
@@ -792,6 +793,7 @@ impl State {
             kind: DeviceKind::Keyboard,
             online: true,
             battery: Some(BatteryInfo {
+                freshness: openlogi_core::device::BatteryFreshness::Current,
                 percentage: Some(90),
                 level: BatteryLevel::Full,
                 status: BatteryStatus::Discharging,
@@ -870,6 +872,7 @@ fn draining_battery(elapsed: Duration) -> BatteryInfo {
 /// beside it.
 fn battery_at(percentage: u8, status: BatteryStatus) -> BatteryInfo {
     BatteryInfo {
+        freshness: openlogi_core::device::BatteryFreshness::Current,
         percentage: Some(percentage),
         level: match percentage {
             0..=10 => BatteryLevel::Critical,
@@ -990,6 +993,7 @@ fn snapshot_of(state: &State) -> AgentSnapshot {
         lights: Vec::new(),
         flow: state.flow.status(),
         config_revision: openlogi_core::config::ConfigRevision::default(),
+        device_selection: None,
     }
 }
 
@@ -1002,6 +1006,7 @@ fn snapshot_of(state: &State) -> AgentSnapshot {
               the real server impl, which is the point of the mock"
 )]
 impl Agent for MockAgent {
+    async fn acknowledge_device_selection(self, _: Context, _: openlogi_ipc::DeviceSelection) {}
     async fn protocol_version(self, _: Context) -> u32 {
         PROTOCOL_VERSION
     }

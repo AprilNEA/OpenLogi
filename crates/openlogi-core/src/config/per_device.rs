@@ -9,10 +9,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
-    GKeyOwner, GamingKeyMode,
     BatteryPreferences, CameraControls, CameraStreamMode, Config, DeviceIdentity, DisableKey,
-    LightSettings, Lighting, MomentumScrolling, OnboardMemory, ScrollResolution, SmartShift,
-    ThumbwheelSensitivity,
+    GKeyOwner, GamingKeyMode, LightSettings, Lighting, MomentumScrolling, OnboardMemory,
+    ScrollResolution, SmartShift, ThumbwheelSensitivity,
 };
 use crate::binding::{
     Action, ActionRingConfig, ActionRingIcon, ActionRingSize, ActionRingSlot, Binding, ButtonId,

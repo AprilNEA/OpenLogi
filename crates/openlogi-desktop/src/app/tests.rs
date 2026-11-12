@@ -2342,6 +2342,6 @@ fn tray_navigation_survives_adoption_with_existing_window(cx: &mut gpui::TestApp
         assert!(main_window::open_device_settings(legacy_key, cx));
         let record = state.read(cx).current_record().unwrap();
         assert_eq!(record.config_key, legacy_key);
-        assert!(record.online && record.model_info.is_none());
+        assert!(record.is_online() && record.model_info.is_none());
     });
 }

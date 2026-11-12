@@ -631,7 +631,6 @@ fn fixture_agent_with(edit: impl FnOnce(&mut DeviceProfile)) -> TestAgent {
         pairing: Some(PairingPhase::Passkey(PasskeyMethod::Keyboard(
             "SECRET-PASSKEY".to_string(),
         ))),
-        device_selection: None,
         foreground: ForegroundApps {
             current: Some(ForegroundApp {
                 id: RUNTIME_APP_ID.to_string(),
@@ -642,6 +641,7 @@ fn fixture_agent_with(edit: impl FnOnce(&mut DeviceProfile)) -> TestAgent {
         lights: Vec::new(),
         flow: FlowStatus::default(),
         config_revision: openlogi_core::config::ConfigRevision::default(),
+        device_selection: None,
     };
     TestAgent::from_profile(profile, snapshot)
 }

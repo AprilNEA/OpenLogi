@@ -58,7 +58,6 @@ fn snapshot() -> AgentSnapshot {
         }],
         standalone: Vec::new(),
         camera_active: false,
-        device_selection: None,
         pairing: None,
         foreground: ForegroundApps {
             current: None,
@@ -67,6 +66,7 @@ fn snapshot() -> AgentSnapshot {
         lights: Vec::new(),
         flow: FlowStatus::default(),
         config_revision: openlogi_core::config::ConfigRevision::default(),
+        device_selection: None,
     }
 }
 

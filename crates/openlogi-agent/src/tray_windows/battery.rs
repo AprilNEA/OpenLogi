@@ -3,7 +3,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use openlogi_core::battery::Severity;
+use openlogi_core::device::BatteryAttention;
 use windows_sys::Win32::Foundation::{COLORREF, HWND, LPARAM, RECT, SIZE};
 use windows_sys::Win32::Graphics::Gdi::{
     COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_MENU, COLOR_MENUTEXT, CreateFontIndirectW,
@@ -263,9 +263,9 @@ impl DeviceMenu {
             rgb(25, 130, 75)
         } else {
             match device.severity {
-                Severity::Normal => foreground,
-                Severity::Low => rgb(183, 100, 0),
-                Severity::Critical => rgb(198, 40, 40),
+                None => foreground,
+                Some(BatteryAttention::Low) => rgb(183, 100, 0),
+                Some(BatteryAttention::Critical) => rgb(198, 40, 40),
             }
         };
         // SAFETY: objects are created here, selected only into the live drawing

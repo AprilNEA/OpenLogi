@@ -63,7 +63,6 @@ pub(crate) fn snapshot_candidate(profile: &DeviceProfile) -> AgentSnapshot {
         standalone: profile.standalone.clone(),
         camera_active: true,
         pairing: None,
-        device_selection: None,
         foreground: ForegroundApps {
             current: Some(editor.clone()),
             recent: vec![editor],
@@ -71,6 +70,7 @@ pub(crate) fn snapshot_candidate(profile: &DeviceProfile) -> AgentSnapshot {
         lights: Vec::new(),
         flow: openlogi_ipc::FlowStatus::default(),
         config_revision: openlogi_core::config::ConfigRevision::default(),
+        device_selection: None,
     }
 }
 
@@ -1260,7 +1260,7 @@ fn battery_preferences_survive_a_model_less_offline_placeholder() {
         let _ = state.refresh_inventories(&[missing.clone()], &[], &resolver, &[]);
         let placeholder = &state.devices()[0];
         assert_eq!(placeholder.device_key(), key);
-        assert!(!placeholder.online && placeholder.route.is_none());
+        assert!(!placeholder.is_online() && placeholder.route.is_none());
         assert_ne!(placeholder.model_key, live_model);
         assert!(
             state.battery_preferences_available(placeholder),

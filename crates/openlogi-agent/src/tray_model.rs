@@ -356,15 +356,6 @@ impl BatteryFill {
     }
 }
 
-/// Whether `battery` is taking a charge, which its glyph shows with a bolt.
-#[must_use]
-pub const fn is_charging(battery: &BatteryInfo) -> bool {
-    matches!(
-        battery.status,
-        BatteryStatus::Charging | BatteryStatus::ChargingSlow
-    )
-}
-
 /// A battery reading in a few characters: "62%", or the coarse level when the
 /// device reports no percentage.
 #[must_use]
@@ -374,7 +365,9 @@ pub fn battery_text(battery: &BatteryInfo) -> String {
         (None, BatteryLevel::Full) => t!("device.full").into_owned(),
         (None, BatteryLevel::Good) => t!("device.battery_good").into_owned(),
         (None, BatteryLevel::Low | BatteryLevel::Critical) => t!("device.low_battery").into_owned(),
-        (None, BatteryLevel::Unknown) if is_charging(battery) => t!("device.charging").into_owned(),
+        (None, BatteryLevel::Unknown) if battery.is_charging() => {
+            t!("device.charging").into_owned()
+        }
         (None, BatteryLevel::Unknown) => "—".to_owned(),
     }
 }

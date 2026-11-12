@@ -14,7 +14,6 @@ type Step = Box<dyn FnOnce(AgentRequest) -> Answer + Send>;
 
 fn snapshot() -> AgentSnapshot {
     AgentSnapshot {
-        device_selection: None,
         status: AgentStatus {
             accessibility_granted: false,
             hook_installed: false,
@@ -57,6 +56,7 @@ fn snapshot() -> AgentSnapshot {
         lights: Vec::new(),
         flow: openlogi_ipc::FlowStatus::default(),
         config_revision: openlogi_core::config::ConfigRevision::default(),
+        device_selection: None,
     }
 }
 

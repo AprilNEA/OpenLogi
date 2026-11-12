@@ -65,7 +65,6 @@ fn config() -> Config {
 /// offline.
 fn snapshot() -> AgentSnapshot {
     AgentSnapshot {
-        device_selection: None,
         status: AgentStatus {
             accessibility_granted: true,
             hook_installed: true,
@@ -101,6 +100,7 @@ fn snapshot() -> AgentSnapshot {
             pairing: None,
         },
         config_revision: openlogi_core::config::ConfigRevision::default(),
+        device_selection: None,
     }
 }
 

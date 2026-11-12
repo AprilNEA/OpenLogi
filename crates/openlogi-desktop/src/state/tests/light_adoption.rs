@@ -383,7 +383,6 @@ fn an_agent_snapshot_keeps_the_changes_it_reports() {
         camera_active: false,
         pairing: None,
         foreground: ForegroundApps::default(),
-        device_selection: None,
         lights: vec![observed(
             &light,
             (true, 135, 5000),
@@ -391,6 +390,7 @@ fn an_agent_snapshot_keeps_the_changes_it_reports() {
         )],
         flow: openlogi_ipc::FlowStatus::default(),
         config_revision: openlogi_core::config::ConfigRevision::default(),
+        device_selection: None,
     };
 
     let changes = state.apply_agent_snapshot(&snapshot, &AssetResolver::new(), &[]);

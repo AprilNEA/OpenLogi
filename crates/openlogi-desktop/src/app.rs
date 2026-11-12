@@ -472,6 +472,14 @@ impl AppView {
         cx.notify();
     }
 
+    /// Open the device selected by the Windows tray.
+    #[cfg(any(target_os = "windows", test))]
+    pub(crate) fn open_device_settings(&mut self, record_key: String, cx: &mut Context<Self>) {
+        self.open_device(record_key, cx);
+        self.active_tab = DetailTab::Device;
+        cx.notify();
+    }
+
     /// Return to the device gallery. Leaves the active-device selection
     /// untouched — the route is purely presentational.
     fn go_home(&mut self, cx: &mut Context<Self>) {
