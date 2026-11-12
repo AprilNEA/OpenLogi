@@ -17,8 +17,8 @@ use openlogi_hid::thumbwheel::WheelResolution;
 /// slow intermittent nudges do not eventually cross the threshold.
 const ACTION_DECAY: Duration = Duration::from_millis(300);
 
-/// Minimum gap between two fires of the same discrete action, so one deliberate
-/// flick triggers once instead of repeating across a fast spin.
+/// Pause the wheel must make after a discrete action fires before it can fire
+/// again, so one flick triggers once however long it spins.
 const ACTION_COOLDOWN: Duration = Duration::from_millis(200);
 
 /// Bound synchronous action dispatch for one captured event.
@@ -175,9 +175,13 @@ impl WheelDirection {
                 (WheelOutput::Idle, last_fired)
             }
         } else {
-            let cooling_down = last_fired
-                .is_some_and(|time| now.saturating_duration_since(time) < ACTION_COOLDOWN);
-            if cooling_down {
+            // Measured from the latest event, not the fire: a spin that keeps
+            // going past the cooldown is still the same flick. A pause ends it
+            // and re-arms the action for the next one.
+            let last_fired = last_fired.filter(|_| {
+                last_event.is_some_and(|time| now.saturating_duration_since(time) < ACTION_COOLDOWN)
+            });
+            if last_fired.is_some() {
                 (WheelOutput::Idle, last_fired)
             } else {
                 increments += magnitude;
