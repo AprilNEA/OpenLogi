@@ -315,6 +315,16 @@ impl HostSwitchManagerState {
         }
     }
 
+    /// Whether a linked switch for `keyboard` is queued. It was asked for
+    /// after the session or restore that ends now began, so the host that one
+    /// asked for (a key press) loses to it: the newest request wins.
+    fn switch_queued_for(&self, keyboard: &DeviceRoute) -> bool {
+        matches!(
+            &self.transition,
+            Some(TransitionPhase::Waiting(intent)) if intent.link.keyboard == *keyboard
+        )
+    }
+
     /// Queue `request` as a transition of its link, as a diverted host key
     /// queues one: every session then stops and restores its keyboard
     /// before the link moves. A request no published link answers for, or
@@ -327,16 +337,6 @@ impl HostSwitchManagerState {
         if matches!(self.transition, Some(TransitionPhase::Running)) {
             debug!(route = %request.route, "a host transition is already switching — request dropped");
             return;
-        }
-        // A session that ended on a key press may still be restoring the
-        // keyboard's host keys with the key's host. The newest request wins,
-        // so the restore's completion must not queue the older one over it.
-        for slot in &mut self.slots {
-            if let HostSwitchSlot::Recovering(recovery) = slot
-                && recovery.link.keyboard == link.keyboard
-            {
-                recovery.requested_host = None;
-            }
         }
         self.transition = Some(TransitionPhase::Waiting(TransitionIntent {
             link: link.clone(),
@@ -511,7 +511,8 @@ impl HostSwitchManagerState {
         let requested_host = match result.follow_up {
             HostSwitchFollowUp::Switch(host) => request_is_current.then_some(host),
             HostSwitchFollowUp::Rearm | HostSwitchFollowUp::AwaitDeparture => None,
-        };
+        }
+        .filter(|_| !self.switch_queued_for(&session.link.keyboard));
         let departing = result.follow_up == HostSwitchFollowUp::AwaitDeparture;
         if let Some(token) = result.pending_restore {
             // A keyboard that is leaving cannot answer a restore write. The
@@ -572,7 +573,11 @@ impl HostSwitchManagerState {
             }
             Ok(HostSwitchRestoreOutcome::Restored) => {
                 let request_is_current = !terminal && published.contains(&recovery.link);
-                if let Some(host) = recovery.requested_host.filter(|_| request_is_current) {
+                let superseded = self.switch_queued_for(&recovery.link.keyboard);
+                if let Some(host) = recovery
+                    .requested_host
+                    .filter(|_| request_is_current && !superseded)
+                {
                     self.transition = Some(TransitionPhase::Waiting(TransitionIntent {
                         link: recovery.link,
                         host,
@@ -1017,6 +1022,108 @@ mod tests {
             state.begin_transition(false).map(|intent| intent.host),
             Some(2),
             "the older request does not replace the newer one"
+        );
+    }
+
+    #[test]
+    fn a_restore_that_began_after_a_newer_request_does_not_replace_it() {
+        // The session ended on a key press for host 1 after an action had
+        // already queued host 2, so the restore it left carries host 1.
+        let mut state = HostSwitchManagerState::new();
+        state.request_switch(
+            &[link(2)],
+            &LinkedSwitchRequest {
+                route: route(2),
+                host: 2,
+            },
+        );
+        state.slots.push(HostSwitchSlot::Recovering(Recovery {
+            link: link(2),
+            epoch: SessionEpoch(1),
+            requested_host: Some(1),
+            restore: RestorePhase::Restoring,
+        }));
+
+        state.handle_restore_completion(
+            RestoreCompletion {
+                epoch: SessionEpoch(1),
+                result: Ok(HostSwitchRestoreOutcome::Restored),
+            },
+            &[link(2)],
+            false,
+        );
+
+        assert_eq!(
+            state.begin_transition(false).map(|intent| intent.host),
+            Some(2),
+            "the key press does not replace the queued request"
+        );
+    }
+
+    #[test]
+    fn a_session_that_ends_on_a_key_press_does_not_replace_a_queued_request() {
+        let mut state = HostSwitchManagerState::new();
+        let (stop, _stop_rx) = oneshot::channel();
+        state.slots.push(HostSwitchSlot::Running(RunningSession {
+            link: link(2),
+            epoch: SessionEpoch(1),
+            phase: SessionPhase::Active(stop),
+        }));
+        state.request_switch(
+            &[link(2)],
+            &LinkedSwitchRequest {
+                route: route(2),
+                host: 2,
+            },
+        );
+
+        state.handle_session_completion(
+            SessionCompletion {
+                epoch: SessionEpoch(1),
+                result: Ok(SessionResult {
+                    follow_up: HostSwitchFollowUp::Switch(1),
+                    pending_restore: None,
+                    failed: false,
+                }),
+            },
+            &[link(2)],
+            false,
+        );
+
+        assert_eq!(
+            state.begin_transition(false).map(|intent| intent.host),
+            Some(2),
+            "the key press does not replace the queued request"
+        );
+    }
+
+    #[test]
+    fn a_key_press_with_no_request_queued_still_switches() {
+        let mut state = HostSwitchManagerState::new();
+        let (stop, _stop_rx) = oneshot::channel();
+        state.slots.push(HostSwitchSlot::Running(RunningSession {
+            link: link(2),
+            epoch: SessionEpoch(1),
+            phase: SessionPhase::Active(stop),
+        }));
+
+        state.handle_session_completion(
+            SessionCompletion {
+                epoch: SessionEpoch(1),
+                result: Ok(SessionResult {
+                    follow_up: HostSwitchFollowUp::Switch(1),
+                    pending_restore: None,
+                    failed: false,
+                }),
+            },
+            &[link(2)],
+            false,
+        );
+
+        assert_eq!(
+            state.begin_transition(false).map(|intent| intent.host),
+            Some(1),
+            "the press is the only request"
         );
     }
 
