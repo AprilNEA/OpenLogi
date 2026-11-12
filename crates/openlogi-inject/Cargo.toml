@@ -54,6 +54,11 @@ mach2 = "0.5"
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
+    # `AdjustTokenPrivileges`, `SetSuspendState` and `LockWorkStation`, for
+    # the Sleep and Lock screen actions.
+    "Win32_Security",
+    "Win32_System_Power",
+    "Win32_System_Shutdown",
     # `CREATE_NO_WINDOW`, so the `cmd /C` behind `RunShellCommand` opens no
     # console window.
     "Win32_System_Threading",
