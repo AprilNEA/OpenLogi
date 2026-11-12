@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use openlogi_core::hid::HostTarget;
 use openlogi_hid::{
     ChannelPool, ChannelRegistry, DeviceIoGate, DeviceRoute, HostSwitchFollowUp,
     HostSwitchRestoreOutcome, HostSwitchStopReason, PendingHostSwitchRestore,
@@ -39,9 +40,9 @@ pub type HostSwitchLinks = watch::Receiver<std::sync::Arc<Vec<HostSwitchLink>>>;
 struct LinkedSwitchRequest {
     /// The keyboard or one of its targets: the device whose action asked.
     route: DeviceRoute,
-    /// The keyboard's zero-based slot. Each target moves to its slot for the
-    /// same computer, as when the keyboard's own host key is pressed.
-    host: u8,
+    /// The keyboard's channel. Each target moves to its slot for the same
+    /// computer, as when the keyboard's own host key is pressed.
+    host: HostTarget,
 }
 
 /// Moves a keyboard and the pointing devices linked to it together, the way
@@ -67,11 +68,11 @@ impl LinkedHostSwitch {
     }
 
     /// Ask to move the link `route` belongs to, as its keyboard or one of
-    /// its targets, to the keyboard's slot `host`. Returns `false`, and
+    /// its targets, to the keyboard's channel `host`. Returns `false`, and
     /// sends nothing, when no published link has `route`: its keyboard is
     /// offline, or nothing links it.
     #[must_use = "a refused request moves nothing, so the caller must move the device itself"]
-    pub fn request(&self, route: &DeviceRoute, host: u8) -> bool {
+    pub fn request(&self, route: &DeviceRoute, host: HostTarget) -> bool {
         if link_for(&self.links.borrow(), route).is_none() {
             return false;
         }
@@ -220,7 +221,7 @@ impl HostSwitchSlot {
 #[derive(Clone)]
 struct TransitionIntent {
     link: HostSwitchLink,
-    host: u8,
+    host: HostTarget,
 }
 
 enum TransitionPhase {
@@ -534,7 +535,7 @@ impl HostSwitchManagerState {
         } else if let Some(host) = requested_host {
             self.transition = Some(TransitionPhase::Waiting(TransitionIntent {
                 link: session.link,
-                host,
+                host: HostTarget::Slot(host),
             }));
         } else if departing && request_is_current {
             self.slots.push(HostSwitchSlot::Departing {
@@ -580,7 +581,7 @@ impl HostSwitchManagerState {
                 {
                     self.transition = Some(TransitionPhase::Waiting(TransitionIntent {
                         link: recovery.link,
-                        host,
+                        host: HostTarget::Slot(host),
                     }));
                 }
             }
@@ -817,7 +818,7 @@ async fn run_transition(
         Ok(true) => wait_for_departure(&mut links, &intent.link.keyboard).await,
         Ok(false) => {}
         Err(error) => {
-            debug!(%error, route = %intent.link.keyboard, host = intent.host, "keyboard host switch failed");
+            debug!(%error, route = %intent.link.keyboard, host = ?intent.host, "keyboard host switch failed");
         }
     }
 }
@@ -931,13 +932,13 @@ mod tests {
                 &published,
                 &LinkedSwitchRequest {
                     route: asking.clone(),
-                    host: 1,
+                    host: HostTarget::Slot(1),
                 },
             );
             let Some(TransitionPhase::Waiting(intent)) = &state.transition else {
                 panic!("{asking} queues a transition");
             };
-            assert_eq!(intent.host, 1);
+            assert_eq!(intent.host, HostTarget::Slot(1));
             assert!(
                 intent.link.keyboard == route(1),
                 "the keyboard leads whichever device asked"
@@ -948,7 +949,7 @@ mod tests {
             &published,
             &LinkedSwitchRequest {
                 route: route(9),
-                host: 1,
+                host: HostTarget::Slot(1),
             },
         );
         assert!(
@@ -968,7 +969,7 @@ mod tests {
         }));
         let request = LinkedSwitchRequest {
             route: route(2),
-            host: 2,
+            host: HostTarget::Slot(2),
         };
         state.request_switch(&[link(2)], &request);
         assert!(
@@ -981,9 +982,15 @@ mod tests {
         state.slots.clear();
         assert_eq!(
             state.begin_transition(false).map(|intent| intent.host),
-            Some(2)
+            Some(HostTarget::Slot(2))
         );
-        state.request_switch(&[link(2)], &LinkedSwitchRequest { host: 0, ..request });
+        state.request_switch(
+            &[link(2)],
+            &LinkedSwitchRequest {
+                host: HostTarget::Slot(0),
+                ..request
+            },
+        );
         assert!(
             matches!(state.transition, Some(TransitionPhase::Running)),
             "a running switch is not replaced"
@@ -1005,7 +1012,7 @@ mod tests {
             &[link(2)],
             &LinkedSwitchRequest {
                 route: route(2),
-                host: 2,
+                host: HostTarget::Slot(2),
             },
         );
 
@@ -1020,7 +1027,7 @@ mod tests {
 
         assert_eq!(
             state.begin_transition(false).map(|intent| intent.host),
-            Some(2),
+            Some(HostTarget::Slot(2)),
             "the older request does not replace the newer one"
         );
     }
@@ -1034,7 +1041,7 @@ mod tests {
             &[link(2)],
             &LinkedSwitchRequest {
                 route: route(2),
-                host: 2,
+                host: HostTarget::Slot(2),
             },
         );
         state.slots.push(HostSwitchSlot::Recovering(Recovery {
@@ -1055,7 +1062,7 @@ mod tests {
 
         assert_eq!(
             state.begin_transition(false).map(|intent| intent.host),
-            Some(2),
+            Some(HostTarget::Slot(2)),
             "the key press does not replace the queued request"
         );
     }
@@ -1073,7 +1080,7 @@ mod tests {
             &[link(2)],
             &LinkedSwitchRequest {
                 route: route(2),
-                host: 2,
+                host: HostTarget::Slot(2),
             },
         );
 
@@ -1092,7 +1099,7 @@ mod tests {
 
         assert_eq!(
             state.begin_transition(false).map(|intent| intent.host),
-            Some(2),
+            Some(HostTarget::Slot(2)),
             "the key press does not replace the queued request"
         );
     }
@@ -1122,7 +1129,7 @@ mod tests {
 
         assert_eq!(
             state.begin_transition(false).map(|intent| intent.host),
-            Some(1),
+            Some(HostTarget::Slot(1)),
             "the press is the only request"
         );
     }
@@ -1134,7 +1141,7 @@ mod tests {
             &[],
             &LinkedSwitchRequest {
                 route: route(2),
-                host: 1,
+                host: HostTarget::Slot(1),
             },
         );
         assert!(state.transition.is_none());
@@ -1145,19 +1152,22 @@ mod tests {
         let (links_tx, links) = watch::channel(std::sync::Arc::new(vec![link(2)]));
         let linked = LinkedHostSwitch::new(&links);
         let mut requests = linked.subscribe();
-        assert!(!linked.request(&route(9), 1));
+        assert!(!linked.request(&route(9), HostTarget::Slot(1)));
         assert!(!requests.has_changed().unwrap_or(false));
-        assert!(linked.request(&route(2), 1));
+        assert!(linked.request(&route(2), HostTarget::Slot(1)));
         assert_eq!(
             requests.borrow_and_update().clone(),
             Some(LinkedSwitchRequest {
                 route: route(2),
-                host: 1,
+                host: HostTarget::Slot(1),
             })
         );
         links_tx.send_replace(std::sync::Arc::new(Vec::new()));
-        assert!(!linked.request(&route(2), 1), "the keyboard went offline");
-        assert!(!LinkedHostSwitch::default().request(&route(1), 0));
+        assert!(
+            !linked.request(&route(2), HostTarget::Slot(1)),
+            "the keyboard went offline"
+        );
+        assert!(!LinkedHostSwitch::default().request(&route(1), HostTarget::Slot(0)));
     }
 
     #[test]
@@ -1165,7 +1175,7 @@ mod tests {
         let mut state = HostSwitchManagerState::new();
         state.transition = Some(TransitionPhase::Waiting(TransitionIntent {
             link: link(2),
-            host: 1,
+            host: HostTarget::Slot(1),
         }));
 
         state.reconcile_transition(&[link(3)], false);
@@ -1237,7 +1247,7 @@ mod tests {
         }));
         state.transition = Some(TransitionPhase::Waiting(TransitionIntent {
             link: link(2),
-            host: 2,
+            host: HostTarget::Slot(2),
         }));
         assert!(state.begin_transition(false).is_none());
         assert!(matches!(
@@ -1253,7 +1263,10 @@ mod tests {
             &[link(2)],
             false,
         );
-        assert_eq!(state.begin_transition(false).unwrap().host, 2);
+        assert_eq!(
+            state.begin_transition(false).unwrap().host,
+            HostTarget::Slot(2)
+        );
         // Another manager wake while switching must not remove Running.
         assert!(state.begin_transition(false).is_none());
         assert!(state.terminal_completion(true).is_none());

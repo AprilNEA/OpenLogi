@@ -157,6 +157,18 @@ impl EasySwitchHosts {
     }
 }
 
+/// The Easy-Switch channel a host switch moves a device to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostTarget {
+    /// The zero-based channel; the device labels it `index + 1`.
+    Slot(u8),
+    /// The channel after the device's current one, wrapping from the last to
+    /// the first, as the device's own Easy-Switch button cycles. A channel
+    /// the device reports empty (`0x1815` HostsInfo) is skipped. The device
+    /// layer resolves it, because only the device knows its current channel.
+    Next,
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

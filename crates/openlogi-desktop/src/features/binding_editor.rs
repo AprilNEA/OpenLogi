@@ -110,6 +110,7 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
         Action::EasySwitchChannel1 => "action-icons/square-1.svg",
         Action::EasySwitchChannel2 => "action-icons/square-2.svg",
         Action::EasySwitchChannel3 => "action-icons/square-3.svg",
+        Action::NextEasySwitchChannel => "action-icons/arrow-left-right.svg",
         Action::ScrollUp | Action::NextDpiPreset => "action-icons/chevrons-up.svg",
         Action::ScrollDown | Action::PreviousDpiPreset => "action-icons/chevrons-down.svg",
         Action::HorizontalScrollLeft => "action-icons/chevrons-left.svg",

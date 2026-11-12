@@ -48,7 +48,7 @@ use hidpp::{
     },
     protocol::v20,
 };
-use openlogi_core::hid::{HidppOperation, WriteError};
+use openlogi_core::hid::{HidppOperation, HostTarget, WriteError};
 use thiserror::Error;
 use tokio::{
     sync::{mpsc, oneshot},
@@ -994,7 +994,8 @@ async fn prepare_follower_change(
         None
     };
     let slot = follower_host(keyboard_hosts, follower.as_ref(), host);
-    let change = prepare_host_change_with(&mut device, device_index, slot).await?;
+    let change =
+        prepare_host_change_with(&mut device, device_index, HostTarget::Slot(slot)).await?;
     Ok((slot, change))
 }
 
@@ -1017,13 +1018,15 @@ async fn follower_channel(
         .ok_or(HostSwitchError::TargetNotFound)
 }
 
-/// Move reachable targets to `host`, then move the keyboard last.
+/// Move reachable targets to the keyboard's `host`, then move the keyboard
+/// last. [`HostTarget::Next`] is the keyboard's next channel, and each target
+/// moves to its slot for the same computer.
 ///
 /// Returns whether the keyboard actually changed hosts.
 pub async fn switch_linked_hosts(
     keyboard: &DeviceRoute,
     targets: &[DeviceRoute],
-    host: u8,
+    host: HostTarget,
     channel_pool: &ChannelPool,
 ) -> Result<bool, HostSwitchError> {
     let channel = open_channel(channel_pool, keyboard, "opening keyboard channel")
@@ -1042,6 +1045,7 @@ pub async fn switch_linked_hosts(
     .await?;
     let keyboard_change =
         prepare_host_change_with(&mut keyboard_device, keyboard.device_index(), host).await?;
+    let host = keyboard_change.host;
     let keyboard_hosts = read_host_table(&mut keyboard_device).await;
     for target in targets {
         let prepared = prepare_host_change(
@@ -1091,7 +1095,9 @@ pub async fn switch_host_on(shared: &SharedChannel, host: u8) -> Result<bool, Ho
     prepare_host_switch_on(shared, host).await?.apply().await
 }
 
-/// [`switch_host_on`] for a device that must still be the one with `unit_id`.
+/// [`switch_host_on`] to `target`, for a device that must still be the one
+/// with `unit_id`. [`HostTarget::Next`] resolves against the channel the
+/// device reports as current when the request runs.
 ///
 /// A receiver slot can be paired to another device between the request and
 /// this write, and the route alone cannot tell. The device's `0x0003` unit ID
@@ -1104,7 +1110,7 @@ pub async fn switch_host_on(shared: &SharedChannel, host: u8) -> Result<bool, Ho
 /// As [`switch_host_on`], and [`HostSwitchError::DeviceChanged`].
 pub async fn switch_host_on_unit(
     shared: &SharedChannel,
-    host: u8,
+    target: HostTarget,
     unit_id: [u8; 4],
 ) -> Result<bool, HostSwitchError> {
     let mut device = timed_hidpp(
@@ -1113,7 +1119,7 @@ pub async fn switch_host_on_unit(
     )
     .await?;
     ensure_unit_id(&mut device, unit_id).await?;
-    let change = prepare_host_change_with(&mut device, shared.device_index(), host).await?;
+    let change = prepare_host_change_with(&mut device, shared.device_index(), target).await?;
     apply_host_change(change).await
 }
 
@@ -1385,15 +1391,16 @@ async fn prepare_host_change_on(
         Device::new(Arc::clone(channel), device_index),
     )
     .await?;
-    prepare_host_change_with(&mut device, device_index, host).await
+    prepare_host_change_with(&mut device, device_index, HostTarget::Slot(host)).await
 }
 
-/// Read-only checks before `device` moves to `host`: the host is in range,
-/// and the device does not report it as an empty slot.
+/// Read-only checks before `device` moves to `target`: the host is in range,
+/// and the device does not report it as an empty slot. [`HostTarget::Next`]
+/// resolves to a host here, from the device's current host ([`next_host`]).
 async fn prepare_host_change_with(
     device: &mut Device,
     device_index: u8,
-    host: u8,
+    target: HostTarget,
 ) -> Result<PreparedHostChange, HostSwitchError> {
     let info = timed_hidpp(
         "locating host-change feature",
@@ -1403,8 +1410,13 @@ async fn prepare_host_change_with(
     .ok_or(HostSwitchError::FeatureUnsupported)?;
     let change_host = device.add_feature::<ChangeHostFeature>(info.index);
     let state = timed_hidpp("reading current host", change_host.get_host_info()).await?;
+    let host = match target {
+        HostTarget::Slot(host) => host,
+        HostTarget::Next => next_host(device, state.current_host, state.host_count).await,
+    };
     let required = host_change_required(state.current_host, state.host_count, host)?;
-    if required && host_slot_is_empty(device, host).await {
+    // `next_host` has already passed over every host reported empty.
+    if required && target != HostTarget::Next && host_slot_is_empty(device, host).await {
         return Err(HostSwitchError::HostSlotEmpty { host });
     }
     Ok(PreparedHostChange {
@@ -1491,6 +1503,51 @@ async fn host_slot_is_empty(device: &mut Device, host: u8) -> bool {
             );
             false
         })
+}
+
+/// The host that [`HostTarget::Next`] moves `device` to: the first host
+/// after `current`, in the order the device's own Easy-Switch button cycles
+/// them ([`hosts_after`]), that the device does not report as empty.
+/// `current` when it reports every other host empty, or has no other host.
+///
+/// The check is advisory, as in [`host_slot_is_empty`], and all of it shares
+/// one [`HOSTS_INFO_BUDGET`]. A device without `HostsInfo` therefore moves to
+/// the host after `current`, as its button would, and one that does not
+/// answer in time moves to the host whose status did not arrive.
+async fn next_host(device: &mut Device, current: u8, host_count: u8) -> u8 {
+    let Some(mut unanswered) = hosts_after(current, host_count).next() else {
+        return current;
+    };
+    let found = timeout(HOSTS_INFO_BUDGET, async {
+        for host in hosts_after(current, host_count) {
+            unanswered = host;
+            if !slot_reported_empty(device, host).await {
+                return Some(host);
+            }
+        }
+        None
+    })
+    .await;
+    match found {
+        Ok(Some(host)) => host,
+        Ok(None) => {
+            debug!(current, "every other host slot is reported empty; staying");
+            current
+        }
+        Err(_) => {
+            debug!(
+                host = unanswered,
+                "host slot status did not arrive in time; treating the slot as usable"
+            );
+            unanswered
+        }
+    }
+}
+
+/// Every host other than `current`, starting after it and wrapping from the
+/// last host to the first.
+fn hosts_after(current: u8, host_count: u8) -> impl Iterator<Item = u8> {
+    (current.saturating_add(1)..host_count).chain(0..current.min(host_count))
 }
 
 async fn slot_reported_empty(device: &mut Device, host: u8) -> bool {

@@ -5,11 +5,13 @@ use hidpp::channel::HidppChannel;
 use hidpp::feature::change_host::HostChangeRequest;
 use tokio::sync::{mpsc, oneshot};
 
+use openlogi_core::hid::HostTarget;
+
 use super::{
     ArmedControl, HostSwitchError, HostSwitchRestoreOutcome, HostSwitchSessionOutcome,
     HostSwitchStop, HostTable, HostTrigger, KeyboardHosts, KeyboardPosition,
     PendingHostSwitchRestore, ReportingMode, announced_host, host_change_required, host_channel,
-    key_trigger, monitor_host_switch, prepare_host_change_on, prepare_host_switch_on,
+    hosts_after, key_trigger, monitor_host_switch, prepare_host_change_on, prepare_host_switch_on,
     queued_departure, restoration_change, rollback_host_switch_start, run_host_switch_session,
     shares_channel, switch_host_on, switch_host_on_unit,
 };
@@ -53,6 +55,8 @@ enum SlotStatus {
     /// still reports a nonzero friendly-name length for them — the MX
     /// Vertical quirk from #1709.
     StuckEmptyButNamed,
+    /// Answers the query: only host 0 paired.
+    OnlyFirstPaired,
 }
 
 /// A three-channel keyboard currently on host 0, paired on hosts 0 and 1
@@ -85,6 +89,11 @@ fn keyboard_with_stuck_empty_status(request: &[u8]) -> Option<Vec<u8>> {
 }
 
 fn scripted_keyboard(request: &[u8], slot_status: SlotStatus) -> Option<Vec<u8>> {
+    scripted_keyboard_on(request, 0, slot_status)
+}
+
+/// [`scripted_keyboard`] currently on host `current`.
+fn scripted_keyboard_on(request: &[u8], current: u8, slot_status: SlotStatus) -> Option<Vec<u8>> {
     if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) {
         return None;
     }
@@ -102,13 +111,14 @@ fn scripted_keyboard(request: &[u8], slot_status: SlotStatus) -> Option<Vec<u8>>
                     SlotStatus::Reported
                     | SlotStatus::ReadErrors
                     | SlotStatus::ReadIgnored
-                    | SlotStatus::StuckEmptyButNamed => HOSTS_INFO_INDEX,
+                    | SlotStatus::StuckEmptyButNamed
+                    | SlotStatus::OnlyFirstPaired => HOSTS_INFO_INDEX,
                 },
                 _ => 0x00,
             };
         }
-        // ChangeHost getHostInfo: three RF channels, currently on host 0.
-        (CHANGE_HOST_INDEX, 0x00) => payload[..2].copy_from_slice(&[3, 0]),
+        // ChangeHost getHostInfo: three RF channels, currently on `current`.
+        (CHANGE_HOST_INDEX, 0x00) => payload[..2].copy_from_slice(&[3, current]),
         // HostsInfo getHostInfo: echo the slot, then its pairing status.
         (HOSTS_INFO_INDEX, 0x01) => {
             match slot_status {
@@ -120,6 +130,8 @@ fn scripted_keyboard(request: &[u8], slot_status: SlotStatus) -> Option<Vec<u8>>
             if slot_status == SlotStatus::StuckEmptyButNamed {
                 payload[1] = 0; // status stuck at Empty on every slot
                 payload[4] = 5; // but a real friendly-name length
+            } else if slot_status == SlotStatus::OnlyFirstPaired {
+                payload[1] = u8::from(request[4] == 0);
             } else {
                 payload[1] = u8::from(request[4] < 2);
             }
@@ -260,7 +272,7 @@ fn keyboard_replaced_by_another_unit(request: &[u8]) -> Option<Vec<u8>> {
 async fn a_device_that_kept_its_unit_id_is_switched() {
     let (shared, handle) = shared_device(keyboard_with_the_expected_unit).await;
 
-    let changed = switch_host_on_unit(&shared, 1, UNIT)
+    let changed = switch_host_on_unit(&shared, HostTarget::Slot(1), UNIT)
         .await
         .expect("the same unit must be switchable");
 
@@ -274,7 +286,7 @@ async fn a_replacement_device_on_the_route_is_not_switched() {
     // write answers on the same route; only its unit ID tells it apart.
     let (shared, handle) = shared_device(keyboard_replaced_by_another_unit).await;
 
-    let error = switch_host_on_unit(&shared, 1, UNIT)
+    let error = switch_host_on_unit(&shared, HostTarget::Slot(1), UNIT)
         .await
         .expect_err("another device must be refused");
 
@@ -289,11 +301,101 @@ async fn a_replacement_device_on_the_route_is_not_switched() {
 async fn an_unknown_unit_id_skips_the_comparison() {
     let (shared, handle) = shared_device(keyboard_replaced_by_another_unit).await;
 
-    switch_host_on_unit(&shared, 1, [0; 4])
+    switch_host_on_unit(&shared, HostTarget::Slot(1), [0; 4])
         .await
         .expect("a zero unit ID names nothing to compare against");
 
     assert!(wrote_set_current_host(&handle, 1));
+}
+
+#[tokio::test]
+async fn the_next_channel_is_the_one_after_the_current_one() {
+    let (shared, handle) = shared_device(keyboard_with_an_empty_third_slot).await;
+
+    let changed = switch_host_on_unit(&shared, HostTarget::Next, [0; 4])
+        .await
+        .expect("host 1 is paired");
+
+    assert!(changed);
+    assert!(wrote_set_current_host(&handle, 1));
+}
+
+#[tokio::test]
+async fn the_next_channel_skips_an_empty_one_and_wraps_to_the_first() {
+    // On host 1, host 2 is empty: the device would leave and not come back.
+    let (shared, handle) =
+        shared_device(|request| scripted_keyboard_on(request, 1, SlotStatus::Reported)).await;
+
+    let changed = switch_host_on_unit(&shared, HostTarget::Next, [0; 4])
+        .await
+        .expect("host 0 is paired");
+
+    assert!(changed);
+    assert!(!wrote_set_current_host(&handle, 2));
+    assert!(wrote_set_current_host(&handle, 0));
+}
+
+#[tokio::test]
+async fn without_hosts_info_the_next_channel_follows_the_button_order() {
+    // Nothing tells the empty host 2 apart, so the move is the one the
+    // device's own Easy-Switch button makes from host 1.
+    let (shared, handle) =
+        shared_device(|request| scripted_keyboard_on(request, 1, SlotStatus::Unimplemented)).await;
+
+    let changed = switch_host_on_unit(&shared, HostTarget::Next, [0; 4])
+        .await
+        .expect("an unknowable pairing does not refuse the move");
+
+    assert!(changed);
+    assert!(wrote_set_current_host(&handle, 2));
+}
+
+#[tokio::test]
+async fn the_next_channel_stays_when_no_other_channel_is_paired() {
+    let (shared, handle) =
+        shared_device(|request| scripted_keyboard(request, SlotStatus::OnlyFirstPaired)).await;
+
+    let changed = switch_host_on_unit(&shared, HostTarget::Next, [0; 4])
+        .await
+        .expect("staying on the current host is always fine");
+
+    assert!(!changed);
+    assert!(handle.written_reports().iter().all(|report| {
+        !(report.len() >= 4 && report[2] == CHANGE_HOST_INDEX && report[3] >> 4 == 1)
+    }));
+}
+
+#[tokio::test]
+async fn an_unanswered_slot_status_does_not_use_up_the_next_channel_budget() {
+    let (shared, handle) =
+        shared_device(|request| scripted_keyboard(request, SlotStatus::ReadIgnored)).await;
+    let started = tokio::time::Instant::now();
+
+    let changed = switch_host_on_unit(&shared, HostTarget::Next, [0; 4])
+        .await
+        .expect("an unanswered status read must not abort the switch");
+
+    assert!(changed);
+    assert!(wrote_set_current_host(&handle, 1));
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(1),
+        "the advisory reads took {:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn the_hosts_after_the_current_one_wrap_from_the_last_to_the_first() {
+    let after = |current, count| hosts_after(current, count).collect::<Vec<u8>>();
+    assert_eq!(after(0, 3), [1, 2]);
+    assert_eq!(after(1, 3), [2, 0]);
+    assert_eq!(after(2, 3), [0, 1]);
+    assert_eq!(after(0, 1), [] as [u8; 0]);
+    assert_eq!(
+        after(5, 3),
+        [0, 1, 2],
+        "a current host outside the count leaves every host"
+    );
 }
 
 #[tokio::test]
