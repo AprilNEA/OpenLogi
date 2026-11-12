@@ -547,6 +547,7 @@ that fires it is the one that moves.
   the rest of its link, as when the keyboard's own host key is pressed. The
   channel number is then the keyboard's: Channel 2 on the mouse moves the
   keyboard to its channel 2, and the mouse to the slot for the same computer.
+  If the keyboard is already on that channel, nothing in the link moves.
 - A function key (F1–F12) binds across every keyboard, so the agent cannot tell
   which keyboard pressed it. The editor does not offer these actions there, and
   the agent passes such a key through if a hand edit binds one.
@@ -569,7 +570,8 @@ above apply to it as well.
   key is pressed.
 - In a `host_switch_targets` link the next channel is the keyboard's: the
   keyboard moves to its next channel, and each linked device to its slot for
-  the same computer.
+  the same computer. When the keyboard has no other paired channel, nothing in
+  the link moves.
 
 Payload actions use a one-key inline table:
 

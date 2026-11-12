@@ -1022,6 +1022,11 @@ async fn follower_channel(
 /// last. [`HostTarget::Next`] is the keyboard's next channel, and each target
 /// moves to its slot for the same computer.
 ///
+/// A keyboard that stays, because it is already on `host` or because `Next`
+/// finds no other paired channel, leaves the targets alone: a target that
+/// this computer reaches is on this computer already, and a slot-number
+/// fallback when slot names do not match could send it to another one.
+///
 /// Returns whether the keyboard actually changed hosts.
 pub async fn switch_linked_hosts(
     keyboard: &DeviceRoute,
@@ -1045,6 +1050,14 @@ pub async fn switch_linked_hosts(
     .await?;
     let keyboard_change =
         prepare_host_change_with(&mut keyboard_device, keyboard.device_index(), host).await?;
+    if !keyboard_change.required {
+        debug!(
+            host = keyboard_change.host,
+            route = %keyboard,
+            "keyboard stays on its host; linked devices stay with it"
+        );
+        return Ok(false);
+    }
     let host = keyboard_change.host;
     let keyboard_hosts = read_host_table(&mut keyboard_device).await;
     for target in targets {

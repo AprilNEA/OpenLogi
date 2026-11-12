@@ -13,7 +13,7 @@ use super::{
     PendingHostSwitchRestore, ReportingMode, announced_host, host_change_required, host_channel,
     hosts_after, key_trigger, monitor_host_switch, prepare_host_change_on, prepare_host_switch_on,
     queued_departure, restoration_change, rollback_host_switch_start, run_host_switch_session,
-    shares_channel, switch_host_on, switch_host_on_unit,
+    shares_channel, switch_host_on, switch_host_on_unit, switch_linked_hosts,
 };
 use crate::ChannelPool;
 use crate::backend::NodeId;
@@ -382,6 +382,97 @@ async fn an_unanswered_slot_status_does_not_use_up_the_next_channel_budget() {
         "the advisory reads took {:?}",
         started.elapsed()
     );
+}
+
+/// Device index of the linked mouse that shares the keyboard's receiver.
+const MOUSE_INDEX: u8 = 2;
+
+/// A keyboard at index 1 with no `0x1815`, and a mouse at [`MOUSE_INDEX`]
+/// without it either, both on host 0.
+fn keyboard_and_mouse_on_the_first_host(request: &[u8]) -> Option<Vec<u8>> {
+    match request.get(1) {
+        Some(1) => scripted_keyboard(request, SlotStatus::Unimplemented),
+        Some(&MOUSE_INDEX) => scripted_keyboard_on(request, 0, SlotStatus::Unimplemented),
+        _ => None,
+    }
+}
+
+/// A keyboard at index 1 paired on host 0 alone, and a mouse at
+/// [`MOUSE_INDEX`] that reaches this computer on its host 1 and reports no
+/// slot names, so it can only follow by slot number.
+fn keyboard_alone_and_mouse_on_another_slot(request: &[u8]) -> Option<Vec<u8>> {
+    match request.get(1) {
+        Some(1) => scripted_keyboard(request, SlotStatus::OnlyFirstPaired),
+        Some(&MOUSE_INDEX) => scripted_keyboard_on(request, 1, SlotStatus::Unimplemented),
+        _ => None,
+    }
+}
+
+/// A keyboard and a mouse on one Bolt receiver, linked, with the receiver's
+/// channel held open in the pool.
+async fn linked_keyboard_and_mouse(
+    responder: crate::channel::scripted::Responder,
+) -> (
+    DeviceRoute,
+    DeviceRoute,
+    ChannelPool,
+    Arc<HidppChannel>,
+    ReplayChannelHandle,
+) {
+    let (raw, handle) = ScriptedRawHidChannel::with_responder(responder);
+    let channel = raw_scripted_channel(raw).await;
+    let keyboard = DeviceRoute::Bolt {
+        receiver_uid: "AABB".into(),
+        slot: 1,
+    };
+    let mouse = DeviceRoute::Bolt {
+        receiver_uid: "AABB".into(),
+        slot: MOUSE_INDEX,
+    };
+    let pool = ChannelPool::with_backend(ScriptedBackend::new(Vec::new()));
+    pool.seed(keyboard.clone(), &channel).await;
+    (keyboard, mouse, pool, channel, handle)
+}
+
+/// The `(device index, host)` of every `ChangeHost setCurrentHost` written.
+fn set_current_host_writes(handle: &ReplayChannelHandle) -> Vec<(u8, u8)> {
+    handle
+        .written_reports()
+        .iter()
+        .filter(|report| report.len() >= 5 && report[2] == CHANGE_HOST_INDEX && report[3] >> 4 == 1)
+        .map(|report| (report[1], report[4]))
+        .collect()
+}
+
+#[tokio::test]
+async fn a_linked_next_channel_moves_the_mouse_first_and_the_keyboard_last() {
+    let (keyboard, mouse, pool, _channel, handle) =
+        linked_keyboard_and_mouse(keyboard_and_mouse_on_the_first_host).await;
+
+    let changed = switch_linked_hosts(&keyboard, &[mouse], HostTarget::Next, &pool)
+        .await
+        .expect("both devices answer");
+
+    assert!(changed);
+    assert_eq!(set_current_host_writes(&handle), [(MOUSE_INDEX, 1), (1, 1)]);
+}
+
+#[tokio::test]
+async fn a_keyboard_that_stays_leaves_its_linked_devices_alone() {
+    // The keyboard has no other paired channel, or is already on the one
+    // asked for. The mouse is on this computer through its slot 1; following
+    // the keyboard's slot 0 by number would send it to another computer.
+    for host in [HostTarget::Next, HostTarget::Slot(0)] {
+        let (keyboard, mouse, pool, _channel, handle) =
+            linked_keyboard_and_mouse(keyboard_alone_and_mouse_on_another_slot).await;
+
+        let changed = switch_linked_hosts(&keyboard, &[mouse], host, &pool)
+            .await
+            .expect("staying on the current host is always fine");
+
+        assert!(!changed, "{host:?}");
+        assert_eq!(set_current_host_writes(&handle), [], "{host:?}");
+    }
 }
 
 #[test]
