@@ -65,6 +65,7 @@ fn dev(key: &str, slot: u8, online: bool) -> AgentDevice {
         serial: None,
         unit_id: [0; 4],
         capabilities: None,
+        hidpp10: false,
         kind: openlogi_core::device::DeviceKind::Mouse,
         light_capabilities: None,
         online,

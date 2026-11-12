@@ -102,7 +102,11 @@ pub(crate) fn direct_inventory(unit_id: [u8; 4]) -> DeviceInventory {
                 model_ids: [0xb034, 0, 0],
                 extended_model_id: 2,
             }),
-            capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Mouse)),
+            // An MX Master 3S measures host change (`0x1814`).
+            capabilities: Some(Capabilities {
+                change_host: true,
+                ..Capabilities::presumed_from_kind(DeviceKind::Mouse)
+            }),
             settings_revision: 0,
             hidpp10: false,
         }],

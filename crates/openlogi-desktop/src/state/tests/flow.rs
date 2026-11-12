@@ -271,11 +271,11 @@ fn readiness_names_what_keeps_each_peer_from_working() {
     assert_eq!(readiness(&off, link, &devices).health, FlowHealth::Off);
 }
 
-/// A crossing hands over only online devices, all or none: a peer whose
-/// devices are all away does nothing, and an online device that cannot
-/// switch keeps every device here.
+/// A crossing hands over only online devices that can switch, all or none: a
+/// peer whose devices are all away does nothing, and an online device that
+/// cannot switch stays here while the others move.
 #[test]
-fn a_route_needs_an_online_device_and_none_that_cannot_switch() {
+fn a_route_needs_an_online_device_that_can_switch() {
     let flow = config(vec![
         device("unit:a393cae0", 0, &[("work", 1)]),
         device("unit:0000beef", 0, &[("work", 1)]),
@@ -315,9 +315,23 @@ fn a_route_needs_an_online_device_and_none_that_cannot_switch() {
         row("unit:a393cae0", "MX Master 3S", true, true),
         row("unit:0000beef", "MX Keys", true, false),
     ];
-    assert!(routes(&keys_cannot_switch).is_empty());
+    assert_eq!(routes(&keys_cannot_switch), work_route);
     assert_eq!(
         work_issues(&keys_cannot_switch),
+        [FlowIssue::CannotSwitch {
+            device: "MX Keys".to_owned(),
+            peer: name("work"),
+        }]
+    );
+
+    // With only it awake, nothing moves, and it is not reported as away.
+    let only_it_awake = [
+        row("unit:a393cae0", "MX Master 3S", false, true),
+        row("unit:0000beef", "MX Keys", true, false),
+    ];
+    assert!(routes(&only_it_awake).is_empty());
+    assert_eq!(
+        work_issues(&only_it_awake),
         [FlowIssue::CannotSwitch {
             device: "MX Keys".to_owned(),
             peer: name("work"),
@@ -343,14 +357,25 @@ fn a_route_needs_an_online_device_and_none_that_cannot_switch() {
 /// without a serial, and `flow`. Like the MX Master 3, it has no hosts list
 /// (`0x1815`).
 fn mouse_state(hidpp10: bool, serial: Option<&str>, flow: FlowConfig) -> AppState {
+    mouse_with_change_host(hidpp10, true, serial, flow)
+}
+
+/// [`mouse_state`], with or without host change (`0x1814`).
+fn mouse_with_change_host(
+    hidpp10: bool,
+    change_host: bool,
+    serial: Option<&str>,
+    flow: FlowConfig,
+) -> AppState {
     let mut inventory = direct_inventory([0xa3, 0x93, 0xca, 0xe0]);
     let mouse = &mut inventory.paired[0];
     mouse.hidpp10 = hidpp10;
-    mouse
+    let capabilities = mouse
         .capabilities
         .as_mut()
-        .expect("the fixture device has capabilities")
-        .easy_switch = false;
+        .expect("the fixture device has capabilities");
+    capabilities.easy_switch = false;
+    capabilities.change_host = change_host;
     mouse
         .model_info
         .as_mut()
@@ -366,36 +391,99 @@ fn mouse_state(hidpp10: bool, serial: Option<&str>, flow: FlowConfig) -> AppStat
     })
 }
 
-/// Switching needs host change (`0x1814`), which every HID++ 2.0 device
-/// with Easy-Switch has; only a HID++ 1.0 device cannot switch.
+/// Switching needs host change (`0x1814`). A HID++ 1.0 device has none, and
+/// neither has a HID++ 2.0 gaming mouse on its own receiver, like a G305.
 #[test]
 fn a_device_that_cannot_switch_is_offered_only_to_be_turned_off() {
     let rows = mouse_state(false, None, config(Vec::new())).flow_devices();
     assert_eq!(rows.len(), 1, "no hosts list does not hide the device");
     assert!(rows[0].switchable && rows[0].online);
 
-    assert!(
-        mouse_state(true, None, config(Vec::new()))
-            .flow_devices()
-            .is_empty()
-    );
+    for (hidpp10, change_host) in [(true, true), (false, false)] {
+        assert!(
+            mouse_with_change_host(hidpp10, change_host, None, config(Vec::new()))
+                .flow_devices()
+                .is_empty()
+        );
 
-    let configured = mouse_state(
-        true,
-        None,
-        config(vec![device("unit:a393cae0", 0, &[("work", 1)])]),
+        let configured = mouse_with_change_host(
+            hidpp10,
+            change_host,
+            None,
+            config(vec![device("unit:a393cae0", 0, &[("work", 1)])]),
+        );
+        let rows = configured.flow_devices();
+        assert_eq!(rows.len(), 1);
+        assert!(!rows[0].switchable);
+        assert!(
+            configured
+                .flow_readiness()
+                .issues
+                .contains(&FlowIssue::CannotSwitch {
+                    device: rows[0].name.clone(),
+                    peer: name("work"),
+                })
+        );
+    }
+}
+
+/// A device awake under its serial that measures `0x1814` can switch, even
+/// when an identity saved under its unit id, from before `0x1814` was
+/// measured, says it has none.
+#[test]
+fn flow_prefers_live_capabilities_across_identity_keys() {
+    let mut inventory = direct_inventory([0xa3, 0x93, 0xca, 0xe0]);
+    let mouse = &mut inventory.paired[0];
+    let capabilities = mouse
+        .capabilities
+        .as_mut()
+        .expect("the fixture device has capabilities");
+    capabilities.change_host = true;
+    let mut saved = *capabilities;
+    saved.change_host = false;
+    mouse
+        .model_info
+        .as_mut()
+        .expect("the fixture device has model info")
+        .serial_number = Some("2214LZ0ABCD8".to_owned());
+    let mut settings = Config::ephemeral();
+    settings.flow = config(vec![device("unit:a393cae0", 0, &[("work", 1)])]);
+    settings.set_device_identity(
+        "unit:a393cae0",
+        openlogi_core::config::DeviceIdentity {
+            display_name: "MX Master 3S".to_owned(),
+            model_info: None,
+            codename: None,
+            kind: openlogi_core::device::DeviceKind::Mouse,
+            capabilities: saved,
+            light_capabilities: None,
+            driver_id: None,
+            registry_model_id: None,
+        },
     );
-    let rows = configured.flow_devices();
-    assert_eq!(rows.len(), 1);
-    assert!(!rows[0].switchable);
+    let resolver = AssetResolver::new();
+    let (commands, _) = tokio::sync::mpsc::unbounded_channel();
+    let state = AppState::new(Sources {
+        inventories: &[inventory],
+        ..Sources::in_memory(settings, &resolver, commands)
+    });
+
     assert!(
-        configured
+        state
+            .devices()
+            .iter()
+            .any(|record| record.config_key == "unit:a393cae0" && !record.is_online()),
+        "the saved identity is listed as well"
+    );
+    let rows = state.flow_devices();
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].online && rows[0].switchable);
+    assert!(
+        !state
             .flow_readiness()
             .issues
-            .contains(&FlowIssue::CannotSwitch {
-                device: rows[0].name.clone(),
-                peer: name("work"),
-            })
+            .iter()
+            .any(|issue| matches!(issue, FlowIssue::CannotSwitch { .. }))
     );
 }
 

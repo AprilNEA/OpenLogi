@@ -98,6 +98,9 @@ struct AgentDevice {
     serial: Option<String>,
     unit_id: [u8; 4],
     capabilities: Option<Capabilities>,
+    /// [`PairedDevice::hidpp10`](openlogi_core::device::PairedDevice::hidpp10):
+    /// the device answered as HID++ 1.0, so it has no measured capabilities.
+    hidpp10: bool,
     /// HID++-reported device kind — identity only (capability decisions come
     /// from the feature table). Used to find the keyboard the key-capture
     /// watcher should target.
@@ -1424,6 +1427,7 @@ impl Orchestrator {
             unit_id: dev.unit_id,
             kind: dev.kind,
             online: dev.online,
+            switches_hosts: Capabilities::switch_hosts(dev.capabilities.as_ref(), dev.hidpp10),
         })
     }
 
