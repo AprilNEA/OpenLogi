@@ -375,6 +375,13 @@ impl Armed {
                             running.inputs.dispatcher.dispatch(&action, device_key.as_deref());
                         }
                     }
+                    ActionRequest::SwitchHost { device_key, slot } => {
+                        running
+                            .orchestrator
+                            .lock()
+                            .await
+                            .switch_host_for_action(device_key.as_deref(), slot);
+                    }
                     ActionRequest::SettingsWritten { route } => {
                         running
                             .orchestrator

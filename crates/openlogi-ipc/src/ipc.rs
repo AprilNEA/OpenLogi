@@ -190,6 +190,10 @@ pub use succession::Identity;
 ///      `AgentSnapshot::config_revision` appended — the revision of
 ///      `config.toml` the agent last loaded, so the settings app learns of
 ///      a save another writer made.
+///      `Action::{EasySwitchChannel1, EasySwitchChannel2, EasySwitchChannel3}`
+///      and `ActionRingIcon::{Channel1, Channel2, Channel3}` appended after
+///      them — a device's move to another Easy-Switch channel, bound to a
+///      button or an Actions Ring slot.
 ///      `DeviceKind::Dialpad` appended, and `ButtonId` gains the
 ///      `DialLeft`/`DialRight`/`RollerUp`/`RollerDown` names — the MX
 ///      Creative Dialpad's dial and roller. `HidppOperation::WriteKeyBrightness`

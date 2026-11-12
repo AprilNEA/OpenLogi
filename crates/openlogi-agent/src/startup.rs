@@ -220,6 +220,7 @@ pub(crate) fn spawn_hidpp_watchers(
     );
     let host_switch = watchers::host_switch::spawn(
         &shared.host_switch_links,
+        &shared.linked_host_switch,
         shared.channel_pool.clone(),
         shared.receiver_access.clone(),
         shared.channel_registry.clone(),

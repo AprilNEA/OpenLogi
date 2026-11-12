@@ -60,7 +60,7 @@ use crate::receiver_access::ReceiverAccess;
 use crate::runtime::hook::{HookMaps, SharedHookMaps};
 use crate::runtime::scroll::ScrollPreferences;
 use crate::runtime::{PageTurn, PointerSelection};
-use crate::watchers::host_switch::{HostSwitchLink, HostSwitchLinks};
+use crate::watchers::host_switch::{HostSwitchLink, HostSwitchLinks, LinkedHostSwitch};
 use crate::watchers::inventory::InventoryRefresh;
 use crate::watchers::key_display::{KeyDisplaySpec, KeyFace, SharedKeyDisplaySpecs, StyledFace};
 use crate::watchers::keyboard::{KeyboardSpec, SharedKeyboardSpecs};
@@ -185,6 +185,9 @@ pub struct SharedHandles {
     transport_turns: crate::hardware::TransportTurns,
     /// Keyboard → pointing-device routes resolved from `config.toml`.
     pub host_switch_links: HostSwitchLinks,
+    /// Moves a linked keyboard and its pointing devices together, for an
+    /// Easy-Switch action fired on either.
+    pub linked_host_switch: LinkedHostSwitch,
     /// The online lights to watch for changes made on the light itself.
     pub watched_lights: WatchedLights,
     /// Orders every path's Fn-lock writes per keyboard.
@@ -203,6 +206,9 @@ pub struct SharedHandles {
     backlight_order: WriteOrder,
     /// Orders host renames per device.
     host_name_order: WriteOrder,
+    /// Orders the Easy-Switch actions' channel switches per device, so a
+    /// later request never lands before an earlier one.
+    host_switch_order: WriteOrder,
     /// Orders the `ChangeHost` cookie writes per linked device.
     follower_cookie_order: WriteOrder,
     /// Saved policy and manual writes share intent identity, not retry order.
@@ -912,6 +918,7 @@ impl Orchestrator {
             receiver_access,
             flow,
             transport_turns: crate::hardware::TransportTurns::default(),
+            linked_host_switch: LinkedHostSwitch::new(&host_switch_links),
             host_switch_links,
             watched_lights,
             fn_lock_order: WriteOrder::default(),
@@ -921,6 +928,7 @@ impl Orchestrator {
             sidetone_order: WriteOrder::default(),
             backlight_order: WriteOrder::default(),
             host_name_order: WriteOrder::default(),
+            host_switch_order: WriteOrder::default(),
             follower_cookie_order: WriteOrder::default(),
             disabled_keys_order: WriteOrder::default(),
             inventory_refresh: Arc::new(RwLock::new(None)),
@@ -1370,6 +1378,46 @@ impl Orchestrator {
         info!(key, page = %next, of = %last, "keypad page turned");
         self.keypad_pages.insert(key.to_owned(), next);
         self.publish_device_runtime();
+    }
+
+    /// Move the device that fired an Easy-Switch action to `slot`, as its own
+    /// channel key would. A keyboard with linked pointing devices, or a
+    /// device linked to a keyboard, moves with the rest of its link, as when
+    /// the keyboard's host key is pressed: `slot` is then the keyboard's.
+    ///
+    /// A press the OS input hook delivers names no device: the hook's maps
+    /// are the selected device's, so the selected device is the one that
+    /// fired. A global function key reaches the hook too, but its binding
+    /// never carries these actions (`Action::needs_firing_device`).
+    pub fn switch_host_for_action(&self, device_key: Option<&str>, slot: u8) {
+        let Some(key) = device_key.or_else(|| self.current_key()) else {
+            debug!(slot, "Easy-Switch action without a device — ignored");
+            return;
+        };
+        let Some((route, unit_id)) = self
+            .devices
+            .iter()
+            .find(|device| device.config_key == key && device.online)
+            .and_then(|device| Some((device.route.clone()?, device.unit_id)))
+        else {
+            debug!(
+                key,
+                slot, "Easy-Switch action for an offline device — ignored"
+            );
+            return;
+        };
+        if self.shared.linked_host_switch.request(&route, slot) {
+            info!(key, slot, "Easy-Switch action → switching linked devices");
+            return;
+        }
+        debug!(key, slot, "Easy-Switch action → switching host");
+        let ticket = self.shared.host_switch_order.request(&route);
+        crate::hardware::switch_host_in_background(
+            self.shared.device(&route),
+            ticket,
+            slot,
+            unit_id,
+        );
     }
 
     /// Rewrite every shared map from the current config + selected device.

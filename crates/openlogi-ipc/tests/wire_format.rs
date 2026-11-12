@@ -512,8 +512,27 @@ fn hold_modifier_bits() {
     assert_wire(&Action::HoldModifier(ctrl_shift), "3d06");
 }
 
+/// The Easy-Switch channel actions are unit variants appended after
+/// `HoldModifier`, so every earlier index is unchanged.
+#[test]
+fn easy_switch_channel_actions() {
+    use openlogi_core::binding::Action;
+    assert_wire(&Action::EasySwitchChannel1, "3e");
+    assert_wire(&Action::EasySwitchChannel2, "3f");
+    assert_wire(&Action::EasySwitchChannel3, "40");
+}
+
+/// The Easy-Switch channel icons are unit variants appended after `Ban`, so
+/// every earlier index is unchanged.
+#[test]
+fn easy_switch_channel_icons() {
+    assert_wire(&ActionRingIcon::Channel1, "36");
+    assert_wire(&ActionRingIcon::Channel2, "37");
+    assert_wire(&ActionRingIcon::Channel3, "38");
+}
+
 /// A live keypad key's activation crosses the wire as its appended variant
-/// index and the key's persisted name.
+/// index (after the Easy-Switch channels) and the key's persisted name.
 #[test]
 fn activate_live_key() {
     use openlogi_core::binding::Action;
@@ -522,7 +541,7 @@ fn activate_live_key() {
             page: KeypadPage::new(2).expect("page 2 exists"),
             key: GridKey::Middle,
         })),
-        "3e1070616765323a677269644d6964646c65",
+        "411070616765323a677269644d6964646c65",
     );
 }
 

@@ -91,6 +91,16 @@ mod tests {
         (fleet, completed, retried)
     }
 
+    #[test]
+    fn a_handoff_that_waits_for_a_held_key_leaves_room_to_restore_before_exit() {
+        // A quit cannot cut the wait short, so the restore after it needs the
+        // rest of the exit deadline.
+        assert!(
+            openlogi_hid::HELD_KEY_RELEASE_TIMEOUT * 2 <= STOP_TIMEOUT,
+            "the held-key wait takes at most half of the exit deadline"
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn pending_replacement_keeps_accepting_exit_requests_and_bounds_the_same_drain() {
         let (mut fleet, completed, _retried) = replacing();
