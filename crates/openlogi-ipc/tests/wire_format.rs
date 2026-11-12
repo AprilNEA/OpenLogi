@@ -35,7 +35,7 @@ use bincode::Options;
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{
     Action, ActionRingIcon, ActionRingSize, ActionRingSlot, ButtonId, GKey, GKeyProfile, GKeySlot,
-    GridKey, GridSlot, KeyCombo, KeypadPage, ModeKey,
+    GridKey, GridSlot, KeyCombo, KeypadPage, ModeKey, RingScrollDirection,
 };
 use openlogi_core::config::{
     ConfigRevision, FlowPeerName, FlowPublicKey, Lighting, ScrollResolution,
@@ -550,13 +550,14 @@ fn action_ring_types() {
                     label: "Cut".to_string(),
                     literal: false,
                     icon: ActionRingIcon::Keyboard,
+                    scrollable: false,
                 },
             )]),
             language: Some("fr".to_string()),
             size: ActionRingSize::Large,
         },
         // The size is one trailing byte after the locale.
-        "2a01000343757400070102667202",
+        "2a0100034375740007000102667202",
     );
     // The literal flag is one byte between label and icon.
     assert_wire(
@@ -564,9 +565,22 @@ fn action_ring_types() {
             label: "Cut".to_string(),
             literal: true,
             icon: ActionRingIcon::Keyboard,
+            scrollable: false,
         },
-        "034375740107",
+        "03437574010700",
     );
+    // The scrollable flag is one trailing byte after the icon.
+    assert_wire(
+        &ActionRingPresentation {
+            label: "Mute".to_string(),
+            literal: false,
+            icon: ActionRingIcon::Volume,
+            scrollable: true,
+        },
+        "044d757465000f01",
+    );
+    assert_wire(&RingScrollDirection::Up, "00");
+    assert_wire(&RingScrollDirection::Down, "01");
     assert_wire(&ActionRingSize::Small, "00");
     assert_wire(&ActionRingSize::Large, "02");
     assert_wire(&ActionRingSlot::Top, "00");
@@ -590,8 +604,18 @@ fn action_ring_types() {
     );
     assert_wire(&ActionRingCommandError::SessionNotFound, "00");
     assert_wire(&ActionRingCommandError::SlotEmpty, "01");
+    assert_wire(&ActionRingCommandError::NotScrollable, "02");
     // Appended after the Flow pairing methods.
     assert_wire(&AgentRequest::ActionRingUnhover { session_id: 7 }, "3907");
+    assert_wire(
+        &AgentRequest::ActionRingScroll {
+            session_id: 7,
+            slot: ActionRingSlot::Bottom,
+            direction: RingScrollDirection::Down,
+            steps: 3,
+        },
+        "3a07040103",
+    );
     assert_wire(&HidppOperation::WriteFnLock, "0c");
     assert_wire(&HidppOperation::PlayHaptic, "0e");
     assert_wire(&HidppOperation::ReadFnLock, "0f");

@@ -49,6 +49,7 @@ const ACTION_ICONS: &[(&str, &[u8])] = &[
     ("action-icons/chevrons-down.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/chevrons-down.svg"))),
     ("action-icons/chevrons-left.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/chevrons-left.svg"))),
     ("action-icons/chevrons-right.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/chevrons-right.svg"))),
+    ("action-icons/chevrons-up-down.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/chevrons-up-down.svg"))),
     ("action-icons/chevrons-up.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/chevrons-up.svg"))),
     ("action-icons/circle-arrow-left.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/circle-arrow-left.svg"))),
     ("action-icons/circle-arrow-right.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/circle-arrow-right.svg"))),
@@ -113,6 +114,10 @@ const ACTION_ICONS: &[(&str, &[u8])] = &[
 /// the same mark, so neither side names the asset itself.
 pub const RING_CANCEL_ICON: &str = "action-icons/x.svg";
 
+/// The mark on an Actions Ring slot that the wheel adjusts. The overlay and
+/// the settings preview draw the same mark, so neither names the asset.
+pub const RING_SCROLL_ICON: &str = "action-icons/chevrons-up-down.svg";
+
 /// The glyph on the overlay's low-battery notice.
 pub const LOW_BATTERY_ICON: &str = "action-icons/battery-low.svg";
 
@@ -164,6 +169,14 @@ mod tests {
         assert!(
             embedded_icon(RING_CANCEL_ICON).is_some(),
             "{RING_CANCEL_ICON} is missing"
+        );
+    }
+
+    #[test]
+    fn the_shared_ring_scroll_icon_is_embedded() {
+        assert!(
+            embedded_icon(RING_SCROLL_ICON).is_some(),
+            "{RING_SCROLL_ICON} is missing"
         );
     }
 
