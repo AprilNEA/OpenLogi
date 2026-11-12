@@ -686,3 +686,14 @@ Top = { action = { CustomShortcut = "Cmd+Shift+P" }, icon = "Keyboard", label = 
 ```
 
 `ShowActionsRing` is rejected inside a ring slot to prevent recursive rings.
+
+## Battery telemetry sidecar
+
+To keep `config.toml`'s strict schema untouched, the desktop app stores learned
+discharge rates and estimated battery health in a separate sidecar file beside
+`config.toml` (`battery-telemetry.json`). Each persistent device's discharge
+rate (`% per day`) is tracked per active power configuration signature (such as
+keyboard backlight brightness and timeout, RGB lighting state, or mouse report
+rate) across discharging intervals and written atomically via a temporary
+sibling file. Deleting `battery-telemetry.json` resets learned discharge
+history back to the nominal hardware configuration model.

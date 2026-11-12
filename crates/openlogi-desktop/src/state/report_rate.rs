@@ -42,6 +42,12 @@ impl AppState {
             .unwrap_or_default()
     }
 
+    /// What is known of `key`'s report rate, if queried.
+    #[must_use]
+    pub(crate) fn report_rate_load_for(&self, key: &DeviceKey) -> Option<&ReportRateLoad> {
+        self.pointer.reads.report_rate_load(key)
+    }
+
     /// Persist `rate` for the active mouse and write it through the agent.
     /// The panel shows `rate` at once; the mouse's read-back arrives as
     /// [`Self::apply_report_rate_written`]. No-op when no device is selected,
@@ -99,6 +105,7 @@ impl AppState {
             rate,
             key: device_key,
         });
+        self.observe_battery_telemetry();
         events
     }
 
@@ -131,6 +138,7 @@ impl AppState {
             debug!(key = %key, "report-rate answer for a connection no read is on — dropping it");
             return StateEvents::none();
         }
+        self.observe_battery_telemetry();
         StateEvent::ReportRateChanged(key.clone()).into()
     }
 
@@ -139,6 +147,12 @@ impl AppState {
     pub(crate) fn retry_report_rate_read(&mut self, key: &DeviceKey) -> StateEvents {
         self.pointer.reads.retry_report_rate(key);
         StateEvent::ReportRateChanged(key.clone()).into()
+    }
+
+    /// `key`'s mouse came back online: re-run any failed report-rate read even
+    /// when `settings_revision` did not move across sleep/wake.
+    pub(super) fn report_rate_reconnected(&mut self, key: &DeviceKey) {
+        self.pointer.reads.retry_report_rate_if_failed(key);
     }
 
     pub(super) fn load_current_report_rate(&mut self, cx: &mut gpui::Context<Self>) {
@@ -156,6 +170,28 @@ impl AppState {
         self.pointer
             .reads
             .ensure_report_rate(key, route, self.ipc_sender(), cx);
+    }
+
+    /// Ensure report-rate state is queried for all online report-rate-capable mice
+    /// so Home and Detail battery duration estimates reflect the live polling rate.
+    pub(super) fn load_all_report_rates(&mut self, cx: &mut gpui::Context<Self>) {
+        let targets: Vec<(DeviceKey, DeviceRoute)> = self
+            .devices
+            .records
+            .iter()
+            .filter(|record| {
+                record
+                    .capabilities
+                    .is_some_and(|capabilities| capabilities.report_rate)
+            })
+            .filter_map(|record| Some((record.device_key(), record.addressable_route()?.clone())))
+            .collect();
+        let sender = self.ipc_sender();
+        for (key, route) in targets {
+            self.pointer
+                .reads
+                .ensure_report_rate(key, route, sender.clone(), cx);
+        }
     }
 }
 

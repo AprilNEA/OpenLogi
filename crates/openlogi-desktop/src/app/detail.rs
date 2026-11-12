@@ -74,6 +74,10 @@ pub(super) fn detail_header(
     let battery = record
         .and_then(|r| r.battery.as_ref())
         .map(BatteryIndicator::inline);
+    let battery_estimate = record.and_then(|r| {
+        AppState::try_read(cx)
+            .and_then(|state| crate::ui::battery_estimate::estimate_for_device(state, r))
+    });
     h_flex()
         .h(px(HEADER_H))
         .flex_shrink_0()
@@ -95,6 +99,14 @@ pub(super) fn detail_header(
                 .child(name),
         )
         .children(battery)
+        .when_some(battery_estimate, |this, est| {
+            this.child(
+                div()
+                    .text_caption()
+                    .text_color(pal.text_muted)
+                    .child(est.inline_label()),
+            )
+        })
         .when_some(online, |this, online| this.child(status_badge(online, pal)))
 }
 
@@ -1056,6 +1068,10 @@ fn keyboard_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
 }
 
 fn device_details_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
+    let battery_estimate = AppState::try_read(cx).and_then(|state| {
+        let record = state.current_record()?;
+        crate::ui::battery_estimate::estimate_for_device(state, record)
+    });
     let content = AppState::try_read(cx)
         .and_then(AppState::current_record)
         .cloned()
@@ -1078,7 +1094,29 @@ fn device_details_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElem
                         pal,
                     ))
                     .when_some(record.battery.as_ref(), |this, battery| {
-                        this.child(BatteryIndicator::summary(battery))
+                        this.child(
+                            v_flex()
+                                .gap_1()
+                                .child(BatteryIndicator::summary(battery))
+                                .when_some(battery_estimate, |col, est| {
+                                    col.child(
+                                        v_flex()
+                                            .gap_0p5()
+                                            .child(
+                                                div()
+                                                    .text_body()
+                                                    .text_color(pal.text_primary)
+                                                    .child(est.detail_headline()),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_caption()
+                                                    .text_color(pal.text_muted)
+                                                    .child(est.detail_subline()),
+                                            ),
+                                    )
+                                }),
+                        )
                     })
                     .child(device_description_list(record, pal))
                     .into_any_element()

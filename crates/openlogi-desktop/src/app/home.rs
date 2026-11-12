@@ -175,6 +175,7 @@ fn device_card(
     glow: Option<(Arc<GlowGeometry>, Hsla)>,
     light_enabled: bool,
     light_settings: LightSettings,
+    battery_estimate: Option<&crate::ui::battery_estimate::BatteryEstimate>,
     pal: Palette,
 ) -> BaseButton {
     BaseButton::new((ElementId::from("device-card"), record.record_key()))
@@ -227,7 +228,13 @@ fn device_card(
                             .absolute()
                             .top_0()
                             .right_0()
-                            .child(battery_glance(battery, record, connectivity)),
+                            .child(battery_glance(
+                                battery,
+                                record,
+                                connectivity,
+                                battery_estimate,
+                                pal,
+                            )),
                     )
                 }),
         )
@@ -335,11 +342,27 @@ fn battery_glance(
     battery: &openlogi_core::device::BatteryInfo,
     record: &DeviceRecord,
     connectivity: Connectivity,
+    estimate: Option<&crate::ui::battery_estimate::BatteryEstimate>,
+    pal: Palette,
 ) -> impl IntoElement {
-    let hint: SharedString = glance_hint(battery, connectivity == Connectivity::Connected).into();
-    div()
+    let base_hint = glance_hint(battery, connectivity == Connectivity::Connected);
+    let hint: SharedString = match estimate {
+        Some(est) => format!("{base_hint} · {}", est.home_label()).into(),
+        None => base_hint.into(),
+    };
+    h_flex()
         .id((ElementId::from("battery-glance"), record.record_key()))
         .flex_none()
+        .items_center()
+        .gap_1p5()
+        .when_some(estimate, |this, est| {
+            this.child(
+                div()
+                    .text_caption()
+                    .text_color(pal.text_muted)
+                    .child(est.inline_label()),
+            )
+        })
         .child(battery_reading(
             BatteryIndicator::glance(battery),
             connectivity,
