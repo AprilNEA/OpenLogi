@@ -31,7 +31,8 @@ mod tests;
 pub use action::{Action, HeldKeys, WorkflowStep};
 pub use action_ring::{
     ActionRingConfig, ActionRingEntry, ActionRingIcon, ActionRingLayout, ActionRingSize,
-    ActionRingSlot, RingAction, RingActionError,
+    ActionRingSlot, RingAction, RingActionError, RingScroll, RingScrollDirection, RingScrollPreset,
+    ScrollBadge,
 };
 pub use application_target::{ApplicationTarget, ApplicationTargetError};
 pub use button::{ButtonId, GridKey, GridSlot, KeypadPage, ParseButtonIdError};

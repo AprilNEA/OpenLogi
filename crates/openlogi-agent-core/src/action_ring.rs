@@ -4,14 +4,15 @@
 //! snapshot. Executable actions remain in the agent, and IPC commands can
 //! select only a slot from that authoritative snapshot.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use openlogi_core::action_ring::DISPLAY_LIFETIME;
 use openlogi_core::binding::{
-    Action, ActionRingIcon, ActionRingLayout, ActionRingSize, ActionRingSlot,
+    Action, ActionRingIcon, ActionRingLayout, ActionRingSize, ActionRingSlot, RingScroll,
+    RingScrollDirection,
 };
 use openlogi_hid::DeviceRoute;
 use openlogi_ipc::{
@@ -32,12 +33,15 @@ use tokio::time::Instant;
 /// round-trip back.
 const SESSION_GRACE: Duration = Duration::from_secs(3);
 
-/// How long a session lives after [`ActionRingManager::begin`] opens it.
+/// How long a session lives after [`ActionRingManager::begin`] opens it, or
+/// after a wheel step last used it ([`ActionRingManager::scroll`]).
 ///
 /// No session outlives this: hover, activation, and cancel all find an older
-/// one expired. Work that must not outlast a session, but may never hear it
-/// close (the overlay can exit without cancelling), ends this long after the
-/// session opened.
+/// one expired. The overlay keeps its window up for [`DISPLAY_LIFETIME`] after
+/// the same two moments, so wheeling over a slot keeps both alive together.
+/// Work that must not outlast a session, but may never hear it close (the
+/// overlay can exit without cancelling), ends this long after the session
+/// opened.
 pub const SESSION_LIFETIME: Duration = DISPLAY_LIFETIME.saturating_add(SESSION_GRACE);
 
 /// How long the trigger must stay down after the ring opens for its release
@@ -47,6 +51,14 @@ pub const SESSION_LIFETIME: Duration = DISPLAY_LIFETIME.saturating_add(SESSION_G
 /// slot, so a hand still moving the mouse as it clicks cannot run an action
 /// it only passed over.
 pub const HOLD_TO_CHOOSE: Duration = Duration::from_millis(250);
+
+/// The most wheel steps one [`ActionRingManager::scroll`] report runs.
+///
+/// The overlay sums the steps that pile up while a report is in flight, so a
+/// wheel spun hard, or an agent briefly stalled, arrives as one large count.
+/// Running it in full would keep stepping the volume long after the hand
+/// stopped; this bound keeps a report to a short, finished burst.
+pub const MAX_SCROLL_STEPS: u8 = 10;
 
 /// Immutable input used to open one ring session.
 pub struct ActionRingSessionSpec {
@@ -69,6 +81,19 @@ pub struct ActionRingActivation {
     /// Action snapshotted when the ring opened.
     pub action: Action,
     /// Route of the triggering device when activation feedback is available.
+    pub haptic_route: Option<DeviceRoute>,
+}
+
+/// Validated wheel steps over a scrollable slot, returned to the dispatcher.
+/// The session stays open.
+pub struct ActionRingScrollSteps {
+    /// Config key of the device whose control opened the ring.
+    pub device_key: String,
+    /// Action snapshotted for this slot and direction when the ring opened.
+    pub action: Action,
+    /// How many times to run it, at most [`MAX_SCROLL_STEPS`].
+    pub steps: u8,
+    /// Route of the triggering device when step feedback is available.
     pub haptic_route: Option<DeviceRoute>,
 }
 
@@ -103,10 +128,18 @@ struct Session {
     device_key: String,
     haptic_route: Option<DeviceRoute>,
     actions: BTreeMap<ActionRingSlot, Action>,
+    scrolls: BTreeMap<ActionRingSlot, RingScroll>,
+    /// Slots the wheel ran an action over. Releasing the held trigger on one
+    /// of them closes the ring without its click: the hand was adjusting, not
+    /// choosing.
+    scrolled: BTreeSet<ActionRingSlot>,
     hovered: Option<ActionRingSlot>,
     /// The trigger that opened this ring has not been released yet.
     trigger_held: bool,
     opened_at: Instant,
+    /// When the session was opened or last scrolled; it expires
+    /// [`SESSION_LIFETIME`] after this.
+    last_used: Instant,
 }
 
 impl Session {
@@ -131,7 +164,7 @@ impl State {
         if self
             .active
             .as_ref()
-            .is_some_and(|session| session.opened_at.elapsed() > SESSION_LIFETIME)
+            .is_some_and(|session| session.last_used.elapsed() > SESSION_LIFETIME)
         {
             self.active = None;
         }
@@ -180,8 +213,12 @@ impl ActionRingManager {
     pub fn begin(&self, spec: ActionRingSessionSpec) -> ActionRingInvocation {
         let session_id = self.next_session.fetch_add(1, Ordering::Relaxed);
         let mut actions = BTreeMap::new();
+        let mut scrolls = BTreeMap::new();
         let mut slots = BTreeMap::new();
         for (slot, entry) in spec.layout.slots {
+            if let Some(scroll) = entry.scroll() {
+                scrolls.insert(slot, scroll.clone());
+            }
             let (action, custom_icon, custom_label) = entry.into_parts();
             let literal = custom_label.is_some();
             slots.insert(
@@ -190,6 +227,7 @@ impl ActionRingManager {
                     label: custom_label.unwrap_or_else(|| action.label()),
                     literal,
                     icon: custom_icon.unwrap_or_else(|| ActionRingIcon::for_action(&action)),
+                    scrollable: scrolls.contains_key(&slot),
                 },
             );
             actions.insert(slot, action);
@@ -200,15 +238,19 @@ impl ActionRingManager {
             language: spec.language,
             size: spec.size,
         };
+        let now = Instant::now();
         let mut state = self.state();
         state.active = Some(Session {
             invocation: invocation.clone(),
             device_key: spec.device_key,
             haptic_route: spec.haptic_route,
             actions,
+            scrolls,
+            scrolled: BTreeSet::new(),
             hovered: None,
             trigger_held: true,
-            opened_at: Instant::now(),
+            opened_at: now,
+            last_used: now,
         });
         self.publish(&state);
         invocation
@@ -312,6 +354,36 @@ impl ActionRingManager {
         Ok(())
     }
 
+    /// Wheel steps over `slot`: return its snapshotted action for `direction`
+    /// to run `steps` times, at most [`MAX_SCROLL_STEPS`], and keep the
+    /// session open and alive for another [`SESSION_LIFETIME`].
+    pub fn scroll(
+        &self,
+        session_id: u64,
+        slot: ActionRingSlot,
+        direction: RingScrollDirection,
+        steps: u8,
+    ) -> Result<ActionRingScrollSteps, ActionRingCommandError> {
+        let mut state = self.state();
+        self.expire_and_publish(&mut state);
+        let session = state.active_session(session_id)?;
+        if !session.actions.contains_key(&slot) {
+            return Err(ActionRingCommandError::SlotEmpty);
+        }
+        let Some(scroll) = session.scrolls.get(&slot) else {
+            return Err(ActionRingCommandError::NotScrollable);
+        };
+        let action = scroll.action(direction).clone();
+        session.scrolled.insert(slot);
+        session.last_used = Instant::now();
+        Ok(ActionRingScrollSteps {
+            device_key: session.device_key.clone(),
+            action,
+            steps: steps.min(MAX_SCROLL_STEPS),
+            haptic_route: session.haptic_route.clone(),
+        })
+    }
+
     /// Consume a session and return the snapshotted action for `slot`.
     pub fn activate(
         &self,
@@ -340,8 +412,10 @@ impl ActionRingManager {
     ///
     /// Released within [`HOLD_TO_CHOOSE`] it was a click, and the ring stays
     /// open. Held longer, the release chooses: the highlighted slot runs, and
-    /// with none highlighted the ring closes. Only the first release after a
-    /// ring opens counts.
+    /// with none highlighted the ring closes. A highlighted slot the wheel
+    /// already ran an action over closes the ring without its click, since
+    /// the hand was adjusting with the wheel rather than choosing. Only the
+    /// first release after a ring opens counts.
     pub fn release(&self) -> ActionRingRelease {
         let mut state = self.state();
         self.expire_and_publish(&mut state);
@@ -357,7 +431,10 @@ impl ActionRingManager {
         };
         self.publish(&state);
         let session_id = session.invocation.session_id;
-        match session.hovered.and_then(|slot| session.activate(slot)) {
+        let chosen = session
+            .hovered
+            .filter(|slot| !session.scrolled.contains(slot));
+        match chosen.and_then(|slot| session.activate(slot)) {
             Some(activation) => ActionRingRelease::Activated {
                 session_id,
                 activation,
@@ -393,7 +470,7 @@ impl ActionRingManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openlogi_core::binding::ActionRingConfig;
+    use openlogi_core::binding::{ActionRingConfig, RingScrollPreset};
 
     fn spec() -> ActionRingSessionSpec {
         ActionRingSessionSpec {
@@ -430,6 +507,7 @@ mod tests {
                 label: "Cut".to_string(),
                 literal: false,
                 icon: ActionRingIcon::Keyboard,
+                scrollable: false,
             }
         );
         assert_eq!(invocation.language.as_deref(), Some("fr"));
@@ -653,6 +731,199 @@ mod tests {
         );
         assert!(ring.has_changed().unwrap(), "expiration must notify");
         assert_eq!(ring.borrow_and_update().invocation, None);
+    }
+
+    /// The default layout with a volume pair on its bottom slot.
+    fn scrollable_spec() -> ActionRingSessionSpec {
+        let mut spec = spec();
+        spec.layout.set_scroll(
+            ActionRingSlot::Bottom,
+            Some(RingScrollPreset::Volume.scroll()),
+        );
+        spec
+    }
+
+    #[test]
+    fn only_slots_with_a_pair_present_as_scrollable() {
+        let invocation = ActionRingManager::default().begin(scrollable_spec());
+        let scrollable: Vec<_> = invocation
+            .slots
+            .iter()
+            .filter(|(_, presentation)| presentation.scrollable)
+            .map(|(slot, _)| *slot)
+            .collect();
+        assert_eq!(scrollable, [ActionRingSlot::Bottom]);
+    }
+
+    #[test]
+    fn wheel_steps_run_the_pair_and_keep_the_ring_open() {
+        let manager = ActionRingManager::default();
+        let mut ring = manager.subscribe();
+        let invocation = manager.begin(scrollable_spec());
+        ring.borrow_and_update();
+
+        let up = manager
+            .scroll(
+                invocation.session_id,
+                ActionRingSlot::Bottom,
+                RingScrollDirection::Up,
+                2,
+            )
+            .expect("a scrollable slot must take wheel steps");
+        assert_eq!(up.action, Action::VolumeUp);
+        assert_eq!(up.steps, 2);
+        let down = manager
+            .scroll(
+                invocation.session_id,
+                ActionRingSlot::Bottom,
+                RingScrollDirection::Down,
+                1,
+            )
+            .expect("the session must survive its own wheel steps");
+        assert_eq!(down.action, Action::VolumeDown);
+
+        assert!(manager.is_showing());
+        assert!(
+            !ring.has_changed().unwrap(),
+            "a wheel step must not republish the ring"
+        );
+    }
+
+    #[test]
+    fn a_burst_of_wheel_steps_is_bounded() {
+        let manager = ActionRingManager::default();
+        let invocation = manager.begin(scrollable_spec());
+        let steps = manager
+            .scroll(
+                invocation.session_id,
+                ActionRingSlot::Bottom,
+                RingScrollDirection::Up,
+                u8::MAX,
+            )
+            .expect("a scrollable slot must take wheel steps");
+        assert_eq!(steps.steps, MAX_SCROLL_STEPS);
+    }
+
+    #[test]
+    fn wheel_steps_over_a_slot_without_a_pair_are_refused() {
+        let manager = ActionRingManager::default();
+        let mut spec = scrollable_spec();
+        spec.layout.set_action(ActionRingSlot::Left, None);
+        let invocation = manager.begin(spec);
+        let scroll = |slot| {
+            manager
+                .scroll(invocation.session_id, slot, RingScrollDirection::Up, 1)
+                .err()
+        };
+        assert_eq!(
+            scroll(ActionRingSlot::Top),
+            Some(ActionRingCommandError::NotScrollable)
+        );
+        assert_eq!(
+            scroll(ActionRingSlot::Left),
+            Some(ActionRingCommandError::SlotEmpty)
+        );
+        assert_eq!(
+            manager
+                .scroll(
+                    invocation.session_id + 1,
+                    ActionRingSlot::Bottom,
+                    RingScrollDirection::Up,
+                    1
+                )
+                .err(),
+            Some(ActionRingCommandError::SessionNotFound)
+        );
+    }
+
+    /// Held, wheeled over the volume slot, released there: the volume is set,
+    /// so the release closes the ring instead of muting it.
+    #[tokio::test(start_paused = true)]
+    async fn releasing_a_held_trigger_after_wheeling_closes_without_the_click() {
+        let manager = ActionRingManager::default();
+        let invocation = manager.begin(scrollable_spec());
+        manager
+            .hover(invocation.session_id, ActionRingSlot::Bottom)
+            .expect("the open session must take a hover");
+        manager
+            .scroll(
+                invocation.session_id,
+                ActionRingSlot::Bottom,
+                RingScrollDirection::Up,
+                1,
+            )
+            .expect("a scrollable slot must take wheel steps");
+        tokio::time::advance(HOLD_TO_CHOOSE).await;
+
+        assert!(matches!(
+            manager.release(),
+            ActionRingRelease::Cancelled { session_id } if session_id == invocation.session_id
+        ));
+        assert!(!manager.is_showing());
+    }
+
+    /// Wheeling over one slot does not disarm the click of another.
+    #[tokio::test(start_paused = true)]
+    async fn releasing_over_another_slot_after_wheeling_still_runs_it() {
+        let manager = ActionRingManager::default();
+        let invocation = manager.begin(scrollable_spec());
+        manager
+            .scroll(
+                invocation.session_id,
+                ActionRingSlot::Bottom,
+                RingScrollDirection::Up,
+                1,
+            )
+            .expect("a scrollable slot must take wheel steps");
+        manager
+            .hover(invocation.session_id, ActionRingSlot::Right)
+            .expect("the open session must take a hover");
+        tokio::time::advance(HOLD_TO_CHOOSE).await;
+
+        let ActionRingRelease::Activated { activation, .. } = manager.release() else {
+            panic!("a held release over an untouched slot must run it");
+        };
+        assert_eq!(activation.action, Action::Paste);
+    }
+
+    /// A click on a slot the wheel adjusted still runs its click: only the
+    /// held trigger's release is ambiguous.
+    #[test]
+    fn clicking_a_wheeled_slot_still_runs_its_click() {
+        let manager = ActionRingManager::default();
+        let invocation = manager.begin(scrollable_spec());
+        manager
+            .scroll(
+                invocation.session_id,
+                ActionRingSlot::Bottom,
+                RingScrollDirection::Up,
+                1,
+            )
+            .expect("a scrollable slot must take wheel steps");
+        let activation = manager
+            .activate(invocation.session_id, ActionRingSlot::Bottom)
+            .expect("a click must still activate the slot");
+        assert_eq!(activation.action, Action::PlayPause);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn wheel_steps_keep_the_session_alive() {
+        let manager = ActionRingManager::default();
+        let invocation = manager.begin(scrollable_spec());
+        let half = SESSION_LIFETIME / 2 + Duration::from_secs(1);
+        for _ in 0..3 {
+            tokio::time::advance(half).await;
+            manager
+                .scroll(
+                    invocation.session_id,
+                    ActionRingSlot::Bottom,
+                    RingScrollDirection::Up,
+                    1,
+                )
+                .expect("a session in use must not expire");
+        }
+        tokio::time::advance(SESSION_LIFETIME + Duration::from_secs(1)).await;
+        assert!(!manager.is_showing(), "an idle session still expires");
     }
 
     #[tokio::test(start_paused = true)]

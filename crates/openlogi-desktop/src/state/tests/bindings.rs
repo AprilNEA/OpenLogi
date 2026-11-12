@@ -267,6 +267,64 @@ fn an_action_ring_icon_edit_targets_the_open_application_layout() {
 }
 
 #[test]
+fn a_scroll_pair_is_set_cleared_and_kept_across_action_edits() {
+    use openlogi_core::binding::RingScrollPreset;
+
+    let mut state = state_with_a_known_mouse();
+    let scroll = |state: &AppState| {
+        state.current_action_ring_layout().slots[&ActionRingSlot::Bottom]
+            .scroll()
+            .cloned()
+    };
+
+    let _ = state.commit_action_ring_scroll(
+        ActionRingSlot::Bottom,
+        Some(RingScrollPreset::Volume.scroll()),
+    );
+    assert_eq!(scroll(&state), Some(RingScrollPreset::Volume.scroll()));
+
+    // The click action changes; the wheel keeps doing what it did.
+    let _ = state.commit_action_ring_slot(
+        ActionRingSlot::Bottom,
+        Some(ring_action(Action::MuteVolume)),
+    );
+    assert_eq!(scroll(&state), Some(RingScrollPreset::Volume.scroll()));
+
+    let _ = state.commit_action_ring_scroll(ActionRingSlot::Bottom, None);
+    assert_eq!(scroll(&state), None);
+}
+
+#[test]
+fn a_custom_scroll_direction_starts_from_volume_and_keeps_the_other_side() {
+    use openlogi_core::binding::RingScrollDirection;
+
+    let mut state = state_with_a_known_mouse();
+    let _ = state.commit_action_ring_scroll_action(
+        ActionRingSlot::Bottom,
+        RingScrollDirection::Up,
+        ring_action(Action::NextTab),
+    );
+    let pair = state.current_action_ring_layout().slots[&ActionRingSlot::Bottom]
+        .scroll()
+        .cloned()
+        .expect("the first custom pick creates the pair");
+    assert_eq!(pair.action(RingScrollDirection::Up), &Action::NextTab);
+    assert_eq!(pair.action(RingScrollDirection::Down), &Action::VolumeDown);
+
+    let _ = state.commit_action_ring_scroll_action(
+        ActionRingSlot::Bottom,
+        RingScrollDirection::Down,
+        ring_action(Action::PrevTab),
+    );
+    let pair = state.current_action_ring_layout().slots[&ActionRingSlot::Bottom]
+        .scroll()
+        .cloned()
+        .expect("the pair stays");
+    assert_eq!(pair.action(RingScrollDirection::Up), &Action::NextTab);
+    assert_eq!(pair.action(RingScrollDirection::Down), &Action::PrevTab);
+}
+
+#[test]
 fn removing_an_action_ring_profile_leaves_button_overrides_untouched() {
     let mut state = state_with_a_known_mouse();
     let _ = state.set_editing_app(Some("com.apple.Safari".into()));

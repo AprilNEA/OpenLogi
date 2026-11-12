@@ -2,6 +2,7 @@
 
 use openlogi_core::binding::{
     ActionRingConfig, ActionRingIcon, ActionRingLayout, ActionRingSize, ActionRingSlot, RingAction,
+    RingScroll, RingScrollDirection, RingScrollPreset,
 };
 
 use super::events::StateEvents;
@@ -76,6 +77,37 @@ impl AppState {
     ) -> StateEvents {
         self.edit_action_ring_layout("Actions Ring icon", |layout| {
             layout.set_icon(slot, icon);
+        })
+    }
+
+    /// Set what the wheel does over one slot in the open layout, or `None`
+    /// for nothing.
+    pub fn commit_action_ring_scroll(
+        &mut self,
+        slot: ActionRingSlot,
+        scroll: Option<RingScroll>,
+    ) -> StateEvents {
+        self.edit_action_ring_layout("Actions Ring scroll", |layout| {
+            layout.set_scroll(slot, scroll);
+        })
+    }
+
+    /// Make one wheel direction over `slot` run `action`, keeping the other.
+    /// A slot with no pair yet starts from the volume pair, so the other
+    /// direction is never left empty.
+    pub fn commit_action_ring_scroll_action(
+        &mut self,
+        slot: ActionRingSlot,
+        direction: RingScrollDirection,
+        action: RingAction,
+    ) -> StateEvents {
+        self.edit_action_ring_layout("Actions Ring scroll action", |layout| {
+            let pair = layout
+                .slots
+                .get(&slot)
+                .and_then(|entry| entry.scroll().cloned())
+                .unwrap_or_else(|| RingScrollPreset::Volume.scroll());
+            layout.set_scroll(slot, Some(pair.with(direction, action)));
         })
     }
 

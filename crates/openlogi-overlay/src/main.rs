@@ -36,12 +36,12 @@ use tracing::{debug, warn};
 use openlogi_core::action_ring::DISPLAY_LIFETIME;
 
 use crate::backlight::BacklightView;
-use crate::ipc::OverlayCommand;
+use crate::ipc::{OverlayCommand, RingReports};
 use crate::notice::NoticeShelf;
 use crate::platform::RingPlacement;
 use crate::ring::{Geometry, RingPointer, RingView};
 use crate::session::{
-    ClickAwaySession, claim_the_role, close_all_ring_windows, close_ring_windows,
+    ClickAwaySession, claim_the_role, close_all_ring_windows, close_ring_windows, ring_time_left,
     spawn_click_away_dismissal,
 };
 
@@ -61,6 +61,7 @@ fn main() -> Result<()> {
         mut notices,
         mut lock_keys,
         commands,
+        scrolls,
     } = ipc::spawn();
 
     // GPUI 0.3.4 never releases a window's AccessKit adapter, and the adapter
@@ -165,13 +166,16 @@ fn main() -> Result<()> {
                     let pointer = cx.new(|_| RingPointer::default());
                     let primary = platform::open_first(placement.openings(), |(options, panel)| {
                         let invocation = invocation.clone();
-                        let commands = commands.clone();
+                        let reports = RingReports {
+                            commands: commands.clone(),
+                            scrolls: scrolls.clone(),
+                        };
                         let pointer = pointer.clone();
                         cx.open_window(options, |window, cx| {
                             cx.new(|cx| {
                                 RingView::new(
                                     invocation,
-                                    commands,
+                                    reports,
                                     &live_session,
                                     panel,
                                     pointer,
@@ -200,9 +204,23 @@ fn main() -> Result<()> {
                         return;
                     }
                     cx.spawn(async move |cx| {
-                        cx.background_executor().timer(DISPLAY_LIFETIME).await;
-                        if cx.update(|cx| close_ring_windows(cx, session_id)) {
-                            let _ = timeout_commands.send(OverlayCommand::Cancel { session_id });
+                        // Wheel steps restart the ring's display time, so wait
+                        // out what is left of it each time instead of once.
+                        let mut wait = DISPLAY_LIFETIME;
+                        loop {
+                            cx.background_executor().timer(wait).await;
+                            match cx.update(|cx| ring_time_left(cx, session_id)) {
+                                Some(left) if !left.is_zero() => wait = left,
+                                Some(_) => {
+                                    if cx.update(|cx| close_ring_windows(cx, session_id)) {
+                                        let _ = timeout_commands
+                                            .send(OverlayCommand::Cancel { session_id });
+                                    }
+                                    break;
+                                }
+                                // Already closed by a click, the agent, or a newer ring.
+                                None => break,
+                            }
                         }
                     })
                     .detach();
