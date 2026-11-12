@@ -510,6 +510,25 @@ fn hold_modifier_bits() {
     assert_wire(&Action::HoldModifier(ctrl_shift), "3d06");
 }
 
+/// The Easy-Switch channel actions are unit variants appended after
+/// `HoldModifier`, so every earlier index is unchanged.
+#[test]
+fn easy_switch_channel_actions() {
+    use openlogi_core::binding::Action;
+    assert_wire(&Action::EasySwitchChannel1, "3e");
+    assert_wire(&Action::EasySwitchChannel2, "3f");
+    assert_wire(&Action::EasySwitchChannel3, "40");
+}
+
+/// The Easy-Switch channel icons are unit variants appended after `Ban`, so
+/// every earlier index is unchanged.
+#[test]
+fn easy_switch_channel_icons() {
+    assert_wire(&ActionRingIcon::Channel1, "36");
+    assert_wire(&ActionRingIcon::Channel2, "37");
+    assert_wire(&ActionRingIcon::Channel3, "38");
+}
+
 /// The agent identity is frozen: a helper from any build has to be able to
 /// decode it, so both halves stay plain `u64`s and this golden never changes.
 #[test]

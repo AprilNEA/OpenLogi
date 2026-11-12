@@ -20,7 +20,10 @@
 //!   A key counts when it is released, not when it is pressed. The session
 //!   hands the keys back to the firmware before anything moves, and a K580
 //!   whose keys were handed back while one was held left this host by itself,
-//!   before the linked devices could follow (#2352).
+//!   before the linked devices could follow (#2352). A stop that a software
+//!   request asks for ([`HostSwitchStopReason::Handoff`]) waits, for a bounded
+//!   time, for a held key to come up before it hands the keys back, for the
+//!   same reason. Any other stop hands them back at once.
 //! - Analytics: the host keys keep their function and also report to
 //!   software.
 //!
@@ -40,6 +43,7 @@ use hidpp::{
             ANNOUNCEMENT_MIN_VERSION, ChangeHostFeature, ChangeHostFeatureCapabilities,
             HostChangeRequest, decode_host_change_request,
         },
+        device_information::DeviceInformationFeature,
         hosts_info::{HostIndex, HostSlotStatus, HostsInfoFeature},
     },
     protocol::v20,
@@ -50,7 +54,7 @@ use tokio::{
     sync::{mpsc, oneshot},
     time::timeout,
 };
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 mod cookies;
 mod hosts;
@@ -77,8 +81,14 @@ use crate::{
 /// Why an armed host-switch session is being stopped externally.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostSwitchStopReason {
-    /// The keyboard remains reachable, so its controls must be restored.
+    /// The keyboard remains reachable, so its controls must be restored, at
+    /// once: the process is leaving, or the receiver is wanted elsewhere.
     Graceful,
+    /// As [`Self::Graceful`], for a linked switch that is about to move the
+    /// keyboard. A host key that is held is waited for first (see
+    /// [`HELD_KEY_RELEASE_TIMEOUT`]), because handing it back makes the
+    /// keyboard leave for the key's host before the linked devices move.
+    Handoff,
     /// The keyboard disappeared, so only local resources can be released.
     DeviceLost,
 }
@@ -99,6 +109,14 @@ const HIDPP_OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
 /// guard: the agent gives a whole `switch_host` 5 s, and Flow 1 s to prepare
 /// each device.
 const HOSTS_INFO_BUDGET: Duration = Duration::from_millis(500);
+/// How long a [`HostSwitchStopReason::Handoff`] waits for a held host key to
+/// come up before it hands the keys back anyway. A key held down this long is
+/// not a tap that a software request raced.
+///
+/// The wait cannot be cut short by a later exit, so it and the restore that
+/// follows must fit in the agent's exit deadline; a test in `openlogi-agent`
+/// pins that.
+pub const HELD_KEY_RELEASE_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ReportingMode {
@@ -150,6 +168,11 @@ pub enum HostSwitchError {
         /// The zero-based host slot that has no pairing.
         host: u8,
     },
+    /// The device on the route reports another unit ID than the one the
+    /// request was made for: a receiver slot was paired to a different device
+    /// since.
+    #[error("the device on this route is not the one the request was made for")]
+    DeviceChanged,
     /// The requested host does not exist on this device.
     #[error("host {host} is outside device host count {host_count}")]
     HostOutOfRange {
@@ -177,9 +200,9 @@ impl From<HostSwitchError> for WriteError {
     fn from(error: HostSwitchError) -> Self {
         match error {
             HostSwitchError::Hid(error) => error.into(),
-            HostSwitchError::KeyboardNotFound | HostSwitchError::TargetNotFound => {
-                Self::DeviceNotFound
-            }
+            HostSwitchError::KeyboardNotFound
+            | HostSwitchError::TargetNotFound
+            | HostSwitchError::DeviceChanged => Self::DeviceNotFound,
             HostSwitchError::Hidpp(message) => Self::Hidpp(message),
             HostSwitchError::FeatureUnsupported => Self::FeatureUnsupported {
                 feature_hex: ChangeHostFeature::ID,
@@ -781,6 +804,16 @@ async fn watch_host_switch(
                     HostSwitchStopReason::Graceful => {
                         HostSwitchStop::for_current_publication(registry, shared)
                     }
+                    HostSwitchStopReason::Handoff => {
+                        if held_host.is_some() {
+                            // Handing a held key back makes the keyboard
+                            // leave for its host before the linked devices
+                            // move (#2352). The request that stops this
+                            // session wins over the key's own host.
+                            wait_for_key_release(triggers, registry, shared).await;
+                        }
+                        HostSwitchStop::for_current_publication(registry, shared)
+                    }
                     HostSwitchStopReason::DeviceLost => {
                         HostSwitchStop::for_lost_publication(registry, shared)
                     }
@@ -829,6 +862,38 @@ async fn watch_host_switch(
                 }
             }
         }
+    }
+}
+
+/// Wait until the diverted host key that is held down comes up. Gives up when
+/// the key stays down for [`HELD_KEY_RELEASE_TIMEOUT`], when inventory no
+/// longer publishes `shared`, and when the listener ends.
+async fn wait_for_key_release(
+    triggers: &mut mpsc::UnboundedReceiver<HostTrigger>,
+    registry: &ChannelRegistry,
+    shared: &SharedChannel,
+) {
+    let mut registry_changes = registry.subscribe();
+    let release = async {
+        loop {
+            tokio::select! {
+                trigger = triggers.recv() => match trigger {
+                    Some(HostTrigger::Released) | None => return,
+                    Some(_) => {}
+                },
+                changed = registry_changes.changed() => {
+                    if changed.is_err() || !registry.is_current(shared) {
+                        return;
+                    }
+                }
+            }
+        }
+    };
+    if timeout(HELD_KEY_RELEASE_TIMEOUT, release).await.is_err() {
+        warn!(
+            route = %shared.route(),
+            "a host key is still held; handing the host keys back anyway"
+        );
     }
 }
 
@@ -1024,6 +1089,58 @@ pub async fn switch_linked_hosts(
 /// transport or timeout variants when the device does not answer.
 pub async fn switch_host_on(shared: &SharedChannel, host: u8) -> Result<bool, HostSwitchError> {
     prepare_host_switch_on(shared, host).await?.apply().await
+}
+
+/// [`switch_host_on`] for a device that must still be the one with `unit_id`.
+///
+/// A receiver slot can be paired to another device between the request and
+/// this write, and the route alone cannot tell. The device's `0x0003` unit ID
+/// is read first, and a different one fails with
+/// [`HostSwitchError::DeviceChanged`] before anything is written. A zero
+/// `unit_id` means the caller never learned it, and skips the comparison.
+///
+/// # Errors
+///
+/// As [`switch_host_on`], and [`HostSwitchError::DeviceChanged`].
+pub async fn switch_host_on_unit(
+    shared: &SharedChannel,
+    host: u8,
+    unit_id: [u8; 4],
+) -> Result<bool, HostSwitchError> {
+    let mut device = timed_hidpp(
+        "opening host-change device",
+        Device::new(Arc::clone(shared.channel()), shared.device_index()),
+    )
+    .await?;
+    ensure_unit_id(&mut device, unit_id).await?;
+    let change = prepare_host_change_with(&mut device, shared.device_index(), host).await?;
+    apply_host_change(change).await
+}
+
+/// Refuse when `device` reports another `0x0003` unit ID than `expected`. A
+/// zero `expected` and a device without the feature pass: nothing is known to
+/// compare.
+async fn ensure_unit_id(device: &mut Device, expected: [u8; 4]) -> Result<(), HostSwitchError> {
+    if expected == [0; 4] {
+        return Ok(());
+    }
+    let Some(info) = timed_hidpp(
+        "locating device information feature",
+        device.root().get_feature(DeviceInformationFeature::ID),
+    )
+    .await?
+    else {
+        return Ok(());
+    };
+    let feature = device.add_feature::<DeviceInformationFeature>(info.index);
+    let reported = timed_hidpp("reading unit ID", feature.get_device_info())
+        .await?
+        .unit_id;
+    if reported == expected {
+        Ok(())
+    } else {
+        Err(HostSwitchError::DeviceChanged)
+    }
 }
 
 /// A host switch that passed every read-only check and waits for its write.
