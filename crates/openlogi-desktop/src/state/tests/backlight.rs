@@ -10,8 +10,8 @@ use crate::state::BacklightLoad;
 use crate::state::backlight::change_target;
 use crate::state::events::StateEvents;
 use openlogi_core::hid::{
-    BacklightChange, BacklightControls, BacklightDuration, BacklightMode, BacklightState,
-    BacklightStatus, DeviceRoute,
+    BacklightChange, BacklightControls, BacklightDuration, BacklightEffect, BacklightEffects,
+    BacklightMode, BacklightState, BacklightStatus, DeviceRoute,
 };
 
 /// A keyboard lit at level 2 of 0–4 by its light sensor, offering every
@@ -35,6 +35,8 @@ fn lit() -> BacklightState {
             | BacklightControls::LEVEL
             | BacklightControls::POWER_SAVE
             | BacklightControls::DURATION,
+        effects: BacklightEffects::default(),
+        effect: BacklightEffect::Static,
     }
 }
 

@@ -30,6 +30,102 @@ pub enum BacklightMode {
     PermanentManual,
 }
 
+/// A predefined animation the backlight runs, in `0x1982` firmware order.
+///
+/// Crosses the agent↔GUI IPC, where serde encodes the variant *index*, so
+/// variant order is wire format — changes require a `PROTOCOL_VERSION` bump
+/// (guarded by `openlogi-ipc/tests/wire_format.rs`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BacklightEffect {
+    /// A fixed brightness with no animation, the firmware default.
+    #[default]
+    Static,
+    /// No effect.
+    None,
+    /// Brightness fades in and out on a loop.
+    Breathing,
+    /// Contrast between keys (device-defined).
+    Contrast,
+    /// Brightness reacts to typing.
+    Reaction,
+    /// Brightness varies at random.
+    Random,
+    /// A wave travels across the keys.
+    Waves,
+}
+
+impl BacklightEffect {
+    /// Every effect, in firmware order.
+    pub const ALL: [Self; 7] = [
+        Self::Static,
+        Self::None,
+        Self::Breathing,
+        Self::Contrast,
+        Self::Reaction,
+        Self::Random,
+        Self::Waves,
+    ];
+
+    /// The effect's lowercase name, as the CLI spells it.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Static => "static",
+            Self::None => "none",
+            Self::Breathing => "breathing",
+            Self::Contrast => "contrast",
+            Self::Reaction => "reaction",
+            Self::Random => "random",
+            Self::Waves => "waves",
+        }
+    }
+}
+
+impl fmt::Display for BacklightEffect {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// The set of [`BacklightEffect`]s a keyboard lists in `getBacklightConfig`.
+///
+/// Bit `n` is the effect at index `n` of [`BacklightEffect::ALL`], as in the
+/// firmware's effect list. Crosses the agent↔GUI IPC inside
+/// [`BacklightState`] as that one byte.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BacklightEffects(u8);
+
+impl BacklightEffects {
+    const fn bit(effect: BacklightEffect) -> u8 {
+        1 << effect as u8
+    }
+
+    /// Whether the set holds `effect`.
+    #[must_use]
+    pub const fn contains(self, effect: BacklightEffect) -> bool {
+        self.0 & Self::bit(effect) != 0
+    }
+
+    /// Whether the set holds no effect.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// The effects in the set, in firmware order.
+    pub fn iter(self) -> impl Iterator<Item = BacklightEffect> {
+        BacklightEffect::ALL
+            .into_iter()
+            .filter(move |&effect| self.contains(effect))
+    }
+}
+
+impl FromIterator<BacklightEffect> for BacklightEffects {
+    fn from_iter<I: IntoIterator<Item = BacklightEffect>>(effects: I) -> Self {
+        Self(effects.into_iter().fold(0, |bits, e| bits | Self::bit(e)))
+    }
+}
+
 /// Why the backlight is in its current state, as reported by the device.
 ///
 /// Crosses the agent↔GUI IPC, where serde encodes the variant *index*, so
@@ -95,6 +191,13 @@ pub struct BacklightState {
     /// field loading; the IPC encoding always carries it.
     #[serde(default)]
     pub duration: Option<BacklightDuration>,
+    /// The effects software can pick, from the `getBacklightConfig` effect
+    /// list. [`BacklightChange::Effect`] needs one of these.
+    #[serde(default)]
+    pub effects: BacklightEffects,
+    /// The effect the backlight runs, from `getBacklightInfo`.
+    #[serde(default)]
+    pub effect: BacklightEffect,
 }
 
 bitflags::bitflags! {
@@ -136,13 +239,16 @@ impl Default for BacklightControls {
 
 impl BacklightControls {
     /// Whether `change` is one this keyboard accepts, ignoring the level
-    /// range and the duration range: [`BacklightChange::Level`] also needs a
-    /// level below [`BacklightState::nb_levels`], and
-    /// [`BacklightChange::Duration`] a validated timer.
+    /// range, the duration range and the effect list: [`BacklightChange::Level`]
+    /// also needs a level below [`BacklightState::nb_levels`],
+    /// [`BacklightChange::Duration`] a validated timer, and
+    /// [`BacklightChange::Effect`] an effect in [`BacklightState::effects`].
     #[must_use]
     pub const fn allow(self, change: BacklightChange) -> bool {
         match change {
-            BacklightChange::Enabled(_) => true,
+            // On/off is part of every 0x1982 keyboard; an effect is checked
+            // against the keyboard's list in `BacklightState::accepts`.
+            BacklightChange::Enabled(_) | BacklightChange::Effect(_) => true,
             BacklightChange::Automatic(_) => self.contains(Self::AUTOMATIC),
             BacklightChange::Level(_) => self.contains(Self::LEVEL),
             BacklightChange::PowerSave(_) => self.contains(Self::POWER_SAVE),
@@ -348,6 +454,8 @@ pub enum BacklightChange {
     PowerSave(bool),
     /// Keep the keys lit this long after typing stops.
     Duration(BacklightDuration),
+    /// Run this predefined effect.
+    Effect(BacklightEffect),
 }
 
 impl fmt::Display for BacklightChange {
@@ -359,6 +467,7 @@ impl fmt::Display for BacklightChange {
             Self::Level(level) => write!(f, "backlight level {level}"),
             Self::PowerSave(on) => write!(f, "battery saving {}", on_off(on)),
             Self::Duration(seconds) => write!(f, "backlight duration {}s", seconds.seconds()),
+            Self::Effect(effect) => write!(f, "backlight effect {effect}"),
         }
     }
 }
@@ -370,8 +479,8 @@ pub const fn max_backlight_level(nb_levels: u8) -> u8 {
 }
 
 impl BacklightState {
-    /// Whether the keyboard accepts `change` right now: the control exists
-    /// and, for a level, the level is in range.
+    /// Whether the keyboard accepts `change` right now: the control exists,
+    /// a level is in range, and an effect is one the keyboard lists.
     #[must_use]
     pub fn accepts(self, change: BacklightChange) -> bool {
         self.controls.allow(change)
@@ -379,6 +488,7 @@ impl BacklightState {
             // in-range check against this keyboard.
             && match change {
                 BacklightChange::Level(level) => level < self.nb_levels,
+                BacklightChange::Effect(effect) => self.effects.contains(effect),
                 _ => true,
             }
     }
@@ -432,6 +542,7 @@ impl BacklightState {
             }
             BacklightChange::PowerSave(on) => next.power_save = on,
             BacklightChange::Duration(seconds) => next.duration = Some(seconds),
+            BacklightChange::Effect(effect) => next.effect = effect,
         }
         next.status = if !next.enabled {
             BacklightStatus::DisabledBySoftware
@@ -481,6 +592,10 @@ mod tests {
                 | BacklightControls::LEVEL
                 | BacklightControls::POWER_SAVE
                 | BacklightControls::DURATION,
+            effects: [BacklightEffect::Static, BacklightEffect::Breathing]
+                .into_iter()
+                .collect(),
+            effect: BacklightEffect::Static,
         }
     }
 
@@ -502,6 +617,41 @@ mod tests {
         }
         // On/off is part of every 0x1982 keyboard.
         assert!(none.accepts(BacklightChange::Enabled(false)));
+    }
+
+    #[test]
+    fn an_effect_must_be_one_the_keyboard_lists() {
+        assert!(lit().accepts(BacklightChange::Effect(BacklightEffect::Breathing)));
+        assert!(!lit().accepts(BacklightChange::Effect(BacklightEffect::Waves)));
+        let no_effects = BacklightState {
+            effects: BacklightEffects::default(),
+            ..lit()
+        };
+        assert!(!no_effects.accepts(BacklightChange::Effect(BacklightEffect::Static)));
+        assert_eq!(
+            lit().effects.iter().collect::<Vec<_>>(),
+            [BacklightEffect::Static, BacklightEffect::Breathing]
+        );
+        assert!(BacklightEffects::default().is_empty());
+    }
+
+    #[test]
+    fn the_effect_set_keeps_the_firmware_bit_order() {
+        let all: BacklightEffects = BacklightEffect::ALL.into_iter().collect();
+        assert_eq!(all, BacklightEffects(0x7f));
+        let waves: BacklightEffects = [BacklightEffect::Waves].into_iter().collect();
+        assert_eq!(waves, BacklightEffects(1 << 6));
+    }
+
+    #[test]
+    fn an_effect_changes_nothing_else() {
+        assert_eq!(
+            lit().changed(BacklightChange::Effect(BacklightEffect::Breathing)),
+            BacklightState {
+                effect: BacklightEffect::Breathing,
+                ..lit()
+            }
+        );
     }
 
     #[test]
@@ -579,6 +729,10 @@ mod tests {
         assert_eq!(
             BacklightChange::Duration(duration(15)).to_string(),
             "backlight duration 15s"
+        );
+        assert_eq!(
+            BacklightChange::Effect(BacklightEffect::Waves).to_string(),
+            "backlight effect waves"
         );
     }
 

@@ -572,10 +572,10 @@ mod controls {
     };
     use openlogi_core::device_order::{DeviceStableId, PhysicalDeviceKey};
     use openlogi_core::hid::{
-        BacklightChange, BacklightControls, BacklightMode, BacklightState, BacklightStatus,
-        DeviceRoute, DisableKeysMask, DisableKeysState, Dpi, LightCommand, SidetoneLevel,
-        SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, SmartShiftThreshold,
-        TunableTorque, WriteError,
+        BacklightChange, BacklightControls, BacklightEffect, BacklightEffects, BacklightMode,
+        BacklightState, BacklightStatus, DeviceRoute, DisableKeysMask, DisableKeysState, Dpi,
+        LightCommand, SidetoneLevel, SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus,
+        SmartShiftThreshold, TunableTorque, WriteError,
     };
     use openlogi_ipc::{AgentSnapshot, ObservedLight};
 
@@ -872,6 +872,8 @@ mod controls {
             power_save: false,
             controls: BacklightControls::AUTOMATIC | BacklightControls::LEVEL,
             duration: None,
+            effect: BacklightEffect::Static,
+            effects: BacklightEffects::default(),
         }
     }
 

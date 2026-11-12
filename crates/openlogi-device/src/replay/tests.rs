@@ -15,9 +15,9 @@ use openlogi_fixture::{
 
 use crate::backend::{HidBackend, RawWriter};
 use crate::{
-    BacklightControls, BacklightMode, BacklightState, BacklightStatus, DIRECT_DEVICE_INDEX,
-    DeviceRoute, Dpi, DpiCapabilities, DpiInfo, Enumerator, HotplugEvent, NodeId, NodeInfo,
-    get_dpi,
+    BacklightControls, BacklightEffect, BacklightEffects, BacklightMode, BacklightState,
+    BacklightStatus, DIRECT_DEVICE_INDEX, DeviceRoute, Dpi, DpiCapabilities, DpiInfo, Enumerator,
+    HotplugEvent, NodeId, NodeInfo, get_dpi,
 };
 
 use super::*;
@@ -268,6 +268,8 @@ fn profile_validator_rejects_route_and_setting_inconsistencies() {
         power_save: false,
         duration: None,
         controls: BacklightControls::default(),
+        effects: BacklightEffects::default(),
+        effect: BacklightEffect::Static,
     });
     let error = invalid_backlight
         .validate()
