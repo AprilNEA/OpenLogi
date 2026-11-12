@@ -245,16 +245,26 @@ impl Config {
                     || overlay.contains_key(&ButtonId::ThumbwheelScrollDown);
                 let effective_up_is_old = overlay
                     .get(&ButtonId::ThumbwheelScrollUp)
-                    .map_or(global_up_is_old, |action| action == &old_up);
+                    .map_or(global_up_is_old, |binding| {
+                        is_old_default(Some(binding), &old_up)
+                    });
                 let effective_down_is_old = overlay
                     .get(&ButtonId::ThumbwheelScrollDown)
-                    .map_or(global_down_is_old, |action| action == &old_down);
+                    .map_or(global_down_is_old, |binding| {
+                        is_old_default(Some(binding), &old_down)
+                    });
                 if overrides_direction && effective_up_is_old && effective_down_is_old {
                     // Write the complete pair. This also handles a profile that
                     // reached the old defaults by overriding one half of a
                     // custom global pair and inheriting the other half.
-                    overlay.insert(ButtonId::ThumbwheelScrollUp, new_up.clone());
-                    overlay.insert(ButtonId::ThumbwheelScrollDown, new_down.clone());
+                    overlay.insert(
+                        ButtonId::ThumbwheelScrollUp,
+                        Binding::Single(new_up.clone()),
+                    );
+                    overlay.insert(
+                        ButtonId::ThumbwheelScrollDown,
+                        Binding::Single(new_down.clone()),
+                    );
                 }
             }
 

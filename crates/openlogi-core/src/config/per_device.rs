@@ -557,7 +557,7 @@ impl Config {
                     .per_app_bindings
                     .values()
                     .flat_map(BTreeMap::values)
-                    .any(|action| *action == Action::GShift)
+                    .any(Binding::is_gshift)
         })
     }
 
@@ -588,7 +588,7 @@ impl Config {
                 .per_app_bindings
                 .values()
                 .flatten()
-                .any(|(b, action)| customized(b, &Binding::Single(action.clone())));
+                .any(|(b, binding)| customized(b, binding));
         needs_host.then_some(OnboardMemory::Off)
     }
 
@@ -677,6 +677,12 @@ impl Config {
         for overlay in device.per_app_bindings.values_mut() {
             overlay.retain(|button, _| kept(button));
         }
+        for stash in device.per_app_disabled_gestures.values_mut() {
+            stash.retain(|button, _| kept(button));
+        }
+        device
+            .per_app_disabled_gestures
+            .retain(|_, stash| !stash.is_empty());
     }
 
     /// Whether any grid key on `page` of `device_key` is bound — device-wide
@@ -696,7 +702,9 @@ impl Config {
                 .per_app_bindings
                 .values()
                 .flatten()
-                .any(|(button, action)| on_page(button) && *action != Action::None)
+                .any(|(button, binding)| {
+                    on_page(button) && *binding != Binding::Single(Action::None)
+                })
     }
 
     /// The effective thumb-wheel sensitivity for `device_key`: the device's
