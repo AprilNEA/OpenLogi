@@ -11,6 +11,8 @@ extend-exclude = [
   "!crates/openlogi-ui/locales/en.toml",
   "docs/README.*.md",
   ".github/scripts/i18n/merge_crowdin_download.py",
+  # Third-party crate kept byte-for-byte except for the patch it carries.
+  "vendor/",
 ]
 
 [default]
