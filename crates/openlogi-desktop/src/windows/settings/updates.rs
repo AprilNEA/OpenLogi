@@ -7,7 +7,9 @@ use super::{
     Updater, div, h_flex, img, px, v_flex,
 };
 use crate::platform::installation::{HomebrewCask, Installation, InstallationSource, LinuxPackage};
-use crate::platform::updater::linux::{self, LinuxUpdateStatus};
+use crate::platform::updater::linux::{
+    self, InstallOffer, LinuxUpdate, LinuxUpdateError, LinuxUpdateStatus,
+};
 use crate::ui::theme::FocusRingStyle as _;
 use crate::ui::theme::PressableStyle as _;
 use crate::ui::theme::SelectableStyle as _;
@@ -89,63 +91,114 @@ pub(super) fn updates_page(updater: Entity<Updater>) -> SettingPage {
         .group(source)
 }
 
-/// A short status tag for the settled Linux-release-check states; transient
-/// states carry their detail in the message line instead.
-fn linux_pill(status: &LinuxUpdateStatus) -> Option<Tag> {
-    match status {
-        LinuxUpdateStatus::Available { .. } => {
-            Some(Tag::info().child(tr!("updates.update_available")))
+/// The hero's status pill.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pill {
+    UpToDate,
+    Available,
+    Ready,
+    Failed,
+}
+
+impl Pill {
+    /// The debug selector the rendered pill carries.
+    fn selector(self) -> &'static str {
+        match self {
+            Self::UpToDate => "update-pill-up-to-date",
+            Self::Available => "update-pill-available",
+            Self::Ready => "update-pill-ready",
+            Self::Failed => "update-pill-failed",
         }
-        LinuxUpdateStatus::Staged { .. } => Some(Tag::success().child(tr!("updates.update_ready"))),
-        LinuxUpdateStatus::Errored(_) => Some(Tag::danger().child(tr!("updates.update_failed"))),
-        LinuxUpdateStatus::Idle
-        | LinuxUpdateStatus::Checking
-        | LinuxUpdateStatus::UpToDate
-        | LinuxUpdateStatus::Installing => None,
+    }
+
+    fn tag(self) -> Tag {
+        match self {
+            Self::UpToDate => Tag::success().child(tr!("updates.up_to_date")),
+            Self::Available => Tag::info().child(tr!("updates.update_available")),
+            Self::Ready => Tag::success().child(tr!("updates.update_ready")),
+            Self::Failed => Tag::danger().child(tr!("updates.update_failed")),
+        }
     }
 }
 
-fn linux_message(
-    status: &LinuxUpdateStatus,
-    installation: Installation,
-) -> Option<gpui::SharedString> {
-    match status {
-        LinuxUpdateStatus::Checking => Some(tr!("updates.checking_for_updates")),
-        LinuxUpdateStatus::Available { version, .. } => Some(match installation {
-            // Not an install the app can update: point at the package manager
-            // (or however it was installed) instead of offering a button.
-            // `Detecting` keeps the plain message; an open window redraws once
-            // detection settles.
-            Installation::Detected(_) if linux::installable_package(installation).is_none() => {
-                tr!("updates.update_version_available_package_manager", version => version)
-            }
-            Installation::Detecting | Installation::Detected(_) => {
-                tr!("updates.update_version_available", version => version)
-            }
-        }),
-        LinuxUpdateStatus::Installing => Some(tr!("updates.installing")),
-        LinuxUpdateStatus::Staged { version } => {
-            Some(tr!("updates.update_version_ready", version => version))
+/// The hero's one contextual action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeroAction {
+    Check,
+    Install,
+    Restart,
+}
+
+impl HeroAction {
+    /// The button's element id, which is also its debug selector.
+    fn id(self) -> &'static str {
+        match self {
+            Self::Check => "update-check",
+            Self::Install => "update-install",
+            Self::Restart => "update-restart",
         }
-        LinuxUpdateStatus::Errored(e) => {
-            Some(tr!("updates.update_failed_message", error => e.clone()))
+    }
+
+    fn label(self) -> gpui::SharedString {
+        match self {
+            Self::Check => tr!("updates.check_for_updates_action"),
+            Self::Install => tr!("updates.download_install"),
+            Self::Restart => tr!("updates.restart_to_update"),
         }
-        LinuxUpdateStatus::Idle | LinuxUpdateStatus::UpToDate => None,
     }
 }
 
-fn engine_pill(status: &UpdateStatus) -> Option<Tag> {
-    match status {
-        UpdateStatus::UpToDate => Some(Tag::success().child(tr!("updates.up_to_date"))),
-        UpdateStatus::Available(_) => Some(Tag::info().child(tr!("updates.update_available"))),
-        UpdateStatus::Staged(_) => Some(Tag::success().child(tr!("updates.update_ready"))),
-        UpdateStatus::Errored(_) => Some(Tag::danger().child(tr!("updates.update_failed"))),
+/// The update path the hero reports, and so the one its action drives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeroPath {
+    /// The shared [`Updater`]: Sparkle or the built-in engine.
+    Engine,
+    /// The Linux package update path ([`linux`]).
+    Linux,
+}
+
+/// What the hero shows next to the build name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HeroContent {
+    path: HeroPath,
+    pill: Option<Pill>,
+    /// The status line; `None` shows the followed channel instead.
+    message: Option<gpui::SharedString>,
+    /// Work is in flight: the action is disabled until it settles.
+    busy: bool,
+    action: HeroAction,
+}
+
+/// The hero for this app's update path.
+///
+/// On Linux the engine's manifest deliberately carries no Linux asset —
+/// Linux installs update through the OS package manager, not the engine (see
+/// `xtask/src/commands/release/latest_json.rs`) — so whatever the engine
+/// reports there is not this install's update state; the Linux path's is.
+/// The path is picked by whether the Linux path is installed (only ever on
+/// Linux, see [`linux::install_path`]), not by the host OS, so both are
+/// tested on every host.
+fn hero_content(updater: &Entity<Updater>, cx: &App) -> HeroContent {
+    match cx.try_global::<LinuxUpdate>() {
+        Some(linux) => linux_hero(
+            linux,
+            cx.try_global::<Installation>()
+                .copied()
+                .unwrap_or(Installation::Detecting),
+        ),
+        None => engine_hero(updater.read(cx).status()),
+    }
+}
+
+fn engine_hero(status: &UpdateStatus) -> HeroContent {
+    let pill = match status {
+        UpdateStatus::UpToDate => Some(Pill::UpToDate),
+        UpdateStatus::Available(_) => Some(Pill::Available),
+        UpdateStatus::Staged(_) => Some(Pill::Ready),
+        UpdateStatus::Errored(_) => Some(Pill::Failed),
         _ => None,
-    }
-}
-
-fn engine_message(status: &UpdateStatus) -> Option<gpui::SharedString> {
-    match status {
+    };
+    let message = match status {
         UpdateStatus::Idle | UpdateStatus::UpToDate => None,
         UpdateStatus::Checking => Some(tr!("updates.checking_for_updates")),
         UpdateStatus::Available(v) => Some(tr!("updates.update_version_available", version => v)),
@@ -162,62 +215,112 @@ fn engine_message(status: &UpdateStatus) -> Option<gpui::SharedString> {
         UpdateStatus::Installing => Some(tr!("updates.installing")),
         UpdateStatus::Staged(v) => Some(tr!("updates.update_version_ready", version => v)),
         UpdateStatus::Errored(e) => Some(tr!("updates.update_failed_message", error => e.clone())),
+    };
+    let action = match status {
+        UpdateStatus::Available(_) => HeroAction::Install,
+        UpdateStatus::Staged(_) => HeroAction::Restart,
+        _ => HeroAction::Check,
+    };
+    HeroContent {
+        path: HeroPath::Engine,
+        pill,
+        message,
+        busy: matches!(
+            status,
+            UpdateStatus::Checking | UpdateStatus::Downloading { .. } | UpdateStatus::Installing
+        ),
+        action,
     }
 }
 
-/// The one contextual action button for the engine-driven states (macOS,
-/// Windows).
-fn engine_action(updater: &Entity<Updater>, status: &UpdateStatus) -> Button {
-    let u = updater.clone();
-    match status {
-        UpdateStatus::Available(_) => Button::new("update-install")
-            .outline()
-            .label(tr!("updates.download_install"))
-            .on_click(move |_, _, cx| {
-                u.update(cx, Updater::download_and_install);
-            }),
-        UpdateStatus::Staged(_) => Button::new("update-restart")
-            .outline()
-            .label(tr!("updates.restart_to_update"))
-            .on_click(move |_, _, cx| {
-                u.update(cx, Updater::restart);
-            }),
-        _ => Button::new("update-check")
-            .outline()
-            .label(tr!("updates.check_for_updates_action"))
-            .on_click(move |_, _, cx| {
-                u.update(cx, Updater::check);
-            }),
-    }
-}
-
-/// The one contextual action button for the Linux-release-check states.
-/// "Install Update" only for an installation [`linux::installable_package`]
-/// accepts; otherwise the check button stays.
-fn linux_action(status: &LinuxUpdateStatus, installation: Installation) -> Button {
-    match status {
-        LinuxUpdateStatus::Available { .. }
-            if linux::installable_package(installation).is_some() =>
-        {
-            Button::new("update-install")
-                .outline()
-                .label(tr!("updates.download_install"))
-                .on_click(move |_, _, cx| {
-                    crate::platform::updater::linux::install(cx);
-                })
+fn linux_hero(linux: &LinuxUpdate, installation: Installation) -> HeroContent {
+    let (pill, message, busy, action) = match linux.status() {
+        LinuxUpdateStatus::Idle => (None, None, false, HeroAction::Check),
+        LinuxUpdateStatus::Checking(_) => (
+            None,
+            Some(tr!("updates.checking_for_updates")),
+            true,
+            HeroAction::Check,
+        ),
+        LinuxUpdateStatus::UpToDate => (Some(Pill::UpToDate), None, false, HeroAction::Check),
+        LinuxUpdateStatus::Available(release) => {
+            let version = &release.version;
+            let (message, action) = match linux.offer(installation) {
+                Some(InstallOffer::Ready(_)) => (
+                    tr!("updates.update_version_available", version => version),
+                    HeroAction::Install,
+                ),
+                Some(InstallOffer::NotPublished) => (
+                    tr!("updates.update_version_available_package_missing", version => version),
+                    HeroAction::Check,
+                ),
+                // Whatever installed this copy updates it.
+                Some(InstallOffer::PackageManager) => (
+                    tr!("updates.update_version_available_package_manager", version => version),
+                    HeroAction::Check,
+                ),
+                // An open window redraws once detection settles.
+                Some(InstallOffer::Detecting) | None => (
+                    tr!("updates.update_version_available", version => version),
+                    HeroAction::Check,
+                ),
+            };
+            (Some(Pill::Available), Some(message), false, action)
         }
-        LinuxUpdateStatus::Staged { .. } => Button::new("update-restart")
-            .outline()
-            .label(tr!("updates.restart_to_update"))
-            .on_click(move |_, _, cx| {
-                crate::platform::updater::linux::restart(cx);
-            }),
-        _ => Button::new("update-check")
-            .outline()
-            .label(tr!("updates.check_for_updates_action"))
-            .on_click(move |_, _, cx| {
-                crate::platform::updater::linux::check_in_background(cx);
-            }),
+        LinuxUpdateStatus::Installing { .. } => (
+            None,
+            Some(tr!("updates.installing")),
+            true,
+            HeroAction::Check,
+        ),
+        LinuxUpdateStatus::Staged { version } => (
+            Some(Pill::Ready),
+            Some(tr!("updates.update_version_ready", version => version)),
+            false,
+            HeroAction::Restart,
+        ),
+        LinuxUpdateStatus::Errored(error) => (
+            Some(Pill::Failed),
+            Some(tr!("updates.update_failed_message", error => linux_error_message(*error))),
+            false,
+            HeroAction::Check,
+        ),
+    };
+    HeroContent {
+        path: HeroPath::Linux,
+        pill,
+        message,
+        busy,
+        action,
+    }
+}
+
+/// The translated reason a Linux check or install failed. The technical
+/// detail went to the log (see [`LinuxUpdateError`]).
+fn linux_error_message(error: LinuxUpdateError) -> gpui::SharedString {
+    match error {
+        LinuxUpdateError::Check => tr!("updates.update_error_check"),
+        LinuxUpdateError::MissingTool(program) => {
+            tr!("updates.update_error_missing_tool", program => program)
+        }
+        LinuxUpdateError::Download => tr!("updates.update_error_download"),
+        LinuxUpdateError::Verification => tr!("updates.update_error_verification"),
+        LinuxUpdateError::Authorization => tr!("updates.update_error_authorization"),
+        LinuxUpdateError::Install => tr!("updates.update_error_install"),
+    }
+}
+
+/// Run the hero's action on the path that offered it.
+fn run_hero_action(path: HeroPath, action: HeroAction, updater: &Entity<Updater>, cx: &mut App) {
+    match (path, action) {
+        (HeroPath::Linux, HeroAction::Check) => linux::check(cx),
+        (HeroPath::Linux, HeroAction::Install) => linux::install(cx),
+        (HeroPath::Linux, HeroAction::Restart) => linux::restart(cx),
+        (HeroPath::Engine, HeroAction::Check) => updater.update(cx, Updater::check),
+        (HeroPath::Engine, HeroAction::Install) => {
+            updater.update(cx, Updater::download_and_install);
+        }
+        (HeroPath::Engine, HeroAction::Restart) => updater.update(cx, Updater::restart),
     }
 }
 
@@ -225,43 +328,21 @@ fn linux_action(status: &LinuxUpdateStatus, installation: Installation) -> Butto
 /// message (or channel), and the one contextual action button.
 fn update_hero(updater: &Entity<Updater>, cx: &mut App) -> gpui::Div {
     let pal = crate::ui::theme::palette(cx);
-    let status = updater.read(cx).status().clone();
     let channel = crate::platform::updater::channel_in_use(cx);
-
-    // On Linux the update manifest deliberately carries no Linux asset — Linux
-    // installs update through the OS package manager, not this engine (see
-    // `xtask/src/commands/release/latest_json.rs`). Whatever the engine
-    // reports there (an expected "no matching asset" error, or a network
-    // failure) is not this install's update state; the Linux release check
-    // (see `platform::updater::linux`) is.
-    let (pill, message, busy, action) = if shows_linux_status(std::env::consts::OS) {
-        let linux_status = cx
-            .try_global::<LinuxUpdateStatus>()
-            .cloned()
-            .unwrap_or_default();
-        let installation = *cx.global::<Installation>();
-        (
-            linux_pill(&linux_status),
-            linux_message(&linux_status, installation),
-            matches!(
-                linux_status,
-                LinuxUpdateStatus::Checking | LinuxUpdateStatus::Installing
-            ),
-            linux_action(&linux_status, installation),
-        )
-    } else {
-        (
-            engine_pill(&status),
-            engine_message(&status),
-            matches!(
-                status,
-                UpdateStatus::Checking
-                    | UpdateStatus::Downloading { .. }
-                    | UpdateStatus::Installing
-            ),
-            engine_action(updater, &status),
-        )
-    };
+    let HeroContent {
+        path,
+        pill,
+        message,
+        busy,
+        action,
+    } = hero_content(updater, cx);
+    let updater = updater.clone();
+    let button = Button::new(action.id())
+        .outline()
+        .label(action.label())
+        .debug_selector(move || action.id().into())
+        .on_click(move |_, _, cx| run_hero_action(path, action, &updater, cx))
+        .disabled(busy);
 
     h_flex()
         .w_full()
@@ -293,18 +374,23 @@ fn update_hero(updater: &Entity<Updater>, cx: &mut App) -> gpui::Div {
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .child(concat!("OpenLogi ", env!("CARGO_PKG_VERSION"))),
                                 )
-                                .children(pill.map(|tag| tag.small().rounded_full())),
+                                .children(pill.map(|pill| {
+                                    div()
+                                        .debug_selector(move || pill.selector().into())
+                                        .child(pill.tag().small().rounded_full())
+                                })),
                         )
                         .child(
                             div()
                                 .text_caption()
                                 .text_color(pal.text_muted)
                                 .truncate()
+                                .debug_selector(|| "update-status-message".into())
                                 .child(message.unwrap_or_else(|| channel_label(channel))),
                         ),
                 ),
         )
-        .child(div().flex_shrink_0().child(action.disabled(busy)))
+        .child(div().flex_shrink_0().child(button))
 }
 
 /// The hero line's name for the channel this launch follows.
@@ -341,12 +427,6 @@ fn channel_segment(cx: &App) -> ButtonGroup {
                     AppState::apply(cx, |state| state.commit_update_channel(channel));
                 })
         }))
-}
-
-/// Whether the hero shows the Linux release check instead of the engine's
-/// status: on Linux, regardless of what the engine reports.
-fn shows_linux_status(os: &str) -> bool {
-    os == "linux"
 }
 
 /// Read the published snapshot only; rendering must never probe the filesystem.
@@ -419,15 +499,260 @@ mod tests {
     use openlogi_core::config::{Config, UiScale};
 
     use super::*;
+    use crate::platform::updater::linux::release_check::{
+        LatestRelease, LinuxUpdateCheck, ReleaseAsset,
+    };
     use crate::services::{assets::AssetResolver, i18n::LOCALE_LOCK};
     use crate::state::Sources;
     use crate::windows::settings::{SettingsPage, SettingsView};
 
+    const RPM: Installation =
+        Installation::Detected(InstallationSource::LinuxPackage(LinuxPackage::Rpm));
+
+    /// Every asset an RPM install of 99.0.0 needs; `{arch}` is this host's.
+    const FULL_RPM: &[&str] = &[
+        "openlogi-v99.0.0-linux-{arch}.rpm",
+        "openlogi-v99.0.0-linux-{arch}.rpm.minisig",
+        "SHA256SUMS",
+    ];
+
+    /// An engine source failing the way the real manifest does on Linux,
+    /// which publishes no Linux asset.
+    struct NoLinuxAsset;
+
+    impl gpui_updater::UpdateSource for NoLinuxAsset {
+        fn fetch_latest(&self) -> gpui_updater::Result<gpui_updater::Release> {
+            Err(gpui_updater::Error::NoMatchingAsset {
+                target_os: "linux",
+                target_arch: "x86_64",
+            })
+        }
+    }
+
+    /// A Linux path, verifying with `key`, whose check found 99.0.0
+    /// publishing `names`.
+    fn linux_update_available(key: Option<&'static str>, names: &[&str]) -> LinuxUpdate {
+        let arch =
+            openlogi_core::linux_package::arch_tag(std::env::consts::ARCH).unwrap_or("amd64");
+        let release = LatestRelease {
+            version: gpui_updater::Version::new(99, 0, 0),
+            assets: names
+                .iter()
+                .map(|name| {
+                    let name = name.replace("{arch}", arch);
+                    ReleaseAsset {
+                        browser_download_url: format!("https://example.test/{name}"),
+                        name,
+                    }
+                })
+                .collect(),
+        };
+        let mut update = LinuxUpdate::new(key);
+        let attempt = update.begin_check().unwrap();
+        assert!(update.finish_check(attempt, Ok(LinuxUpdateCheck::Available(release))));
+        update
+    }
+
+    /// The Linux path after a check or install that failed with `error`.
+    fn linux_update_failed(error: LinuxUpdateError) -> LinuxUpdate {
+        let mut update = LinuxUpdate::new(None);
+        let attempt = update.begin_check().unwrap();
+        assert!(update.finish_check(attempt, Err(error)));
+        update
+    }
+
+    /// The reported bug: on Linux the engine's manifest check always fails
+    /// with "no release asset matched", and the hero showed that error. With
+    /// the Linux path installed the real view must show the Linux path's
+    /// state and action instead, whatever the engine reports.
+    #[gpui::test]
+    fn linux_hero_ignores_engine_error(cx: &mut TestAppContext) {
+        let _locale = LOCALE_LOCK.lock().unwrap();
+        rust_i18n::set_locale("en");
+        let updater = cx.update(|cx| {
+            gpui_kit::init(cx);
+            crate::ui::theme::register_builtin_themes(cx);
+            let (commands, _) = tokio::sync::mpsc::unbounded_channel();
+            let state = cx.new(|_| {
+                AppState::new(Sources::in_memory(
+                    Config::ephemeral(),
+                    &AssetResolver::new(),
+                    commands,
+                ))
+            });
+            AppState::set_global(state, cx);
+            cx.set_global(RPM);
+            let config = gpui_updater::EngineConfig::new(gpui_updater::Version::new(0, 0, 1));
+            let updater = cx.new(|cx| Updater::new(NoLinuxAsset, config, cx));
+            updater.update(cx, Updater::check);
+            crate::platform::updater::share(updater.clone(), cx);
+            updater
+        });
+        cx.run_until_parked();
+        let engine_error = cx.read(|cx| match updater.read(cx).status() {
+            UpdateStatus::Errored(error) => error.clone(),
+            other => panic!("the engine must fail without a Linux asset, not {other:?}"),
+        });
+        assert!(
+            engine_error.contains("no release asset matched"),
+            "{engine_error}"
+        );
+
+        let handle = cx.open_window(gpui::size(px(920.), px(640.)), |window, cx| {
+            let settings = cx.new(|cx| SettingsView::new(SettingsPage::Updates, window, cx));
+            gpui_kit::component::Root::new(settings, window, cx)
+        });
+        let mut visual = VisualTestContext::from_window(handle.into(), cx);
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        // Without the Linux path (macOS, Windows) the engine's state is the
+        // hero's: the same view does render this failure.
+        assert!(visual.debug_bounds("update-pill-failed").is_some());
+        assert!(visual.debug_bounds("update-check").is_some());
+        assert!(visual.debug_bounds("update-install").is_none());
+
+        cx.update(|cx| cx.set_global(linux_update_available(Some("RWQfixture"), FULL_RPM)));
+        cx.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(
+            visual.debug_bounds("update-pill-failed").is_none(),
+            "the engine's expected failure must not reach the Linux hero"
+        );
+        assert!(visual.debug_bounds("update-pill-available").is_some());
+        assert!(visual.debug_bounds("update-install").is_some());
+        assert!(visual.debug_bounds("update-check").is_none());
+        assert!(visual.debug_bounds("update-status-message").is_some());
+        let hero = visual.update(|_, cx| hero_content(&updater, cx));
+        assert_eq!(hero.path, HeroPath::Linux);
+        assert_eq!(
+            hero.message.as_deref(),
+            Some("Version 99.0.0 is available.")
+        );
+        rust_i18n::set_locale("en");
+    }
+
     #[test]
-    fn only_linux_shows_the_linux_release_check() {
-        assert!(shows_linux_status("linux"));
-        assert!(!shows_linux_status("macos"));
-        assert!(!shows_linux_status("windows"));
+    fn linux_hero_offers_install_only_for_a_published_verifiable_package() {
+        let _locale = LOCALE_LOCK.lock().unwrap();
+        rust_i18n::set_locale("en");
+        let key = Some("RWQfixture");
+        let ready = linux_hero(&linux_update_available(key, FULL_RPM), RPM);
+        assert_eq!(ready.path, HeroPath::Linux);
+        assert_eq!(ready.pill, Some(Pill::Available));
+        assert_eq!(ready.action, HeroAction::Install);
+        assert!(!ready.busy);
+        assert_eq!(
+            ready.message.as_deref(),
+            Some("Version 99.0.0 is available.")
+        );
+
+        // The release went out without this host's package.
+        let partial = linux_hero(&linux_update_available(key, &["SHA256SUMS"]), RPM);
+        assert_eq!(partial.pill, Some(Pill::Available));
+        assert_eq!(partial.action, HeroAction::Check);
+        assert_eq!(
+            partial.message.as_deref(),
+            Some("Version 99.0.0 has no package for this system yet.")
+        );
+
+        // A build that cannot verify the package, and an install the app does
+        // not own, both point at the package manager.
+        for (update, installation) in [
+            (linux_update_available(None, FULL_RPM), RPM),
+            (
+                linux_update_available(key, FULL_RPM),
+                Installation::Detected(InstallationSource::Nix),
+            ),
+        ] {
+            let hero = linux_hero(&update, installation);
+            assert_eq!(hero.action, HeroAction::Check, "{installation:?}");
+            assert_eq!(
+                hero.message.as_deref(),
+                Some("Version 99.0.0 is available. Update it with your package manager.")
+            );
+        }
+
+        let detecting = linux_hero(
+            &linux_update_available(key, FULL_RPM),
+            Installation::Detecting,
+        );
+        assert_eq!(detecting.action, HeroAction::Check);
+        assert_eq!(
+            detecting.message.as_deref(),
+            Some("Version 99.0.0 is available.")
+        );
+
+        let idle = linux_hero(&LinuxUpdate::new(key), RPM);
+        assert_eq!(
+            (idle.pill, idle.message, idle.action),
+            (None, None, HeroAction::Check)
+        );
+    }
+
+    #[test]
+    fn linux_update_errors_follow_locale() {
+        const ERRORS: [LinuxUpdateError; 6] = [
+            LinuxUpdateError::Check,
+            LinuxUpdateError::MissingTool("/usr/bin/pkexec"),
+            LinuxUpdateError::Download,
+            LinuxUpdateError::Verification,
+            LinuxUpdateError::Authorization,
+            LinuxUpdateError::Install,
+        ];
+        let message = |error| {
+            linux_hero(&linux_update_failed(error), RPM)
+                .message
+                .unwrap()
+                .to_string()
+        };
+        let _locale = LOCALE_LOCK.lock().unwrap();
+        for (locale, check, missing_tool) in [
+            (
+                "en",
+                "Update failed: Couldn't check GitHub Releases.",
+                "Update failed: Installing updates needs /usr/bin/pkexec.",
+            ),
+            (
+                "fr",
+                "Échec de la mise à jour : Impossible de consulter GitHub Releases.",
+                "Échec de la mise à jour : L’installation des mises à jour nécessite /usr/bin/pkexec.",
+            ),
+            (
+                "zh-CN",
+                "更新失败：无法检查 GitHub Releases。",
+                "更新失败：安装更新需要 /usr/bin/pkexec。",
+            ),
+        ] {
+            rust_i18n::set_locale(locale);
+            assert_eq!(message(LinuxUpdateError::Check), check);
+            assert_eq!(
+                message(LinuxUpdateError::MissingTool("/usr/bin/pkexec")),
+                missing_tool
+            );
+            assert_eq!(
+                linux_hero(&linux_update_failed(LinuxUpdateError::Check), RPM).pill,
+                Some(Pill::Failed)
+            );
+        }
+
+        // Every reason has its own entry in every catalog: none falls back to
+        // English, and no two reasons read alike.
+        rust_i18n::set_locale("en");
+        let english = ERRORS.map(linux_error_message);
+        for locale in rust_i18n::available_locales!() {
+            rust_i18n::set_locale(&locale);
+            let reasons = ERRORS.map(linux_error_message);
+            for (index, reason) in reasons.iter().enumerate() {
+                assert!(!reason.contains("update_error"), "{locale}: {reason}");
+                assert!(
+                    !reasons[..index].contains(reason),
+                    "{locale}: {reason} is not distinct"
+                );
+                if locale != "en" {
+                    assert_ne!(reason, &english[index], "{locale} falls back to English");
+                }
+            }
+        }
+        rust_i18n::set_locale("en");
     }
 
     #[test]

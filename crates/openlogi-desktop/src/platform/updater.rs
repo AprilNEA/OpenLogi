@@ -11,9 +11,14 @@
 //!   builds. It reads its per-architecture appcast and EdDSA key from
 //!   `Info.plist`, installs on quit, and can replace an `/Applications` copy
 //!   the user cannot write to.
-//! - **The built-in engine** otherwise — Windows, Linux, an unbundled
-//!   `cargo run`, a bundle without Sparkle, or one whose Sparkle fails to
-//!   load — on the minisign-verified static `latest.json` manifest.
+//! - **The built-in engine** otherwise — Windows, an unbundled `cargo run`, a
+//!   bundle without Sparkle, or one whose Sparkle fails to load — on the
+//!   minisign-verified static `latest.json` manifest.
+//!
+//! On Linux the manifest carries no asset — `.deb`, `.rpm` and `.pkg.tar.zst`
+//! installs belong to the OS package manager — so [`install`] also installs
+//! the [`linux`] package path there, and every check runs on that path
+//! instead of the engine.
 //!
 //! Neither backend polls. With [`AppSettings::check_for_updates`] on, exactly
 //! one check runs per launch and it opens no window; the result shows in
@@ -237,9 +242,9 @@ pub fn install(cx: &mut App, settings: &AppSettings) {
     });
     cx.set_global(UpdaterObserver(observer));
 
+    linux::install_path(cx);
     if settings.check_for_updates {
         start_background_check(&updater, settings.auto_install_updates, cx);
-        linux::check_in_background(cx);
     }
     cx.set_global(SharedUpdater(updater));
 }
@@ -259,10 +264,21 @@ pub(crate) fn check_in_background(cx: &mut App) {
     let auto_install =
         AppState::try_read(cx).is_some_and(|state| state.app_settings().auto_install_updates);
     start_background_check(&updater, auto_install, cx);
-    linux::check_in_background(cx);
+}
+
+/// Publish `updater` as the shared updater, as [`install`] does, without the
+/// launch check or the channel decision.
+#[cfg(test)]
+pub(crate) fn share(updater: Entity<Updater>, cx: &mut App) {
+    cx.set_global(SharedUpdater(updater));
 }
 
 fn start_background_check(updater: &Entity<Updater>, auto_install: bool, cx: &mut App) {
+    if linux::is_active(cx) {
+        // The engine has no Linux asset to find; see the module docs.
+        linux::check(cx);
+        return;
+    }
     let checked_by_sparkle = with_sparkle(updater, cx, |sparkle| {
         if auto_install {
             // Sparkle's unattended check: with automatic downloads mirrored

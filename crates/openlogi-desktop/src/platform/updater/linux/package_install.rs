@@ -4,12 +4,14 @@
 //! Mirrors `packaging/linux/install.sh`'s `install_release` /
 //! `install_release_package`: download the package plus its `.minisig` and
 //! the release's `SHA256SUMS`, verify both, then hand the verified file to
-//! the OS package manager through `pkexec` (the script uses `sudo`; the GUI
-//! has no TTY for a password prompt, so `pkexec` is the GUI equivalent). This
-//! never runs on its own — only from an explicit "Install Update" click.
+//! the package manager the script would pick, through `pkexec` (the script
+//! uses `sudo`; the GUI has no TTY for a password prompt, so `pkexec` is the
+//! GUI equivalent). This never runs on its own — only from an explicit
+//! "Download & Install" click.
 
 use std::fmt::Write as _;
 use std::path::Path;
+use std::process::Command;
 
 use gpui_updater::Version;
 use sha2::{Digest as _, Sha256};
@@ -38,22 +40,12 @@ fn package_extension(source: LinuxPackage) -> &'static str {
     }
 }
 
-/// Pick the package, `.minisig` and `SHA256SUMS` assets matching this host out
-/// of a release's asset list.
+/// Pick the package, `.minisig` and `SHA256SUMS` assets for package family
+/// `source` on release arch tag `arch` out of a release's asset list. An
+/// error when any of the three is missing: the release workflow still
+/// publishes a release whose Linux build failed, so a newer version is no
+/// proof that its package exists.
 pub fn match_assets(
-    assets: &[ReleaseAsset],
-    version: &Version,
-    source: LinuxPackage,
-) -> Result<MatchedAssets, String> {
-    let arch = openlogi_core::linux_package::arch_tag(std::env::consts::ARCH)
-        .ok_or("unsupported architecture for a Linux package install")?;
-    match_assets_for_arch(assets, version, source, arch)
-}
-
-/// [`match_assets`] with the arch tag passed in rather than read from the
-/// host, so tests can exercise every arch/package-family combination without
-/// depending on the arch of the machine running them.
-fn match_assets_for_arch(
     assets: &[ReleaseAsset],
     version: &Version,
     source: LinuxPackage,
@@ -107,34 +99,20 @@ pub fn ensure_newer(version: &Version, current: &Version) -> Result<(), String> 
     }
 }
 
-/// Verify `package_bytes` against the `.minisig` text with the update public
-/// key this build embeds ([`crate::platform::updater::minisign_public_key`]), as `install.sh`'s
-/// `minisign -V` does, and require the signed trusted comment to name
-/// `package_name`. The release pipeline signs with minisign's default trusted
-/// comment (`timestamp:…\tfile:<name>\thashed`), so this binds the signature
-/// to that exact, versioned filename. A build without the key fails closed,
-/// like the engine's own updates.
+/// Verify `package_bytes` against the `.minisig` text with `public_key`, as
+/// `install.sh`'s `minisign -V` does, and require the signed trusted comment
+/// to name `package_name`. The release pipeline signs with minisign's default
+/// trusted comment (`timestamp:…\tfile:<name>\thashed`), so this binds the
+/// signature to that exact, versioned filename. The caller passes the key
+/// this build embeds ([`crate::platform::updater::minisign_public_key`]); a
+/// build without one never offers an install (see
+/// [`super::InstallOffer::PackageManager`]).
 pub fn verify_minisign(
+    public_key: &str,
     package_bytes: &[u8],
     signature: &str,
     package_name: &str,
 ) -> Result<(), String> {
-    verify_minisign_with_key(
-        crate::platform::updater::minisign_public_key(),
-        package_bytes,
-        signature,
-        package_name,
-    )
-}
-
-fn verify_minisign_with_key(
-    public_key: Option<&str>,
-    package_bytes: &[u8],
-    signature: &str,
-    package_name: &str,
-) -> Result<(), String> {
-    let public_key =
-        public_key.ok_or("this build embeds no update signing key, so it cannot verify updates")?;
     let signature = minisign_verify::Signature::decode(signature)
         .map_err(|error| format!("invalid minisign signature: {error}"))?;
     let public_key = minisign_verify::PublicKey::from_base64(public_key)
@@ -167,65 +145,81 @@ fn is_executable(path: &Path) -> bool {
     path.is_file()
 }
 
-/// Check, before anything is downloaded, that `pkexec` and the package
-/// manager the install runs exist at their fixed paths, so a missing tool is
-/// an actionable message instead of a failure after the download.
-pub fn require_install_tools(source: LinuxPackage) -> Result<(), String> {
-    first_missing_tool(source, is_executable).map_or(Ok(()), |program| {
-        Err(format!(
-            "{program} was not found; install it to update from the app \
-             (pkexec is provided by polkit)"
-        ))
-    })
+/// One package-manager frontend: its fixed path, never looked up on `PATH`
+/// (see [`PKEXEC`]), and the arguments that install a local package file.
+struct Frontend {
+    program: &'static str,
+    args: &'static [&'static str],
 }
 
-/// The first of the install's fixed-path tools `exists` rejects.
-fn first_missing_tool(
-    source: LinuxPackage,
-    exists: impl Fn(&Path) -> bool,
-) -> Option<&'static str> {
-    [PKEXEC, install_program(source)]
-        .into_iter()
-        .find(|program| !exists(Path::new(program)))
-}
-
-/// The package manager's fixed path. Like [`PKEXEC`], never looked up on
-/// `PATH`.
-fn install_program(source: LinuxPackage) -> &'static str {
+/// The frontends that install a package of family `source`, in the order
+/// `install.sh`'s `select_package_manager` prefers them, with the arguments
+/// its `install_release_package` passes. A dnf host updates through dnf, as
+/// the script installed it, so dnf resolves any dependency a newer package
+/// adds and records the transaction; plain `rpm -Uvh` is the last resort.
+/// zypper needs `--allow-unsigned-rpm` because the packages carry a minisign
+/// signature, not an RPM GPG one.
+fn frontends(source: LinuxPackage) -> &'static [Frontend] {
     match source {
-        LinuxPackage::Deb => "/usr/bin/apt-get",
-        LinuxPackage::Rpm => "/usr/bin/rpm",
-        LinuxPackage::Arch => "/usr/bin/pacman",
+        LinuxPackage::Deb => &[Frontend {
+            program: "/usr/bin/apt-get",
+            args: &["install", "-y"],
+        }],
+        LinuxPackage::Rpm => &[
+            Frontend {
+                program: "/usr/bin/dnf",
+                args: &["install", "-y"],
+            },
+            Frontend {
+                program: "/usr/bin/yum",
+                args: &["install", "-y"],
+            },
+            Frontend {
+                program: "/usr/bin/zypper",
+                args: &["--non-interactive", "install", "--allow-unsigned-rpm"],
+            },
+            Frontend {
+                program: "/usr/bin/rpm",
+                args: &["-Uvh"],
+            },
+        ],
+        LinuxPackage::Arch => &[Frontend {
+            program: "/usr/bin/pacman",
+            args: &["-U", "--noconfirm"],
+        }],
     }
 }
 
-/// The literal per-package-manager install command `install.sh`'s
-/// `install_release_package` runs, without the `pkexec`/`sudo` wrapper.
-///
-/// `LinuxPackage` only distinguishes the package family, not which frontend
-/// manages it (`dnf` vs `zypper` vs plain `rpm`), so the RPM case uses
-/// `rpm -Uvh` — the lowest-common-denominator command `install.sh` itself
-/// falls back to, valid on every RPM-based host since `rpm` always underlies
-/// `dnf`/`zypper`/`yum`.
-fn install_command(source: LinuxPackage, package_path: &Path) -> Vec<String> {
-    let args: &[&str] = match source {
-        LinuxPackage::Deb => &["install", "-y"],
-        LinuxPackage::Rpm => &["-Uvh"],
-        LinuxPackage::Arch => &["-U", "--noconfirm"],
-    };
-    std::iter::once(install_program(source))
-        .chain(args.iter().copied())
-        .map(String::from)
-        .chain([package_path.display().to_string()])
-        .collect()
+/// The `pkexec`-wrapped command that installs `package_path`, or the fixed
+/// path of the tool that is missing. Resolved before anything downloads, so
+/// a missing tool is an actionable message rather than a failure after it.
+pub fn install_command(source: LinuxPackage, package_path: &Path) -> Result<Command, &'static str> {
+    install_command_with(source, package_path, is_executable)
 }
 
-/// [`install_command`], wrapped in `pkexec` for the privilege escalation a GUI
-/// has no TTY to do with `sudo`.
-pub fn pkexec_install_command(source: LinuxPackage, package_path: &Path) -> Vec<String> {
-    let mut argv = vec![PKEXEC.to_string()];
-    argv.extend(install_command(source, package_path));
-    argv
+/// [`install_command`] with the executable check passed in, so tests cover
+/// every frontend choice without depending on the host's tools.
+fn install_command_with(
+    source: LinuxPackage,
+    package_path: &Path,
+    exists: impl Fn(&Path) -> bool,
+) -> Result<Command, &'static str> {
+    if !exists(Path::new(PKEXEC)) {
+        return Err(PKEXEC);
+    }
+    let candidates = frontends(source);
+    let frontend = candidates
+        .iter()
+        .find(|frontend| exists(Path::new(frontend.program)))
+        // The family's base tool (rpm, apt-get, pacman) is the one to name:
+        // every frontend before it sits on top of it.
+        .ok_or_else(|| candidates.last().map_or(PKEXEC, |frontend| frontend.program))?;
+    let mut command = Command::new(PKEXEC);
+    command
+        .arg(frontend.program)
+        .args(frontend.args)
+        .arg(package_path);
+    Ok(command)
 }
 
 #[cfg(test)]
@@ -264,8 +258,7 @@ mod tests {
     #[test]
     fn matches_the_asset_for_an_explicit_arch_and_package_family() {
         let version = Version::parse("0.8.15").unwrap();
-        let matched =
-            match_assets_for_arch(&assets(), &version, LinuxPackage::Deb, "amd64").unwrap();
+        let matched = match_assets(&assets(), &version, LinuxPackage::Deb, "amd64").unwrap();
         assert_eq!(matched.package.name, "openlogi-v0.8.15-linux-amd64.deb");
         assert_eq!(
             matched.signature.name,
@@ -273,16 +266,15 @@ mod tests {
         );
         assert_eq!(matched.checksums.name, "SHA256SUMS");
 
-        let matched =
-            match_assets_for_arch(&assets(), &version, LinuxPackage::Rpm, "arm64").unwrap();
+        let matched = match_assets(&assets(), &version, LinuxPackage::Rpm, "arm64").unwrap();
         assert_eq!(matched.package.name, "openlogi-v0.8.15-linux-arm64.rpm");
     }
 
     #[test]
     fn missing_asset_is_an_error_not_a_panic() {
         let version = Version::parse("0.8.15").unwrap();
-        match_assets_for_arch(&assets(), &version, LinuxPackage::Arch, "amd64").unwrap_err();
-        match_assets_for_arch(&assets(), &version, LinuxPackage::Deb, "arm64").unwrap_err();
+        match_assets(&assets(), &version, LinuxPackage::Arch, "amd64").unwrap_err();
+        match_assets(&assets(), &version, LinuxPackage::Deb, "arm64").unwrap_err();
     }
 
     #[test]
@@ -323,18 +315,18 @@ fpTEZT3hEgq9Dt80RpQtQU7Kff+YNjzVBoMwk+p2H11ji5iYFgTNrNdjVH9RPoDeKf6JZXmNZhwvKmAp
     #[test]
     fn minisign_rejects_bytes_the_release_signature_does_not_cover() {
         let name = "openlogi-v0.8.17-linux-amd64.deb";
-        let key = Some(V0_8_17_SIGNING_KEY);
-        let error = verify_minisign_with_key(key, b"not the package", V0_8_17_DEB_MINISIG, name)
-            .unwrap_err();
+        let error = verify_minisign(
+            V0_8_17_SIGNING_KEY,
+            b"not the package",
+            V0_8_17_DEB_MINISIG,
+            name,
+        )
+        .unwrap_err();
         assert!(error.contains("verification failed"), "{error}");
-        assert!(verify_minisign_with_key(key, b"x", "garbage", name).is_err());
-    }
-
-    #[test]
-    fn minisign_fails_closed_without_an_embedded_key() {
-        let name = "openlogi-v0.8.17-linux-amd64.deb";
-        let error = verify_minisign_with_key(None, b"x", V0_8_17_DEB_MINISIG, name).unwrap_err();
-        assert!(error.contains("no update signing key"), "{error}");
+        let error = verify_minisign(V0_8_17_SIGNING_KEY, b"x", "garbage", name).unwrap_err();
+        assert!(error.contains("invalid minisign signature"), "{error}");
+        let error = verify_minisign("not a key", b"x", V0_8_17_DEB_MINISIG, name).unwrap_err();
+        assert!(error.contains("invalid minisign public key"), "{error}");
     }
 
     #[test]
@@ -367,33 +359,103 @@ fpTEZT3hEgq9Dt80RpQtQU7Kff+YNjzVBoMwk+p2H11ji5iYFgTNrNdjVH9RPoDeKf6JZXmNZhwvKmAp
         ensure_newer(&Version::parse("0.8.17-beta.1").unwrap(), &current).unwrap_err();
     }
 
+    const PK: &str = "/usr/bin/pkexec";
+
+    fn present(installed: &'static [&'static str]) -> impl Fn(&Path) -> bool {
+        move |path| installed.iter().any(|tool| Path::new(tool) == path)
+    }
+
+    fn argv(command: &Command) -> Vec<String> {
+        std::iter::once(command.get_program())
+            .chain(command.get_args())
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
+    }
+
     #[test]
-    fn install_tools_are_checked_at_their_fixed_paths_only() {
-        let present = |installed: &'static [&'static str]| {
-            move |path: &Path| installed.iter().any(|tool| Path::new(tool) == path)
-        };
-        assert_eq!(
-            first_missing_tool(LinuxPackage::Deb, present(&[])),
-            Some("/usr/bin/pkexec")
-        );
-        assert_eq!(
-            first_missing_tool(LinuxPackage::Deb, present(&["/usr/bin/pkexec"])),
-            Some("/usr/bin/apt-get")
-        );
-        assert_eq!(
-            first_missing_tool(
+    fn install_needs_pkexec_and_a_frontend_at_their_fixed_paths() {
+        let path = Path::new("/tmp/openlogi.pkg");
+        for (source, installed, missing) in [
+            (LinuxPackage::Deb, &[][..], PK),
+            (LinuxPackage::Deb, &["/usr/bin/apt-get"][..], PK),
+            (LinuxPackage::Deb, &[PK][..], "/usr/bin/apt-get"),
+            // A copy elsewhere on `PATH` is not the fixed path.
+            (
                 LinuxPackage::Deb,
-                present(&["/usr/bin/pkexec", "/usr/bin/apt-get"])
+                &[PK, "/usr/local/bin/apt-get"][..],
+                "/usr/bin/apt-get",
             ),
-            None
-        );
+            (LinuxPackage::Rpm, &[PK][..], "/usr/bin/rpm"),
+            (LinuxPackage::Arch, &[PK][..], "/usr/bin/pacman"),
+        ] {
+            assert_eq!(
+                install_command_with(source, path, present(installed)).unwrap_err(),
+                missing,
+                "{source:?} with {installed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rpm_installs_through_the_frontend_install_sh_would_pick() {
+        let path = Path::new("/tmp/openlogi.rpm");
+        for (installed, expected) in [
+            (
+                &[
+                    PK,
+                    "/usr/bin/dnf",
+                    "/usr/bin/yum",
+                    "/usr/bin/zypper",
+                    "/usr/bin/rpm",
+                ][..],
+                &[PK, "/usr/bin/dnf", "install", "-y", "/tmp/openlogi.rpm"][..],
+            ),
+            (
+                &[PK, "/usr/bin/yum", "/usr/bin/zypper", "/usr/bin/rpm"][..],
+                &[PK, "/usr/bin/yum", "install", "-y", "/tmp/openlogi.rpm"][..],
+            ),
+            (
+                &[PK, "/usr/bin/zypper", "/usr/bin/rpm"][..],
+                &[
+                    PK,
+                    "/usr/bin/zypper",
+                    "--non-interactive",
+                    "install",
+                    "--allow-unsigned-rpm",
+                    "/tmp/openlogi.rpm",
+                ][..],
+            ),
+            (
+                &[PK, "/usr/bin/rpm"][..],
+                &[PK, "/usr/bin/rpm", "-Uvh", "/tmp/openlogi.rpm"][..],
+            ),
+        ] {
+            let command = install_command_with(LinuxPackage::Rpm, path, present(installed));
+            assert_eq!(argv(&command.unwrap()), expected, "{installed:?}");
+        }
+    }
+
+    #[test]
+    fn deb_and_arch_install_as_install_sh_does() {
+        let path = Path::new("/tmp/openlogi.deb");
+        let command =
+            install_command_with(LinuxPackage::Deb, path, present(&[PK, "/usr/bin/apt-get"]));
         assert_eq!(
-            first_missing_tool(LinuxPackage::Rpm, present(&["/usr/bin/pkexec"])),
-            Some("/usr/bin/rpm")
+            argv(&command.unwrap()),
+            [PK, "/usr/bin/apt-get", "install", "-y", "/tmp/openlogi.deb"]
         );
+        let path = Path::new("/tmp/openlogi.pkg.tar.zst");
+        let command =
+            install_command_with(LinuxPackage::Arch, path, present(&[PK, "/usr/bin/pacman"]));
         assert_eq!(
-            first_missing_tool(LinuxPackage::Arch, present(&["/usr/bin/pkexec"])),
-            Some("/usr/bin/pacman")
+            argv(&command.unwrap()),
+            [
+                PK,
+                "/usr/bin/pacman",
+                "-U",
+                "--noconfirm",
+                "/tmp/openlogi.pkg.tar.zst"
+            ]
         );
     }
 
@@ -411,41 +473,5 @@ fpTEZT3hEgq9Dt80RpQtQU7Kff+YNjzVBoMwk+p2H11ji5iYFgTNrNdjVH9RPoDeKf6JZXmNZhwvKmAp
         std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(is_executable(&tool));
         assert!(!is_executable(dir.path()));
-    }
-
-    #[test]
-    fn pkexec_install_command_matches_install_sh_per_package_manager() {
-        let path = Path::new("/tmp/openlogi.rpm");
-        assert_eq!(
-            pkexec_install_command(LinuxPackage::Rpm, path),
-            vec![
-                "/usr/bin/pkexec",
-                "/usr/bin/rpm",
-                "-Uvh",
-                "/tmp/openlogi.rpm"
-            ]
-        );
-        let path = Path::new("/tmp/openlogi.deb");
-        assert_eq!(
-            pkexec_install_command(LinuxPackage::Deb, path),
-            vec![
-                "/usr/bin/pkexec",
-                "/usr/bin/apt-get",
-                "install",
-                "-y",
-                "/tmp/openlogi.deb"
-            ]
-        );
-        let path = Path::new("/tmp/openlogi.pkg.tar.zst");
-        assert_eq!(
-            pkexec_install_command(LinuxPackage::Arch, path),
-            vec![
-                "/usr/bin/pkexec",
-                "/usr/bin/pacman",
-                "-U",
-                "--noconfirm",
-                "/tmp/openlogi.pkg.tar.zst",
-            ]
-        );
     }
 }

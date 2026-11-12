@@ -38,7 +38,7 @@ pub(super) use openlogi_core::config::{
 };
 
 use crate::features::pointer::momentum::{MomentumPanel, MomentumScope};
-use crate::platform::updater::linux::LinuxUpdateStatus;
+use crate::platform::updater::linux::LinuxUpdate;
 pub(super) use crate::services::assets::sync::{AssetCommand, AssetControl};
 pub(super) use crate::state::{AppState, StateEvent};
 use crate::ui::commit_slider::{CommitSlider, SliderRange};
@@ -269,7 +269,7 @@ impl SettingsView {
             _state_obs: state_obs,
             _installation_obs: cx
                 .observe_global::<crate::platform::installation::Installation>(|_, cx| cx.notify()),
-            _linux_update_obs: cx.observe_global::<LinuxUpdateStatus>(|_, cx| cx.notify()),
+            _linux_update_obs: cx.observe_global::<LinuxUpdate>(|_, cx| cx.notify()),
             theme_filter: ThemeFilter::All,
             theme_search,
             initial_page,
