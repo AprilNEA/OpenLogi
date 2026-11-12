@@ -694,6 +694,8 @@ async fn the_first_retry_waits_one_full_period() {
     )
     .await
     .expect_err("startup reconciliation must not be followed by an immediate retry");
-    sources.wake().await;
+    tokio::time::timeout(RETRY_INTERVAL, sources.wake())
+        .await
+        .expect("the first retry must wake within one full period");
     assert_eq!(started.elapsed(), RETRY_INTERVAL);
 }
