@@ -64,6 +64,34 @@ shader compiler, and link errors about missing `_write` / `_sysconf` /
 `_waitpid` symbols show up because the Nix `apple-sdk-14.4` stub doesn't
 expose `libSystem` the way Apple's real linker wants.
 
+### Shared build cache with mbx (optional)
+
+[mbx](https://github.com/jdx/mr-boxington) wraps Cargo with one compiler-output
+cache shared by every checkout and worktree. It also moves each checkout's
+`target/` into a managed directory behind a `target` link and prunes the store
+and those directories to size budgets. A new worktree then builds mostly from
+cache. The edit–compile loop in one checkout gets no faster: edited crates
+still compile with their own incremental state.
+
+Amp orbs install a pinned mbx in `.agents/setup` and put its Cargo shim first
+on `PATH`, so plain `cargo` there already runs through it. CI keeps sccache.
+
+To use it locally:
+
+```sh
+cargo install mbx --locked
+mbx setup     # installs the Cargo shim; put the directory it prints first on PATH
+mbx doctor    # confirms `cargo` resolves to the shim
+```
+
+- devenv sets `RUSTC_WRAPPER=sccache`, and mbx defers to an existing wrapper
+  without caching. Clear it in the git-ignored `devenv.local.nix`:
+  `{ lib, ... }: { env.RUSTC_WRAPPER = lib.mkForce ""; }`.
+- macOS: the dev bundle `target/dev/OpenLogi.app` moves into the managed
+  directory, which mbx removes after 30 idle days or when over budget. Whether
+  its Input Monitoring grant survives that is not yet verified;
+  `MBX_TARGET_VIEWS=0` keeps a plain `target/` directory.
+
 ### Nix package
 
 The Flake in `packaging/` exposes native `x86_64-linux` and `aarch64-linux`
