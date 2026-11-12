@@ -32,6 +32,16 @@ impl ChannelPool {
         }
     }
 
+    /// Hold `channel` as the open channel for `route`, as if [`Self::open`]
+    /// had opened it.
+    #[cfg(test)]
+    pub(crate) async fn seed(&self, route: DeviceRoute, channel: &Arc<HidppChannel>) {
+        self.entries.lock().await.push(PoolEntry {
+            route,
+            channel: Arc::downgrade(channel),
+        });
+    }
+
     /// Return a shared channel reaching `route`, opening it when necessary.
     pub async fn open(
         &self,

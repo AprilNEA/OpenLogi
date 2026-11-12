@@ -6,6 +6,7 @@ use super::application_target::ApplicationTarget;
 use super::category::Category;
 use super::key_combo::KeyCombo;
 use super::modifiers::BareModifiers;
+use crate::hid::HostTarget;
 
 /// What pressing a [`ButtonId`](crate::binding::ButtonId) should do.
 ///
@@ -252,7 +253,7 @@ pub enum Action {
     HoldModifier(BareModifiers),
     /// Move the device that fired the action to its first Easy-Switch
     /// channel, as its own channel key would (HID++ `0x1814`). See
-    /// [`Action::easy_switch_host`].
+    /// [`Action::easy_switch_target`].
     ///
     /// A channel that has no paired computer is refused before anything is
     /// sent, but only on a device that reports its channels (`0x1815`
@@ -264,6 +265,14 @@ pub enum Action {
     EasySwitchChannel2,
     /// Move the device to its third Easy-Switch channel.
     EasySwitchChannel3,
+    /// Move the device to its next Easy-Switch channel that has a paired
+    /// computer, wrapping from the last to the first, as the single
+    /// Easy-Switch button of a mouse such as the MX Master 3S cycles them.
+    /// See [`HostTarget::Next`].
+    ///
+    /// A device that does not report its channels (`0x1815` HostsInfo)
+    /// cannot skip an empty one, and may leave this computer for it.
+    NextEasySwitchChannel,
 }
 
 /// Which of a held chord's keys stay down for the lifetime of the press.
@@ -368,6 +377,7 @@ macro_rules! for_each_unit_action {
             EasySwitchChannel1 "Easy-Switch Channel 1" "actions.easy_switch_channel_1" System Channel1,
             EasySwitchChannel2 "Easy-Switch Channel 2" "actions.easy_switch_channel_2" System Channel2,
             EasySwitchChannel3 "Easy-Switch Channel 3" "actions.easy_switch_channel_3" System Channel3,
+            NextEasySwitchChannel "Next Easy-Switch Channel" "actions.next_easy_switch_channel" System NextChannel,
             // Media
             PlayPause "Play / Pause" "actions.play_pause" Media Play,
             NextTrack "Next Track" "actions.next_track" Media NextTrack,
@@ -506,14 +516,15 @@ macro_rules! derive_action_core {
 for_each_unit_action!(derive_action_core);
 
 impl Action {
-    /// The zero-based Easy-Switch channel this action moves its device to,
-    /// or `None` for any other action.
+    /// The Easy-Switch channel this action moves its device to, or `None`
+    /// for any other action.
     #[must_use]
-    pub fn easy_switch_host(&self) -> Option<u8> {
+    pub fn easy_switch_target(&self) -> Option<HostTarget> {
         match self {
-            Self::EasySwitchChannel1 => Some(0),
-            Self::EasySwitchChannel2 => Some(1),
-            Self::EasySwitchChannel3 => Some(2),
+            Self::EasySwitchChannel1 => Some(HostTarget::Slot(0)),
+            Self::EasySwitchChannel2 => Some(HostTarget::Slot(1)),
+            Self::EasySwitchChannel3 => Some(HostTarget::Slot(2)),
+            Self::NextEasySwitchChannel => Some(HostTarget::Next),
             _ => None,
         }
     }
@@ -528,10 +539,11 @@ impl Action {
     }
 
     /// Every action [`Self::needs_firing_device`] holds for.
-    pub const NEEDS_FIRING_DEVICE: [Self; 3] = [
+    pub const NEEDS_FIRING_DEVICE: [Self; 4] = [
         Self::EasySwitchChannel1,
         Self::EasySwitchChannel2,
         Self::EasySwitchChannel3,
+        Self::NextEasySwitchChannel,
     ];
 
     /// The chord whose output must remain down until the originating press

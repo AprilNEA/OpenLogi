@@ -427,27 +427,33 @@ fn key_bound_to_easy_switch_passes_through_without_a_firing_device() {
     let (dispatcher, mut owner, _events) = test_dispatcher();
     let keycode = 0x7a;
     let modifiers = KeyModifiers::default();
-    let bindings = Arc::new(RwLock::new(BTreeMap::from([(
-        KeyTrigger { keycode, modifiers },
-        Action::EasySwitchChannel2,
-    )])));
-    let (actions, queued) = mpsc::sync_channel(1);
+    for action in Action::NEEDS_FIRING_DEVICE {
+        let bindings = Arc::new(RwLock::new(BTreeMap::from([(
+            KeyTrigger { keycode, modifiers },
+            action.clone(),
+        )])));
+        let (actions, queued) = mpsc::sync_channel(1);
 
-    assert_eq!(
-        handle_key(
-            KeyEvent {
-                keycode,
-                pressed: true,
-                modifiers,
-            },
-            &bindings,
-            &actions,
-            &dispatcher,
-            ActionDispatchTarget::capture,
-        ),
-        EventDisposition::PassThrough
-    );
-    queued.try_recv().expect_err("no action should be queued");
+        assert_eq!(
+            handle_key(
+                KeyEvent {
+                    keycode,
+                    pressed: true,
+                    modifiers,
+                },
+                &bindings,
+                &actions,
+                &dispatcher,
+                ActionDispatchTarget::capture,
+            ),
+            EventDisposition::PassThrough,
+            "{action:?}"
+        );
+        assert!(
+            queued.try_recv().is_err(),
+            "no action should be queued for {action:?}"
+        );
+    }
     assert!(owner.shutdown());
 }
 

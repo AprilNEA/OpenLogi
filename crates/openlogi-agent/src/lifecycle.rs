@@ -362,12 +362,12 @@ impl Armed {
                             .await
                             .turn_keypad_page(device_key.as_deref(), turn);
                     }
-                    ActionRequest::SwitchHost { device_key, slot } => {
+                    ActionRequest::SwitchHost { device_key, host } => {
                         running
                             .orchestrator
                             .lock()
                             .await
-                            .switch_host_for_action(device_key.as_deref(), slot);
+                            .switch_host_for_action(device_key.as_deref(), host);
                     }
                     ActionRequest::SettingsWritten { route } => {
                         running

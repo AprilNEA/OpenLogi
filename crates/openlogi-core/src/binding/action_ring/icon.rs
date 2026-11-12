@@ -122,6 +122,8 @@ pub enum ActionRingIcon {
     Channel2,
     /// Easy-Switch channel 3 glyph.
     Channel3,
+    /// Next Easy-Switch channel glyph.
+    NextChannel,
 }
 
 impl ActionRingIcon {
@@ -189,11 +191,12 @@ impl ActionRingIcon {
             Self::Channel1 => "action-icons/square-1.svg",
             Self::Channel2 => "action-icons/square-2.svg",
             Self::Channel3 => "action-icons/square-3.svg",
+            Self::NextChannel => "action-icons/arrow-left-right.svg",
         }
     }
 
     /// Every icon offered by the Actions Ring editor.
-    pub const ALL: [Self; 57] = [
+    pub const ALL: [Self; 58] = [
         Self::Pointer,
         Self::Mouse,
         Self::Copy,
@@ -251,6 +254,7 @@ impl ActionRingIcon {
         Self::Channel1,
         Self::Channel2,
         Self::Channel3,
+        Self::NextChannel,
     ];
 
     /// Stable catalog key used as this icon's accessible label.
@@ -312,6 +316,7 @@ impl ActionRingIcon {
             Self::Channel1 => "actions.easy_switch_channel_1",
             Self::Channel2 => "actions.easy_switch_channel_2",
             Self::Channel3 => "actions.easy_switch_channel_3",
+            Self::NextChannel => "actions.next_easy_switch_channel",
         }
     }
 }
