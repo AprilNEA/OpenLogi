@@ -156,6 +156,101 @@ const KEY_HOTSPOT_DOT: f32 = 12.;
 /// row shows it.
 const NATIVE_FUNCTION_ICON: &str = "action-icons/keyboard.svg";
 
+/// Plain-string Power User editors that commit directly without input rejection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TextEditorKind {
+    TypeText,
+    RunAppleScript,
+    RunShellCommand,
+}
+
+impl TextEditorKind {
+    #[must_use]
+    pub const fn power_user_kind(self) -> PowerUserKind {
+        match self {
+            Self::TypeText => PowerUserKind::TypeText,
+            Self::RunAppleScript => PowerUserKind::RunAppleScript,
+            Self::RunShellCommand => PowerUserKind::RunShellCommand,
+        }
+    }
+}
+
+/// Which key and edit context an open Power User draft belongs to, so saving
+/// after the key, page, G-profile, device, or app profile moves is refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EditorTarget {
+    pub key_idx: usize,
+    pub key_target: Option<KeyTarget>,
+    scope: EditScope,
+    page: KeypadPage,
+    g_profile: GKeyProfile,
+}
+
+/// Single explicit lifecycle enum for the inspector's Power User editor so
+/// drafts, text inputs, workflow steps, and validation errors never span
+/// independent fields.
+#[derive(Default)]
+pub(crate) enum EditorState {
+    #[default]
+    Closed,
+    CustomShortcut {
+        target: EditorTarget,
+        input: Option<Entity<InputState>>,
+        invalid: bool,
+    },
+    Text {
+        target: EditorTarget,
+        kind: TextEditorKind,
+        input: Option<Entity<InputState>>,
+    },
+    Application {
+        target: EditorTarget,
+        input: Option<Entity<InputState>>,
+        invalid: bool,
+    },
+    Workflow {
+        target: EditorTarget,
+        steps: Vec<WorkflowStep>,
+        seeded: bool,
+    },
+}
+
+pub(crate) enum EditorTransition<'a> {
+    Close,
+    Open {
+        kind: PowerUserKind,
+        key_target: Option<KeyTarget>,
+    },
+    SyncSlot {
+        key_idx: usize,
+        key_target: KeyTarget,
+        current_action: Option<&'a Action>,
+    },
+    AttachInput(Entity<InputState>),
+    MarkInvalid,
+    PushWorkflowStep(WorkflowStep),
+    RemoveWorkflowStep(usize),
+    CommitText {
+        expected_target: &'a KeyTarget,
+        raw_text: String,
+    },
+    CommitApplication {
+        expected_target: &'a KeyTarget,
+        picked: Action,
+    },
+    CommitWorkflow {
+        expected_target: &'a KeyTarget,
+    },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum EditorOutcome {
+    Applied,
+    InvalidInput,
+    Refused,
+    Commit { target: KeyTarget, action: Action },
+}
+
 /// The function-row remapper view.
 pub struct FunctionRowView {
     /// The single selected key index (0 = Esc), or `None` when nothing is
@@ -164,14 +259,8 @@ pub struct FunctionRowView {
     /// The hovered function-row key index, shared by callout bubbles, key hit
     /// zones, and leader lines.
     hovered_key: Option<usize>,
-    /// Which power-user editor is showing in the panel, if any.
-    active_editor: Option<PowerUserKind>,
-    /// Lazily-created [`InputState`] for the text editors.
-    text_state: Option<Entity<InputState>>,
-    /// Draft copy of the Workflow steps under edit.
-    workflow_draft: Vec<WorkflowStep>,
-    /// Whether the Open Application editor rejected a blank path.
-    application_invalid: bool,
+    /// Unified Power User editor state mutated solely through [`Self::transition_editor`].
+    editor: EditorState,
     /// The keypad binding page the grid keys are being edited on — this
     /// editor's own choice, independent of the page the keypad is showing.
     keypad_page: KeypadPage,
@@ -199,7 +288,7 @@ pub struct FunctionRowView {
 
 /// Which device's bindings, in which app profile, the view edits — beside
 /// the key and the page, what a draft was started for.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct EditScope {
     device: Option<DeviceKey>,
     /// The open app profile, `None` for the device's global one.
@@ -214,10 +303,7 @@ impl FunctionRowView {
         Self {
             selected_key: None,
             hovered_key: None,
-            active_editor: None,
-            text_state: None,
-            workflow_draft: Vec::new(),
-            application_invalid: false,
+            editor: EditorState::Closed,
             keypad_page: KeypadPage::FIRST,
             g_profile: GKeyProfile::M1,
             selected_profile_card: false,
@@ -244,10 +330,7 @@ impl FunctionRowView {
     /// being edited — another key, page, device, or app profile — calls
     /// this, or a draft started for one would save onto the next.
     fn drop_editor(&mut self) {
-        self.active_editor = None;
-        self.text_state = None;
-        self.workflow_draft.clear();
-        self.application_invalid = false;
+        let _ = self.transition_editor(EditorTransition::Close);
     }
 
     /// Edit the grid keys on `page`, dropping any open editor when it moves.
@@ -423,12 +506,270 @@ impl FunctionRowView {
         }
     }
 
+    fn target_matches_live_context(&self, target: &EditorTarget) -> bool {
+        self.selected_key == Some(target.key_idx)
+            && self.edit_scope == target.scope
+            && self.keypad_page == target.page
+            && self.g_profile == target.g_profile
+    }
+
+    /// Single transition owner for all [`EditorState`] writes.
+    pub(crate) fn transition_editor(&mut self, op: EditorTransition<'_>) -> EditorOutcome {
+        match op {
+            EditorTransition::Close => {
+                self.editor = EditorState::Closed;
+                EditorOutcome::Applied
+            }
+            EditorTransition::Open { kind, key_target } => {
+                self.open_editor_transition(kind, key_target)
+            }
+            EditorTransition::SyncSlot {
+                key_idx,
+                key_target,
+                current_action,
+            } => self.sync_editor_slot(key_idx, key_target, current_action),
+            EditorTransition::AttachInput(state) => match &mut self.editor {
+                EditorState::CustomShortcut { input, .. }
+                | EditorState::Text { input, .. }
+                | EditorState::Application { input, .. } => {
+                    *input = Some(state);
+                    EditorOutcome::Applied
+                }
+                EditorState::Closed | EditorState::Workflow { .. } => EditorOutcome::Refused,
+            },
+            EditorTransition::MarkInvalid => match &mut self.editor {
+                EditorState::CustomShortcut { invalid, .. }
+                | EditorState::Application { invalid, .. } => {
+                    *invalid = true;
+                    EditorOutcome::Applied
+                }
+                EditorState::Closed | EditorState::Text { .. } | EditorState::Workflow { .. } => {
+                    EditorOutcome::Refused
+                }
+            },
+            EditorTransition::PushWorkflowStep(step) => match &mut self.editor {
+                EditorState::Workflow { steps, seeded, .. } => {
+                    *seeded = true;
+                    steps.push(step);
+                    EditorOutcome::Applied
+                }
+                EditorState::Closed
+                | EditorState::CustomShortcut { .. }
+                | EditorState::Text { .. }
+                | EditorState::Application { .. } => EditorOutcome::Refused,
+            },
+            EditorTransition::RemoveWorkflowStep(idx) => match &mut self.editor {
+                EditorState::Workflow { steps, .. } if idx < steps.len() => {
+                    steps.remove(idx);
+                    EditorOutcome::Applied
+                }
+                _ => EditorOutcome::Refused,
+            },
+            EditorTransition::CommitText {
+                expected_target,
+                raw_text,
+            } => self.commit_editor_text(expected_target, raw_text),
+            EditorTransition::CommitApplication {
+                expected_target,
+                picked,
+            } => {
+                let EditorState::Application { target, .. } = &self.editor else {
+                    return EditorOutcome::Refused;
+                };
+                let target = target.clone();
+                self.finish_target_commit(&target, expected_target, picked)
+            }
+            EditorTransition::CommitWorkflow { expected_target } => {
+                let EditorState::Workflow { target, steps, .. } = &self.editor else {
+                    return EditorOutcome::Refused;
+                };
+                let (target, steps) = (target.clone(), steps.clone());
+                self.finish_target_commit(&target, expected_target, Action::Workflow(steps))
+            }
+        }
+    }
+
+    fn open_editor_transition(
+        &mut self,
+        kind: PowerUserKind,
+        key_target: Option<KeyTarget>,
+    ) -> EditorOutcome {
+        let Some(key_idx) = self.selected_key else {
+            return EditorOutcome::Refused;
+        };
+        let target = EditorTarget {
+            key_idx,
+            key_target,
+            scope: self.edit_scope.clone(),
+            page: self.keypad_page,
+            g_profile: self.g_profile,
+        };
+        self.editor = match kind {
+            PowerUserKind::CustomShortcut => EditorState::CustomShortcut {
+                target,
+                input: None,
+                invalid: false,
+            },
+            PowerUserKind::TypeText => EditorState::Text {
+                target,
+                kind: TextEditorKind::TypeText,
+                input: None,
+            },
+            PowerUserKind::RunAppleScript => EditorState::Text {
+                target,
+                kind: TextEditorKind::RunAppleScript,
+                input: None,
+            },
+            PowerUserKind::RunShellCommand => EditorState::Text {
+                target,
+                kind: TextEditorKind::RunShellCommand,
+                input: None,
+            },
+            PowerUserKind::OpenApplication => EditorState::Application {
+                target,
+                input: None,
+                invalid: false,
+            },
+            PowerUserKind::Workflow => EditorState::Workflow {
+                target,
+                steps: Vec::new(),
+                seeded: false,
+            },
+        };
+        EditorOutcome::Applied
+    }
+
+    fn sync_editor_slot(
+        &mut self,
+        key_idx: usize,
+        key_target: KeyTarget,
+        current_action: Option<&Action>,
+    ) -> EditorOutcome {
+        let valid = match &self.editor {
+            EditorState::Closed => return EditorOutcome::Refused,
+            EditorState::CustomShortcut { target, .. }
+            | EditorState::Text { target, .. }
+            | EditorState::Application { target, .. }
+            | EditorState::Workflow { target, .. } => {
+                self.target_matches_live_context(target)
+                    && target.key_idx == key_idx
+                    && target
+                        .key_target
+                        .as_ref()
+                        .is_none_or(|existing| existing == &key_target)
+            }
+        };
+        if !valid {
+            self.editor = EditorState::Closed;
+            return EditorOutcome::Refused;
+        }
+        match &mut self.editor {
+            EditorState::CustomShortcut { target, .. }
+            | EditorState::Text { target, .. }
+            | EditorState::Application { target, .. } => {
+                target.key_target = Some(key_target);
+            }
+            EditorState::Workflow {
+                target,
+                steps,
+                seeded,
+            } => {
+                target.key_target = Some(key_target);
+                if !*seeded {
+                    *steps = workflow_editor_seed(current_action);
+                    *seeded = true;
+                }
+            }
+            EditorState::Closed => {}
+        }
+        EditorOutcome::Applied
+    }
+
+    fn commit_editor_text(
+        &mut self,
+        expected_target: &KeyTarget,
+        raw_text: String,
+    ) -> EditorOutcome {
+        match &self.editor {
+            EditorState::CustomShortcut { target, .. } => {
+                let target = target.clone();
+                if !self.target_matches_live_context(&target)
+                    || target.key_target.as_ref() != Some(expected_target)
+                {
+                    self.editor = EditorState::Closed;
+                    return EditorOutcome::Refused;
+                }
+                if let Ok(combo) = raw_text.parse::<openlogi_core::binding::KeyCombo>() {
+                    self.editor = EditorState::Closed;
+                    EditorOutcome::Commit {
+                        target: expected_target.clone(),
+                        action: Action::CustomShortcut(combo),
+                    }
+                } else {
+                    if let EditorState::CustomShortcut { invalid, .. } = &mut self.editor {
+                        *invalid = true;
+                    }
+                    EditorOutcome::InvalidInput
+                }
+            }
+            EditorState::Text { target, kind, .. } => {
+                let (target, kind) = (target.clone(), *kind);
+                let action = match kind {
+                    TextEditorKind::TypeText => Action::TypeText(raw_text),
+                    TextEditorKind::RunAppleScript => Action::RunAppleScript(raw_text),
+                    TextEditorKind::RunShellCommand => Action::RunShellCommand(raw_text),
+                };
+                self.finish_target_commit(&target, expected_target, action)
+            }
+            EditorState::Closed
+            | EditorState::Application { .. }
+            | EditorState::Workflow { .. } => EditorOutcome::Refused,
+        }
+    }
+
+    fn finish_target_commit(
+        &mut self,
+        target: &EditorTarget,
+        expected_target: &KeyTarget,
+        action: Action,
+    ) -> EditorOutcome {
+        if !self.target_matches_live_context(target)
+            || target.key_target.as_ref() != Some(expected_target)
+        {
+            self.editor = EditorState::Closed;
+            return EditorOutcome::Refused;
+        }
+        self.editor = EditorState::Closed;
+        EditorOutcome::Commit {
+            target: expected_target.clone(),
+            action,
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn open_editor(&mut self, kind: PowerUserKind, cx: &mut Context<Self>) {
-        self.active_editor = Some(kind);
-        self.text_state = None;
-        self.workflow_draft.clear();
-        self.application_invalid = false;
-        cx.notify();
+        if self.transition_editor(EditorTransition::Open {
+            kind,
+            key_target: None,
+        }) == EditorOutcome::Applied
+        {
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn open_editor_for_target(
+        &mut self,
+        kind: PowerUserKind,
+        key_target: KeyTarget,
+        cx: &mut Context<Self>,
+    ) {
+        if self.transition_editor(EditorTransition::Open {
+            kind,
+            key_target: Some(key_target),
+        }) == EditorOutcome::Applied
+        {
+            cx.notify();
+        }
     }
 
     pub(crate) fn close_editor(&mut self, cx: &mut Context<Self>) {
@@ -436,13 +777,40 @@ impl FunctionRowView {
         cx.notify();
     }
 
-    pub(crate) fn mark_application_invalid(&mut self, cx: &mut Context<Self>) {
-        self.application_invalid = true;
-        cx.notify();
+    pub(crate) fn mark_editor_invalid(&mut self, cx: &mut Context<Self>) {
+        if self.transition_editor(EditorTransition::MarkInvalid) == EditorOutcome::Applied {
+            cx.notify();
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn active_editor_kind(&self) -> Option<PowerUserKind> {
+        match &self.editor {
+            EditorState::Closed => None,
+            EditorState::CustomShortcut { .. } => Some(PowerUserKind::CustomShortcut),
+            EditorState::Text { kind, .. } => Some(kind.power_user_kind()),
+            EditorState::Application { .. } => Some(PowerUserKind::OpenApplication),
+            EditorState::Workflow { .. } => Some(PowerUserKind::Workflow),
+        }
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn is_editor_invalid(&self) -> bool {
+        match &self.editor {
+            EditorState::CustomShortcut { invalid, .. }
+            | EditorState::Application { invalid, .. } => *invalid,
+            EditorState::Closed | EditorState::Text { .. } | EditorState::Workflow { .. } => false,
+        }
     }
 
     pub(crate) fn text_state(&self) -> Option<Entity<InputState>> {
-        self.text_state.clone()
+        match &self.editor {
+            EditorState::CustomShortcut { input, .. }
+            | EditorState::Text { input, .. }
+            | EditorState::Application { input, .. } => input.clone(),
+            EditorState::Closed | EditorState::Workflow { .. } => None,
+        }
     }
 
     pub(crate) fn new_text_state(
@@ -459,22 +827,33 @@ impl FunctionRowView {
             }
             s
         });
-        self.text_state = Some(state.clone());
+        let _ = self.transition_editor(EditorTransition::AttachInput(state.clone()));
         state
     }
 
+    #[cfg(test)]
     pub(crate) fn workflow_draft(&self) -> &[WorkflowStep] {
-        &self.workflow_draft
+        match &self.editor {
+            EditorState::Workflow { steps, .. } => steps,
+            EditorState::Closed
+            | EditorState::CustomShortcut { .. }
+            | EditorState::Text { .. }
+            | EditorState::Application { .. } => &[],
+        }
     }
 
     pub(crate) fn push_workflow_step(&mut self, step: WorkflowStep, cx: &mut Context<Self>) {
-        self.workflow_draft.push(step);
-        cx.notify();
+        if self.transition_editor(EditorTransition::PushWorkflowStep(step))
+            == EditorOutcome::Applied
+        {
+            cx.notify();
+        }
     }
 
     pub(crate) fn remove_workflow_step(&mut self, idx: usize, cx: &mut Context<Self>) {
-        if idx < self.workflow_draft.len() {
-            self.workflow_draft.remove(idx);
+        if self.transition_editor(EditorTransition::RemoveWorkflowStep(idx))
+            == EditorOutcome::Applied
+        {
             cx.notify();
         }
     }
@@ -538,33 +917,31 @@ impl Render for FunctionRowView {
         }
         let selected = self.selected_key;
         let hovered = self.hovered_key;
-        let active_editor = self.active_editor;
-        if let (Some(selected_idx), Some(kind)) = (selected, active_editor)
+        if let (Some(selected_idx), Some(kind)) = (selected, self.active_editor_kind())
             && let Some(slot) = slots.get(selected_idx)
         {
             let current_action = state.and_then(|state| bound_action(state, &slot.target));
-            match kind {
-                PowerUserKind::Workflow => {
-                    if self.workflow_draft.is_empty() {
-                        self.workflow_draft = workflow_editor_seed(current_action.as_ref());
-                    }
-                }
-                _ => {
-                    if let Some(state) = self.text_state.clone() {
-                        crate::ui::components::localize_placeholder(
-                            &state,
-                            text_editor_placeholder(kind),
-                            window,
-                            cx,
-                        );
-                    } else {
-                        self.new_text_state(
-                            text_editor_seed(current_action.as_ref(), kind),
-                            text_editor_placeholder(kind),
-                            window,
-                            cx,
-                        );
-                    }
+            if self.transition_editor(EditorTransition::SyncSlot {
+                key_idx: selected_idx,
+                key_target: slot.target.clone(),
+                current_action: current_action.as_ref(),
+            }) == EditorOutcome::Applied
+                && kind != PowerUserKind::Workflow
+            {
+                if let Some(input_state) = self.text_state() {
+                    crate::ui::components::localize_placeholder(
+                        &input_state,
+                        text_editor_placeholder(kind),
+                        window,
+                        cx,
+                    );
+                } else {
+                    self.new_text_state(
+                        text_editor_seed(current_action.as_ref(), kind),
+                        text_editor_placeholder(kind),
+                        window,
+                        cx,
+                    );
                 }
             }
         }
@@ -1507,16 +1884,8 @@ impl FunctionRowView {
         let key_name = slot.label.clone();
 
         // If an editor is active, render it instead of the list.
-        if let Some(kind) = self.active_editor {
-            return super::editors::editor_card(
-                target,
-                kind,
-                self.text_state.clone(),
-                self.workflow_draft.clone(),
-                self.application_invalid,
-                view,
-                pal,
-            );
+        if !matches!(self.editor, EditorState::Closed) {
+            return super::editors::editor_card(target, &self.editor, view, pal);
         }
 
         let state = AppState::try_read(cx);
@@ -1717,6 +2086,11 @@ fn panel_action_rows(
 
     let power_user_actions: &[(PowerUserKind, SharedString, &'static str)] = &[
         (
+            PowerUserKind::CustomShortcut,
+            tr!("action_ring.custom_shortcut"),
+            "action-icons/keyboard.svg",
+        ),
+        (
             PowerUserKind::OpenApplication,
             tr!("action_ring.open_application_or_folder"),
             "action-icons/grid-3x3.svg",
@@ -1750,6 +2124,7 @@ fn panel_action_rows(
                 |(idx, (kind, label, icon_path))| {
                     let kind = *kind;
                     let view = view.clone();
+                    let row_target = target.clone();
                     let selected = power_user_selected(current, kind);
                     MenuRow::new(format!("panel-power-{idx}"))
                         .selected(selected)
@@ -1778,7 +2153,10 @@ fn panel_action_rows(
                             )
                         })
                         .on_click(move |_ev, _window, cx| {
-                            view.update(cx, |v, vcx| v.open_editor(kind, vcx));
+                            let row_target = row_target.clone();
+                            view.update(cx, |v, vcx| {
+                                v.open_editor_for_target(kind, row_target, vcx);
+                            });
                         })
                 },
             )),
@@ -1792,6 +2170,9 @@ fn power_user_selected(current: Option<&Action>, kind: PowerUserKind) -> bool {
     matches!(
         (current, kind),
         (
+            Some(Action::CustomShortcut(_)),
+            PowerUserKind::CustomShortcut
+        ) | (
             Some(Action::OpenApplication(_)),
             PowerUserKind::OpenApplication
         ) | (Some(Action::TypeText(_)), PowerUserKind::TypeText)

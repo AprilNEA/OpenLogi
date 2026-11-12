@@ -106,11 +106,11 @@ Things OpenLogi does that Options+ won't:
     </tr>
     <tr>
         <td width="50%"><img src="https://assets.openlogi.org/screenshots/macos/light/cards/actions-ring.png" width="400" alt="Actions Ring editor with eight slots around the cursor"></td>
-        <td width="50%"><b>Actions Ring</b><ul><li>Eight actions in a ring around the cursor</li><li>Its own layout per application</li></ul></td>
+        <td width="50%"><b>Actions Ring</b><ul><li>Eight actions in a ring around the cursor, including custom shortcuts, applications, text, scripts, and workflows</li><li>Its own layout per application</li></ul></td>
     </tr>
     <tr>
         <td width="50%"><img src="https://assets.openlogi.org/screenshots/macos/light/cards/keys.png" width="400" alt="MX Keys S with three keys bound to Launchpad, Lock Screen, and Screenshot"></td>
-        <td width="50%"><b>Keyboard keys</b><ul><li>Bind media, emoji, screenshot, and other dedicated keys like mouse buttons</li><li>Restore one key to its device default, or reset the whole row</li></ul></td>
+        <td width="50%"><b>Keyboard keys</b><ul><li>Bind media, emoji, screenshot, and other dedicated keys like mouse buttons, including custom shortcuts from the Power User list</li><li>Restore one key to its device default, or reset the whole row</li></ul></td>
     </tr>
 </table>
 

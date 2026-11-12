@@ -566,6 +566,14 @@ MiddleClick = { OpenApplication = { path = "~/Downloads", display_name = "Downlo
 DpiToggle = { short = "ShowDesktop", long = "MissionControl" }
 ```
 
+In the desktop app, `CustomShortcut` can also be bound directly without editing
+`config.toml`: select a key in a keyboard's **Keys** tab and choose **Power
+User → Custom Shortcut** in the inspector, or select an **Actions Ring** slot
+and choose **Custom Shortcut**. Both editors accept the `Modifier+Key` (or
+single-key) chord syntax below — such as `Cmd+Shift+P`, `Ctrl+Alt+T`,
+`Super+End`, or `PageUp` — and reject bare modifiers (such as `Ctrl+Shift`) or
+unrecognised key names inline on Save while keeping the draft open for editing.
+
 Chord modifiers are `Cmd`, `Ctrl`, `Alt`, `Shift`, and `Super`. `Cmd` is the
 cross-platform primary modifier: Command on macOS, Control on Linux and Windows,
 so `Cmd+C` copies everywhere. `Super` (aliases `Win`, `Meta`) always presses the

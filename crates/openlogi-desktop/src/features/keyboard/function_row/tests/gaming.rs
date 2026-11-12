@@ -401,7 +401,11 @@ fn a_mode_change_drops_the_selection_and_its_draft(cx: &mut gpui::TestAppContext
 
             view.edited_slots(key_surface(Some(&asset), None, nine).slots(), None, nine);
             assert_eq!(view.selected_key, None, "the index no longer names G1");
-            assert_eq!(view.active_editor, None, "the draft can't save to MR");
+            assert_eq!(
+                view.active_editor_kind(),
+                None,
+                "the draft can't save to MR"
+            );
         });
     });
 }

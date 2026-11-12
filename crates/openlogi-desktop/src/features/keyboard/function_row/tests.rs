@@ -770,6 +770,23 @@ fn an_open_application_binding_selects_its_power_user_row() {
     ));
 }
 
+#[test]
+fn a_custom_shortcut_binding_selects_its_power_user_row() {
+    let shortcut = Action::CustomShortcut("Ctrl+Alt+T".parse().expect("a valid chord"));
+    assert!(power_user_selected(
+        Some(&shortcut),
+        PowerUserKind::CustomShortcut
+    ));
+    assert!(!power_user_selected(
+        Some(&shortcut),
+        PowerUserKind::TypeText
+    ));
+    assert!(!power_user_selected(
+        Some(&Action::Copy),
+        PowerUserKind::CustomShortcut
+    ));
+}
+
 /// The Keys tab body in a main-window-sized window, with no device: the
 /// fallback F-row, motion reduced so a frame shows the settled layout.
 fn keys_tab(
@@ -1119,8 +1136,11 @@ fn open_application_editor_binds_the_selected_key(cx: &mut gpui::TestAppContext)
     // A blank path is rejected in place and binds nothing.
     click(cx, "key-editor-custom-application-add");
     view.read_with(cx, |view, _| {
-        assert!(view.application_invalid);
-        assert_eq!(view.active_editor, Some(PowerUserKind::OpenApplication));
+        assert!(view.is_editor_invalid());
+        assert_eq!(
+            view.active_editor_kind(),
+            Some(PowerUserKind::OpenApplication)
+        );
     });
     assert!(
         cx.debug_bounds("key-editor-custom-application-error")
@@ -1136,8 +1156,8 @@ fn open_application_editor_binds_the_selected_key(cx: &mut gpui::TestAppContext)
     );
     assert_eq!(f1_binding(cx, &f1), Some(expected));
     view.read_with(cx, |view, _| {
-        assert_eq!(view.active_editor, None);
-        assert!(!view.application_invalid);
+        assert_eq!(view.active_editor_kind(), None);
+        assert!(!view.is_editor_invalid());
     });
 
     // Reopening the editor seeds the bound path.
@@ -1167,6 +1187,201 @@ fn open_application_editor_binds_the_selected_key(cx: &mut gpui::TestAppContext)
     drop(view);
     cx.update(|window, _| window.remove_window());
     cx.run_until_parked();
+}
+
+#[gpui::test]
+fn custom_shortcut_editor_binds_the_selected_key(cx: &mut gpui::TestAppContext) {
+    use crate::services::i18n::LOCALE_LOCK;
+    use gpui::{Modifiers, VisualTestContext};
+
+    fn click(cx: &mut VisualTestContext, selector: &'static str) {
+        let bounds = cx.debug_bounds(selector).expect(selector);
+        cx.simulate_click(bounds.center(), Modifiers::default());
+        redraw(cx);
+    }
+    fn f1_binding(cx: &mut VisualTestContext, trigger: &KeyTarget) -> Option<Action> {
+        cx.update(|_, cx| bound_action(AppState::try_read(cx).unwrap(), trigger))
+    }
+
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    let (view, cx) = keys_tab(cx);
+    // Slot 1 of the fallback F-row is F1.
+    let f1 = key_slots(None, None)[1].target.clone();
+    view.update(cx, |view, cx| {
+        view.select_key(Some(1), cx);
+        view.open_editor(PowerUserKind::CustomShortcut, cx);
+    });
+    redraw(cx);
+
+    // A blank chord is rejected in place and binds nothing.
+    click(cx, "key-editor-save");
+    view.read_with(cx, |view, _| {
+        assert!(view.is_editor_invalid());
+        assert_eq!(
+            view.active_editor_kind(),
+            Some(PowerUserKind::CustomShortcut)
+        );
+    });
+    assert!(cx.debug_bounds("key-editor-text-error").is_some());
+    assert_eq!(f1_binding(cx, &f1), None);
+
+    click(cx, "key-editor-text-input");
+    cx.simulate_input("Ctrl+Alt+T");
+    click(cx, "key-editor-save");
+    let expected = Action::CustomShortcut("Ctrl+Alt+T".parse().expect("a valid chord"));
+    assert_eq!(f1_binding(cx, &f1), Some(expected));
+    view.read_with(cx, |view, _| {
+        assert_eq!(view.active_editor_kind(), None);
+        assert!(!view.is_editor_invalid());
+    });
+
+    // Reopening the editor seeds the bound chord.
+    view.update(cx, |view, cx| {
+        view.open_editor(PowerUserKind::CustomShortcut, cx);
+    });
+    redraw(cx);
+    view.read_with(cx, |view, cx| {
+        assert_eq!(
+            view.text_state().expect("editor input").read(cx).value(),
+            "Ctrl+Alt+T"
+        );
+    });
+
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn custom_shortcut_save_reports_missing_key(cx: &mut gpui::TestAppContext) {
+    use crate::services::i18n::LOCALE_LOCK;
+    use gpui::{Modifiers, VisualTestContext};
+
+    fn click(cx: &mut VisualTestContext, selector: &'static str) {
+        let bounds = cx.debug_bounds(selector).expect(selector);
+        cx.simulate_click(bounds.center(), Modifiers::default());
+        redraw(cx);
+    }
+
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    let (view, cx) = keys_tab(cx);
+    let f1 = key_slots(None, None)[1].target.clone();
+    view.update(cx, |view, cx| {
+        view.select_key(Some(1), cx);
+        view.open_editor(PowerUserKind::CustomShortcut, cx);
+    });
+    redraw(cx);
+
+    click(cx, "key-editor-text-input");
+    cx.simulate_input("Ctrl+Shift");
+    click(cx, "key-editor-save");
+
+    assert!(cx.debug_bounds("key-editor-text-error").is_some());
+    view.read_with(cx, |view, cx| {
+        assert!(view.is_editor_invalid());
+        assert_eq!(
+            view.active_editor_kind(),
+            Some(PowerUserKind::CustomShortcut)
+        );
+        assert_eq!(
+            view.text_state().expect("draft preserved").read(cx).value(),
+            "Ctrl+Shift"
+        );
+        assert_eq!(bound_action(AppState::try_read(cx).unwrap(), &f1), None);
+    });
+
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn editor_refuses_saving_without_target_or_after_key_or_scope_changes(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (state, _commands) = crate::state::tests::keypad_pages::keypad_state();
+    cx.update(|cx| {
+        let state = cx.new(|_| state);
+        AppState::set_global(state, cx);
+        let view = cx.new(FunctionRowView::new);
+        let f1 = key_slots(None, None)[1].target.clone();
+        let f2 = key_slots(None, None)[2].target.clone();
+
+        view.update(cx, |view, cx| {
+            view.sync_edit_scope(AppState::try_read(cx));
+
+            // 1. Without a selected key target, opening and saving are refused.
+            assert_eq!(
+                view.transition_editor(EditorTransition::Open {
+                    kind: PowerUserKind::CustomShortcut,
+                    key_target: None,
+                }),
+                EditorOutcome::Refused
+            );
+            assert_eq!(
+                view.transition_editor(EditorTransition::CommitText {
+                    expected_target: &f1,
+                    raw_text: "Ctrl+Alt+T".into(),
+                }),
+                EditorOutcome::Refused
+            );
+            assert_eq!(view.active_editor_kind(), None);
+
+            // 2. Open an editor on slot 1 without SyncSlot binding `key_target` yet:
+            // saving before a concrete KeyTarget is bound is refused.
+            view.select_key(Some(1), cx);
+            view.open_editor(PowerUserKind::CustomShortcut, cx);
+            assert_eq!(
+                view.transition_editor(EditorTransition::CommitText {
+                    expected_target: &f1,
+                    raw_text: "Ctrl+Alt+T".into(),
+                }),
+                EditorOutcome::Refused
+            );
+            assert_eq!(view.active_editor_kind(), None);
+
+            // 3. Open for F1 explicitly, then switch selected key to F2 (slot 2):
+            // the draft is dropped and saving against F1 or F2 is refused.
+            view.open_editor_for_target(PowerUserKind::CustomShortcut, f1.clone(), cx);
+            view.select_key(Some(2), cx);
+            assert_eq!(view.active_editor_kind(), None);
+            assert_eq!(
+                view.transition_editor(EditorTransition::CommitText {
+                    expected_target: &f1,
+                    raw_text: "Ctrl+Alt+T".into(),
+                }),
+                EditorOutcome::Refused
+            );
+            assert_eq!(
+                view.transition_editor(EditorTransition::CommitText {
+                    expected_target: &f2,
+                    raw_text: "Ctrl+Alt+T".into(),
+                }),
+                EditorOutcome::Refused
+            );
+
+            // 4. Open for F2, then change app profile scope before sync_edit_scope runs
+            // or after sync_edit_scope runs: saving the old-scope draft is refused.
+            view.open_editor_for_target(PowerUserKind::CustomShortcut, f2.clone(), cx);
+        });
+
+        AppState::global(cx).update(cx, |state, _| {
+            let _ = state.set_editing_app(Some("com.apple.Safari".into()));
+        });
+        view.update(cx, |view, cx| {
+            view.sync_edit_scope(AppState::try_read(cx));
+            assert_eq!(view.active_editor_kind(), None);
+            assert_eq!(
+                view.transition_editor(EditorTransition::CommitText {
+                    expected_target: &f2,
+                    raw_text: "Ctrl+Alt+T".into(),
+                }),
+                EditorOutcome::Refused
+            );
+        });
+    });
 }
 
 /// The view edits grid keys on its chosen page by moving their targets there;
@@ -1231,7 +1446,7 @@ fn turning_the_page_drops_a_draft_for_the_old_page(cx: &mut gpui::TestAppContext
     cx.update(|cx| {
         view.update(cx, |view, cx| {
             view.set_keypad_page(KeypadPage::FIRST, cx);
-            assert_eq!(view.active_editor, None);
+            assert_eq!(view.active_editor_kind(), None);
             assert!(view.workflow_draft().is_empty());
         });
     });
@@ -1245,7 +1460,7 @@ fn removing_the_edited_page_drops_its_draft(cx: &mut gpui::TestAppContext) {
             // No device has a second page, so the edited page clamps to 1.
             view.sync_edit_scope(None);
             assert_eq!(view.keypad_page, KeypadPage::FIRST);
-            assert_eq!(view.active_editor, None);
+            assert_eq!(view.active_editor_kind(), None);
             assert!(view.workflow_draft().is_empty());
         });
     });
@@ -1270,7 +1485,7 @@ fn switching_the_app_profile_drops_a_draft_for_the_old_one(cx: &mut gpui::TestAp
         });
         view.update(cx, |view, cx| {
             view.sync_edit_scope(AppState::try_read(cx));
-            assert_eq!(view.active_editor, None);
+            assert_eq!(view.active_editor_kind(), None);
             assert!(view.workflow_draft().is_empty());
             // The key stays selected: only the draft belonged to the profile.
             assert_eq!(view.selected_key, Some(0));
