@@ -6,6 +6,7 @@
 //! in [`hook`]; the button state machine remains an internal implementation.
 
 mod button;
+pub(crate) use button::{ButtonRuntimeEvent, ButtonRuntimeOwner};
 pub mod hook;
 mod pointer;
 pub mod scroll;
@@ -18,9 +19,7 @@ use std::time::{Duration, Instant};
 use openlogi_core::binding::{Action, Binding, ButtonId};
 use tracing::{debug, info, warn};
 
-use self::button::{
-    ButtonInputHandle, ButtonRuntimeEvent, ButtonRuntimeOwner, EndReason, PressControl,
-};
+use self::button::{ButtonInputHandle, EndReason, PressControl};
 pub(crate) use self::button::{HidppSessionId, PressToken};
 pub(crate) use self::pointer::{FocusBinding, PointerPress, PointerSelection};
 use crate::dpi::DpiBeforeShift;
@@ -118,7 +117,7 @@ impl ActionDispatchTarget {
         Self::for_pointer(None, openlogi_hook::frontmost_safari_pid)
     }
 
-    fn for_pointer(
+    pub(crate) fn for_pointer(
         press: Option<PointerPress>,
         capture_safari_pid: impl FnOnce() -> Option<i32>,
     ) -> Self {
@@ -745,6 +744,7 @@ impl ButtonEventHandler {
         if (action.held_chord().is_some() || action.held_modifier().is_some())
             && target.resolve(action).is_none()
         {
+            self.held.end(press);
             return;
         }
         if matches!(action, Action::DpiShift) {
@@ -752,6 +752,7 @@ impl ButtonEventHandler {
             return;
         }
         if !self.held.start(press, action) {
+            self.held.end(press);
             self.executor.dispatch_to(action, device_key, target);
         }
     }
@@ -872,8 +873,14 @@ impl ActionDispatcher {
     }
 
     /// Execute a semantic gesture action only if its exact press is still live.
-    pub(crate) fn try_dispatch_while_pressed(&self, press: &PressToken, action: &Action) -> bool {
-        self.buttons.try_trigger_while_pressed(press, action)
+    pub(crate) fn try_dispatch_while_pressed(
+        &self,
+        press: &PressToken,
+        action: &Action,
+        target: ActionDispatchTarget,
+    ) -> bool {
+        self.buttons
+            .try_trigger_while_pressed(press, action, target)
     }
 
     /// Record that the wheel moved while `press` was down, so a wheel-hold
@@ -886,6 +893,11 @@ impl ActionDispatcher {
     /// over the thread-local gesture accumulator.
     fn cancel_stale_hook_press(&self, press: &PressToken) {
         self.buttons.cancel_stale_press(press);
+    }
+
+    pub(crate) fn cancel_gesture_press(&self, press: &PressToken) {
+        self.buttons
+            .cancel_press(press, button::CancelReason::Invalidated);
     }
 
     /// Cancel every active press owned by the current OS-hook callback thread.
@@ -1049,6 +1061,38 @@ fn dispatch_browser_navigation(
             unreachable!("pointer targets resolve before navigation")
         }
     }
+}
+
+#[cfg(test)]
+pub(crate) fn test_dispatcher() -> (
+    ActionDispatcher,
+    button::ButtonRuntimeOwner,
+    std::sync::mpsc::Receiver<button::ButtonRuntimeEvent>,
+) {
+    let (events, received) = std::sync::mpsc::channel();
+    let owner = button::ButtonRuntimeOwner::spawn(move |event| {
+        events
+            .send(event)
+            .expect("test receiver should stay connected");
+    })
+    .expect("button worker should start");
+    let (action_ring, _ring_events) = tokio::sync::mpsc::unbounded_channel();
+    let dispatcher = ActionDispatcher {
+        executor: ActionExecutor {
+            dpi_cycle: Arc::new(RwLock::new(crate::DpiCycles::default())),
+            pointer_speeds: Arc::default(),
+            access: crate::hardware::DeviceAccess {
+                channel: Arc::new(RwLock::new(None)),
+                registry: openlogi_hid::ChannelRegistry::default(),
+                receiver_access: crate::receiver_access::ReceiverAccess::default(),
+                device_io: openlogi_hid::device_io_channel().1,
+                transport_turns: crate::hardware::TransportTurns::default(),
+            },
+            requests: action_ring,
+        },
+        buttons: owner.input(),
+    };
+    (dispatcher, owner, received)
 }
 
 #[cfg(test)]

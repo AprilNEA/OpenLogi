@@ -28,12 +28,13 @@ mod arm;
 pub(super) mod main_wheel;
 mod spy;
 
+use std::collections::BTreeMap;
 use std::num::NonZeroU8;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use hidpp::feature::hires_wheel::{self, HiResWheelEvent};
 use hidpp::protocol::v20;
-use openlogi_core::binding::{ButtonId, GestureDirection};
+use openlogi_core::binding::{ButtonId, GestureDirection, GesturePolicy};
 use tokio::sync::mpsc;
 use tracing::{debug, info};
 
@@ -42,7 +43,7 @@ use crate::channel::route::DeviceRoute;
 
 pub use super::capture::CaptureHost;
 use super::capture::{ArmedCapture, Liveness, ReportingChangeStream, run_capture};
-use accum::CaptureAccum;
+use accum::{CaptureAccum, CaptureRoutes};
 pub(crate) use arm::enumerate_controls;
 use arm::{ArmedControls, ArmedThumb, ArmedThumbwheel, arm_controls};
 pub use main_wheel::MainWheelDivert;
@@ -179,6 +180,8 @@ pub const GESTURE_SOURCE_BUTTONS: [(u16, ButtonId); 3] = [
 /// Which of one device's controls a capture session should divert.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CaptureSpec {
+    /// Effective runtime response policies for the armed gesture buttons.
+    pub gesture_policies: BTreeMap<ButtonId, GesturePolicy>,
     /// Divert the thumb wheel over `0x2150`, or Gestures2 gesture 46 on a
     /// device without it (rotation rebind / sensitivity / click bound).
     pub capture_thumbwheel: bool,
@@ -246,7 +249,12 @@ pub async fn run_capture_session(
     {
         let _ = host.sink.send(CapturedInput::HostModeEntered);
     }
-    Ok(run_capture(shared, GestureCapture::new(armed), host).await)
+    Ok(run_capture(
+        shared,
+        GestureCapture::new(armed, spec.gesture_policies),
+        host,
+    )
+    .await)
 }
 
 /// Gesture capture as [`run_capture`] drives it: the armed controls, and the
@@ -263,10 +271,10 @@ struct GestureCapture {
 }
 
 impl GestureCapture {
-    fn new(armed: ArmedControls) -> Self {
+    fn new(armed: ArmedControls, policies: BTreeMap<ButtonId, GesturePolicy>) -> Self {
         Self {
             armed,
-            accum: Arc::default(),
+            accum: Arc::new(Mutex::new(CaptureAccum::with_policies(policies))),
             thumb_status: Arc::new(Mutex::new(RotationStatus::Inactive)),
             spy_edges: Arc::default(),
         }
@@ -353,10 +361,12 @@ impl ArmedCapture for GestureCapture {
                 let mut acc = accum.lock().unwrap_or_else(PoisonError::into_inner);
                 acc.on_event(
                     event,
-                    &gesture_cids,
-                    &dpi_set,
-                    &gesture_button_set,
-                    &button_set,
+                    CaptureRoutes {
+                        gestures: &gesture_cids,
+                        dpi: &dpi_set,
+                        gesture_buttons: &gesture_button_set,
+                        buttons: &button_set,
+                    },
                     &sink,
                 );
                 return;
@@ -409,7 +419,10 @@ impl ArmedCapture for GestureCapture {
     }
 
     fn reset_input_state(&self) {
-        *self.accum.lock().unwrap_or_else(PoisonError::into_inner) = CaptureAccum::default();
+        self.accum
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .reset_input_state();
         // A power cycle ends any roll in progress; carrying it over would
         // swallow the first tap after the reconnect.
         *self

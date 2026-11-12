@@ -307,8 +307,8 @@ fn stale_token_cannot_trigger_after_same_key_repress() {
         ButtonRuntimeEvent::Started(_)
     ));
 
-    assert!(input.try_trigger_while_pressed(&old, &Action::Copy));
-    assert!(input.try_trigger_while_pressed(&new, &Action::Paste));
+    assert!(input.try_trigger_while_pressed(&old, &Action::Copy, ActionDispatchTarget::Keyboard));
+    assert!(input.try_trigger_while_pressed(&new, &Action::Paste, ActionDispatchTarget::Keyboard));
     let ButtonRuntimeEvent::Triggered { press, action } = recv_event(&received) else {
         panic!("only the replacement token should trigger");
     };
@@ -328,7 +328,11 @@ fn hook_actions_retain_the_press_time_target_across_focus_changes() {
     let input = owner.input();
     let target = ActionDispatchTarget::SafariProcess(417);
     let token = input
-        .try_hook_down_with_target(ButtonId::Back, None, target)
+        .try_hook_down_with_target(
+            ButtonId::Back,
+            Some(&Binding::Single(Action::BrowserBack)),
+            target,
+        )
         .expect("Safari down should be queued");
     let ButtonRuntimeEvent::Started(started) = recv_event(&received) else {
         panic!("down should start the press lifecycle");
@@ -346,7 +350,11 @@ fn hook_actions_retain_the_press_time_target_across_focus_changes() {
         })
     ));
 
-    assert!(input.try_trigger_while_pressed(&token, &Action::BrowserBack));
+    assert!(input.try_trigger_while_pressed(
+        &token,
+        &Action::BrowserBack,
+        ActionDispatchTarget::Keyboard
+    ));
     let ButtonRuntimeEvent::Triggered { press, action } = recv_event(&received) else {
         panic!("queued browser action should retain its originating press");
     };
@@ -488,7 +496,11 @@ fn pointer_change_retargets_a_gesture_hold_instead_of_canceling_it() {
     ));
     // The first swipe switched desktops, changing the hovered window (#1634).
     input.cancel_pointer_except(current);
-    assert!(input.try_trigger_while_pressed(&hold, &Action::Copy));
+    assert!(input.try_trigger_while_pressed(
+        &hold,
+        &Action::Copy,
+        ActionDispatchTarget::for_pointer(Some(PointerPress::distinct(current)), || None)
+    ));
     let ButtonRuntimeEvent::Triggered { press, .. } = recv_event(&received) else {
         panic!("the hold must survive the pointer change and keep triggering");
     };
@@ -520,7 +532,7 @@ fn source_cancellation_invalidates_queued_gesture_work() {
     ));
 
     input.cancel_hidpp_session(&session);
-    assert!(input.try_trigger_while_pressed(&token, &Action::Copy));
+    assert!(input.try_trigger_while_pressed(&token, &Action::Copy, ActionDispatchTarget::Keyboard));
     let sentinel = input
         .try_hook_down(ButtonId::Forward, None)
         .expect("sentinel down should be queued");
@@ -584,8 +596,11 @@ fn invalidation_rejects_old_tokens_and_cancels_active_presses() {
     ));
 
     input.invalidate_all();
-    assert!(!input.try_trigger_while_pressed(&token, &Action::Copy));
-    // The dispatcher posts a held-wheel scroll only for an accepted token.
+    assert!(!input.try_trigger_while_pressed(
+        &token,
+        &Action::Copy,
+        ActionDispatchTarget::Keyboard
+    ));
     assert!(!input.try_wheel_while_pressed(&token));
     assert!(matches!(
         recv_event(&received),
@@ -1495,5 +1510,50 @@ fn a_press_says_whether_the_os_hook_captured_it() {
 
     assert!(hook.captured_by_os_hook());
     assert!(!hidpp.captured_by_os_hook());
+    assert!(owner.shutdown());
+}
+
+#[test]
+fn focused_gesture_semantics_refresh_target_without_changing_physical_token() {
+    let (sent, received) = mpsc::channel();
+    let mut owner = ButtonRuntimeOwner::spawn(move |event| sent.send(event).expect("receiver"))
+        .expect("worker");
+    let input = owner.input();
+    let original = ActionDispatchTarget::SafariProcess(417);
+    let token = input
+        .try_hook_down_with_target(ButtonId::Back, None, original)
+        .expect("down");
+    let ButtonRuntimeEvent::Started(started) = recv_event(&received) else {
+        panic!("started")
+    };
+    assert_eq!(started.target(), original);
+    for safari in [None, Some(512)] {
+        let fresh = ActionDispatchTarget::for_pointer(None, || safari);
+        assert!(input.try_trigger_while_pressed(&token, &Action::VolumeUp, fresh));
+        let ButtonRuntimeEvent::Triggered { press, action } = recv_event(&received) else {
+            panic!("triggered")
+        };
+        assert_eq!(press.token(), &token);
+        assert_eq!(press.target(), fresh);
+        assert_eq!(
+            press.target().resolve_with(
+                &action,
+                || panic!("focused path has no pointer"),
+                |_| false,
+                || None
+            ),
+            Some(fresh)
+        );
+    }
+    assert!(input.try_hook_up(ButtonId::Back));
+    let ButtonRuntimeEvent::Ended { press, .. } = recv_event(&received) else {
+        panic!("ended")
+    };
+    assert_eq!(press.token(), &token);
+    assert_eq!(
+        press.target(),
+        original,
+        "physical lifecycle retains its initial context"
+    );
     assert!(owner.shutdown());
 }
