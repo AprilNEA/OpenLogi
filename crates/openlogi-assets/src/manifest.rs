@@ -40,9 +40,15 @@ use crate::error::AssetError;
 use crate::http;
 
 /// Top-level `manifest.json` document.
+///
+/// Supports both the multi-variant `{"devices": [...]}` schema and the
+/// single-depot flat `{"resources": [...]}` schema (as seen in the K380 depot).
 #[derive(Debug, Deserialize)]
 pub struct DepotManifest {
+    #[serde(default)]
     pub devices: Vec<ManifestDevice>,
+    #[serde(default)]
+    pub resources: Vec<ManifestResource>,
 }
 
 /// One device variant — base model or a colour SKU.
@@ -86,6 +92,12 @@ impl DepotManifest {
             .find(|d| d.model_id.eq_ignore_ascii_case(model_id))
             .and_then(|d| d.resources.iter().find(|r| r.key == resource_key))
             .map(|r| r.src.as_str())
+            .or_else(|| {
+                self.resources
+                    .iter()
+                    .find(|r| r.key == resource_key)
+                    .map(|r| r.src.as_str())
+            })
     }
 
     /// Resolve `resource_key`'s `src` filename for the colour variant
@@ -119,5 +131,61 @@ pub fn variant_model_id(base: &str, ext: u8) -> String {
         base.to_string()
     } else {
         format!("{base}_ext{ext}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_multi_variant_manifest() {
+        let json = r#"{
+            "devices": [
+                {
+                    "modelId": "2b042",
+                    "resources": [
+                        { "key": "device_image", "src": "front_core.png" }
+                    ]
+                },
+                {
+                    "modelId": "2b042_ext1",
+                    "resources": [
+                        { "key": "device_image", "src": "front_ext1.png" }
+                    ]
+                }
+            ]
+        }"#;
+
+        let manifest: DepotManifest = serde_json::from_str(json).unwrap();
+        assert_eq!(manifest.device_image_for("2b042"), Some("front_core.png"));
+        assert_eq!(
+            manifest.resource_for_variant("2b042", 1, "device_image"),
+            Some("front_ext1.png")
+        );
+        assert_eq!(manifest.device_image_for("unknown"), None);
+    }
+
+    #[test]
+    fn parses_flat_resources_manifest() {
+        let json = r#"{
+            "resources": [
+                { "key": "manifest", "src": "manifest.json" },
+                { "key": "device_image", "src": "front.png" },
+                { "key": "image_metadata", "src": "metadata.json" }
+            ]
+        }"#;
+
+        let manifest: DepotManifest = serde_json::from_str(json).unwrap();
+        assert_eq!(manifest.device_image_for("1b342"), Some("front.png"));
+        assert_eq!(
+            manifest.resource_for_variant("1b342", 0, "device_image"),
+            Some("front.png")
+        );
+        assert_eq!(
+            manifest.resource_for_variant("1b342", 0, "image_metadata"),
+            Some("metadata.json")
+        );
+        assert_eq!(manifest.resource_for("any_id", "non_existent"), None);
     }
 }
