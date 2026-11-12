@@ -10,7 +10,7 @@ use openlogi_core::hid::DeviceRoute;
 pub struct Observation {
     /// Canonical GUI target when online or identified; otherwise a resolved or runtime key.
     pub key: String,
-    /// Stable physical identity for warning persistence, absent for anonymous devices.
+    /// Unit ID, or serial when no unit ID exists, for durable warning episodes.
     pub history_key: Option<String>,
     /// Route and model evidence for a connection session, never persisted.
     pub session_key: String,
@@ -34,8 +34,12 @@ pub(super) fn observations(config: &Config, inventories: &[DeviceInventory]) -> 
             let unit = model.map_or([0; 4], |model| model.unit_id);
             let identity = DeviceIdentity::from_parts(serial, unit);
             let stable = DeviceStableId::from_parts(route.as_ref(), paired.slot, serial, unit);
-            // A receiver slot identifies a route, not the device paired there.
-            let history_key = identity.config_key();
+            // Unit ID arrives with mandatory device info; serial is optional and
+            // can recover later. Enrichment must not start a new warning episode.
+            // A receiver slot never identifies the device paired there.
+            let history_key = DeviceIdentity::Unit(unit)
+                .config_key()
+                .or_else(|| identity.config_key());
             // A direct device's runtime key gains its identity after probing;
             // its connection session must survive that transition.
             let session_key = format!("{}:{:?}", stable.route_key(), paired.wpid);
@@ -154,6 +158,36 @@ mod tests {
                 capabilities: None,
                 settings_revision: 0,
             }],
+        }
+    }
+
+    #[test]
+    fn serial_enrichment_preserves_the_warning_episode_identity() {
+        for (product, slot) in [(0xc548, 1), (0xc52b, 1), (0xb369, 0xff), (0xc343, 0xff)] {
+            let mut before = inventory(product, slot, [1, 2, 3, 4]);
+            before.paired[0].battery.as_mut().unwrap().percentage = Some(8);
+            let mut enriched = before.clone();
+            enriched.paired[0]
+                .model_info
+                .as_mut()
+                .unwrap()
+                .serial_number = Some("ABC".into());
+            let initial = observations(&Config::default(), &[before.clone()]).remove(0);
+            let after = observations(&Config::default(), &[enriched.clone()]).remove(0);
+            assert_eq!(initial.history_key.as_deref(), Some("unit:01020304"));
+            assert_eq!(after.history_key, initial.history_key);
+            assert_eq!(
+                after.key, "serial:abc",
+                "GUI navigation still uses its canonical identity"
+            );
+            assert_eq!(
+                observations(&Config::default(), &[before, enriched.clone()]).len(),
+                1
+            );
+
+            enriched.paired[0].model_info.as_mut().unwrap().unit_id = [0; 4];
+            let serial_only = observations(&Config::default(), &[enriched]).remove(0);
+            assert_eq!(serial_only.history_key.as_deref(), Some("serial:abc"));
         }
     }
 
