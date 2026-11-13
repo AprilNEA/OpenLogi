@@ -16,7 +16,21 @@ use crate::backend::HidBackend;
 use crate::channel::route::DeviceRoute;
 
 use super::dpi::{Dpi, get_dpi_info_on_channel};
+use super::unit_id::unit_id;
 use super::{HidppOperation, WriteError, classify_hidpp_error, open_feature, with_route};
+
+/// A startup-DPI write bound to one physical mouse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OnboardDefaultDpi {
+    /// The `0x0003` unit ID of the mouse the caller chose. The write refuses
+    /// any other device on the route: a receiver slot re-paired after the
+    /// choice holds a different mouse, whose flash this must not touch.
+    pub unit: [u8; 4],
+    /// The onboard profile to write.
+    pub profile: ProfileIndex,
+    /// Its new startup DPI.
+    pub dpi: Dpi,
+}
 
 /// The startup DPI of one onboard profile, before and after a write.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,22 +44,25 @@ pub struct OnboardDefaultDpiChange {
     pub after: Dpi,
 }
 
-/// Make `dpi` the startup DPI of onboard `profile` on the mouse `route`
-/// reaches: the DPI it runs at in onboard mode, before any host takes over.
+/// Make `write.dpi` the startup DPI of onboard `write.profile` on the mouse
+/// `route` reaches: the DPI it runs at in onboard mode, before any host takes
+/// over.
 ///
-/// `dpi` must be a value the sensor reports as supported. The profile's
-/// other DPI slots, buttons and lighting are kept. Nothing is written when
-/// the profile already starts at `dpi`. The sector is read back after the
-/// write, and an active profile is re-selected so the mouse loads the change.
+/// Before anything else the mouse must report `write.unit` as its `0x0003`
+/// unit ID; another device, or one without the feature, is
+/// [`WriteError::DeviceNotFound`]. `write.dpi` must be a value the sensor
+/// reports as supported. The profile's other DPI slots, buttons and lighting
+/// are kept. Nothing is written when the profile already starts at the DPI.
+/// The sector is read back after the write, and an active profile is
+/// re-selected so the mouse loads the change.
 pub async fn set_onboard_default_dpi(
     backend: &dyn HidBackend,
     route: &DeviceRoute,
-    profile: ProfileIndex,
-    dpi: Dpi,
+    write: OnboardDefaultDpi,
 ) -> Result<OnboardDefaultDpiChange, WriteError> {
     let index = route.device_index();
     with_route(backend, route, move |channel| async move {
-        set_onboard_default_dpi_on_channel(&channel, index, profile, dpi).await
+        set_onboard_default_dpi_on_channel(&channel, index, write).await
     })
     .await
 }
@@ -53,17 +70,24 @@ pub async fn set_onboard_default_dpi(
 async fn set_onboard_default_dpi_on_channel(
     channel: &Arc<HidppChannel>,
     index: u8,
-    profile: ProfileIndex,
-    dpi: Dpi,
+    OnboardDefaultDpi { unit, profile, dpi }: OnboardDefaultDpi,
 ) -> Result<OnboardDefaultDpiChange, WriteError> {
+    let mut device = Device::new(Arc::clone(channel), index)
+        .await
+        .map_err(|_| WriteError::DeviceUnreachable { index })?;
+    if unit_id(&mut device, HidppOperation::WriteOnboard).await? != Some(unit) {
+        debug!(
+            index,
+            "another device answers on the route; not writing onboard memory"
+        );
+        return Err(WriteError::DeviceNotFound);
+    }
+
     let capabilities = get_dpi_info_on_channel(channel, index).await?.capabilities;
     let target = NonZeroU16::new(dpi.into_inner())
         .filter(|_| capabilities.contains(dpi))
         .ok_or(WriteError::DpiUnsupported { requested: dpi })?;
 
-    let mut device = Device::new(Arc::clone(channel), index)
-        .await
-        .map_err(|_| WriteError::DeviceUnreachable { index })?;
     let onboard = open_feature::<OnboardProfilesFeature>(&mut device).await?;
     let read_err = |e| classify_hidpp_error(e, HidppOperation::ReadOnboard, 0x8100);
     let write_err = |e| classify_hidpp_error(e, HidppOperation::WriteOnboard, 0x8100);
@@ -180,3 +204,6 @@ async fn get_onboard_on_channel(
         profiles,
     })
 }
+
+#[cfg(test)]
+mod tests;

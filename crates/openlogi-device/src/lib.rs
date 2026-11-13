@@ -81,7 +81,7 @@ pub use write::{
     HidppFeatureErrorKind, HidppOperation, HostConnection, HostOs, HostOsInfo, HostOsKind,
     KeyDisplay, KeyImageJpeg, LITRA_BEAM_PRODUCT_ID, LITRA_GLOW_PRODUCT_ID, LightChange,
     LightCommand, LightControls, LightWatch, LightingMethod, LitraDescriptor, LitraModel,
-    OnboardDefaultDpiChange, OsLayoutOutcome, OsMask, OsVersion, PointerSpeed,
+    OnboardDefaultDpi, OnboardDefaultDpiChange, OsLayoutOutcome, OsMask, OsVersion, PointerSpeed,
     RAW_BATTERY_FEATURES, RAW_FEATURE_PARAMS, RawFeatureAnswers, RawFeatureCall, RawFeatureReply,
     ReportRate, ReportRateInfo, ReprogControlEntry, ScrollReportingTarget, ScrollResolution,
     ScrollWheelMode, SidetoneLevel, WriteError, apply_litra, commands_for_light_settings,

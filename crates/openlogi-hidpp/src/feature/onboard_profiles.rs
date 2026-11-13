@@ -522,21 +522,13 @@ mod tests {
         assert!(changed[1..].iter().all(|&i| i >= before.len() - CRC_LEN));
     }
 
-    // Profile 1 as read from a PRO X SUPERLIGHT (format 4, 255-byte sectors):
-    // slots 400/800/1600/3200/4950, starting in slot 4.
-    const SUPERLIGHT_PROFILE: &str = concat!(
-        "010400900120034006800c5613ffffffff00ffffffffffffffffffffffffffff",
-        "8001000180010002800100048001000880010010ffffffffffffffffffffffff",
-        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-        "8001000180010002800100048001000880010010ffffffffffffffffffffffff",
-        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-        "500052004f00460049004c0045005f004e0041004d0045005f00440045004600",
-        "410055004c00540000000000000000000000000000001f400000000000000000",
-        "001f40000000ffffffffffffffffffffffffffffffffffffffffffffffe576",
-    );
+    /// Profile 1 as read from a PRO X SUPERLIGHT (format 4, 255-byte sectors):
+    /// slots 400/800/1600/3200/4950, starting in slot 4. The device layer's
+    /// scripted mouse serves the same file.
+    const SUPERLIGHT_PROFILE: &[u8] = include_bytes!("onboard_profiles/superlight_profile_1.bin");
     #[test]
     fn rewrites_a_superlight_profile_the_way_its_flash_stored_it() {
-        let bytes = hex::decode(SUPERLIGHT_PROFILE).unwrap();
+        let bytes = SUPERLIGHT_PROFILE.to_vec();
         let mut sector = ProfileSector::from_bytes(1, bytes.clone()).unwrap();
         assert_eq!(sector.default_dpi(), Some(dpi(4950)));
         sector.set_default_dpi(dpi(1200));

@@ -9,11 +9,9 @@ use std::io::Write as _;
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
-use openlogi_core::single_instance::{self, Role};
 use openlogi_hid::{RAW_FEATURE_PARAMS, RawFeatureCall, RawFeatureReply};
-use openlogi_ipc::client::ConnectError;
 
-use crate::cmd::diag::select_device;
+use crate::cmd::diag::{exclude_agent, select_device};
 
 #[derive(Debug, Args)]
 pub struct HidppArgs {
@@ -34,19 +32,9 @@ pub struct HidppArgs {
 }
 
 pub async fn run(args: HidppArgs) -> Result<()> {
-    // The agent holds the device's channel and may write to it at any time.
-    // It takes this lock before any HID I/O, so holding it to the end keeps
-    // one from starting while a prompt waits; the endpoint check catches an
-    // agent that is already up.
-    let _agent_lock = single_instance::acquire(Role::Agent).context(
-        "could not take the agent's instance lock; quit the OpenLogi agent, then run this again",
-    )?;
-    if !matches!(
-        crate::agent::connect().await,
-        Err(ConnectError::Endpoint(_))
-    ) {
-        bail!("the OpenLogi agent is running; quit it, then run this again");
-    }
+    // A call can write, and an interactive session can wait at a prompt, so
+    // the agent stays excluded until the command exits.
+    let _agent_lock = exclude_agent().await?;
     let (route, name) = select_device(args.device.as_deref(), &[args.feature]).await?;
     println!("device: {name} ({route})");
 
