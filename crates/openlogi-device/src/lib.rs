@@ -108,6 +108,15 @@ pub use write::{
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
 pub mod test_support {
+    /// Inject an already-decoded HID++ event through the production notifier and
+    /// bounded queue. This does not bypass coalescing or the worker's settle drain.
+    pub fn notify_inventory_event(
+        notifier: &crate::inventory::events::EventNotifier,
+        source: crate::inventory::events::HidppEventSource,
+    ) {
+        notifier.notify(source);
+    }
+
     pub use crate::channel::scripted::{publish_scripted_channel, scripted_shared_channel};
     pub use crate::replay::ReplayChannelHandle as ScriptedRawHidHandle;
 }

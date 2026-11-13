@@ -193,6 +193,56 @@ impl LockKeyUpdate {
 /// them, so only a stalled indicator fills it.
 const LOCK_KEY_QUEUE: usize = 8;
 
+/// One owner for the pending request and its derived capacity-one wake token.
+struct ReconcileQueue {
+    state: ReconcileQueueState,
+    // The receiver must not keep the sending half alive.
+    wake: mpsc::WeakSender<()>,
+}
+
+#[derive(Clone, Copy)]
+enum ReconcileQueueState {
+    Idle,
+    Pending(HidppEventSource),
+}
+
+enum ReconcileTransition {
+    Request(HidppEventSource),
+    Take,
+}
+
+impl ReconcileQueue {
+    /// Called under the shared lock, including wake publication. Only Idle ->
+    /// Pending emits a token; upgrades cannot queue a second one. Receiving a
+    /// token and taking its request have no intervening await/cancellation point.
+    fn transition(&mut self, transition: ReconcileTransition) -> Option<HidppEventSource> {
+        use HidppEventSource::{ReceiverConnection, WirelessDeviceStatus};
+        use ReconcileQueueState::{Idle, Pending};
+        match (self.state, transition) {
+            (Idle, ReconcileTransition::Request(source)) => {
+                self.state = Pending(source);
+                if let Some(wake) = self.wake.upgrade() {
+                    let _ = wake.try_send(());
+                }
+                None
+            }
+            (Pending(previous), ReconcileTransition::Request(source)) => {
+                self.state = Pending(match (previous, source) {
+                    (ReceiverConnection, _) | (_, ReceiverConnection) => ReceiverConnection,
+                    (WirelessDeviceStatus, _) | (_, WirelessDeviceStatus) => WirelessDeviceStatus,
+                    _ => previous,
+                });
+                None
+            }
+            (Pending(source), ReconcileTransition::Take) => {
+                self.state = Idle;
+                Some(source)
+            }
+            (Idle, ReconcileTransition::Take) => None,
+        }
+    }
+}
+
 /// The sending half of the HID++ notification channels.
 ///
 /// Clones are installed only on inventory-owned channels. Reconciliation
@@ -205,8 +255,8 @@ const LOCK_KEY_QUEUE: usize = 8;
 /// both reported.
 #[derive(Clone)]
 pub struct EventNotifier {
-    sender: mpsc::Sender<()>,
-    pending: Arc<Mutex<Option<HidppEventSource>>>,
+    _sender: mpsc::Sender<()>,
+    queue: Arc<Mutex<ReconcileQueue>>,
     backlight: watch::Sender<Option<BacklightUpdate>>,
     lock_keys: mpsc::Sender<LockKeyUpdate>,
     #[cfg(test)]
@@ -214,23 +264,11 @@ pub struct EventNotifier {
 }
 
 impl EventNotifier {
-    fn notify(&self, source: HidppEventSource) {
-        let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
-        match *pending {
-            None => {
-                *pending = Some(source);
-                let _ = self.sender.try_send(());
-            }
-            Some(previous) => {
-                use HidppEventSource::{ReceiverConnection, WirelessDeviceStatus};
-                *pending = Some(match (previous, source) {
-                    (ReceiverConnection, _) | (_, ReceiverConnection) => ReceiverConnection,
-                    (WirelessDeviceStatus, _) | (_, WirelessDeviceStatus) => WirelessDeviceStatus,
-                    _ => previous,
-                });
-            }
-        }
-        drop(pending);
+    pub(crate) fn notify(&self, source: HidppEventSource) {
+        self.queue
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .transition(ReconcileTransition::Request(source));
         #[cfg(test)]
         if let Some(observation) = &self.observation {
             observation.count.fetch_add(1, Ordering::Release);
@@ -253,7 +291,7 @@ impl EventNotifier {
 /// backlight reading and the lock-key updates.
 pub struct EventReceiver {
     lifecycle: mpsc::Receiver<()>,
-    pending: Arc<Mutex<Option<HidppEventSource>>>,
+    queue: Arc<Mutex<ReconcileQueue>>,
     backlight: watch::Receiver<Option<BacklightUpdate>>,
     lock_keys: Option<mpsc::Receiver<LockKeyUpdate>>,
 }
@@ -262,10 +300,10 @@ impl EventReceiver {
     /// Receive the next reconciliation request.
     pub async fn recv(&mut self) -> Option<HidppEventSource> {
         self.lifecycle.recv().await?;
-        self.pending
+        self.queue
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .take()
+            .transition(ReconcileTransition::Take)
     }
 
     /// Receive a queued reconciliation request without waiting.
@@ -276,10 +314,10 @@ impl EventReceiver {
     /// [`mpsc::error::TryRecvError::Disconnected`] once every notifier is gone.
     pub fn try_recv(&mut self) -> Result<HidppEventSource, mpsc::error::TryRecvError> {
         self.lifecycle.try_recv()?;
-        self.pending
+        self.queue
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .take()
+            .transition(ReconcileTransition::Take)
             .ok_or(mpsc::error::TryRecvError::Empty)
     }
 
@@ -301,13 +339,16 @@ impl EventReceiver {
 #[must_use]
 pub fn event_channel() -> (EventNotifier, EventReceiver) {
     let (sender, receiver) = mpsc::channel(1);
-    let pending = Arc::new(Mutex::new(None));
+    let queue = Arc::new(Mutex::new(ReconcileQueue {
+        state: ReconcileQueueState::Idle,
+        wake: sender.downgrade(),
+    }));
     let (backlight, backlight_receiver) = watch::channel(None);
     let (lock_keys, lock_key_receiver) = mpsc::channel(LOCK_KEY_QUEUE);
     (
         EventNotifier {
-            sender,
-            pending: Arc::clone(&pending),
+            _sender: sender,
+            queue: Arc::clone(&queue),
             backlight,
             lock_keys,
             #[cfg(test)]
@@ -315,7 +356,7 @@ pub fn event_channel() -> (EventNotifier, EventReceiver) {
         },
         EventReceiver {
             lifecycle: receiver,
-            pending,
+            queue,
             backlight: backlight_receiver,
             lock_keys: Some(lock_key_receiver),
         },
@@ -350,30 +391,13 @@ impl EventObserver {
 /// Build the production capacity-one event channel plus a decode observation barrier.
 #[cfg(test)]
 pub(crate) fn observed_event_channel() -> (EventNotifier, EventReceiver, EventObserver) {
-    let (sender, receiver) = mpsc::channel(1);
-    let pending = Arc::new(Mutex::new(None));
-    let (backlight, backlight_receiver) = watch::channel(None);
-    let (lock_keys, lock_key_receiver) = mpsc::channel(LOCK_KEY_QUEUE);
+    let (mut notifier, receiver) = event_channel();
     let observation = Arc::new(EventObservation {
         count: AtomicUsize::new(0),
         changed: Notify::new(),
     });
-    (
-        EventNotifier {
-            sender,
-            pending: Arc::clone(&pending),
-            backlight,
-            lock_keys,
-            observation: Some(Arc::clone(&observation)),
-        },
-        EventReceiver {
-            lifecycle: receiver,
-            pending,
-            backlight: backlight_receiver,
-            lock_keys: Some(lock_key_receiver),
-        },
-        EventObserver { observation },
-    )
+    notifier.observation = Some(Arc::clone(&observation));
+    (notifier, receiver, EventObserver { observation })
 }
 
 /// Runtime feature indexes whose unsolicited events affect inventory.
@@ -1868,6 +1892,43 @@ mod tests {
         // 0x8060 has no broadcast.
         assert_eq!(state.decode(report(4, 0, 0), false), None);
         assert_eq!(handle.settings_revision(1), 1);
+    }
+
+    #[tokio::test]
+    async fn queue_transitions_refuse_idle_takes_and_duplicate_wakes() {
+        let (notifier, mut receiver) = event_channel();
+        assert_eq!(
+            notifier
+                .queue
+                .lock()
+                .unwrap()
+                .transition(ReconcileTransition::Take),
+            None
+        );
+        assert!(receiver.lifecycle.is_empty());
+        notifier.notify(HidppEventSource::UnifiedBattery);
+        notifier.notify(HidppEventSource::ReceiverConnection);
+        assert_eq!(
+            receiver.lifecycle.len(),
+            1,
+            "an upgrade must not emit another token"
+        );
+        assert_eq!(
+            receiver.recv().await,
+            Some(HidppEventSource::ReceiverConnection)
+        );
+        assert_eq!(receiver.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+        notifier.notify(HidppEventSource::UnifiedBattery);
+        drop(notifier);
+        assert_eq!(
+            receiver.recv().await,
+            Some(HidppEventSource::UnifiedBattery)
+        );
+        assert_eq!(
+            receiver.recv().await,
+            None,
+            "the queue owner must not prevent closure"
+        );
     }
 
     #[test]

@@ -820,7 +820,7 @@ mod tests {
     }
 
     #[test]
-    fn reconnect_drained_during_battery_settle_is_retained() {
+    fn reconnect_reason_outlives_ordinary_battery_triggers() {
         let mut state = WatchState::default();
         state.observe_trigger(ReconcileTrigger::HidEvent(HidppEventSource::UnifiedBattery));
         state.observe_trigger(ReconcileTrigger::HidEvent(
