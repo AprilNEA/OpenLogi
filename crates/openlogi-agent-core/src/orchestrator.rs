@@ -1282,7 +1282,7 @@ impl Orchestrator {
             .live
             .due(keys.iter().map(|(id, key)| (id.clone(), key)), now);
         due.into_iter()
-            .map(|(id, source)| {
+            .map(|(id, source, ticket)| {
                 let battery = match &source {
                     LiveSource::Battery(device) => self
                         .devices
@@ -1293,6 +1293,7 @@ impl Orchestrator {
                 };
                 crate::live_keys::LiveRead {
                     id,
+                    ticket,
                     source,
                     battery,
                 }
@@ -1300,16 +1301,19 @@ impl Orchestrator {
             .collect()
     }
 
-    /// Take in read live values, end an active key whose time is up, and
-    /// repaint when anything shown changed.
-    pub fn set_live_values(
-        &mut self,
-        values: Vec<(crate::live_keys::LiveKeyId, crate::live_keys::LiveValue)>,
-        now: std::time::Instant,
-    ) {
-        let changed = self.live.set_values(values);
-        let expired = self.live.expire(now);
-        if changed || expired {
+    /// Take in one finished live-key read and repaint when what it shows
+    /// changed. A read the key's configuration has moved past is dropped.
+    pub fn set_live_value(&mut self, done: crate::live_keys::LiveReadDone) {
+        if self.live.set_value(done) {
+            self.publish_device_runtime();
+        }
+    }
+
+    /// End an active live key whose time is up at `now`, and repaint it
+    /// without its frame. Runs on every watcher tick, whatever reads are in
+    /// flight.
+    pub fn expire_live_keys(&mut self, now: std::time::Instant) {
+        if self.live.expire(now) {
             self.publish_device_runtime();
         }
     }
@@ -1372,11 +1376,17 @@ impl Orchestrator {
             .get(key)
             .map(|device| device.live_keys.clone())
             .unwrap_or_default();
+        let now = std::time::Instant::now();
+        // A key whose time is up loses its frame here, not only on the next
+        // watcher tick, and no longer takes the paging keys.
+        if self.live.expire(now) {
+            self.publish_device_runtime();
+        }
         if let crate::live_keys::Paging::Adjust(action) = self.live.paging(
             key,
             turn == PageTurn::Next,
             |slot| live_keys.get(slot).cloned(),
-            std::time::Instant::now(),
+            now,
         ) {
             return action;
         }
