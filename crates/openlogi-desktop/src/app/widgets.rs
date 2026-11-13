@@ -58,8 +58,7 @@ impl RenderOnce for FlowButton {
         let readiness = AppState::try_read(cx).map(AppState::flow_readiness);
         let status = readiness
             .as_ref()
-            .map(crate::windows::flow::status_label)
-            .unwrap_or_default();
+            .map_or_else(Default::default, crate::windows::flow::status_label);
         let color = readiness
             .as_ref()
             .and_then(|readiness| crate::windows::flow::health_color(readiness.health));

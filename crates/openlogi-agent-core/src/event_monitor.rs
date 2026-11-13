@@ -113,8 +113,7 @@ impl EventMonitor {
             .store(MonitorState::Polled as u8, Ordering::Release);
         self.buf
             .lock()
-            .map(|mut buf| buf.drain(..).collect())
-            .unwrap_or_default()
+            .map_or_else(|_| Vec::new(), |mut buf| buf.drain(..).collect())
     }
 
     fn idle_tick(&self) {

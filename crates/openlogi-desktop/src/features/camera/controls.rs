@@ -578,9 +578,8 @@ impl CameraControlsPanel {
         let (Some(key), Some(uid)) = (self.key.clone(), self.uid.clone()) else {
             return;
         };
-        let custom = AppState::try_read(cx)
-            .map(|s| s.camera_profiles(&key))
-            .unwrap_or_default();
+        let custom =
+            AppState::try_read(cx).map_or_else(Default::default, |s| s.camera_profiles(&key));
 
         // Auto targets: built-ins engage every auto mode except Default, which
         // restores the device's own default states; customs use their snapshot

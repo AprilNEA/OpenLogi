@@ -134,9 +134,7 @@ fn temperature_native(range: LightValueRange, settings: LightSettings) -> u16 {
 impl Render for LightPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pal = theme::palette(cx);
-        let settings = AppState::try_read(cx)
-            .map(AppState::light)
-            .unwrap_or_default();
+        let settings = AppState::try_read(cx).map_or_else(Default::default, AppState::light);
         let record = AppState::try_read(cx)
             .and_then(AppState::current_record)
             .cloned();
