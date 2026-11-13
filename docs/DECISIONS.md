@@ -4,6 +4,36 @@ Durable "why we did it this way" records that are not obvious from the code.
 Add a dated entry when a non-obvious architectural or dependency decision is
 made or revisited.
 
+## 2026-11: The virtual HID keyboard reports Apple's vendor ID
+
+The virtual keyboard first set no vendor or product ID, so both read as 0.
+Built-in keyboards on the FIFO transport report the same: on a `Mac17,9`
+running macOS 27, `Apple Internal Keyboard / Trackpad` has `VendorID` 0 and
+`ProductID` 0. Karabiner-Elements identifies a device by these IDs. It gave
+both keyboards the identifiers `{"is_keyboard": true}`, listed them as one
+device, grabbed both, and applied the built-in keyboard's simple
+modifications to OpenLogi's keys. Its re-posted keys also come from
+Karabiner's own virtual keyboard, so the hook's product-name check no longer
+recognises them as OpenLogi's output. Older built-in keyboards on the SPI
+transport report Apple's vendor ID and a product ID, which is why the clash
+appears only on some Macs.
+
+- **Vendor ID `0x05AC`, product ID `0x4F4C`.** OpenLogi owns no USB vendor
+  ID. Karabiner-Elements' virtual keyboard reports Apple's (`0x05AC`, product
+  591), and OpenLogi follows that convention. Logitech's ID would make
+  `openlogi-hid` open the device as a HID++ candidate.
+- **A product ID no Apple keyboard driver claims.** `AppleHIDKeyboard.kext`
+  binds its keyboard drivers to specific Apple product IDs, 591 among them,
+  which is why Karabiner chose it. `0x4F4C` ("OL" in ASCII) is in neither the
+  USB ID database's Apple list nor any macOS 27 driver personality, so the
+  device keeps the generic HID event driver it had without IDs. A unit test
+  rejects zero IDs, Logitech's vendor ID and the product IDs those
+  personalities list.
+- **Apple may ship a product with this ID.** That risk comes with borrowing
+  Apple's vendor ID. If it happens, pick another unused ID.
+- **With distinct IDs, Karabiner-Elements users can ignore the device.** It
+  appears as its own keyboard (`vendor_id` 1452, `product_id` 20300).
+
 ## 2026-11: The agent saves a paired Flow computer in `config.toml`
 
 Until now the agent only read `config.toml`; the GUI and `openlogi api` wrote
@@ -288,9 +318,10 @@ creates one at arming and sends shortcut keys through it.
 - **A boot keyboard without outputs.** The descriptor has the modifier bitmap,
   a reserved byte and six key slots: an eight-byte input report without a
   report ID. It declares no LED report, because a device without a dispatch
-  queue receives no output reports. The properties set only the descriptor
-  and `Product`. Without a vendor ID, `openlogi-hid`'s Logitech filter never
-  opens the device.
+  queue receives no output reports. The properties set the descriptor,
+  `Product`, and since 2026-11 a vendor and product ID (see "The virtual HID
+  keyboard reports Apple's vendor ID"). The vendor ID is not Logitech's, so
+  `openlogi-hid`'s Logitech filter never opens the device.
 - **A key is released on the path that pressed it.** A key without a HID usage,
   a press beyond six keys, and an up edge whose down edge the device did not
   carry all go out as `CGEvent`s. A tap reports its release before it returns,

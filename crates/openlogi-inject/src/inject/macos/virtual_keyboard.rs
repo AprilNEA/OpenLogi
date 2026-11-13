@@ -45,6 +45,20 @@ use device::Device;
 /// device's keys as OpenLogi's own output.
 const PRODUCT: &str = "OpenLogi Virtual Keyboard";
 
+/// The device's `VendorID` property: Apple's USB vendor ID, which
+/// Karabiner-Elements' virtual keyboard reports too. Built-in keyboards on
+/// the FIFO transport report vendor and product ID 0, and tools that tell
+/// keyboards apart by these IDs, Karabiner-Elements among them, take a
+/// device without IDs for the built-in keyboard. Not Logitech's ID, which
+/// `openlogi-hid` would open as a HID++ candidate.
+const VENDOR_ID: u16 = 0x05ac;
+
+/// The device's `ProductID` property, "OL" in ASCII. No Apple product in
+/// the USB ID database and no macOS driver personality uses it, so the
+/// device keeps the generic HID event driver instead of an Apple keyboard
+/// driver.
+const PRODUCT_ID: u16 = 0x4f4c;
+
 /// A boot-protocol keyboard input report without a report ID: the modifier
 /// bitmap, a reserved byte, then [`KEY_SLOTS`] key slots. It declares no
 /// LED output report, because the device registers no handler to receive
@@ -134,7 +148,7 @@ impl VirtualKeyboard {
             tracing::warn!("a virtual HID keyboard is already installed");
             return None;
         }
-        let Some(device) = Device::create(PRODUCT, REPORT_DESCRIPTOR) else {
+        let Some(device) = Device::create(PRODUCT, VENDOR_ID, PRODUCT_ID, REPORT_DESCRIPTOR) else {
             tracing::info!(
                 "virtual HID keyboard unavailable (no com.apple.developer.hid.virtual.device \
                  entitlement?); synthesized keys use CGEventPost"
