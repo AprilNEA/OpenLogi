@@ -82,17 +82,17 @@ pub async fn run(args: OnboardArgs) -> Result<()> {
     Ok(())
 }
 
+// Unix socket paths and the lock honour XDG_CONFIG_HOME, so a child process
+// with its own config home cannot meet a real agent; Windows uses a fixed
+// pipe name, so the module is Unix-only.
 #[cfg(test)]
+#[cfg(unix)]
 mod tests {
     use openlogi_core::single_instance::{self, InstanceError, Role};
 
     use super::{OnboardArgs, run};
     use crate::cmd::diag::exclude_agent;
 
-    // Unix socket paths and the lock honour XDG_CONFIG_HOME, so a child
-    // process with its own config home cannot meet a real agent; Windows
-    // uses a fixed pipe name.
-    #[cfg(unix)]
     #[test]
     fn a_startup_dpi_write_never_starts_beside_the_agent() {
         const TEST: &str =
