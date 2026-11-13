@@ -58,7 +58,7 @@ use openlogi_agent_core::lock_keys::LockKeyIndicator;
 use openlogi_agent_core::notices::{LowBatteryWatch, NoticeBoard};
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::ActionRingSlot;
-use openlogi_core::config::{AppSettings, Config, Lighting};
+use openlogi_core::config::{AppSettings, Config, KeyDisplayBrightness, Lighting};
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind, LockKey,
     PairedDevice, StandaloneDevice, prettify_codename,
@@ -417,6 +417,9 @@ struct State {
     /// keeps it.
     low_battery: LowBatteryWatch,
     disable_keys_scenario: DisableKeysScenario,
+    /// Display-key brightness the GUI wrote, per device that reports
+    /// `0x8040`; an unwritten one shows its full brightness.
+    key_brightness: Vec<(DeviceRoute, KeyDisplayBrightness)>,
     disable_keys_reads: u64,
     disable_keys_writes: u64,
     reload_calls: u64,
@@ -453,6 +456,7 @@ impl State {
             next_pairing_id: 0,
             clock,
             battery_overrides: Vec::new(),
+            key_brightness: Vec::new(),
             faults: Vec::new(),
             low_battery: LowBatteryWatch::default(),
             disable_keys_scenario,
@@ -646,6 +650,31 @@ impl State {
 
     fn standalone(&self) -> Vec<StandaloneDevice> {
         self.profile.standalone.clone()
+    }
+
+    /// The display-key brightness of the device on `route`, when it is
+    /// reachable and its capabilities report `0x8040`.
+    fn key_brightness(&self, route: &DeviceRoute) -> Result<KeyDisplayBrightness, WriteError> {
+        self.require_reachable(route)?;
+        let supported = self.render_inventory().iter().any(|inventory| {
+            slot_routes(inventory)
+                .into_iter()
+                .zip(&inventory.paired)
+                .any(|(device_route, device)| {
+                    device_route.as_ref() == Some(route)
+                        && device.capabilities.is_some_and(|caps| caps.key_brightness)
+                })
+        });
+        if !supported {
+            return Err(WriteError::FeatureUnsupported {
+                feature_hex: 0x8040,
+            });
+        }
+        Ok(self
+            .key_brightness
+            .iter()
+            .find(|(stored, _)| stored == route)
+            .map_or(KeyDisplayBrightness::MAX, |(_, brightness)| *brightness))
     }
 
     fn settings_for(&self, route: &DeviceRoute) -> Result<&ProfileDeviceSettings, WriteError> {
@@ -1602,6 +1631,26 @@ impl Agent for MockAgent {
         _session_id: u64,
     ) -> Result<(), ActionRingCommandError> {
         Err(ActionRingCommandError::SessionNotFound)
+    }
+    async fn read_key_brightness(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<KeyDisplayBrightness, WriteError> {
+        self.state.lock().await.key_brightness(&route)
+    }
+    async fn set_key_brightness(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        brightness: KeyDisplayBrightness,
+    ) -> Result<KeyDisplayBrightness, WriteError> {
+        let mut state = self.state.lock().await;
+        state.key_brightness(&route)?;
+        state.key_brightness.retain(|(stored, _)| *stored != route);
+        state.key_brightness.push((route.clone(), brightness));
+        info!(%route, %brightness, "set_key_brightness");
+        Ok(brightness)
     }
 }
 

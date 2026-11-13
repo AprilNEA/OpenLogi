@@ -14,7 +14,9 @@ use std::time::Duration;
 
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{ActionRingIcon, ActionRingSize, ActionRingSlot};
-use openlogi_core::config::{ConfigRevision, FlowPeerName, FlowPublicKey, Lighting};
+use openlogi_core::config::{
+    ConfigRevision, FlowPeerName, FlowPublicKey, KeyDisplayBrightness, Lighting,
+};
 use openlogi_core::device::{
     BatteryInfo, ChangedOnLight, DeviceInventory, DeviceKind, LightState, LockKey, StandaloneDevice,
 };
@@ -200,7 +202,8 @@ pub use succession::Identity;
 ///      appended — the MX Creative Keypad's LCD brightness.
 ///      `Action::ActivateLiveKey` appended — a keypad key that shows a live
 ///      value. `Capabilities::key_brightness` appended — measured `0x8040`
-///      display-key brightness.
+///      display-key brightness — with `HidppOperation::ReadKeyBrightness`
+///      and the `read_key_brightness`/`set_key_brightness` calls.
 pub const PROTOCOL_VERSION: u32 = 46;
 
 /// Environment variable through which the agent hands a supervised helper the
@@ -1270,4 +1273,15 @@ pub trait Agent {
     /// held trigger cancels instead of choosing the slot last reported by
     /// [`Agent::action_ring_hover`].
     async fn action_ring_unhover(session_id: u64) -> Result<(), ActionRingCommandError>;
+    /// Read the brightness of the display keys on `route` (HID++ `0x8040`),
+    /// as a percentage of the range the device reports.
+    async fn read_key_brightness(route: DeviceRoute) -> Result<KeyDisplayBrightness, WriteError>;
+    /// Write the brightness of the display keys on `route` now and answer
+    /// with what the device reads back, which a newer write requested
+    /// before this one's turn — the agent's own reconnect or config-reload
+    /// write included — may have replaced.
+    async fn set_key_brightness(
+        route: DeviceRoute,
+        brightness: KeyDisplayBrightness,
+    ) -> Result<KeyDisplayBrightness, WriteError>;
 }

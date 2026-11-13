@@ -39,6 +39,17 @@ async fn keypad(
                 (0, 0) => [0, 0, 0],
                 // getInfo: max 100, 101 steps, min 1.
                 (BRIGHTNESS_INDEX, 0) => [0, 100, 101],
+                // getBrightness: the last level written, else full.
+                (BRIGHTNESS_INDEX, 1) => {
+                    let level = written
+                        .lock()
+                        .expect("levels")
+                        .last()
+                        .copied()
+                        .unwrap_or(100_u16);
+                    let [hi, lo] = level.to_be_bytes();
+                    [hi, lo, 0]
+                }
                 (BRIGHTNESS_INDEX, 2) => {
                     written
                         .lock()
@@ -94,4 +105,24 @@ async fn key_brightness_latest_save_wins() {
         Some(&newer),
         "the older save landed after the newer one"
     );
+}
+
+/// The app's own write answers with what the keypad reads back afterwards,
+/// and a read answers with the level the keypad shows.
+#[tokio::test]
+async fn a_gui_brightness_write_answers_with_the_keypads_read_back() {
+    let shared = orchestrator(Config::default()).shared();
+    let (route, levels, _reports) = keypad(&shared).await;
+    let level = KeyDisplayBrightness::try_new(40).expect("valid brightness");
+
+    let read = tokio::time::timeout(
+        Duration::from_secs(5),
+        shared.set_key_brightness(&route, level),
+    )
+    .await
+    .expect("the write answers")
+    .expect("the keypad takes the level");
+
+    assert_eq!(read, level);
+    assert_eq!(*levels.lock().expect("levels"), [level.scale(0, 100)]);
 }

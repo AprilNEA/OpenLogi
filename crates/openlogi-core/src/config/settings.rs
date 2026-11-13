@@ -445,6 +445,24 @@ impl KeyDisplayBrightness {
         Self::try_new(raw).unwrap_or(Self::MAX)
     }
 
+    /// The percentage a device reading `level` on its range `min..=max`
+    /// shows: the inverse of [`Self::scale`], rounded to the nearest percent
+    /// and kept within `1..=100` — a panel at its bottom value reads as the
+    /// dimmest selectable level, since `0` is not one.
+    #[must_use]
+    pub fn from_level(level: u16, min: u16, max: u16) -> Self {
+        let span = u32::from(max.saturating_sub(min));
+        if span == 0 {
+            return Self::MAX;
+        }
+        let above = u32::from(level.clamp(min, max) - min);
+        let percent = (above * 100 + span / 2) / span;
+        u8::try_from(percent)
+            .ok()
+            .and_then(|percent| Self::try_new(percent.max(1)).ok())
+            .unwrap_or(Self::MAX)
+    }
+
     /// This percentage on a device range `min..=max`, never below `min + 1`
     /// so the excluded "fully dark" value is never written.
     #[must_use]
@@ -1174,6 +1192,19 @@ mod tests {
         // A coarse range still never maps to its excluded bottom value.
         assert_eq!(at(1).scale(0, 4), 1);
         assert_eq!(at(50).scale(10, 20), 15);
+        // Reading a level back is the inverse on the keypad's range, and a
+        // coarse range rounds to its nearest percent.
+        for percent in 1..=100 {
+            assert_eq!(
+                KeyDisplayBrightness::from_level(at(percent).scale(0, 100), 0, 100),
+                at(percent)
+            );
+        }
+        assert_eq!(KeyDisplayBrightness::from_level(0, 0, 100), at(1));
+        assert_eq!(KeyDisplayBrightness::from_level(15, 10, 20), at(50));
+        assert_eq!(KeyDisplayBrightness::from_level(1, 0, 4), at(25));
+        assert_eq!(KeyDisplayBrightness::from_level(9, 10, 20), at(1));
+        assert_eq!(KeyDisplayBrightness::from_level(7, 7, 7), at(100));
         assert_eq!(
             KeyDisplayBrightness::from_rounded(0.2),
             KeyDisplayBrightness::MIN

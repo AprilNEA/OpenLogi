@@ -432,7 +432,10 @@ The keypad's LCD keys have three more per-device settings:
   reports, never its bottom value). The agent writes it when the keypad
   connects and when it changes, and only to a keypad that reported HID++
   `0x8040` — the app shows the control only then; absent leaves the panel as
-  it is. Of several quick changes, the newest is the level that stays.
+  it is. Of several quick changes, the newest is the level that stays. The
+  app's slider shows the level the keypad reads, writes it straight to the
+  keypad and saves it once the keypad reads it back; a level the keypad does
+  not take is noted beside the slider and not saved.
   `openlogi api key-brightness --save` sets it from the command line.
 - `key_faces`, by grid key: how a key is drawn instead of its action's icon.
 

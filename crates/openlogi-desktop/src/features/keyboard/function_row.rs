@@ -255,7 +255,9 @@ impl FunctionRowView {
         let state_obs = AppState::repaint_on(cx, |event| {
             matches!(
                 event,
-                StateEvent::BindingsChanged(_) | StateEvent::DeviceConfigChanged(_)
+                StateEvent::BindingsChanged(_)
+                    | StateEvent::DeviceConfigChanged(_)
+                    | StateEvent::KeyBrightnessChanged(_)
             )
         });
         // Both write on release only: a drag would stream config saves.
@@ -278,15 +280,10 @@ impl FunctionRowView {
             SliderRange::new(KeyDisplayBrightness::MIN, KeyDisplayBrightness::MAX),
             UNSET_KEY_BRIGHTNESS,
             cx,
+            // `commit_key_brightness` resolves the keypad when the thumb is
+            // released, and saves the level once the keypad reads it back.
             |_, brightness, cx| {
-                AppState::apply(cx, |state| {
-                    state
-                        .current_record()
-                        .map(DeviceRecord::device_key)
-                        .map_or_else(StateEvents::none, |key| {
-                            state.commit_device_key_display_brightness(&key, brightness)
-                        })
-                });
+                AppState::apply(cx, |state| state.commit_key_brightness(brightness));
             },
         );
         Self {
@@ -334,24 +331,36 @@ impl FunctionRowView {
         .debug_selector(|| "dial-speed".into())
     }
 
-    /// The keypad's LCD brightness. Until the user picks one the slider
-    /// rests on [`UNSET_KEY_BRIGHTNESS`] and nothing is saved.
+    /// The keypad's LCD brightness: what the keypad reads, else the saved
+    /// level, else [`UNSET_KEY_BRIGHTNESS`] until either is known. A note
+    /// follows when the keypad did not take the last level written.
     fn key_brightness_control(
         &self,
-        committed: Option<KeyDisplayBrightness>,
+        brightness: Option<KeyDisplayBrightness>,
+        refused: bool,
         window: &mut Window,
         cx: &mut App,
     ) -> gpui::Div {
-        let committed = committed.unwrap_or(UNSET_KEY_BRIGHTNESS);
+        let committed = brightness.unwrap_or(UNSET_KEY_BRIGHTNESS);
         self.key_brightness.sync(committed, window, cx);
         let shown = self.key_brightness.shown(committed);
+        let pal = theme::palette(cx);
         setting_slider(
             tr!("keyboard.key_brightness"),
             format!("{shown}%"),
             self.key_brightness.slider(),
-            &theme::palette(cx),
+            &pal,
         )
         .debug_selector(|| "key-brightness".into())
+        .when(refused, |row| {
+            row.child(
+                div()
+                    .debug_selector(|| "key-brightness-refusal".into())
+                    .text_caption()
+                    .text_color(pal.text_danger)
+                    .child(tr!("keyboard.key_brightness_not_applied")),
+            )
+        })
     }
 
     /// What the key panel's custom shortcut opens on: the selected key and
@@ -897,8 +906,14 @@ struct DeviceSettings {
 enum KeyBrightnessSetting {
     /// The device has not measured the feature that sets it (`0x8040`).
     Unsupported,
-    /// The saved level, or `None` while OpenLogi leaves the panel as it is.
-    Offered(Option<KeyDisplayBrightness>),
+    /// The keypad measured it.
+    Offered {
+        /// What the keypad reads, else the saved level; `None` while
+        /// neither is known.
+        brightness: Option<KeyDisplayBrightness>,
+        /// The keypad did not take the last level written.
+        refused: bool,
+    },
 }
 
 impl DeviceSettings {
@@ -908,9 +923,12 @@ impl DeviceSettings {
             dial_speed: device.map_or(ThumbwheelSensitivity::DEFAULT, |(state, key)| {
                 state.device_thumbwheel_sensitivity(key)
             }),
-            key_brightness: match device {
-                Some((state, key)) if state.current_key_brightness_supported() => {
-                    KeyBrightnessSetting::Offered(state.device_key_display_brightness(key))
+            key_brightness: match state {
+                Some(state) if state.current_key_brightness_supported() => {
+                    KeyBrightnessSetting::Offered {
+                        brightness: state.current_key_brightness(),
+                        refused: state.current_key_brightness_refused(),
+                    }
                 }
                 Some(_) | None => KeyBrightnessSetting::Unsupported,
             },
@@ -947,9 +965,10 @@ impl FunctionRowView {
                         cx,
                     ))
                     .children(match settings.key_brightness {
-                        KeyBrightnessSetting::Offered(level) => {
-                            Some(self.key_brightness_control(level, window, cx))
-                        }
+                        KeyBrightnessSetting::Offered {
+                            brightness,
+                            refused,
+                        } => Some(self.key_brightness_control(brightness, refused, window, cx)),
                         KeyBrightnessSetting::Unsupported => None,
                     }),
             ),

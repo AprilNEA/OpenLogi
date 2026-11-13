@@ -78,7 +78,7 @@ pub use hires_wheel::{
     get_scroll_wheel_mode_on, set_scroll_inversion, set_scroll_inversion_on, set_scroll_resolution,
     set_scroll_resolution_on, set_scroll_wheel_mode, set_scroll_wheel_mode_on,
 };
-pub use key_brightness::set_key_display_brightness_on;
+pub use key_brightness::{get_key_display_brightness_on, set_key_display_brightness_on};
 pub use key_display::{
     KEY_IMAGE_SINGLE_PACKET_MAX, KeyDisplay, KeyImageJpeg, key_display_for, write_key_image_on,
 };

@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use openlogi_core::config::KeyDisplayBrightness;
 use openlogi_core::hid::{
     BacklightState, DisableKeysState, DpiInfo, EasySwitchHosts, FnLockState, ForceSensingInfo,
     OnboardState, PointerSpeed, ReportRateInfo, SidetoneLevel, SmartShiftStatus,
@@ -57,6 +58,10 @@ pub type SidetoneLoad = Load<Arc<SidetoneLevel>>;
 /// the force the button clicks at now, the range the device accepts, and
 /// whether software may change it.
 pub type ForceSensingLoad = Load<Arc<ForceSensingInfo>>;
+/// Per-keypad display-key brightness (`0x8040`) load state. See [`Load`].
+/// The read is the brightness the keys show now, as a percentage of the
+/// range the keypad reports.
+pub type KeyBrightnessLoad = Load<Arc<KeyDisplayBrightness>>;
 /// Per-keyboard backlight (`0x1982`) load state. See [`Load`]. The keyboard
 /// stores its backlight itself and changes it on its own — the backlight keys,
 /// the light sensor, a low battery — so the read is the only record.

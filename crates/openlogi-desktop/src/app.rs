@@ -430,6 +430,7 @@ impl AppView {
             | StateEvent::PointerSpeedChanged(_)
             | StateEvent::SidetoneChanged(_)
             | StateEvent::ForceSensingChanged(_)
+            | StateEvent::KeyBrightnessChanged(_)
             | StateEvent::DeviceRemovalFailed { .. }
             | StateEvent::StalePairingRemovalFailed { .. }
             | StateEvent::CameraPermissionChanged

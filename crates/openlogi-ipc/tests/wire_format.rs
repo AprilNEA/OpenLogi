@@ -38,7 +38,7 @@ use openlogi_core::binding::{
     GridKey, GridSlot, KeyCombo, KeypadPage, ModeKey,
 };
 use openlogi_core::config::{
-    ConfigRevision, FlowPeerName, FlowPublicKey, Lighting, ScrollResolution,
+    ConfigRevision, FlowPeerName, FlowPublicKey, KeyDisplayBrightness, Lighting, ScrollResolution,
 };
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, ChangedOnLight, DeviceInventory,
@@ -406,6 +406,30 @@ fn sidetone_calls() {
         "3202fb6d04fbc40a28",
     );
     assert_wire(&AgentResponse::SetSidetone(Ok(level)), "320028");
+}
+
+/// The display-key brightness calls were appended after
+/// `action_ring_unhover` and carry the brightness as one percent byte.
+#[test]
+fn key_brightness_calls() {
+    let route = DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xc354,
+    };
+    let brightness = KeyDisplayBrightness::try_new(40).expect("a level in range");
+    assert_wire(&HidppOperation::ReadKeyBrightness, "22");
+    assert_wire(&brightness, "28");
+    assert_wire(
+        &AgentRequest::ReadKeyBrightness {
+            route: route.clone(),
+        },
+        "3a02fb6d04fb54c3",
+    );
+    assert_wire(
+        &AgentRequest::SetKeyBrightness { route, brightness },
+        "3b02fb6d04fb54c328",
+    );
+    assert_wire(&AgentResponse::SetKeyBrightness(Ok(brightness)), "3b0028");
 }
 
 /// The overlay long-polls the backlight indicator by generation, like

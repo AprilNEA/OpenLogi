@@ -1690,7 +1690,7 @@ pub(crate) fn write_key_brightness_in_background(
         move |result| {
             log_outcome(index, "key brightness write", result, |level| {
                 if let Some(level) = level {
-                    debug!(index, level, "key brightness written");
+                    debug!(index, %level, "key brightness written");
                 } else {
                     debug!(index, "key brightness write superseded by a newer one");
                 }

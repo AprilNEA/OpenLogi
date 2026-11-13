@@ -368,6 +368,9 @@ pub enum HidppOperation {
     /// Write a keypad's LCD brightness over HID++ `0x8040`. Appended last —
     /// variant order is wire format.
     WriteKeyBrightness,
+    /// Read a keypad's LCD brightness over HID++ `0x8040`. Appended after
+    /// `WriteKeyBrightness` — variant order is wire format.
+    ReadKeyBrightness,
 }
 
 /// HID++ feature error kind in a serializable wire-safe form.

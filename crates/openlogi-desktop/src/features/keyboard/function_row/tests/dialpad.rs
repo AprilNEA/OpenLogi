@@ -426,3 +426,48 @@ fn key_brightness_requires_measured_support(cx: &mut gpui::TestAppContext) {
     drop(view);
     window.update(|window, _| window.remove_window());
 }
+
+/// A brightness the keypad did not take is said so beside the slider, and
+/// the note goes once a write lands.
+#[gpui::test]
+fn a_refused_key_brightness_shows_a_note(cx: &mut gpui::TestAppContext) {
+    use openlogi_core::config::KeyDisplayBrightness;
+    use openlogi_core::hid::WriteError;
+
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+
+    init_ui(cx);
+    let (state, _commands) = crate::state::tests::keypad_pages::keypad_state();
+    let key = state.current_record().unwrap().device_key();
+    let (view, window) = open_keys_view(cx, state);
+    assert!(window.debug_bounds("key-brightness-refusal").is_none());
+
+    let level = KeyDisplayBrightness::try_new(30).unwrap();
+    let answer = |result: Result<KeyDisplayBrightness, WriteError>,
+                  window: &mut gpui::VisualTestContext| {
+        window.update(|_, cx| {
+            AppState::apply(cx, |state| state.commit_key_brightness(level));
+            // The state numbers its writes from zero, one per release.
+            let write = AppState::try_read(cx)
+                .map(|state| state.pending_key_brightness_write(&key))
+                .unwrap()
+                .expect("the release is pending");
+            AppState::apply(cx, |state| {
+                state.apply_key_brightness_written(&key, write, level, result)
+            });
+        });
+        window.update(|window, cx| window.draw(cx).clear(cx));
+    };
+
+    answer(Err(WriteError::AgentUnavailable), window);
+    assert!(
+        window.debug_bounds("key-brightness-refusal").is_some(),
+        "the refusal is shown"
+    );
+    answer(Ok(level), window);
+    assert!(window.debug_bounds("key-brightness-refusal").is_none());
+
+    drop(view);
+    window.update(|window, _| window.remove_window());
+}

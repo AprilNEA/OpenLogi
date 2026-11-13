@@ -16,20 +16,49 @@ use openlogi_core::config::KeyDisplayBrightness;
 use super::{HidppOperation, WriteError, classify_hidpp_error, open_feature};
 use crate::SharedChannel;
 
-/// Write `brightness` to the keypad behind `shared` and return the raw level
-/// written.
+/// Read the brightness the keypad behind `shared` shows now, as a
+/// percentage of the range it reports ([`KeyDisplayBrightness::from_level`]).
+pub async fn get_key_display_brightness_on(
+    shared: &SharedChannel,
+) -> Result<KeyDisplayBrightness, WriteError> {
+    let feature = open_brightness(shared).await?;
+    let classify = |e| classify_hidpp_error(e, HidppOperation::ReadKeyBrightness, 0x8040);
+    let info = feature.get_info().await.map_err(classify)?;
+    let level = feature.get_brightness().await.map_err(classify)?;
+    Ok(KeyDisplayBrightness::from_level(
+        level,
+        info.min_brightness,
+        info.max_brightness,
+    ))
+}
+
+/// Write `brightness` to the keypad behind `shared` and answer with the
+/// brightness it reads back afterwards, which need not be `brightness` on a
+/// panel coarser than one percent.
 pub async fn set_key_display_brightness_on(
     shared: &SharedChannel,
     brightness: KeyDisplayBrightness,
-) -> Result<u16, WriteError> {
-    let index = shared.device_index();
-    let mut device = Device::new(Arc::clone(shared.channel()), index)
-        .await
-        .map_err(|_| WriteError::DeviceUnreachable { index })?;
-    let feature = open_feature::<BrightnessControlFeature>(&mut device).await?;
+) -> Result<KeyDisplayBrightness, WriteError> {
+    let feature = open_brightness(shared).await?;
     let classify = |e| classify_hidpp_error(e, HidppOperation::WriteKeyBrightness, 0x8040);
     let info = feature.get_info().await.map_err(classify)?;
     let level = brightness.scale(info.min_brightness, info.max_brightness);
     feature.set_brightness(level).await.map_err(classify)?;
-    Ok(level)
+    let read = feature.get_brightness().await.map_err(classify)?;
+    Ok(KeyDisplayBrightness::from_level(
+        read,
+        info.min_brightness,
+        info.max_brightness,
+    ))
+}
+
+/// The `0x8040` feature of the device behind `shared`.
+async fn open_brightness(
+    shared: &SharedChannel,
+) -> Result<Arc<BrightnessControlFeature>, WriteError> {
+    let index = shared.device_index();
+    let mut device = Device::new(Arc::clone(shared.channel()), index)
+        .await
+        .map_err(|_| WriteError::DeviceUnreachable { index })?;
+    open_feature::<BrightnessControlFeature>(&mut device).await
 }

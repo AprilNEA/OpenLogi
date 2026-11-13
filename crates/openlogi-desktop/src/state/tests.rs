@@ -58,6 +58,7 @@ mod easy_switch;
 mod flow;
 mod fn_lock;
 pub(crate) mod force_sensing;
+mod key_brightness;
 pub(crate) mod keypad_pages;
 mod light_adoption;
 mod lighting;

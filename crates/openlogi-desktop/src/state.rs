@@ -42,7 +42,7 @@ pub use light::LightCommandStatus;
 pub(crate) use load::Load;
 pub use load::{
     BacklightLoad, DisableKeysLoad, DpiLoad, EasySwitchLoad, FnLockLoad, ForceSensingLoad,
-    OnboardLoad, PointerSpeedLoad, ReportRateLoad, SidetoneLoad, SmartShiftLoad,
+    KeyBrightnessLoad, OnboardLoad, PointerSpeedLoad, ReportRateLoad, SidetoneLoad, SmartShiftLoad,
 };
 
 /// Result of confirming a SmartShift write by reading the value back.
@@ -97,6 +97,7 @@ mod force_sensing;
 mod gaming_keys;
 mod host_switch;
 mod inventory;
+mod key_brightness;
 mod key_faces;
 mod light;
 mod lighting;
@@ -262,6 +263,7 @@ impl AppState {
             state.load_current_pointer_speed(cx);
             state.load_current_sidetone(cx);
             state.load_current_force_sensing(cx);
+            state.load_current_key_brightness(cx);
             state.load_current_backlight(cx);
             state.load_current_easy_switch(cx);
             state.load_current_disable_keys(cx);
