@@ -16,8 +16,7 @@ use crate::state::tests::device_list::snapshot_candidate;
 use crate::state::{AppState, ConfigPersistence, Sources};
 use crate::windows::{WindowRegistry, main_window};
 
-/// The canonical profile's Bolt mouse in slot 1, and its RGB keyboard, which
-/// has no per-application profile editor.
+/// The canonical profile's Bolt mouse in slot 1, and its RGB keyboard.
 const MOUSE: &str = "unit:4f4c4401";
 const KEYBOARD: &str = "unit:4f4c4402";
 
@@ -193,12 +192,14 @@ fn an_app_profile_link_opens_the_profile_the_selected_device_runs_the_app_under(
         assert_eq!(state.button_bindings()[&ButtonId::Back], Action::Undo);
         assert_eq!(state.editing_action_ring_app(), Some(PHOTOSHOP));
 
-        // A selected device with no profile editor keeps its page.
+        // The keyboard edits per-app Actions Ring profiles, even though its
+        // key bindings have no per-app editor.
         links.dispatch(device_link(KEYBOARD), cx);
-        let keyboard_page = page(cx);
         links.dispatch(profile_link, cx);
-        assert_eq!(page(cx), keyboard_page);
-        assert_eq!(AppState::try_read(cx).unwrap().editing_app(), None);
+        assert_eq!(page(cx), (device_page(KEYBOARD), DetailTab::ActionsRing));
+        let state = AppState::try_read(cx).unwrap();
+        assert_eq!(state.editing_app(), Some(PHOTOSHOP));
+        assert_eq!(state.editing_action_ring_app(), Some(PHOTOSHOP));
     });
 }
 
@@ -264,5 +265,15 @@ fn camera_links_open_the_camera_on_its_preview_or_its_device_information(cx: &mu
         links.dispatch(DeeplinkCommand::OpenCamera(KEY.into()), cx);
         assert_eq!(page(cx), (device_page(KEY), DetailTab::Device));
         assert_eq!(selected(cx), KEY);
+
+        // A selected device with no profile editor keeps its page.
+        links.dispatch(
+            DeeplinkCommand::OpenAppProfile("com.example.editor".into()),
+            cx,
+        );
+        assert_eq!(page(cx), (device_page(KEY), DetailTab::Device));
+        let state = AppState::try_read(cx).unwrap();
+        assert_eq!(state.editing_app(), None);
+        assert_eq!(state.editing_action_ring_app(), None);
     });
 }
