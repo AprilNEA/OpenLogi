@@ -2,11 +2,13 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use core_graphics::event::CGEventFlags;
+use objc2_core_foundation::{CFDictionary, CFNumber, CFString, CFType};
 
 use super::{
     Installed, KEY_SLOTS, Keyboard, LEFT_COMMAND, LEFT_CONTROL, LEFT_OPTION, LEFT_SHIFT, Offer,
-    PRODUCT, Pressed, REPORT_DESCRIPTOR, REPORT_LEN, Report, Routed, SendError, Sink, holds,
-    is_virtual_keyboard_product, modifier_bits, modifier_flags, offer, repress_edges,
+    PRODUCT, PRODUCT_ID, Pressed, REPORT_DESCRIPTOR, REPORT_LEN, Report, Routed, SendError, Sink,
+    VENDOR_ID, device, holds, is_virtual_keyboard_product, modifier_bits, modifier_flags, offer,
+    repress_edges,
 };
 use crate::inject::KeyPhase;
 
@@ -435,4 +437,45 @@ fn only_the_virtual_keyboard_product_is_recognised() {
         "Apple Internal Keyboard / Trackpad"
     ));
     assert!(!is_virtual_keyboard_product(""));
+}
+
+/// The integer a properties dictionary holds under `key`.
+fn number_property(properties: &CFDictionary<CFString, CFType>, key: &str) -> Option<i32> {
+    properties
+        .get(&CFString::from_str(key))?
+        .downcast::<CFNumber>()
+        .ok()?
+        .as_i32()
+}
+
+#[test]
+fn the_device_properties_carry_its_vendor_and_product_id() {
+    let properties = device::properties(PRODUCT, VENDOR_ID, PRODUCT_ID, REPORT_DESCRIPTOR)
+        .expect("the HID property keys are valid UTF-8");
+    assert_eq!(
+        number_property(&properties, "VendorID"),
+        Some(i32::from(VENDOR_ID))
+    );
+    assert_eq!(
+        number_property(&properties, "ProductID"),
+        Some(i32::from(PRODUCT_ID))
+    );
+}
+
+#[test]
+fn the_device_ids_match_no_keyboard_it_could_be_mistaken_for() {
+    /// Apple keyboard product IDs that `AppleHIDKeyboard.kext` binds its
+    /// own keyboard drivers to on macOS 27. Karabiner-Elements' virtual
+    /// keyboard reports 591 so that one of them takes it.
+    const APPLE_KEYBOARD_DRIVER_IDS: [u16; 19] = [
+        541, 542, 543, 544, 545, 546, 556, 557, 558, 569, 570, 571, 591, 592, 593, 597, 598, 599,
+        0xf00b,
+    ];
+    // Apple Silicon built-in keyboards on the FIFO transport report vendor
+    // and product ID 0, so a device without IDs looks like one of them.
+    assert_ne!(VENDOR_ID, 0);
+    assert_ne!(PRODUCT_ID, 0);
+    // `openlogi-hid` opens every Logitech device as a HID++ candidate.
+    assert_ne!(VENDOR_ID, 0x046d);
+    assert!(!APPLE_KEYBOARD_DRIVER_IDS.contains(&PRODUCT_ID));
 }
