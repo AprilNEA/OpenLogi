@@ -188,11 +188,18 @@ fn an_app_profile_link_opens_the_profile_the_selected_device_runs_the_app_under(
         let mut snapshot = snapshot_candidate(&profile());
         // Measured controls keep the keyboard's profile editor independent
         // of whether this host has its device-render asset cached.
-        snapshot.inventory[1].paired[0]
-            .capabilities
-            .as_mut()
-            .unwrap()
-            .buttons = true;
+        let keyboard = snapshot
+            .inventory
+            .iter_mut()
+            .flat_map(|inventory| &mut inventory.paired)
+            .find(|device| device.kind.is_keyboard_family())
+            .expect("the canonical keyboard");
+        assert_eq!(
+            keyboard.model_info.as_ref().unwrap().unit_id,
+            [0x4f, 0x4c, 0x44, 0x02],
+            "the measured controls must belong to the device named by the link"
+        );
+        keyboard.capabilities.as_mut().unwrap().buttons = true;
         deliver(&snapshot, &mut links, cx);
         assert_eq!(page(cx), (device_page(MOUSE), DetailTab::Buttons));
         let state = AppState::try_read(cx).unwrap();
