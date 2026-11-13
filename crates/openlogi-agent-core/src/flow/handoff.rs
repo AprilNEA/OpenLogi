@@ -35,8 +35,10 @@ use tokio::time::Instant;
 use super::devices::LocalDevices;
 use super::edge::{EdgeCrossing, EdgeSide};
 
-/// How long this receiver watches for arrival after accepting.
-pub(crate) const ARM_TIMEOUT: Duration = Duration::from_secs(3);
+/// How long this receiver watches for arrival after accepting. A switched
+/// device takes 2 to 4 s to show up on Linux and up to 9 s on macOS, so a
+/// shorter window reports a timeout for a handoff that is still landing.
+pub(crate) const ARM_TIMEOUT: Duration = Duration::from_secs(10);
 /// The longest arrival window a sender honors from a peer's accept.
 pub(crate) const MAX_ARM_TIMEOUT: Duration = Duration::from_secs(10);
 /// The time a sender adds to the receiver's window before it stops waiting
