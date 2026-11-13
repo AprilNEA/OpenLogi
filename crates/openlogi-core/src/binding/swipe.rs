@@ -28,10 +28,9 @@ pub const GESTURE_REPEAT_DISTANCE: i32 = 12 * GESTURE_SWIPE_THRESHOLD;
 /// How long the pointer must rest mid-hold to end a stroke: the next swipe then
 /// starts fresh and may repeat the last direction at the normal threshold.
 pub const GESTURE_REARM_PAUSE: std::time::Duration = std::time::Duration::from_millis(250);
-/// Minimum time a gesture button must be held before its travel can commit to a
-/// swipe. Distinguishes a deliberate hold-and-swipe from a quick click whose
-/// cursor happened to be moving. Shared by both gesture paths (the HID++ thumb
-/// pad and the OS-hook Back/Forward buttons).
+/// Minimum hold before a swipe commits mid-motion. A shorter hold can still
+/// resolve to a swipe on release when its travel passes the direction threshold.
+/// Shared by the HID++ and OS-hook gesture paths.
 pub const GESTURE_HOLD_FOR_SWIPE: std::time::Duration = std::time::Duration::from_millis(160);
 
 /// Classify the *running* raw-XY travel of a held gesture button into a
@@ -42,7 +41,7 @@ pub const GESTURE_HOLD_FOR_SWIPE: std::time::Duration = std::time::Duration::fro
 /// stays within `max(`[`GESTURE_SWIPE_DEADZONE`]`, 35% of dominant)`. Callers
 /// fire the bound action the moment this returns `Some` — mid-swipe, like
 /// Options+ — rather than waiting for the button release; a press that never
-/// commits a direction is treated as [`GestureDirection::Click`] on release.
+/// commits a direction is classified from its final travel on release.
 ///
 /// Coordinates follow the device's raw-XY convention (`+x` = right, `+y` =
 /// down), so an upward swipe (negative `dy`) maps to [`GestureDirection::Up`].
@@ -85,9 +84,9 @@ pub fn detect_swipe(dx: i32, dy: i32) -> Option<GestureDirection> {
 /// OS-hook Middle/Back/Forward buttons (`openlogi-agent-core`'s CGEventTap). A gesture
 /// button's hold accumulates travel; the instant the dominant axis commits a
 /// direction — after the button has been held [`GESTURE_HOLD_FOR_SWIPE`], so a
-/// quick click whose cursor drifted doesn't count — [`Self::accumulate`] returns
-/// that direction exactly once, like Logitech Options+. A hold that never
-/// commits is a plain click, reported by [`Self::end`].
+/// quick click does not commit mid-motion — [`Self::accumulate`] returns
+/// that direction exactly once, like Logitech Options+. [`Self::end`] resolves
+/// an uncommitted hold from its travel, preserving fast swipes on release.
 ///
 /// The two paths differ only in *what identifies the held control* (a
 /// [`ButtonId`](super::ButtonId) for the OS hook, a diverted CID for the HID++ gesture control), so each owns
@@ -244,14 +243,16 @@ impl SwipeAccumulator {
         None
     }
 
-    /// End the current hold. Returns `true` when an in-progress hold ended
-    /// without committing a swipe — the caller should fire the plain `Click`
-    /// action — and `false` when a swipe already fired mid-motion, or when there
-    /// was no hold to end (a stray release reports no click).
-    pub fn end(&mut self) -> bool {
-        let was_click = self.held_since.is_some() && !self.fired;
-        self.held_since = None;
-        was_click
+    /// End the hold and return its remaining action. An uncommitted hold uses
+    /// the same travel classifier as mid-motion swipes, falling back to `Click`
+    /// for small or ambiguous motion. An absent or already committed hold emits
+    /// nothing, so a fast swipe cannot also click or repeat on release.
+    pub fn end(&mut self) -> Option<GestureDirection> {
+        self.held_since.take()?;
+        if self.fired {
+            return None;
+        }
+        Some(detect_swipe(self.dx, self.dy).unwrap_or(GestureDirection::Click))
     }
 
     /// Test-only seam: backdate the current hold so its [`GESTURE_HOLD_FOR_SWIPE`]
@@ -405,7 +406,7 @@ mod tests {
         assert_eq!(acc.accumulate(-t, 0), Some(GestureDirection::Left));
         assert_eq!(acc.accumulate(t, 0), Some(GestureDirection::Right));
         assert_eq!(acc.accumulate(-t, 0), Some(GestureDirection::Left));
-        assert!(!acc.end(), "a hold that swiped is not a click");
+        assert_eq!(acc.end(), None, "a hold that swiped is not a click");
     }
 
     #[test]
@@ -649,19 +650,51 @@ mod tests {
     }
 
     #[test]
+    fn accumulator_release_preserves_a_fast_swipe_in_each_direction() {
+        for (dx, dy, direction) in [
+            (-120, 5, GestureDirection::Left),
+            (120, 5, GestureDirection::Right),
+            (5, -120, GestureDirection::Up),
+            (5, 120, GestureDirection::Down),
+        ] {
+            let mut acc = SwipeAccumulator::default();
+            acc.begin();
+            // Keep the mid-motion gate closed without wall-clock sleeps.
+            acc.held_since = Instant::now().checked_add(GESTURE_HOLD_FOR_SWIPE);
+            assert_eq!(acc.accumulate(dx, dy), None);
+            assert_eq!(acc.end(), Some(direction));
+            assert_eq!(acc.end(), None, "release must not dispatch twice");
+        }
+    }
+
+    #[test]
+    fn accumulator_fast_release_keeps_small_or_ambiguous_motion_as_a_click() {
+        for (dx, dy) in [(0, 0), (49, 0), (-49, 5), (120, 120), (-120, 120)] {
+            let mut acc = SwipeAccumulator::default();
+            acc.begin();
+            assert_eq!(acc.accumulate(dx, dy), None);
+            assert_eq!(acc.end(), Some(GestureDirection::Click));
+        }
+    }
+
+    #[test]
     fn accumulator_end_reports_click_only_when_no_swipe_fired() {
         // A hold with only tiny drift never commits → end() is a click.
         let mut acc = SwipeAccumulator::default();
         acc.begin();
         acc.backdate_hold_for_test();
         assert_eq!(acc.accumulate(2, -1), None);
-        assert!(acc.end(), "a hold that never swiped is a click");
+        assert_eq!(
+            acc.end(),
+            Some(GestureDirection::Click),
+            "a hold that never swiped is a click"
+        );
 
         // A hold that committed a swipe → end() is not a click.
         acc.begin();
         acc.backdate_hold_for_test();
         assert!(acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0).is_some());
-        assert!(!acc.end(), "a committed swipe must not also click");
+        assert_eq!(acc.end(), None, "a committed swipe must not also click");
     }
 
     #[test]
@@ -746,10 +779,18 @@ mod tests {
         // end() in isolation (no begin) must not claim a click — there was no
         // hold — so a stray release can't be read as a press.
         let mut acc = SwipeAccumulator::default();
-        assert!(!acc.end(), "a release with no hold is not a click");
+        assert_eq!(acc.end(), None, "a release with no hold is not a click");
         // A redundant second release after a real hold already ended is inert too.
         acc.begin();
-        assert!(acc.end(), "the held release is a click");
-        assert!(!acc.end(), "the redundant second release is not a click");
+        assert_eq!(
+            acc.end(),
+            Some(GestureDirection::Click),
+            "the held release is a click"
+        );
+        assert_eq!(
+            acc.end(),
+            None,
+            "the redundant second release is not a click"
+        );
     }
 }

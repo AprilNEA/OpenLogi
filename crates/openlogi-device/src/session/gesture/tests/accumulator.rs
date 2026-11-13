@@ -243,17 +243,58 @@ fn a_same_report_swap_to_the_panel_still_discards_its_contact_jump() {
 }
 
 #[test]
+fn quick_dpi_gesture_dispatches_its_direction_on_release() {
+    for (dx, dy, direction) in [
+        (-120, 5, GestureDirection::Left),
+        (120, 5, GestureDirection::Right),
+        (5, -120, GestureDirection::Up),
+        (5, 120, GestureDirection::Down),
+    ] {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut acc = CaptureAccum::default();
+        let cid = reprog_controls::DPI_MODE_SHIFT_CIDS[0];
+        let buttons = &[(cid, ButtonId::DpiToggle)];
+        acc.on_event(
+            RawControlEvent::DivertedButtons([cid, 0, 0, 0]),
+            &[],
+            &[],
+            buttons,
+            &[],
+            &tx,
+        );
+        stale_report(&mut acc, &tx);
+        acc.on_event(
+            RawControlEvent::RawXy { dx, dy },
+            &[],
+            &[],
+            buttons,
+            &[],
+            &tx,
+        );
+        acc.on_event(release(), &[], &[], buttons, &[], &tx);
+        assert_eq!(
+            next_gesture(&mut rx),
+            Ok(CapturedInput::Gesture(ButtonId::DpiToggle, direction))
+        );
+        assert!(
+            next_gesture(&mut rx).is_err(),
+            "a swipe must not also click"
+        );
+    }
+}
+
+#[test]
 fn quick_tap_is_a_click_even_while_the_cursor_moves() {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut acc = CaptureAccum::default();
 
     handle_reprog(&mut acc, press(), GESTURE, &[], &[], &tx);
     // Past the stale report, so the travel below reaches the accumulator and
-    // only the hold-time gate stands between it and a swipe.
+    // only small click drift is accumulated.
     stale_report(&mut acc, &tx);
     handle_reprog(
         &mut acc,
-        RawControlEvent::RawXy { dx: 120, dy: 5 },
+        RawControlEvent::RawXy { dx: 12, dy: 5 },
         GESTURE,
         &[],
         &[],
