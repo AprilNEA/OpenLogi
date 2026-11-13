@@ -206,35 +206,15 @@ fn wayland_notice_windows(size: Size<Pixels>) -> Vec<WindowOptions> {
         window_bounds: bounds,
         ..notice_window_options()
     };
-    wayland_indicator_windows(plain)
+    super::IndicatorBackend::current().windows(plain)
 }
 
-/// Use the same bottom-edge placement as notices, with the indicator's own
-/// identity and dimensions. Keep the original window as the fallback for
-/// compositors without layer-shell and on other window systems.
-pub(crate) fn indicator_windows(plain: WindowOptions) -> Vec<WindowOptions> {
-    if on_wayland() {
-        wayland_indicator_windows(plain)
-    } else {
-        vec![plain]
-    }
-}
-
-fn wayland_indicator_windows(plain: WindowOptions) -> Vec<WindowOptions> {
-    layer_shell_notice(plain.window_bounds, plain.app_id.as_deref())
-        .into_iter()
-        .chain([plain])
-        .collect()
-}
-
-/// The notice as a layer-shell surface on the bottom edge, above other
-/// windows and never taking the keyboard, unless the compositor refused one.
+/// A backend choice captured before opening preserves both the preferred
+/// surface and the ordinary window for compositors that reject layer-shell.
 #[cfg(target_os = "linux")]
-fn layer_shell_notice(bounds: Option<WindowBounds>, app_id: Option<&str>) -> Option<WindowOptions> {
-    if super::layer_shell_refused() {
-        return None;
-    }
-    Some(layer_shell_indicator(bounds, app_id))
+pub(super) fn wayland_indicator_windows(plain: WindowOptions) -> Vec<WindowOptions> {
+    let layer = layer_shell_indicator(plain.window_bounds, plain.app_id.as_deref());
+    vec![layer, plain]
 }
 
 /// Shared non-focusing layer policy for notices and backlight indicators.
@@ -255,14 +235,6 @@ fn layer_shell_indicator(bounds: Option<WindowBounds>, app_id: Option<&str>) -> 
         app_id: app_id.map(str::to_string),
         ..notice_window_options()
     }
-}
-
-#[cfg(not(target_os = "linux"))]
-const fn layer_shell_notice(
-    _bounds: Option<WindowBounds>,
-    _app_id: Option<&str>,
-) -> Option<WindowOptions> {
-    None
 }
 
 /// The ring's window on `display` as a layer-shell surface over the whole
@@ -312,7 +284,7 @@ fn covering_window_options(display: &dyn PlatformDisplay) -> WindowOptions {
 }
 
 /// Report whether GPUI's own backend selection is Wayland.
-fn on_wayland() -> bool {
+pub(super) fn on_wayland() -> bool {
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     {
         gpui::guess_compositor() == "Wayland"
@@ -372,32 +344,6 @@ mod tests {
     use super::*;
 
     #[cfg(target_os = "linux")]
-    #[gpui::test]
-    fn backlight_is_a_bottom_overlay_without_taking_space_or_focus(cx: &mut gpui::TestAppContext) {
-        use gpui::layer_shell::{Anchor, KeyboardInteractivity, Layer};
-
-        let plain = cx.update(crate::backlight::window_options);
-        let options = layer_shell_indicator(plain.window_bounds, plain.app_id.as_deref());
-        let gpui::WindowKind::LayerShell(layer) = options.kind else {
-            panic!("the backlight indicator must not be a tiled application window");
-        };
-        assert_eq!(layer.namespace, "openlogi-backlight-osd");
-        assert_eq!(layer.layer, Layer::Overlay);
-        assert_eq!(layer.anchor, Anchor::BOTTOM);
-        assert_eq!(layer.exclusive_zone, None, "the desktop must not resize");
-        assert_eq!(layer.keyboard_interactivity, KeyboardInteractivity::None);
-        assert_eq!(
-            layer.margin,
-            Some((px(0.0), px(0.0), px(crate::notice::BOTTOM_MARGIN), px(0.0)))
-        );
-        assert_eq!(options.app_id, plain.app_id);
-        assert_eq!(options.window_bounds, plain.window_bounds);
-        assert!(!options.focus);
-        assert!(!options.is_movable);
-        assert!(!options.is_resizable);
-    }
-
-    #[cfg(target_os = "linux")]
     #[test]
     fn notice_layer_surface_keeps_its_own_identity_and_bottom_placement() {
         use gpui::layer_shell::Anchor;
@@ -415,22 +361,6 @@ mod tests {
             options.app_id.as_deref(),
             Some(crate::notice::NOTICE_APP_ID)
         );
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    #[gpui::test]
-    fn platforms_without_layer_shell_keep_the_original_backlight_window(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let plain = cx.update(crate::backlight::window_options);
-        let bounds = plain.window_bounds;
-        let mut attempts = wayland_indicator_windows(plain).into_iter();
-        let options = attempts.next().unwrap();
-        assert!(attempts.next().is_none(), "only the original popup remains");
-        assert_eq!(options.kind, gpui::WindowKind::PopUp);
-        assert_eq!(options.app_id.as_deref(), Some("openlogi-backlight-osd"));
-        assert_eq!(options.window_bounds, bounds);
-        assert!(!options.focus);
     }
 
     const fn rect(x: f64, y: f64, width: f64, height: f64) -> CocoaRect {

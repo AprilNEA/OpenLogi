@@ -17,16 +17,31 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use tracing::{debug, warn};
 
-/// Prefer a bottom-centred layer surface for a transient indicator on Wayland.
-/// Other backends retain the caller's window options.
-pub(crate) fn indicator_windows(options: gpui::WindowOptions) -> Vec<gpui::WindowOptions> {
-    #[cfg(not(target_os = "windows"))]
-    {
-        placement::indicator_windows(options)
+/// The window-system choice captured before opening a transient indicator.
+#[derive(Clone, Copy)]
+pub(crate) enum IndicatorBackend {
+    #[cfg(target_os = "linux")]
+    WaylandLayerShell,
+    Plain,
+}
+
+impl IndicatorBackend {
+    /// Prefer layer-shell only on Wayland and until the compositor refuses it.
+    pub(crate) fn current() -> Self {
+        #[cfg(target_os = "linux")]
+        if placement::on_wayland() && !layer_shell_refused() {
+            return Self::WaylandLayerShell;
+        }
+        Self::Plain
     }
-    #[cfg(target_os = "windows")]
-    {
-        vec![options]
+
+    /// Window options in preference order, retaining the original as fallback.
+    pub(crate) fn windows(self, plain: gpui::WindowOptions) -> Vec<gpui::WindowOptions> {
+        match self {
+            #[cfg(target_os = "linux")]
+            Self::WaylandLayerShell => placement::wayland_indicator_windows(plain),
+            Self::Plain => vec![plain],
+        }
     }
 }
 
