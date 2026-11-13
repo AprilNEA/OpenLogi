@@ -30,6 +30,9 @@ use super::edge::{
     EdgeSide, ExposedEdges,
 };
 
+#[cfg(target_os = "linux")]
+mod kwin_script;
+
 /// How often the thread reads the display layout again.
 pub(crate) const GEOMETRY_REFRESH: Duration = Duration::from_secs(2);
 /// How long after the last motion the thread reads the pointer once more.
@@ -112,7 +115,23 @@ impl PointerThread {
     /// Start the thread on this session's pointer. Crossings go to
     /// `crossings`; one that does not fit is dropped.
     pub(crate) fn spawn(crossings: async_mpsc::Sender<EdgeCrossing>) -> std::io::Result<Self> {
-        Self::spawn_with(PointerProbe::connect, crossings)
+        Self::spawn_thread(
+            |receiver, moved, crossings| {
+                if let Some(probe) = PointerProbe::connect() {
+                    run(probe, receiver, moved, crossings);
+                    return;
+                }
+                // A KDE Wayland session cannot be polled, but a KWin script
+                // can report edge crossings instead.
+                #[cfg(target_os = "linux")]
+                if let Some(edge) = kwin_script::connect() {
+                    kwin_script::run(edge, receiver, moved, crossings);
+                    return;
+                }
+                warn!("Flow cannot read the pointer in this session; edge handoff is off");
+            },
+            crossings,
+        )
     }
 
     /// Start the thread on this session's pointer, or with `probe` off on
@@ -138,18 +157,35 @@ impl PointerThread {
         P: Pointer,
         F: FnOnce() -> Option<P> + Send + 'static,
     {
+        Self::spawn_thread(
+            move |receiver, moved, crossings| {
+                let Some(pointer) = connect() else {
+                    warn!("Flow cannot read the pointer in this session; edge handoff is off");
+                    return;
+                };
+                run(pointer, receiver, moved, crossings);
+            },
+            crossings,
+        )
+    }
+
+    /// Start the thread and run `body` on it with the thread's command
+    /// channel, motion flag and crossing sender.
+    fn spawn_thread<B>(
+        body: B,
+        crossings: async_mpsc::Sender<EdgeCrossing>,
+    ) -> std::io::Result<Self>
+    where
+        B: FnOnce(&mpsc::Receiver<Command>, &AtomicBool, &async_mpsc::Sender<EdgeCrossing>)
+            + Send
+            + 'static,
+    {
         let (commands, receiver) = mpsc::channel();
         let moved = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&moved);
         let join = thread::Builder::new()
             .name("openlogi-flow-pointer".to_owned())
-            .spawn(move || {
-                let Some(pointer) = connect() else {
-                    warn!("Flow cannot read the pointer in this session; edge handoff is off");
-                    return;
-                };
-                run(pointer, &receiver, &flag, &crossings);
-            })?;
+            .spawn(move || body(&receiver, &flag, &crossings))?;
         let waker = PointerWaker {
             moved,
             thread: join.thread().clone(),
