@@ -11,7 +11,7 @@ use gpui::{
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::{IconName, Selectable as _, Sizable as _, h_flex, v_flex};
-use openlogi_core::binding::{Action, KeyCombo};
+use openlogi_core::binding::{Action, KeyCombo, Rotary};
 
 use super::{FunctionRowView, KeyTarget, commit_key_action};
 use crate::features::binding_editor::{
@@ -32,12 +32,30 @@ pub(super) struct ShortcutDraft {
     _input_changed: Subscription,
 }
 
-/// The mode the editor shows for a key bound to `current`: the mode of its
-/// shortcut, or tapping when it has none.
-pub(super) fn shown_mode(current: Option<&Action>) -> ShortcutMode {
+/// The modes the editor offers for `target`. A dial or roller direction
+/// fires once per detent, with no press to hold and no release to end it,
+/// so the agent can only tap its chord: holding one would do exactly what
+/// tapping does, which is not what its label promises.
+pub(super) fn offered_modes(target: &KeyTarget) -> &'static [ShortcutMode] {
+    match target {
+        KeyTarget::Control(button) if Rotary::of(*button).is_some() => &[ShortcutMode::Tap],
+        KeyTarget::Control(_)
+        | KeyTarget::Grid(_)
+        | KeyTarget::FunctionKey(_)
+        | KeyTarget::GKey(_)
+        | KeyTarget::ModeKey(_) => &ShortcutMode::ALL,
+    }
+}
+
+/// The mode the editor shows for `target` bound to `current`: the mode of
+/// its shortcut, or tapping when it has none or its mode is not one
+/// `target` offers.
+pub(super) fn shown_mode(target: &KeyTarget, current: Option<&Action>) -> ShortcutMode {
     current
         .and_then(ShortcutMode::of)
-        .map_or(ShortcutMode::Tap, |(mode, _)| mode)
+        .map(|(mode, _)| mode)
+        .filter(|mode| offered_modes(target).contains(mode))
+        .unwrap_or(ShortcutMode::Tap)
 }
 
 /// The action switching a key bound to `current` to `mode` makes: the same
@@ -62,6 +80,7 @@ impl FunctionRowView {
     /// seeded from the shortcut the key is bound to now.
     pub(super) fn ensure_shortcut_draft(
         &mut self,
+        target: &KeyTarget,
         current: Option<&Action>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -90,7 +109,7 @@ impl FunctionRowView {
         });
         self.shortcut = Some(ShortcutDraft {
             input,
-            mode: shown_mode(current),
+            mode: shown_mode(target, current),
             recorder: None,
             error: None,
             _input_changed: input_changed,
@@ -166,7 +185,7 @@ impl FunctionRowView {
         let draft = self.shortcut.as_ref()?;
         let recording = draft.recorder.is_some();
         let bound = current.and_then(ShortcutMode::of);
-        let mode_buttons = ShortcutMode::ALL.into_iter().map(|mode| {
+        let mode_buttons = offered_modes(target).iter().copied().map(|mode| {
             let view = view.clone();
             let target = target.clone();
             let current = current.cloned();

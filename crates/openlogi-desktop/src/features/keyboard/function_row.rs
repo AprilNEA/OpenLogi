@@ -362,6 +362,26 @@ impl FunctionRowView {
         .debug_selector(|| "key-brightness".into())
     }
 
+    /// What the key panel's custom shortcut opens on: the selected key and
+    /// the action it is bound to, read while `state` is still borrowed.
+    /// `None` while a power-user editor is open, or a grid key's panel shows
+    /// its Appearance or Live tab.
+    fn shortcut_seed(
+        &self,
+        slots: &[KeySlot],
+        state: Option<&AppState>,
+    ) -> Option<(KeyTarget, Option<Action>)> {
+        let target = &slots.get(self.selected_key?)?.target;
+        let other_tab = matches!(self.panel_tab, KeyPanelTab::Appearance | KeyPanelTab::Live)
+            && matches!(target, KeyTarget::Grid(_));
+        (self.active_editor.is_none() && !other_tab).then(|| {
+            (
+                target.clone(),
+                state.and_then(|state| selected_key_action(state, target)),
+            )
+        })
+    }
+
     /// Select a key (or deselect with `None`), opening/closing the panel.
     pub(crate) fn select_key(&mut self, idx: Option<usize>, cx: &mut Context<Self>) {
         // Changing selection also drops any open editor + its drafts.
@@ -702,25 +722,15 @@ impl Render for FunctionRowView {
         let selected = self.selected_key;
         let hovered = self.hovered_key;
         let active_editor = self.active_editor;
-        // The key panel's Action tab opens on the key's custom shortcut: the
-        // action the key is bound to, read while `state` is still borrowed.
-        let shortcut_current = selected
-            .and_then(|idx| slots.get(idx))
-            .map(|slot| &slot.target)
-            .filter(|target| {
-                active_editor.is_none()
-                    && !(matches!(self.panel_tab, KeyPanelTab::Appearance | KeyPanelTab::Live)
-                        && matches!(target, KeyTarget::Grid(_)))
-            })
-            .map(|target| state.and_then(|state| selected_key_action(state, target)));
+        let shortcut_seed = self.shortcut_seed(&slots, state);
         if let (Some(selected_idx), Some(kind)) = (selected, active_editor)
             && let Some(slot) = slots.get(selected_idx)
         {
             let current_action = state.and_then(|state| bound_action(state, &slot.target));
             self.seed_power_user_editor(kind, current_action.as_ref(), window, cx);
         }
-        if let Some(current) = shortcut_current {
-            self.ensure_shortcut_draft(current.as_ref(), window, cx);
+        if let Some((target, current)) = shortcut_seed {
+            self.ensure_shortcut_draft(&target, current.as_ref(), window, cx);
         }
         let view = cx.entity();
         let device = pane.render(

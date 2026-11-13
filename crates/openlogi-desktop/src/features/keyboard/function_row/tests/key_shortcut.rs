@@ -2,7 +2,7 @@
 //! what switching the mode rebinds, what a typed chord binds, and that the
 //! editor binds, shows, and clears a keypad key's chord.
 
-use super::super::key_shortcut::{rebound_in_mode, shown_mode, typed_shortcut};
+use super::super::key_shortcut::{offered_modes, rebound_in_mode, shown_mode, typed_shortcut};
 use super::*;
 use crate::features::binding_editor::{ShortcutError, ShortcutMode};
 use openlogi_core::binding::KeyCombo;
@@ -15,20 +15,55 @@ fn chord(text: &str) -> KeyCombo {
 /// modifiers while tapping the key included — and on tapping otherwise.
 #[test]
 fn the_shown_mode_is_the_bindings_own() {
-    assert_eq!(shown_mode(None), ShortcutMode::Tap);
-    assert_eq!(shown_mode(Some(&Action::Copy)), ShortcutMode::Tap);
+    let key = KeyTarget::grid(GridKey::Middle);
+    assert_eq!(shown_mode(&key, None), ShortcutMode::Tap);
+    assert_eq!(shown_mode(&key, Some(&Action::Copy)), ShortcutMode::Tap);
     assert_eq!(
-        shown_mode(Some(&Action::CustomShortcut(chord("Ctrl+C")))),
+        shown_mode(&key, Some(&Action::CustomShortcut(chord("Ctrl+C")))),
         ShortcutMode::Tap
     );
     assert_eq!(
-        shown_mode(Some(&Action::HoldShortcut(chord("Ctrl+Space")))),
+        shown_mode(&key, Some(&Action::HoldShortcut(chord("Ctrl+Space")))),
         ShortcutMode::Hold
     );
     assert_eq!(
-        shown_mode(Some(&Action::TapKeyHoldingModifiers(chord("Alt+Tab")))),
+        shown_mode(
+            &key,
+            Some(&Action::TapKeyHoldingModifiers(chord("Alt+Tab")))
+        ),
         ShortcutMode::HoldModifiers
     );
+}
+
+/// A dial or roller direction has no press to hold, so its editor offers
+/// tapping only — and shows tapping for a chord saved with a hold mode
+/// before — while every pressable key offers all three modes.
+#[test]
+fn rotary_shortcuts_offer_only_supported_modes() {
+    for button in [
+        ButtonId::DialLeft,
+        ButtonId::DialRight,
+        ButtonId::RollerUp,
+        ButtonId::RollerDown,
+    ] {
+        let rotary = KeyTarget::Control(button);
+        assert_eq!(offered_modes(&rotary), [ShortcutMode::Tap], "{button:?}");
+        assert_eq!(
+            shown_mode(&rotary, Some(&Action::HoldShortcut(chord("Ctrl+Space")))),
+            ShortcutMode::Tap,
+            "{button:?}"
+        );
+    }
+    for pressable in [
+        KeyTarget::grid(GridKey::Middle),
+        KeyTarget::Control(ButtonId::Control(Cid::RIGHT_PAGING)),
+    ] {
+        assert_eq!(
+            offered_modes(&pressable),
+            ShortcutMode::ALL,
+            "{pressable:?}"
+        );
+    }
 }
 
 /// Switching the mode of a key that sends a chord rebinds that chord the new
