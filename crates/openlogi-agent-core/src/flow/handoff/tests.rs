@@ -145,7 +145,11 @@ fn retransmissions_are_answered_from_the_transfer_state() {
     let ArmDecision::Duplicate(accept) = duplicate else {
         panic!("expected a duplicate, got {duplicate:?}");
     };
-    assert_eq!(accept.arm_timeout_ms, 2000, "the window left");
+    assert_eq!(
+        u128::from(accept.arm_timeout_ms),
+        ARM_TIMEOUT.saturating_sub(ms(1000)).as_millis(),
+        "the window left"
+    );
 
     let other = ledger.arm(SENDER, &request(8, &[0x0a]), &offline, true, t0);
     assert_eq!(
@@ -154,7 +158,8 @@ fn retransmissions_are_answered_from_the_transfer_state() {
     );
 
     let done = ledger.expire(t0 + ARM_TIMEOUT).expect("the window closed");
-    let replay = ledger.arm(SENDER, &request(7, &[0x0a]), &offline, true, t0 + ms(4000));
+    let late = t0 + ARM_TIMEOUT + ms(1000);
+    let replay = ledger.arm(SENDER, &request(7, &[0x0a]), &offline, true, late);
     let ArmDecision::Replay { accept, result } = replay else {
         panic!("expected a replay, got {replay:?}");
     };
