@@ -420,7 +420,8 @@ tab. Their bindings live in the device's `bindings` like any other key:
   binding once per step, or scrolls when bound to a scroll action. Binding
   either direction takes that whole control from the device: the other
   direction then does nothing until it is bound too. A control with no bound
-  direction stays native. The device's `thumbwheel_sensitivity` (else the
+  direction stays native. A direction has no press to hold, so a custom
+  shortcut on it is always tapped. The device's `thumbwheel_sensitivity` (else the
   app-wide one) sets how many steps a turn makes.
 - A single-page keypad keeps its two paging keys native unless it has a live
   key (below), whose value they adjust.
@@ -429,7 +430,9 @@ The keypad's LCD keys have three more per-device settings:
 
 - `key_display_brightness`, `1` through `100` (percent of the range the keypad
   reports, never its bottom value). The agent writes it when the keypad
-  connects and when it changes; absent leaves the panel as it is.
+  connects and when it changes, and only to a keypad that reported HID++
+  `0x8040` — the app shows the control only then; absent leaves the panel as
+  it is. Of several quick changes, the newest is the level that stays.
   `openlogi api key-brightness --save` sets it from the command line.
 - `key_faces`, by grid key: how a key is drawn instead of its action's icon.
 
@@ -446,7 +449,8 @@ The keypad's LCD keys have three more per-device settings:
   `RRGGBB` hex without `#`, `gradient` replaces the background with two colours and a
   `direction` (`vertical`, `horizontal` or `diagonal`), `image` is a picture
   file drawn behind the label, `symbol` is `{ lucide = "<icon name>" }` or an
-  `{ emoji = "…" }`, and `icon` keeps the action's icon. A key styled on a
+  `{ emoji = "…" }`, and `icon` keeps the action's icon. A picture file
+  replaced at the same path is drawn again within a second. A key styled on a
   page that `keypad_pages` later removes loses its style with its binding.
 - `live_keys`, by grid key: a key that shows a value instead of running a
   binding.
@@ -462,7 +466,10 @@ The keypad's LCD keys have three more per-device settings:
   `{ Command = "<shell command>" }`, whose first output line (or a JSON
   object with `label` and `progress` 0–100) becomes the key's text and bar.
   The command runs through the same shell as `RunShellCommand`, at most every
-  `refresh_secs` (1–3600) and for at most five seconds. Pressing the key runs
+  `refresh_secs` (1–3600) and for at most five seconds; a command still
+  running is not started again, at most four commands run at once, and a slow
+  one delays no other key. Changing a key's source drops the old source's
+  value and reads the new one at once. Pressing the key runs
   `on_press` and makes it active for `timeout_secs` (2–300, default 10):
   meanwhile the two keys under the grid run `decrement` and `increment`
   (the volume keys for a volume source) instead of turning the page. A second
