@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use openlogi_flow::generated as proto;
 use openlogi_hook::{DesktopPoint as HookPoint, DisplayBounds, KwinCrossing, KwinSide, WarpError};
@@ -124,6 +124,18 @@ fn a_position_off_the_edge_uses_the_nearest_segment() {
         .expect("a crossing at the nearest segment");
 
     assert!((crossing.t - 1.0).abs() < 1e-9, "t was {}", crossing.t);
+}
+
+#[test]
+fn edge_calls_are_ignored_while_quiet_and_resume_after() {
+    let mut state = armed(&[EdgeSide::Left]);
+
+    state.quiet_until(Instant::now() + Duration::from_secs(60));
+    assert!(state.crossed(&call(KwinSide::Left, 0.0, 800.0)).is_none());
+
+    // A window that has already passed no longer holds anything back.
+    state.quiet_until(Instant::now());
+    assert!(state.crossed(&call(KwinSide::Left, 0.0, 800.0)).is_some());
 }
 
 #[derive(Default)]
@@ -258,6 +270,41 @@ fn the_thread_places_the_cursor_when_told_to() {
         .expect("the thread placed the cursor");
     assert_eq!(warps.len(), 1);
     assert_eq!(warps[0].0, 2.0);
+
+    thread.stop();
+}
+
+#[test]
+fn an_edge_call_right_after_a_placement_is_not_reported() {
+    let script = FakeScript::with_layout();
+    let (sender, mut receiver) = mpsc::channel(4);
+    let source = script.clone();
+    let thread = PointerThread::spawn_thread(
+        move |commands, moved, crossings| run(source, commands, moved, crossings),
+        sender,
+    )
+    .expect("spawn the pointer thread");
+    thread.configure(PointerSettings {
+        sides: ArmedSides::from_sides([EdgeSide::Left]),
+        require_modifier: false,
+    });
+
+    // The arrival, then the edge firing again at once: the cursor sits two
+    // pixels from the edge it was placed on.
+    thread.place(entry(proto::Side::Left, 0.5));
+    let placed = (0..200).any(|_| {
+        std::thread::sleep(Duration::from_millis(10));
+        !script.warps().is_empty()
+    });
+    assert!(placed, "the thread placed the cursor");
+    script.push(call(KwinSide::Left, 2.0, 720.0));
+    thread.waker().moved();
+
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(
+        receiver.try_recv().is_err(),
+        "the call inside the cooldown was dropped"
+    );
 
     thread.stop();
 }

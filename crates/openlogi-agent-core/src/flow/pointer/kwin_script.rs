@@ -10,7 +10,8 @@
 //! Nothing here captures input. The script cannot say which modifier keys are
 //! held, so a layout that requires Control gets no crossings. KWin itself
 //! limits how often an edge fires, in place of the polling thread's dwell and
-//! cooldown.
+//! cooldown. The one cooldown kept here follows a placement, so the cursor
+//! that was just put at an edge does not send the devices back.
 //!
 //! When a handoff arrives, the cursor is placed the way the polling thread
 //! places it, at the entry point on the matching edge. A KWin script cannot
@@ -19,6 +20,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, TryRecvError};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use openlogi_flow::generated as proto;
 use openlogi_hook::{
@@ -31,6 +33,11 @@ use super::{Command, PointerSettings, entry_position, exposed_edges};
 use crate::flow::edge::{
     DesktopPoint, EdgeCrossing, EdgeSegment, EdgeSide, ExposedEdges, crossing_through,
 };
+
+/// How long edge calls are ignored after the cursor is placed on arrival. The
+/// cursor lands two pixels inside the edge, so a small motion toward it would
+/// otherwise hand the devices straight back.
+const PLACEMENT_COOLDOWN: Duration = Duration::from_secs(1);
 
 /// What the thread needs from the session. [`KwinEdge`] provides it outside
 /// tests.
@@ -77,7 +84,10 @@ pub(super) fn run<S: EdgeScript>(
         loop {
             match commands.try_recv() {
                 Ok(Command::Configure(settings)) => state.configure(settings),
-                Ok(Command::Place(entry)) => place(&mut script, &entry),
+                Ok(Command::Place(entry)) => {
+                    place(&mut script, &entry);
+                    state.quiet_until(Instant::now() + PLACEMENT_COOLDOWN);
+                }
                 Ok(Command::Stop) | Err(TryRecvError::Disconnected) => return,
                 Err(TryRecvError::Empty) => break,
             }
@@ -120,6 +130,8 @@ struct ScriptLoop {
     settings: PointerSettings,
     /// Whether the modifier limitation has been reported.
     warned_modifier: bool,
+    /// Calls before this instant are ignored.
+    quiet_until: Option<Instant>,
 }
 
 impl ScriptLoop {
@@ -127,9 +139,18 @@ impl ScriptLoop {
         self.settings = settings;
     }
 
+    /// Ignore edge calls until `until`.
+    fn quiet_until(&mut self, until: Instant) {
+        self.quiet_until = Some(until);
+    }
+
     /// The crossing a call from the script means, if a peer is armed beyond
     /// that edge.
     fn crossed(&mut self, call: &KwinCrossing) -> Option<EdgeCrossing> {
+        if self.quiet_until.is_some_and(|until| Instant::now() < until) {
+            debug!("the cursor was just placed; the edge call is ignored");
+            return None;
+        }
         let side = edge_side(call.side);
         if !self.settings.sides.contains(side) {
             debug!(
