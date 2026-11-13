@@ -55,8 +55,8 @@ use hidpp::channel::HidppChannel;
 use hidpp::feature::root::RootFeature;
 
 use super::capture::{
-    ArmedCapture, CaptureHost, Liveness, ReportingChangeStream, open_device, run_capture,
-    subscribe_reporting_changes,
+    ArmedCapture, CaptureHost, CaptureListeners, Liveness, ReportingChangeStream, arm_listening,
+    open_device, run_listening, subscribe_reporting_changes,
 };
 use super::capture_restore::{
     ArmedReporting, GKeysRestore, ReprogRestore, RollerRestore, divert_keyboard_key,
@@ -65,7 +65,6 @@ use super::gesture::{
     CaptureError, CaptureSessionFailure, CaptureSessionOutcome, CapturedInput,
     PendingCaptureRestore, enumerate_controls,
 };
-use super::restore::rollback_start;
 use crate::channel::route::DeviceRoute;
 use crate::{ChannelRegistry, SharedChannel};
 
@@ -157,20 +156,27 @@ pub async fn run_keyboard_capture_session(
     host: CaptureHost<'_>,
 ) -> Result<CaptureSessionOutcome, CaptureSessionFailure> {
     let shared = host.channel_for(&route)?;
-    let armed = arm_keyboard(&shared, wanted, host.registry).await?;
-    Ok(run_capture(shared, armed, host).await)
+    let (armed, listeners) = arm_keyboard(&shared, wanted, &host.sink, host.registry).await?;
+    Ok(run_listening(shared, armed, listeners, host).await)
 }
 
 /// Divert the wanted controls of the keyboard behind `shared`.
 ///
+/// The session listens before its first diversion write: a dialpad roller
+/// reports a turn as soon as the firmware has diverted it, which can be
+/// before that write's reply arrives — or while the next roller is being
+/// diverted. Those reports reach `sink` like any later one.
+///
 /// A failure mid-way tries to hand every possibly-diverted control back to the
-/// firmware. If compensation is incomplete, the returned failure carries an
-/// opaque restore capability for the manager to retain and retry.
+/// firmware, listening until it has. If compensation is incomplete, the
+/// returned failure carries an opaque restore capability for the manager to
+/// retain and retry.
 async fn arm_keyboard(
     shared: &SharedChannel,
     wanted: watch::Receiver<KeyboardWanted>,
+    sink: &mpsc::UnboundedSender<CapturedInput>,
     registry: &ChannelRegistry,
-) -> Result<ArmedKeys, CaptureSessionFailure> {
+) -> Result<(ArmedKeys, CaptureListeners), CaptureSessionFailure> {
     let device = open_device(shared).await?;
     let root = device.root();
     // A G713 has the gaming cluster and no `0x1b04` at all: its controls are
@@ -194,7 +200,7 @@ async fn arm_keyboard(
     // `subscribe_reporting_changes`).
     let reporting_changes = controls.as_ref().map(subscribe_reporting_changes);
     let rollers = arm_rollers(shared, &device).await?;
-    let mut armed = ArmedKeys {
+    let armed = ArmedKeys {
         controls,
         table,
         reporting: Vec::new(),
@@ -208,12 +214,7 @@ async fn arm_keyboard(
         reporting_changes,
         wanted,
     };
-    // Arming is the first change, from no key captured to the wanted set.
-    if let Err(error) = armed.retarget().await {
-        let pending = armed.into_pending(shared);
-        return Err(rollback_start(error, pending, registry).await);
-    }
-    Ok(armed)
+    arm_listening(armed, shared, sink, registry).await
 }
 
 /// Resolve a dialpad's `0x4610` rollers to its rotary controls. Writes
@@ -305,7 +306,9 @@ impl ArmedRollers {
                 continue;
             };
             // Recorded before the write, so a transport failure still hands
-            // it back; dispatched before it, so the first event is not lost.
+            // it back; dispatched before it, so a turn reported before the
+            // reply reaches the session's listener, which is already
+            // installed (see `arm_keyboard`).
             self.diverted.insert(rotary);
             self.dispatch().insert(id, (rotary, per_revolution));
             self.feature

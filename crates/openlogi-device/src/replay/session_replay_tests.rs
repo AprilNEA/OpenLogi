@@ -117,83 +117,133 @@ const DIALPAD_PRODUCT_ID: u16 = 0xbc00;
 /// The `0x4610` feature index the dialpad replay places `MultiRoller` at.
 const MULTI_ROLLER_FEATURE_INDEX: u8 = 0x03;
 
-/// A dialpad session diverts the roller a bound direction names, reports its
-/// turns as rotations of that control, and hands it back to native reporting
-/// before it completes. The strict cassette fails on any other request: the
-/// unbound small roller is resolved but never written.
-#[tokio::test]
-async fn keyboard_capture_replay_diverts_and_hands_back_a_dialpad_roller() {
-    let roller = |function, payload| {
+/// The `0x4610` request or echoed reply for function `function` with
+/// `payload` on the dialpad replay's roller feature.
+fn roller_report(function: u8, payload: [u8; 3]) -> Vec<u8> {
+    hidpp20_short(0xff, MULTI_ROLLER_FEATURE_INDEX, function, payload)
+}
+
+/// The dialpad replay's request diverting the dial (roller 1).
+fn divert_dial_request() -> Vec<u8> {
+    roller_report(3, [1, 1, 0])
+}
+
+/// A dialpad replay whose session diverts the dial, then hands it back: the
+/// strict cassette fails on any other request, so the unbound roller is
+/// resolved but never written.
+async fn dialpad_dial_replay(name: &str) -> ArmedReplay {
+    let echoed = |function, payload| {
         hidpp20_exchange(
-            hidpp20_short(0xff, MULTI_ROLLER_FEATURE_INDEX, function, payload),
-            hidpp20_short(0xff, MULTI_ROLLER_FEATURE_INDEX, function, payload),
+            roller_report(function, payload),
+            roller_report(function, payload),
         )
     };
-    let replay = ArmedReplay::enumerate_product(
+    ArmedReplay::enumerate_product(
         keyboard_cassette(
-            "dialpad capture diverts the dial",
+            name,
             &[KEYBOARD_CID],
             vec![
                 root_feature_lookup_exchange(0x4610, MULTI_ROLLER_FEATURE_INDEX, 0),
                 // Resolution of the dial (roller 1), then the roller (0).
                 hidpp20_exchange(
-                    hidpp20_short(0xff, MULTI_ROLLER_FEATURE_INDEX, 1, [1, 0, 0]),
-                    hidpp20_short(0xff, MULTI_ROLLER_FEATURE_INDEX, 1, [0xb4, 0, 0x1f]),
+                    roller_report(1, [1, 0, 0]),
+                    roller_report(1, [0xb4, 0, 0x1f]),
                 ),
                 hidpp20_exchange(
-                    hidpp20_short(0xff, MULTI_ROLLER_FEATURE_INDEX, 1, [0, 0, 0]),
-                    hidpp20_short(0xff, MULTI_ROLLER_FEATURE_INDEX, 1, [0x28, 0, 0x1f]),
+                    roller_report(1, [0, 0, 0]),
+                    roller_report(1, [0x28, 0, 0x1f]),
                 ),
                 // Divert the dial.
-                roller(3, [1, 1, 0]),
+                echoed(3, [1, 1, 0]),
                 root_feature_lookup_exchange(0x1d4b, 0, 0),
                 // Hand the dial back.
-                roller(3, [1, 0, 0]),
+                echoed(3, [1, 0, 0]),
             ],
         ),
         DIALPAD_PRODUCT_ID,
     )
-    .await;
+    .await
+}
+
+/// A session wanting only the dial.
+fn dial_wanted() -> watch::Receiver<KeyboardWanted> {
+    watch::channel(KeyboardWanted {
+        rotary: BTreeSet::from([Rotary::Dial]),
+        ..KeyboardWanted::default()
+    })
+    .1
+}
+
+/// Turn `roller` by `delta` increments on the dialpad replay's device.
+fn turn_roller(replay: &ArmedReplay, roller: u8, delta: u8) {
+    let mut payload = [0; 16];
+    payload[0] = roller;
+    payload[1] = delta;
+    replay
+        .backend
+        .emit_channel_report(
+            CAPTURE_CHANNEL,
+            &hidpp20_long(0xff, MULTI_ROLLER_FEATURE_INDEX, 0, payload),
+        )
+        .expect("the rotation reaches the session");
+}
+
+/// How long a dialpad replay may take before it counts as hung.
+const DIALPAD_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// A dialpad session diverts the roller a bound direction names, reports its
+/// turns as rotations of that control — including a turn the dial sends
+/// while its diversion's reply is still on the way — and hands it back to
+/// native reporting before it completes. The strict cassette fails on any
+/// other request: the unbound small roller is resolved but never written.
+#[tokio::test]
+async fn keyboard_capture_replay_diverts_and_hands_back_a_dialpad_roller() {
+    let replay = dialpad_dial_replay("dialpad capture diverts the dial").await;
+    let divert_reply = replay
+        .backend
+        .hold_next_response(
+            CAPTURE_CHANNEL,
+            RequestMatch::Hidpp20,
+            &divert_dial_request(),
+        )
+        .expect("the dial's diversion reply can be held");
     let (sink, mut captured) = mpsc::unbounded_channel();
     let (shutdown, host) = replay.host(sink);
-    let capture = run_keyboard_capture_session(
-        replay.route.clone(),
-        watch::channel(KeyboardWanted {
-            rotary: BTreeSet::from([Rotary::Dial]),
-            ..KeyboardWanted::default()
-        })
-        .1,
-        host,
-    );
+    let capture = run_keyboard_capture_session(replay.route.clone(), dial_wanted(), host);
     let turn_then_stop = async {
+        // The firmware diverts the dial once it has the request, and the dial
+        // can turn before its reply reaches the host: two increments
+        // counter-clockwise, sent while arming still waits.
+        divert_reply.request_written().await;
+        turn_roller(&replay, 1, 0xfe);
+        divert_reply.release();
         replay.wireless_lookup.request_written().await;
-        // Two increments counter-clockwise on the dial, then a turn of the
-        // undiverted roller that must not be reported.
-        for (roller, delta) in [(1, 0xfe), (0, 0x01)] {
-            let mut payload = [0; 16];
-            payload[0] = roller;
-            payload[1] = delta;
-            replay
-                .backend
-                .emit_channel_report(
-                    CAPTURE_CHANNEL,
-                    &hidpp20_long(0xff, MULTI_ROLLER_FEATURE_INDEX, 0, payload),
-                )
-                .expect("the rotation reaches the session");
-        }
+        // A turn of the undiverted roller, which must not be reported.
+        turn_roller(&replay, 0, 0x01);
+        let rotation = tokio::time::timeout(DIALPAD_DEADLINE, captured.recv())
+            .await
+            .expect("the session neither reported the dial's turn nor ended");
+        // `None`: the session ended — its wake lookup is still held — without
+        // ever reporting the turn.
         assert_eq!(
-            captured.recv().await,
+            rotation,
             Some(CapturedInput::Rotation {
                 rotary: Rotary::Dial,
                 increments: -2,
                 per_revolution: 180,
-            })
+            }),
+            "the dial's two counter-clockwise increments, turned while its \
+             diversion was being armed, were never reported"
         );
         replay.stop_after_arm(shutdown).await;
         captured
     };
 
-    let (outcome, mut captured) = tokio::join!(capture, turn_then_stop);
+    let (outcome, mut captured) = tokio::time::timeout(DIALPAD_DEADLINE, async {
+        tokio::join!(capture, turn_then_stop)
+    })
+    .await
+    .expect("the dialpad session neither reported the dial nor shut down");
 
     assert!(matches!(
         outcome.expect("capture session shuts down cleanly"),
@@ -207,6 +257,63 @@ async fn keyboard_capture_replay_diverts_and_hands_back_a_dialpad_roller() {
         .backend
         .require_complete()
         .expect("the dialpad cassette is strictly consumed");
+}
+
+/// A diversion whose native write stalls past the HID++ response deadline
+/// must finish before anything else is sent for that roller: a hand-back
+/// that overtook it would be undone by the late diversion, leaving the
+/// roller captured after teardown. The strict cassette fails on a hand-back
+/// written before the diversion completed.
+#[tokio::test]
+async fn roller_restore_waits_for_stalled_take() {
+    let replay = dialpad_dial_replay("dialpad restore waits for a stalled diversion").await;
+    let stalled = replay
+        .backend
+        .hold_next_write_completion(
+            CAPTURE_CHANNEL,
+            RequestMatch::Hidpp20,
+            &divert_dial_request(),
+        )
+        .expect("the dial's diversion write can be held");
+    let (sink, _captured) = mpsc::unbounded_channel();
+    let (shutdown, host) = replay.host(sink);
+    let mut capture = std::pin::pin!(run_keyboard_capture_session(
+        replay.route.clone(),
+        dial_wanted(),
+        host
+    ));
+
+    let stall = async {
+        stalled.write_accepted().await;
+        // Past the 5-second HID++ deadline: a bounded call gives up here and
+        // arming rolls back with a hand-back while the diversion is pending.
+        tokio::time::sleep(
+            hidpp::channel::SEND_RESPONSE_TIMEOUT + std::time::Duration::from_secs(1),
+        )
+        .await;
+    };
+    tokio::select! {
+        outcome = &mut capture => panic!(
+            "the session ended while its diversion was still on the wire: {:?}",
+            outcome.map(|_| ()).map_err(|_| "arming failed")
+        ),
+        () = stall => {}
+    }
+    stalled.release();
+    let (outcome, ()) = tokio::time::timeout(DIALPAD_DEADLINE, async {
+        tokio::join!(capture, replay.stop_after_arm(shutdown))
+    })
+    .await
+    .expect("the session arms and shuts down once the diversion completes");
+
+    assert!(matches!(
+        outcome.expect("capture session shuts down cleanly"),
+        CaptureSessionOutcome::Restored
+    ));
+    replay
+        .backend
+        .require_complete()
+        .expect("the dialpad cassette is strictly consumed, in order");
 }
 
 /// The `0x8010` feature index the G-key replay places `GamingGKeys` at.

@@ -119,12 +119,19 @@ impl MultiRollerFeature {
     ///
     /// The response echoes `[roller, mode]` and is not decoded; read the mode
     /// back with [`get_mode`](Self::get_mode) when it is needed.
+    ///
+    /// The write finishes on the wire before the call returns, as the G-key
+    /// row's ownership writes do: a hand-back can then never overtake a
+    /// stalled diversion and leave the roller diverted with nobody
+    /// listening. The caller must drive it to completion.
     pub async fn set_mode(
         &self,
         roller: RollerId,
         mode: RollerReportingMode,
     ) -> Result<(), Hidpp20Error> {
-        self.endpoint.call(3, [roller.0, mode.into(), 0]).await?;
+        self.endpoint
+            .call_write_through(3, [roller.0, mode.into(), 0])
+            .await?;
         Ok(())
     }
 }
