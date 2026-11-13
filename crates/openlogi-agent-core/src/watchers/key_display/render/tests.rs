@@ -120,7 +120,7 @@ fn a_picture_fills_the_tile_and_an_unreadable_one_is_left_out() {
         .save(&path)
         .unwrap();
     let face = StyledFace {
-        image: Some(path),
+        image: Some(KeyPicture::current(path)),
         ..plain(Color::new(0, 0, 0))
     };
     let image = decode(&render_tile(&styled(face), KEY).unwrap());
@@ -129,7 +129,7 @@ fn a_picture_fills_the_tile_and_an_unreadable_one_is_left_out() {
     assert!(near(*image.get_pixel(115, 115), [0xe0, 0x10, 0x10]));
 
     let missing = StyledFace {
-        image: Some(dir.path().join("missing.png")),
+        image: Some(KeyPicture::current(dir.path().join("missing.png"))),
         ..plain(Color::new(0, 0x80, 0))
     };
     let image = decode(&render_tile(&styled(missing), KEY).unwrap());
@@ -187,7 +187,7 @@ fn a_detailed_picture_still_fits_one_image_packet() {
     .save(&path)
     .unwrap();
     let face = StyledFace {
-        image: Some(path),
+        image: Some(KeyPicture::current(path)),
         label: Some("Noise".into()),
         ..plain(Color::new(0, 0, 0))
     };
@@ -287,4 +287,40 @@ fn a_key_picture_is_read_only_within_bounds() {
     let long = "word ".repeat(1000);
     let lines = label_lines(&long);
     assert!(lines.iter().map(|line| line.chars().count()).sum::<usize>() <= MAX_LABEL_CHARS);
+}
+
+/// Replacing a key's picture file — or a missing one appearing — at the
+/// same path makes a different face, so the cached tile is not reused and
+/// the key shows the new picture.
+#[test]
+fn replacing_key_picture_invalidates_tile() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("picture.png");
+    let face = |picture| {
+        styled(StyledFace {
+            image: Some(picture),
+            ..plain(Color::new(0, 0, 0))
+        })
+    };
+    let missing = face(KeyPicture::current(path.clone()));
+
+    RgbImage::from_pixel(8, 8, Rgb([0xe0, 0x10, 0x10]))
+        .save(&path)
+        .unwrap();
+    let red = face(KeyPicture::current(path.clone()));
+    assert_ne!(missing, red, "a picture that became readable is a new face");
+    let pixel = |face: &KeyFace| *decode(&render_tile(face, KEY).unwrap()).get_pixel(59, 59);
+    assert!(near(pixel(&red), [0xe0, 0x10, 0x10]));
+
+    RgbImage::from_pixel(16, 16, Rgb([0x10, 0x10, 0xe0]))
+        .save(&path)
+        .unwrap();
+    let blue = face(KeyPicture::current(path.clone()));
+    assert_ne!(red, blue, "a replaced picture is a new face");
+    assert_eq!(
+        blue,
+        face(KeyPicture::current(path)),
+        "an unchanged file is the same face, so its tile is reused"
+    );
+    assert!(near(pixel(&blue), [0x10, 0x10, 0xe0]));
 }

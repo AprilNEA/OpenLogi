@@ -3,7 +3,8 @@
 //! as often as its own interval says. Reads run concurrently off the async
 //! threads, because a source may be a command, and each value is drawn as
 //! soon as it is read: a slow command delays no other key, and an active
-//! key's time runs out on schedule whatever is being read.
+//! key's time runs out on schedule whatever is being read. The same tick
+//! redraws a key whose picture file was replaced on disk.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -28,6 +29,7 @@ pub(crate) async fn watch(orchestrator: Arc<Mutex<Orchestrator>>) {
                     let mut orchestrator = orchestrator.lock().await;
                     let now = Instant::now();
                     orchestrator.expire_live_keys(now);
+                    orchestrator.refresh_key_displays();
                     orchestrator.live_key_reads(now)
                 };
                 reader.start(reads);

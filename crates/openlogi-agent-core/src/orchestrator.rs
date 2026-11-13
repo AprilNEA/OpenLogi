@@ -62,7 +62,9 @@ use crate::runtime::scroll::ScrollPreferences;
 use crate::runtime::{PageTurn, PointerSelection};
 use crate::watchers::host_switch::{HostSwitchLink, HostSwitchLinks, LinkedHostSwitch};
 use crate::watchers::inventory::InventoryRefresh;
-use crate::watchers::key_display::{KeyDisplaySpec, KeyFace, SharedKeyDisplaySpecs, StyledFace};
+use crate::watchers::key_display::{
+    KeyDisplaySpec, KeyFace, KeyPicture, SharedKeyDisplaySpecs, StyledFace,
+};
 use crate::watchers::keyboard::{KeyboardSpec, SharedKeyboardSpecs};
 use crate::watchers::light::{WatchedLight, WatchedLights};
 use crate::{DpiCycleState, DpiCycles, PointerSpeeds};
@@ -1316,6 +1318,15 @@ impl Orchestrator {
         if self.live.expire(now) {
             self.publish_device_runtime();
         }
+    }
+
+    /// Republish what the keypads' LCD keys show when a picture on one of
+    /// them changed on disk. A face carries its picture's file version
+    /// ([`KeyPicture`]), so a file replaced at the same path — which saves
+    /// no config — is drawn again within a watcher tick. Publishes nothing
+    /// when every face is unchanged.
+    pub fn refresh_key_displays(&self) {
+        publish_arc_if_changed(&self.key_display_specs_tx, self.key_display_specs_for());
     }
 
     /// A press of the live key `slot` on `device_key`: activate or end it.
@@ -2857,7 +2868,7 @@ fn key_face(binding: Option<&Binding>, style: Option<&KeyFaceStyle>) -> KeyFace 
         foreground: style.color.unwrap_or(Rgb::WHITE),
         icon_color: style.icon_color.or(style.color).unwrap_or(Rgb::WHITE),
         gradient: style.gradient,
-        image: style.image.clone(),
+        image: style.image.clone().map(KeyPicture::current),
         symbol: style.symbol.as_ref().and_then(KeySymbol::normalized),
         progress: None,
         highlight: false,

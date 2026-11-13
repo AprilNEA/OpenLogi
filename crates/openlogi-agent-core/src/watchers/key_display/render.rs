@@ -14,6 +14,7 @@ use std::fmt::Write as _;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
+use std::time::SystemTime;
 
 use image::ExtendedColorType;
 use image::ImageEncoder as _;
@@ -54,14 +55,53 @@ pub struct StyledFace {
     pub icon_color: Rgb,
     /// A gradient drawn instead of the flat `background`.
     pub gradient: Option<KeyGradient>,
-    /// A PNG or JPEG file drawn under the icon and label.
-    pub image: Option<PathBuf>,
+    /// A PNG or JPEG file drawn under the icon and label, as it was on disk
+    /// when the face was made.
+    pub image: Option<KeyPicture>,
     /// A Lucide icon or emoji drawn in place of `icon`.
     pub symbol: Option<KeySymbol>,
     /// A bar along the bottom, in percent (a live key's value).
     pub progress: Option<u8>,
     /// Drawn with a frame: the live key the paging keys adjust.
     pub highlight: bool,
+}
+
+/// A picture on a key: its file, and which version of that file. Equal
+/// faces render equal tiles, so the version is part of the face: a file
+/// replaced at the same path — or one unreadable when it was chosen and
+/// readable now — is a different face, and the key is drawn again.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct KeyPicture {
+    path: PathBuf,
+    revision: Option<FileRevision>,
+}
+
+/// What tells two versions of one file apart without reading it: its size
+/// and when it was last written. `None` fields stand for what the platform
+/// cannot report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct FileRevision {
+    modified: Option<SystemTime>,
+    len: u64,
+}
+
+impl KeyPicture {
+    /// The picture at `path` as it is on disk now. A file that cannot be
+    /// read has no revision, so its becoming readable changes the face.
+    #[must_use]
+    pub fn current(path: PathBuf) -> Self {
+        let revision = std::fs::metadata(&path).ok().map(|meta| FileRevision {
+            modified: meta.modified().ok(),
+            len: meta.len(),
+        });
+        Self { path, revision }
+    }
+
+    /// The picture's file.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
 }
 
 /// The one glyph a styled face draws above its label: the user's symbol, else
@@ -157,8 +197,8 @@ fn draw_styled(
         Some(gradient) => fill_gradient(pixmap, gradient, side),
         None => pixmap.fill(color(face.background, 255)),
     }
-    if let Some(path) = &face.image {
-        draw_picture(pixmap, path);
+    if let Some(picture) = &face.image {
+        draw_picture(pixmap, picture.path());
     }
     let lines = face.label.as_deref().map(label_lines).unwrap_or_default();
     let glyph = face

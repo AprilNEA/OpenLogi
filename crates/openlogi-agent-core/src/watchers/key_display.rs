@@ -37,7 +37,7 @@ use crate::hardware::DeviceAccess;
 
 pub mod render;
 
-pub use render::{KeyFace, StyledFace};
+pub use render::{KeyFace, KeyPicture, StyledFace};
 use render::{RenderError, render_tile};
 
 /// What one keypad's LCD keys should show.
