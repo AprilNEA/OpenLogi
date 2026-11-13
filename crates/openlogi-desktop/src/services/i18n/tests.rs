@@ -112,3 +112,17 @@ fn czech_pairing_translations_resolve() {
         "Spárováno na pozici 2."
     );
 }
+
+/// Lithuanian must resolve in the actual desktop backend, including an
+/// interpolated pairing message.
+#[test]
+fn lithuanian_pairing_translations_resolve() {
+    assert_eq!(
+        rust_i18n::t!("pairing.add_device", locale = "lt"),
+        "Pridėti įrenginį"
+    );
+    assert_eq!(
+        rust_i18n::t!("pairing.paired_receiver_slot", locale = "lt", slot = 2),
+        "Susieta 2 lizde."
+    );
+}

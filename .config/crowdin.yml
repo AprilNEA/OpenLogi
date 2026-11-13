@@ -28,6 +28,7 @@ export_languages:
   - zh-HK
   - zh-TW
   - ko
+  - lt
 
 files:
   - source: "/crates/openlogi-ui/locales/en.toml"
@@ -59,3 +60,4 @@ files:
         zh-HK: "zh-HK"
         zh-TW: "zh-TW"
         ko: "ko"
+        lt: "lt"
