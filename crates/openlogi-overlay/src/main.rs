@@ -246,10 +246,16 @@ fn main() -> Result<()> {
                         .all(|handle| handle.downcast::<BacklightView>().is_none())
                     {
                         let options = backlight::window_options(cx);
-                        let opened = cx.open_window(options, |_, cx| {
-                            cx.new(|_| BacklightView::new(observation.clone()))
+                        let alternatives = platform::indicator_windows(options)
+                            .into_iter()
+                            .map(|options| vec![options])
+                            .collect();
+                        let opened = platform::open_first(alternatives, |options| {
+                            cx.open_window(options, |_, cx| {
+                                cx.new(|_| BacklightView::new(observation.clone()))
+                            })
                         });
-                        debug!(success = opened.is_ok(), "backlight window opened");
+                        debug!(success = opened.is_some(), "backlight window opened");
                     }
                 });
             }
