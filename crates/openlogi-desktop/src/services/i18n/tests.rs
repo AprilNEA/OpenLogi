@@ -117,6 +117,7 @@ fn czech_pairing_translations_resolve() {
 /// interpolated pairing message.
 #[test]
 fn lithuanian_pairing_translations_resolve() {
+    let _locale = super::LOCALE_LOCK.lock();
     assert_eq!(
         rust_i18n::t!("pairing.add_device", locale = "lt"),
         "Pridėti įrenginį"
