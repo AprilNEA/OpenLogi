@@ -269,3 +269,79 @@ fn the_live_tab_edits_the_live_key(cx: &mut gpui::TestAppContext) {
     cx.update(|window, _| window.remove_window());
     cx.run_until_parked();
 }
+
+/// A command live key with its action fields, in the shortest window the
+/// app allows and at the largest interface scale: the Live panel stays in
+/// its column and scrolls, so the increment field can be reached.
+#[gpui::test]
+fn the_live_tab_scrolls_to_its_last_field_in_a_short_window(cx: &mut gpui::TestAppContext) {
+    use gpui::{ScrollDelta, ScrollEvent, point, size};
+    use openlogi_core::config::{LiveKey, LiveSource, UiScale};
+
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    let (mut state, _commands) = crate::state::tests::keypad_pages::keypad_state();
+    let top_left = GridSlot {
+        page: KeypadPage::FIRST,
+        key: GridKey::TopLeft,
+    };
+    let _ = state.commit_live_key(
+        top_left,
+        Some(LiveKey::new(LiveSource::Command("date +%H:%M".into()))),
+    );
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        cx.set_reduce_motion(true);
+        let state = cx.new(|_| state);
+        AppState::set_global(state, cx);
+    });
+    let (view, cx) = cx.add_window_view(|_, cx| FunctionRowView::new(cx));
+    // The device page's share of the main window at its minimum size.
+    let window_h = px(520.);
+    cx.simulate_resize(size(px(1280.), window_h));
+    cx.update(|window, _| crate::ui::theme::apply_scale(window, UiScale::ExtraLarge));
+    view.update(cx, |view, cx| {
+        view.select_key(Some(0), cx);
+        view.set_panel_tab(KeyPanelTab::Live, cx);
+    });
+    let draw = |cx: &mut gpui::VisualTestContext| {
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+    };
+    draw(cx);
+
+    let panel = cx
+        .debug_bounds("live-key-panel")
+        .expect("the Live panel shows");
+    assert!(
+        panel.bottom() <= window_h,
+        "the panel ends inside the window: {panel:?}"
+    );
+    let viewport = cx
+        .debug_bounds("scrollbar-overlay")
+        .expect("the Live fields scroll");
+    assert!(
+        viewport.bottom() <= panel.bottom(),
+        "the fields end inside the panel: {viewport:?} in {panel:?}"
+    );
+
+    for _ in 0..3 {
+        cx.simulate_event(ScrollEvent {
+            position: viewport.center(),
+            delta: ScrollDelta::Pixels(point(px(0.), px(-2000.))),
+            ..Default::default()
+        });
+        draw(cx);
+    }
+    let increment = cx
+        .debug_bounds("live-key-increment")
+        .expect("the increment field is laid out");
+    assert!(
+        increment.top() >= viewport.top() && increment.bottom() <= viewport.bottom(),
+        "scrolling reaches the increment field: {increment:?} in {viewport:?}"
+    );
+
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}

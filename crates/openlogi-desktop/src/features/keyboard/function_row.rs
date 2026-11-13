@@ -2066,12 +2066,19 @@ impl FunctionRowView {
         if let Some(grid) = grid
             && self.panel_tab == KeyPanelTab::Live
         {
+            // The fields grow with every battery source; like the Action
+            // tab's list, they give up height and scroll inside the panel.
             return compact_panel(pal)
+                .debug_selector(|| "live-key-panel".into())
                 .w(px(PANEL_W))
+                .max_h_full()
                 .child(title_header(&key_name, None, &pal))
                 .children(tabs)
                 .child(divider(pal))
-                .child(self.live_panel(grid, pal, cx));
+                .child(editor_scroll_list(
+                    "live-key-scroll",
+                    [self.live_panel(grid, pal, cx)],
+                ));
         }
 
         let state = AppState::try_read(cx);

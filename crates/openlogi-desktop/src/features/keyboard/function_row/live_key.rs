@@ -238,7 +238,11 @@ impl FunctionRowView {
             content = content
                 .child(control_input(&draft.fields[Field::Press as usize]))
                 .child(control_input(&draft.fields[Field::Decrement as usize]))
-                .child(control_input(&draft.fields[Field::Increment as usize]));
+                .child(
+                    div()
+                        .debug_selector(|| "live-key-increment".into())
+                        .child(control_input(&draft.fields[Field::Increment as usize])),
+                );
         }
         content.child(div().h(px(2.)))
     }
