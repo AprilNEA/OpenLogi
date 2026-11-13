@@ -185,7 +185,15 @@ fn an_app_profile_link_opens_the_profile_the_selected_device_runs_the_app_under(
         // Cold: which device is selected is unknown until the inventory.
         links.dispatch(profile_link.clone(), cx);
         assert_eq!(page(cx).0, Route::Home);
-        deliver(&snapshot_candidate(&profile()), &mut links, cx);
+        let mut snapshot = snapshot_candidate(&profile());
+        // Measured controls keep the keyboard's profile editor independent
+        // of whether this host has its device-render asset cached.
+        snapshot.inventory[1].paired[0]
+            .capabilities
+            .as_mut()
+            .unwrap()
+            .buttons = true;
+        deliver(&snapshot, &mut links, cx);
         assert_eq!(page(cx), (device_page(MOUSE), DetailTab::Buttons));
         let state = AppState::try_read(cx).unwrap();
         assert_eq!(state.editing_app(), Some("exe:photoshop.exe"));
