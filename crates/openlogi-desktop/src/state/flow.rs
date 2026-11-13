@@ -263,9 +263,7 @@ pub(crate) fn with_channel(
         (FlowHost::This, Some(slot)) => Some(FlowDevice::new(
             device.clone(),
             slot,
-            existing
-                .map(|entry| entry.peer_slots().clone())
-                .unwrap_or_default(),
+            existing.map_or_else(Default::default, |entry| entry.peer_slots().clone()),
         )?),
         (FlowHost::Peer(peer), slot) => {
             let (self_slot, mut peers) = match (existing, slot) {

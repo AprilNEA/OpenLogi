@@ -49,9 +49,9 @@ pub fn button_bindings_for(
     app_bundle: Option<&str>,
     layout: Option<&GamingLayout>,
 ) -> BTreeMap<ButtonId, Binding> {
-    let stored = config_key
-        .map(|key| config.effective_bindings(key, app_bundle))
-        .unwrap_or_default();
+    let stored = config_key.map_or_else(Default::default, |key| {
+        config.effective_bindings(key, app_bundle)
+    });
     let mut bindings: BTreeMap<ButtonId, Binding> = ButtonId::ALL
         .iter()
         .chain(&ButtonId::G_BUTTONS)

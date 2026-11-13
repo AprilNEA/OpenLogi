@@ -66,6 +66,7 @@ use crate::watchers::light::{WatchedLight, WatchedLights};
 use crate::{DpiCycleState, DpiCycles, PointerSpeeds};
 
 mod devices;
+mod inventory_events;
 mod lights;
 mod settings;
 
@@ -1065,9 +1066,9 @@ impl Orchestrator {
                 gestures.remove(button);
             }
         }
-        let shift_bindings = key
-            .map(|key| shift_bindings_for(&self.config, key))
-            .unwrap_or_default();
+        let shift_bindings = key.map_or_else(Default::default, |key| {
+            shift_bindings_for(&self.config, key)
+        });
         HookMaps {
             bindings,
             gestures,
@@ -1469,8 +1470,7 @@ impl Orchestrator {
             let before_shift = guard
                 .by_key
                 .get(&dev.config_key)
-                .map(|state| state.before_shift.clone())
-                .unwrap_or_default();
+                .map_or_else(Default::default, |state| state.before_shift.clone());
             let nearest = current.and_then(|dpi| crate::dpi::nearest_preset(&presets, dpi));
             let same_presets = previous.filter(|state| state.presets == presets);
             by_key.insert(

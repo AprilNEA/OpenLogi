@@ -76,8 +76,7 @@ pub(crate) fn run(args: &Args) -> Result<()> {
     };
     let stamp = tag
         .stamp_version(base.as_ref())
-        .map(ToString::to_string)
-        .unwrap_or_default();
+        .map_or_else(String::new, ToString::to_string);
     let build = BuildVersion::of(&tag, beta)?.to_string();
     let version = tag.version().to_string();
     let previous = tag.notes_base(&merged).unwrap_or_default();

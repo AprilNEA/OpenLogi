@@ -90,8 +90,7 @@ fn current_taps(cx: &App) -> Vec<openlogi_hook::EventTapInfo> {
     {
         AppState::try_global(cx)
             .map(|state| state.read(cx))
-            .map(|s| s.event_taps().to_vec())
-            .unwrap_or_default()
+            .map_or_else(Default::default, |s| s.event_taps().to_vec())
     }
     #[cfg(not(debug_assertions))]
     {
@@ -107,15 +106,14 @@ fn current_taps(cx: &App) -> Vec<openlogi_hook::EventTapInfo> {
 fn monitor_list(pal: Palette, cx: &mut App) -> impl IntoElement {
     let lines: Vec<String> = AppState::try_global(cx)
         .map(|state| state.read(cx))
-        .map(|s| {
+        .map_or_else(Default::default, |s| {
             s.monitor_events()
                 .iter()
                 .rev()
                 .take(20)
                 .map(format_monitor_event)
                 .collect()
-        })
-        .unwrap_or_default();
+        });
 
     let mut col = v_flex().w_full().mt_2().gap_1().child(
         div()

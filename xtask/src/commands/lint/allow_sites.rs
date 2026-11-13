@@ -132,15 +132,19 @@ fn lint_names(allow: &Meta) -> Vec<String> {
         return Vec::new();
     };
     list.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)
-        .map(|args| {
-            args.iter()
-                .filter_map(|arg| match arg {
-                    Meta::Path(path) => Some(path.to_token_stream().to_string().replace(' ', "")),
-                    Meta::List(_) | Meta::NameValue(_) => None,
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+        .map_or_else(
+            |_| Vec::new(),
+            |args| {
+                args.iter()
+                    .filter_map(|arg| match arg {
+                        Meta::Path(path) => {
+                            Some(path.to_token_stream().to_string().replace(' ', ""))
+                        }
+                        Meta::List(_) | Meta::NameValue(_) => None,
+                    })
+                    .collect()
+            },
+        )
 }
 
 /// Byte ranges of every outer attribute, `#` through its closing `]`.

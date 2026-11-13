@@ -105,14 +105,15 @@ impl AutoToggle {
 /// cameras) carry no `vid_`/`pid_` markers and are dropped.
 pub fn enumerate() -> Vec<Camera> {
     let com = ComApartment::enter();
-    monikers(&com)
-        .map(|monikers| {
+    monikers(&com).map_or_else(
+        |_| Vec::new(),
+        |monikers| {
             monikers
                 .into_iter()
                 .filter_map(|m| camera_from_moniker(&m))
                 .collect()
-        })
-        .unwrap_or_default()
+        },
+    )
 }
 
 /// Read a control's min/max/default/current straight from the device.

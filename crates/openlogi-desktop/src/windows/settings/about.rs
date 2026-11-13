@@ -161,8 +161,7 @@ fn copy_diagnostics_action(
 fn about_config(cx: &App) -> gpui::Div {
     let pal = crate::ui::theme::palette(cx);
     let path = openlogi_core::paths::config_path()
-        .map(|p| p.display().to_string())
-        .unwrap_or_default();
+        .map_or_else(|_| String::new(), |p| p.display().to_string());
 
     h_flex()
         .w_full()
