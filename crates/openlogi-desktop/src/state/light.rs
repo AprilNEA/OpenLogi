@@ -1,6 +1,8 @@
 //! Optimistic standalone-light state and IPC result handling.
 
 use std::collections::BTreeMap;
+use std::iter;
+use std::num::NonZeroUsize;
 
 use openlogi_core::config::LightSettings;
 use openlogi_core::device::LightState;
@@ -42,56 +44,254 @@ pub(super) struct LightDeviceState {
     manual_override: Option<bool>,
     /// Session-only settings for a device without a persistent identity.
     volatile_settings: Option<LightSettings>,
-    /// The in-flight optimistic write, if any.
-    pending: Option<PendingLightCommand>,
-    /// Visible outcome of the latest write for this device.
-    status: Option<(u64, LightCommandStatus)>,
+    /// The latest optimistic write, which is also the status the panel shows.
+    write: LightWrite,
 }
 
+/// Where the latest optimistic write to one light stands. The panel's
+/// [`LightCommandStatus`] is a projection of it, so a status cannot disagree
+/// with the write in flight.
+#[derive(Debug, Default)]
+enum LightWrite {
+    /// Nothing to show: no write yet, or the latest one succeeded, which the
+    /// controls themselves already show.
+    #[default]
+    Idle,
+    /// The agent still owes answers; shown as Pending.
+    Writing(LightWriteRequest),
+    /// The latest write was rejected, shown until the next one.
+    Failed(String),
+    /// The latest change found the light offline, so nothing was sent.
+    Offline,
+}
+
+/// A write in flight. Every value owes at least one answer:
+/// [`LightWrite::begin`] starts it owing one per command sent, and the answer
+/// that leaves nothing owed settles it in the same transition.
 #[derive(Debug)]
-struct PendingLightCommand {
-    request_id: u64,
-    pending: u16,
-    settings: Option<LightSettings>,
-    persistent_key: Option<String>,
-    rollback_settings: LightSettings,
-    previous_volatile: Option<LightSettings>,
-    manual_override_rollback: Option<ManualOverrideRollback>,
-    successful_commands: Vec<LightCommand>,
-    failure: Option<String>,
-    superseded: Vec<SupersededLightCommand>,
+struct LightWriteRequest {
+    /// The latest request's commands.
+    latest: LightBatch,
+    /// The requests it superseded, oldest first. Their answers keep the write
+    /// alive: a sibling may still be queued after the first failure, and its
+    /// success must reach the reconciled GUI/config state instead of being
+    /// discarded as stale.
+    superseded: Vec<LightBatch>,
+    setup: LightWriteSetup,
 }
 
-/// Everything a fresh [`PendingLightCommand`] carries beyond its request id,
-/// gathered by the caller *before* [`AppState::begin_light_command`] so the
-/// pending entry is inserted fully formed. The insert-then-patch shape this
-/// replaces kept a placeholder with factory-default rollback settings between
-/// the two phases — an early return slipped in between would have persisted
-/// those defaults to config.toml as the "rollback".
-struct PendingLightSetup {
-    /// Commands already counted as in flight when the entry lands: the
-    /// manual-power path dispatches its single command itself, while the
-    /// settings path queues each one (counting them) afterwards.
-    in_flight: u16,
+/// Everything a write carries beyond its answers. The caller gathers it
+/// *before* [`AppState::begin_light_write`], so no write exists with a
+/// placeholder rollback that an early return could persist to config.toml.
+#[derive(Debug)]
+struct LightWriteSetup {
     settings: LightSettings,
     persistent_key: Option<String>,
     rollback_settings: LightSettings,
     previous_volatile: Option<LightSettings>,
     manual_override_rollback: Option<ManualOverrideRollback>,
-    superseded: Vec<SupersededLightCommand>,
 }
 
+/// One request's commands as the agent answers them. The IPC client answers
+/// every command it is handed exactly once — with the agent's verdict, or as
+/// unavailable when no agent could be reached — so `unanswered` reaches zero
+/// unless the client itself is gone ([`LightWrite::abandon`]).
 #[derive(Debug)]
-struct SupersededLightCommand {
+struct LightBatch {
     request_id: u64,
-    pending: u16,
-    successful_commands: Vec<LightCommand>,
+    /// Commands sent that the agent has not answered.
+    unanswered: usize,
+    /// Commands the light accepted, in answer order.
+    applied: Vec<LightCommand>,
+    /// The first rejection.
     failure: Option<String>,
+}
+
+/// A write whose every answer is in, handed back for its effects.
+#[derive(Debug)]
+struct SettledLightWrite {
+    /// The latest request's first rejection, else the oldest superseded one's.
+    failure: Option<String>,
+    /// Every command the light accepted, oldest request first.
+    applied: Vec<LightCommand>,
+    setup: LightWriteSetup,
+}
+
+/// What one answer did to a light's write.
+#[derive(Debug)]
+enum LightAnswer {
+    /// It belongs to no request still owed an answer.
+    Stale,
+    /// It was counted; the write still owes others.
+    Counted,
+    /// It was the last one owed: the write is settled.
+    Settled(SettledLightWrite),
 }
 
 #[derive(Debug, Clone, Copy)]
 struct ManualOverrideRollback {
     previous: Option<bool>,
+}
+
+impl LightWrite {
+    /// The status the panel shows for this write.
+    fn status(&self) -> Option<LightCommandStatus> {
+        match self {
+            Self::Idle => None,
+            Self::Writing(_) => Some(LightCommandStatus::Pending),
+            Self::Failed(error) => Some(LightCommandStatus::Failed(error.clone())),
+            Self::Offline => Some(LightCommandStatus::Offline),
+        }
+    }
+
+    /// The write in flight, if any.
+    const fn writing(&self) -> Option<&LightWriteRequest> {
+        match self {
+            Self::Writing(request) => Some(request),
+            Self::Idle | Self::Failed(_) | Self::Offline => None,
+        }
+    }
+
+    /// Start request `request_id`, owed one answer per command `sent`. A write
+    /// still in flight is superseded: its answers keep counting toward this one.
+    #[must_use]
+    fn begin(self, request_id: u64, sent: NonZeroUsize, setup: LightWriteSetup) -> Self {
+        let superseded = match self {
+            Self::Writing(previous) => previous.into_batches(),
+            Self::Idle | Self::Failed(_) | Self::Offline => Vec::new(),
+        };
+        Self::Writing(LightWriteRequest {
+            latest: LightBatch {
+                request_id,
+                unanswered: sent.get(),
+                applied: Vec::new(),
+                failure: None,
+            },
+            superseded,
+            setup,
+        })
+    }
+
+    /// Count one answer for `request_id`, settling the write when it was the
+    /// last one owed.
+    #[must_use]
+    fn answer(
+        self,
+        request_id: u64,
+        command: LightCommand,
+        result: Result<(), WriteError>,
+    ) -> (Self, LightAnswer) {
+        let Self::Writing(mut request) = self else {
+            return (self, LightAnswer::Stale);
+        };
+        if !request.record(request_id, command, result) {
+            return (Self::Writing(request), LightAnswer::Stale);
+        }
+        if request.owes_answers() {
+            return (Self::Writing(request), LightAnswer::Counted);
+        }
+        let settled = request.settle();
+        (settled.outcome(), LightAnswer::Settled(settled))
+    }
+
+    /// Settle a write whose answers can no longer arrive, as if each one still
+    /// owed had come back unavailable — the answer the IPC client gives a
+    /// command it cannot send.
+    #[must_use]
+    fn abandon(self) -> (Self, Option<SettledLightWrite>) {
+        let Self::Writing(mut request) = self else {
+            return (self, None);
+        };
+        for batch in iter::once(&mut request.latest).chain(&mut request.superseded) {
+            batch.abandon();
+        }
+        let settled = request.settle();
+        (settled.outcome(), Some(settled))
+    }
+}
+
+impl LightWriteRequest {
+    /// Count one answer against the request it belongs to; `false` when it
+    /// belongs to none still owed one.
+    fn record(
+        &mut self,
+        request_id: u64,
+        command: LightCommand,
+        result: Result<(), WriteError>,
+    ) -> bool {
+        iter::once(&mut self.latest)
+            .chain(&mut self.superseded)
+            .find(|batch| batch.request_id == request_id)
+            .is_some_and(|batch| batch.record(command, result))
+    }
+
+    fn owes_answers(&self) -> bool {
+        iter::once(&self.latest)
+            .chain(&self.superseded)
+            .any(|batch| batch.unanswered > 0)
+    }
+
+    /// This write's batches, oldest first, for the write that supersedes it.
+    fn into_batches(self) -> Vec<LightBatch> {
+        let mut batches = self.superseded;
+        batches.push(self.latest);
+        batches
+    }
+
+    fn settle(self) -> SettledLightWrite {
+        let Self {
+            latest,
+            superseded,
+            setup,
+        } = self;
+        let applied = superseded
+            .iter()
+            .chain(iter::once(&latest))
+            .flat_map(|batch| batch.applied.iter().copied())
+            .collect();
+        let failure = latest
+            .failure
+            .or_else(|| superseded.into_iter().find_map(|batch| batch.failure));
+        SettledLightWrite {
+            failure,
+            applied,
+            setup,
+        }
+    }
+}
+
+impl LightBatch {
+    /// Count one answer; `false` when every command has been answered.
+    fn record(&mut self, command: LightCommand, result: Result<(), WriteError>) -> bool {
+        let Some(unanswered) = self.unanswered.checked_sub(1) else {
+            return false;
+        };
+        self.unanswered = unanswered;
+        match result {
+            Ok(()) => self.applied.push(command),
+            Err(error) => {
+                self.failure.get_or_insert_with(|| error.to_string());
+            }
+        }
+        true
+    }
+
+    fn abandon(&mut self) {
+        if self.unanswered > 0 {
+            self.unanswered = 0;
+            self.failure
+                .get_or_insert_with(|| WriteError::AgentUnavailable.to_string());
+        }
+    }
+}
+
+impl SettledLightWrite {
+    /// The write state it leaves behind.
+    fn outcome(&self) -> LightWrite {
+        self.failure
+            .clone()
+            .map_or(LightWrite::Idle, LightWrite::Failed)
+    }
 }
 
 impl AppState {
@@ -143,91 +343,53 @@ impl AppState {
     #[must_use]
     pub fn light_command_status(&self) -> Option<LightCommandStatus> {
         let key = self.current_record()?.device_key();
-        self.devices
-            .sessions
-            .get(&key)
-            .and_then(|entry| entry.light.status.as_ref())
-            .map(|(_, status)| status.clone())
+        self.devices.sessions.get(&key)?.light.write.status()
     }
 
-    /// Allocate the next request id and record the command: a full
-    /// [`PendingLightSetup`] becomes the pending entry in one step, while
-    /// `None` (device offline / no route) records only the Offline status.
-    fn begin_light_command(&mut self, key: &DeviceKey, setup: Option<PendingLightSetup>) -> u64 {
+    /// Allocate the next request id and start a write of `sent` commands
+    /// under it, superseding any write to `key` still in flight.
+    fn begin_light_write(
+        &mut self,
+        key: &DeviceKey,
+        sent: NonZeroUsize,
+        setup: LightWriteSetup,
+    ) -> u64 {
         self.lights.next_request_id = self.lights.next_request_id.wrapping_add(1);
         let request_id = self.lights.next_request_id;
-        let entry = self.devices.sessions.entry(key.clone()).or_default();
-        match setup {
-            Some(setup) => {
-                entry.light.pending = Some(PendingLightCommand {
-                    request_id,
-                    pending: setup.in_flight,
-                    settings: Some(setup.settings),
-                    persistent_key: setup.persistent_key,
-                    rollback_settings: setup.rollback_settings,
-                    previous_volatile: setup.previous_volatile,
-                    manual_override_rollback: setup.manual_override_rollback,
-                    successful_commands: Vec::new(),
-                    failure: None,
-                    superseded: setup.superseded,
-                });
-                entry.light.status = Some((request_id, LightCommandStatus::Pending));
-            }
-            None => {
-                entry.light.status = Some((request_id, LightCommandStatus::Offline));
-            }
-        }
+        let light = &mut self.devices.sessions.entry(key.clone()).or_default().light;
+        light.write = std::mem::take(&mut light.write).begin(request_id, sent, setup);
         request_id
     }
 
-    fn queue_light_command(
+    /// A change to `key` found it offline, so nothing was sent. A write still
+    /// in flight is dropped with it: its late answers are stale and cannot
+    /// overwrite the newer change, which is saved directly.
+    fn light_found_offline(&mut self, key: &DeviceKey) {
+        self.devices
+            .sessions
+            .entry(key.clone())
+            .or_default()
+            .light
+            .write = LightWrite::Offline;
+    }
+
+    /// Hand one command of request `request_id` to the IPC client, answering
+    /// it as unavailable when the client is gone.
+    fn send_light_command(
         &mut self,
         key: &DeviceKey,
         request_id: u64,
         route: DeviceRoute,
         command: LightCommand,
     ) {
-        if let Some(pending) = self
-            .devices
-            .sessions
-            .get_mut(key)
-            .and_then(|entry| entry.light.pending.as_mut())
-            && pending.request_id == request_id
-        {
-            pending.pending = pending.pending.saturating_add(1);
-        }
         if !self.send_ipc(crate::services::ipc::SetLight {
             route,
             command,
             key: key.clone(),
             request_id,
         }) {
-            self.settle_light_command(
-                key.clone(),
-                request_id,
-                command,
-                Err(WriteError::AgentUnavailable),
-            );
+            self.answer_light_command(key, request_id, command, Err(WriteError::AgentUnavailable));
         }
-    }
-
-    fn supersede_light_command(&mut self, key: &DeviceKey) -> Vec<SupersededLightCommand> {
-        let Some(pending) = self
-            .devices
-            .sessions
-            .get_mut(key)
-            .and_then(|entry| entry.light.pending.take())
-        else {
-            return Vec::new();
-        };
-        let mut superseded = pending.superseded;
-        superseded.push(SupersededLightCommand {
-            request_id: pending.request_id,
-            pending: pending.pending,
-            successful_commands: pending.successful_commands,
-            failure: pending.failure,
-        });
-        superseded
     }
 
     /// Consume an asynchronous light-write result from the IPC client.
@@ -240,150 +402,123 @@ impl AppState {
         command: LightCommand,
         result: Result<(), WriteError>,
     ) -> StateEvents {
-        if self.settle_light_command(key.clone(), request_id, command, result) {
+        if self.answer_light_command(&key, request_id, command, result) {
             StateEvent::LightingChanged(key).into()
         } else {
             StateEvents::none()
         }
     }
 
+    /// The IPC client is gone, so no light write still in flight will ever be
+    /// answered. Settle each one, rolling back what the light did not
+    /// confirm, so its status leaves Pending and adoption resumes.
+    pub fn abandon_light_writes(&mut self) -> StateEvents {
+        let settled = self
+            .devices
+            .sessions
+            .iter_mut()
+            .filter_map(|(key, entry)| {
+                let (write, settled) = std::mem::take(&mut entry.light.write).abandon();
+                entry.light.write = write;
+                settled.map(|settled| (key.clone(), settled))
+            })
+            .collect::<Vec<_>>();
+        let mut events = StateEvents::none();
+        for (key, settled) in settled {
+            self.finish_light_write(&key, settled);
+            events = events.and(StateEvent::LightingChanged(key));
+        }
+        events
+    }
+
     /// Record one write result against the request it belongs to, reporting
     /// whether it belonged to a live one.
-    fn settle_light_command(
+    fn answer_light_command(
         &mut self,
-        key: DeviceKey,
+        key: &DeviceKey,
         request_id: u64,
         command: LightCommand,
         result: Result<(), WriteError>,
     ) -> bool {
-        let Some(pending) = self
-            .devices
-            .sessions
-            .get_mut(&key)
-            .and_then(|entry| entry.light.pending.as_mut())
-        else {
+        let Some(entry) = self.devices.sessions.get_mut(key) else {
             return false;
         };
-        if pending.request_id == request_id {
-            pending.pending = pending.pending.saturating_sub(1);
-            match result {
-                Ok(()) => pending.successful_commands.push(command),
-                Err(error) => {
-                    pending.failure.get_or_insert_with(|| error.to_string());
-                }
+        let (write, answer) =
+            std::mem::take(&mut entry.light.write).answer(request_id, command, result);
+        entry.light.write = write;
+        match answer {
+            LightAnswer::Stale => false,
+            LightAnswer::Counted => true,
+            LightAnswer::Settled(settled) => {
+                self.finish_light_write(key, settled);
+                true
             }
-        } else if let Some(superseded) = pending
-            .superseded
-            .iter_mut()
-            .find(|superseded| superseded.request_id == request_id)
-        {
-            superseded.pending = superseded.pending.saturating_sub(1);
-            match result {
-                Ok(()) => superseded.successful_commands.push(command),
-                Err(error) => {
-                    superseded.failure.get_or_insert_with(|| error.to_string());
-                }
-            }
-        } else {
-            return false;
         }
-        if pending.pending != 0 || pending.superseded.iter().any(|batch| batch.pending != 0) {
-            // A sibling may still be queued after the first failure. Keep the
-            // request alive so later successes are reflected in the reconciled
-            // GUI/config state instead of being discarded as stale.
-            return true;
-        }
-
-        let Some(pending) = self
-            .devices
-            .sessions
-            .get_mut(&key)
-            .and_then(|entry| entry.light.pending.take())
-        else {
-            return false;
-        };
-        self.finish_light_command(key, request_id, pending);
-        true
     }
 
-    /// Reconcile one fully settled light request with runtime and persisted state.
-    fn finish_light_command(
-        &mut self,
-        key: DeviceKey,
-        request_id: u64,
-        pending: PendingLightCommand,
-    ) {
-        let failure = pending.failure.clone().or_else(|| {
-            pending
-                .superseded
-                .iter()
-                .find_map(|batch| batch.failure.clone())
-        });
-        let successful_commands = pending
-            .superseded
-            .iter()
-            .flat_map(|batch| batch.successful_commands.iter().copied())
-            .chain(pending.successful_commands.iter().copied())
-            .collect::<Vec<_>>();
-        let manual_override_rollback = pending.manual_override_rollback;
-        if let Some(error) = failure {
-            if successful_commands.is_empty() {
-                self.devices
-                    .sessions
-                    .entry(key.clone())
-                    .or_default()
-                    .light
-                    .volatile_settings = pending.previous_volatile;
-                restore_manual_override(&mut self.devices.sessions, &key, manual_override_rollback);
-            } else {
-                let mut accepted = pending.rollback_settings;
-                for &command in &successful_commands {
-                    apply_light_command(&mut accepted, command);
-                }
-                if let Some(persistent_key) = pending.persistent_key {
-                    if let Some(entry) = self.devices.sessions.get_mut(&key) {
-                        entry.light.volatile_settings = None;
-                    }
-                    self.config
-                        .edit(|config| config.set_light(&persistent_key, accepted));
-                    self.persist_and_reload("partial light");
-                } else {
-                    self.devices
-                        .sessions
-                        .entry(key.clone())
-                        .or_default()
-                        .light
-                        .volatile_settings = Some(accepted);
-                }
-                if !successful_commands
-                    .iter()
-                    .any(|command| matches!(command, LightCommand::Power(_)))
-                {
-                    restore_manual_override(
-                        &mut self.devices.sessions,
-                        &key,
-                        manual_override_rollback,
-                    );
-                }
-            }
-            self.devices.sessions.entry(key).or_default().light.status =
-                Some((request_id, LightCommandStatus::Failed(error)));
-        } else {
-            if let (Some(settings), Some(persistent_key)) =
-                (pending.settings, pending.persistent_key)
-            {
+    /// Reconcile one settled light write with runtime and persisted state.
+    /// Its status is already the write's outcome.
+    fn finish_light_write(&mut self, key: &DeviceKey, settled: SettledLightWrite) {
+        let SettledLightWrite {
+            failure,
+            applied,
+            setup,
+        } = settled;
+        if failure.is_none() {
+            // Successful writes are reflected by the controls themselves; the
+            // write is Idle, so no success banner stays in the panel.
+            if let Some(persistent_key) = setup.persistent_key {
                 self.config
-                    .edit(|config| config.set_light(&persistent_key, settings));
-                if let Some(entry) = self.devices.sessions.get_mut(&key) {
+                    .edit(|config| config.set_light(&persistent_key, setup.settings));
+                if let Some(entry) = self.devices.sessions.get_mut(key) {
                     entry.light.volatile_settings = None;
                 }
                 self.persist_and_reload("light");
             }
-            // Successful writes are reflected by the controls themselves; do
-            // not leave a persistent success banner in the panel.
-            if let Some(entry) = self.devices.sessions.get_mut(&key) {
-                entry.light.status = None;
+            return;
+        }
+        if applied.is_empty() {
+            self.devices
+                .sessions
+                .entry(key.clone())
+                .or_default()
+                .light
+                .volatile_settings = setup.previous_volatile;
+            restore_manual_override(
+                &mut self.devices.sessions,
+                key,
+                setup.manual_override_rollback,
+            );
+            return;
+        }
+        let mut accepted = setup.rollback_settings;
+        for &command in &applied {
+            accepted.apply(command);
+        }
+        if let Some(persistent_key) = setup.persistent_key {
+            if let Some(entry) = self.devices.sessions.get_mut(key) {
+                entry.light.volatile_settings = None;
             }
+            self.config
+                .edit(|config| config.set_light(&persistent_key, accepted));
+            self.persist_and_reload("partial light");
+        } else {
+            self.devices
+                .sessions
+                .entry(key.clone())
+                .or_default()
+                .light
+                .volatile_settings = Some(accepted);
+        }
+        if !applied
+            .iter()
+            .any(|command| matches!(command, LightCommand::Power(_)))
+        {
+            restore_manual_override(
+                &mut self.devices.sessions,
+                key,
+                setup.manual_override_rollback,
+            );
         }
     }
 
@@ -429,7 +564,7 @@ impl AppState {
                 .devices
                 .records
                 .iter()
-                .find(|record| record.online && record.route.as_ref() == Some(&light.route))
+                .find(|record| record.addressable_route() == Some(&light.route))
                 .map(|record| {
                     (
                         record.device_key(),
@@ -443,7 +578,7 @@ impl AppState {
                 .devices
                 .sessions
                 .get(&runtime_key)
-                .is_some_and(|entry| entry.light.pending.is_some())
+                .is_some_and(|entry| entry.light.write.writing().is_some())
             {
                 continue;
             }
@@ -488,7 +623,7 @@ impl AppState {
         self.devices
             .sessions
             .get(key)
-            .and_then(|entry| entry.light.pending.as_ref())
+            .and_then(|entry| entry.light.write.writing())
             .map_or_else(
                 || {
                     (
@@ -499,7 +634,12 @@ impl AppState {
                             .and_then(|entry| entry.light.volatile_settings),
                     )
                 },
-                |pending| (pending.rollback_settings, pending.previous_volatile),
+                |request| {
+                    (
+                        request.setup.rollback_settings,
+                        request.setup.previous_volatile,
+                    )
+                },
             )
     }
 
@@ -515,8 +655,8 @@ impl AppState {
         self.devices
             .sessions
             .get(key)
-            .and_then(|entry| entry.light.pending.as_ref())
-            .and_then(|pending| pending.manual_override_rollback)
+            .and_then(|entry| entry.light.write.writing())
+            .and_then(|request| request.setup.manual_override_rollback)
             .or_else(|| {
                 camera_mode_changed.then(|| ManualOverrideRollback {
                     previous: self
@@ -533,17 +673,14 @@ impl AppState {
     /// advertised device command succeeds; failures roll optimistic state back.
     pub fn commit_light(&mut self, light: LightSettings) -> StateEvents {
         let events = self.for_current_device(StateEvent::LightingChanged);
-        let Some((runtime_key, key, route, online, capabilities)) =
-            self.current_record().map(|record| {
-                (
-                    record.device_key(),
-                    record.persistent_config_key().map(str::to_string),
-                    record.route.clone(),
-                    record.online,
-                    record.light_capabilities,
-                )
-            })
-        else {
+        let Some((runtime_key, key, route, capabilities)) = self.current_record().map(|record| {
+            (
+                record.device_key(),
+                record.persistent_config_key().map(str::to_string),
+                record.addressable_route().cloned(),
+                record.light_capabilities,
+            )
+        }) else {
             debug!("no active device — light change ignored");
             return events;
         };
@@ -579,27 +716,25 @@ impl AppState {
             .or_default()
             .light
             .volatile_settings = Some(light);
-        if !commands.is_empty() {
-            if online && let Some(route) = route {
-                let superseded = self.supersede_light_command(&runtime_key);
-                let request_id = self.begin_light_command(
+        if let Some(sent) = NonZeroUsize::new(commands.len()) {
+            if let Some(route) = route {
+                let request_id = self.begin_light_write(
                     &runtime_key,
-                    Some(PendingLightSetup {
-                        in_flight: 0,
+                    sent,
+                    LightWriteSetup {
                         settings: light,
                         persistent_key: key.clone(),
                         rollback_settings,
                         previous_volatile,
                         manual_override_rollback,
-                        superseded,
-                    }),
+                    },
                 );
                 for command in commands {
-                    self.queue_light_command(&runtime_key, request_id, route.clone(), command);
+                    self.send_light_command(&runtime_key, request_id, route.clone(), command);
                 }
                 return events;
             }
-            self.begin_light_command(&runtime_key, None);
+            self.light_found_offline(&runtime_key);
         }
         if let Some(key) = key {
             if let Some(entry) = self.devices.sessions.get_mut(&runtime_key) {
@@ -624,12 +759,11 @@ impl AppState {
     /// but the runtime override lasts only until the next camera transition.
     pub fn commit_manual_light_power(&mut self, enabled: bool) -> StateEvents {
         let events = self.for_current_device(StateEvent::LightingChanged);
-        let Some((runtime_key, key, route, online)) = self.current_record().map(|record| {
+        let Some((runtime_key, key, route)) = self.current_record().map(|record| {
             (
                 record.device_key(),
                 record.persistent_config_key().map(str::to_string),
-                record.route.clone(),
-                record.online,
+                record.addressable_route().cloned(),
             )
         }) else {
             debug!("no active device — manual light power ignored");
@@ -657,19 +791,17 @@ impl AppState {
             entry.light.volatile_settings = Some(light);
         }
 
-        if online && let Some(route) = route {
-            let superseded = self.supersede_light_command(&runtime_key);
-            let request_id = self.begin_light_command(
+        if let Some(route) = route {
+            let request_id = self.begin_light_write(
                 &runtime_key,
-                Some(PendingLightSetup {
-                    in_flight: 1,
+                NonZeroUsize::MIN,
+                LightWriteSetup {
                     settings: light,
                     persistent_key: key.clone(),
                     rollback_settings,
                     previous_volatile,
                     manual_override_rollback,
-                    superseded,
-                }),
+                },
             );
             if !self.send_ipc(crate::services::ipc::SetLightManualPower {
                 route,
@@ -677,8 +809,8 @@ impl AppState {
                 key: runtime_key.clone(),
                 request_id,
             }) {
-                self.settle_light_command(
-                    runtime_key,
+                self.answer_light_command(
+                    &runtime_key,
                     request_id,
                     LightCommand::Power(enabled),
                     Err(WriteError::AgentUnavailable),
@@ -686,7 +818,7 @@ impl AppState {
             }
             return events;
         }
-        self.begin_light_command(&runtime_key, None);
+        self.light_found_offline(&runtime_key);
 
         if let Some(key) = key {
             if let Some(entry) = self.devices.sessions.get_mut(&runtime_key) {
@@ -728,19 +860,6 @@ fn read_back_light(state: &LightState) -> LightSettings {
     }
 }
 
-fn apply_light_command(settings: &mut LightSettings, command: LightCommand) {
-    match command {
-        LightCommand::Power(enabled) => settings.enabled = enabled,
-        LightCommand::BrightnessPercent(brightness_percent) => {
-            settings.brightness_percent = brightness_percent;
-        }
-        LightCommand::TemperatureKelvin(temperature_kelvin) => {
-            settings.temperature_kelvin = Some(temperature_kelvin);
-        }
-        LightCommand::BrightnessNative(_) => {}
-    }
-}
-
 fn restore_manual_override(
     sessions: &mut BTreeMap<DeviceKey, DeviceSession>,
     key: &DeviceKey,
@@ -768,5 +887,196 @@ fn chosen_light(key: &str, before: LightSettings, after: LightSettings) -> Vec<C
         vec![chosen]
     } else {
         Vec::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroUsize;
+
+    use openlogi_core::config::LightSettings;
+    use openlogi_core::hid::{LightCommand, WriteError};
+
+    use super::{LightAnswer, LightCommandStatus, LightWrite, LightWriteSetup, SettledLightWrite};
+
+    const POWER: LightCommand = LightCommand::Power(true);
+    const BRIGHTNESS: LightCommand = LightCommand::BrightnessPercent(40);
+    const TEMPERATURE: LightCommand = LightCommand::TemperatureKelvin(4000);
+
+    fn sent(commands: usize) -> NonZeroUsize {
+        NonZeroUsize::new(commands).expect("a write sends at least one command")
+    }
+
+    fn setup() -> LightWriteSetup {
+        LightWriteSetup {
+            settings: LightSettings::new(true, 40, Some(4000)),
+            persistent_key: None,
+            rollback_settings: LightSettings::default(),
+            previous_volatile: None,
+            manual_override_rollback: None,
+        }
+    }
+
+    fn ambiguous() -> Result<(), WriteError> {
+        Err(WriteError::AmbiguousRawDevice)
+    }
+
+    fn unavailable() -> Result<(), WriteError> {
+        Err(WriteError::AgentUnavailable)
+    }
+
+    fn failed(error: &WriteError) -> LightCommandStatus {
+        LightCommandStatus::Failed(error.to_string())
+    }
+
+    /// Answer `command` of `request_id`, which must leave the write pending.
+    fn counted(
+        write: LightWrite,
+        request_id: u64,
+        command: LightCommand,
+        result: Result<(), WriteError>,
+    ) -> LightWrite {
+        let (write, answer) = write.answer(request_id, command, result);
+        assert!(matches!(answer, LightAnswer::Counted), "got {answer:?}");
+        assert_eq!(write.status(), Some(LightCommandStatus::Pending));
+        write
+    }
+
+    /// Answer `command` of `request_id`, which must be the last answer owed.
+    fn last(
+        write: LightWrite,
+        request_id: u64,
+        command: LightCommand,
+        result: Result<(), WriteError>,
+    ) -> (LightWrite, SettledLightWrite) {
+        let (write, answer) = write.answer(request_id, command, result);
+        let LightAnswer::Settled(settled) = answer else {
+            panic!("expected the last answer to settle the write, got {answer:?}");
+        };
+        (write, settled)
+    }
+
+    #[test]
+    fn a_write_is_pending_until_its_last_answer_and_then_shows_nothing() {
+        let write = LightWrite::Failed("an earlier write".into()).begin(1, sent(2), setup());
+        assert_eq!(write.status(), Some(LightCommandStatus::Pending));
+
+        let write = counted(write, 1, POWER, Ok(()));
+        let (write, settled) = last(write, 1, BRIGHTNESS, Ok(()));
+
+        assert_eq!(write.status(), None);
+        assert_eq!(settled.failure, None);
+        assert_eq!(settled.applied, [POWER, BRIGHTNESS]);
+    }
+
+    #[test]
+    fn a_rejection_waits_for_its_siblings_and_shows_the_first_error() {
+        let write = LightWrite::Offline.begin(1, sent(3), setup());
+        let write = counted(write, 1, POWER, ambiguous());
+        let write = counted(write, 1, BRIGHTNESS, Ok(()));
+        let (write, settled) = last(write, 1, TEMPERATURE, unavailable());
+
+        assert_eq!(
+            write.status(),
+            Some(failed(&WriteError::AmbiguousRawDevice))
+        );
+        assert_eq!(
+            settled.failure,
+            Some(WriteError::AmbiguousRawDevice.to_string())
+        );
+        assert_eq!(settled.applied, [BRIGHTNESS]);
+    }
+
+    #[test]
+    fn a_superseded_request_holds_its_successor_open_and_counts_first() {
+        let write = LightWrite::Idle.begin(1, sent(2), setup());
+        let write = counted(write, 1, POWER, ambiguous());
+        let write = write.begin(2, sent(2), setup());
+        // Every answer of the latest request is in, but request 1 still owes one.
+        let write = counted(write, 2, TEMPERATURE, Ok(()));
+        let write = counted(write, 2, POWER, unavailable());
+        let (write, settled) = last(write, 1, BRIGHTNESS, Ok(()));
+
+        // The latest request's rejection wins over the older, earlier one.
+        assert_eq!(write.status(), Some(failed(&WriteError::AgentUnavailable)));
+        assert_eq!(
+            settled.failure,
+            Some(WriteError::AgentUnavailable.to_string())
+        );
+        // Oldest request first, not in the order the answers arrived.
+        assert_eq!(settled.applied, [BRIGHTNESS, TEMPERATURE]);
+    }
+
+    #[test]
+    fn an_answer_no_request_still_owes_changes_nothing() {
+        let (write, answer) = LightWrite::Failed("shown".into()).answer(1, POWER, Ok(()));
+        assert!(matches!(answer, LightAnswer::Stale), "got {answer:?}");
+        assert_eq!(
+            write.status(),
+            Some(LightCommandStatus::Failed("shown".into()))
+        );
+
+        let write = LightWrite::Idle
+            .begin(1, sent(1), setup())
+            .begin(2, sent(1), setup());
+        let (write, answer) = write.answer(7, POWER, Ok(()));
+        assert!(matches!(answer, LightAnswer::Stale), "got {answer:?}");
+        let write = counted(write, 1, POWER, Ok(()));
+        // Request 1 is fully answered; a second answer under its id must not
+        // count against request 2.
+        let (write, answer) = write.answer(1, BRIGHTNESS, Ok(()));
+        assert!(matches!(answer, LightAnswer::Stale), "got {answer:?}");
+        assert_eq!(write.status(), Some(LightCommandStatus::Pending));
+
+        let (write, settled) = last(write, 2, TEMPERATURE, Ok(()));
+        assert_eq!(write.status(), None);
+        assert_eq!(settled.applied, [POWER, TEMPERATURE]);
+    }
+
+    #[test]
+    fn an_abandoned_write_settles_what_never_came_back_as_unavailable() {
+        let write = counted(
+            LightWrite::Idle.begin(1, sent(2), setup()),
+            1,
+            POWER,
+            Ok(()),
+        );
+        let (write, settled) = write.abandon();
+        let settled = settled.expect("a write in flight settles");
+        assert_eq!(write.status(), Some(failed(&WriteError::AgentUnavailable)));
+        assert_eq!(settled.applied, [POWER]);
+
+        // Only the superseded request still owes an answer.
+        let write = LightWrite::Idle
+            .begin(1, sent(1), setup())
+            .begin(2, sent(1), setup());
+        let write = counted(write, 2, BRIGHTNESS, Ok(()));
+        let (write, settled) = write.abandon();
+        assert_eq!(write.status(), Some(failed(&WriteError::AgentUnavailable)));
+        assert_eq!(settled.expect("settled").applied, [BRIGHTNESS]);
+
+        // A rejection already in is the one shown.
+        let write = counted(
+            LightWrite::Idle.begin(1, sent(2), setup()),
+            1,
+            POWER,
+            ambiguous(),
+        );
+        let (write, _) = write.abandon();
+        assert_eq!(
+            write.status(),
+            Some(failed(&WriteError::AmbiguousRawDevice))
+        );
+
+        for write in [
+            LightWrite::Idle,
+            LightWrite::Failed("shown".into()),
+            LightWrite::Offline,
+        ] {
+            let status = write.status();
+            let (write, settled) = write.abandon();
+            assert!(settled.is_none());
+            assert_eq!(write.status(), status);
+        }
     }
 }

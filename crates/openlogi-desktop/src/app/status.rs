@@ -4,14 +4,14 @@
 //! bar shown only while something needs saying.
 
 use gpui::{App, Div, IntoElement, ParentElement, SharedString, Styled, div, px, rgb};
-use gpui_component::{
+use gpui_kit::component::{
     Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     spinner::Spinner,
     v_flex,
 };
-use openlogi_ipc::{AgentStatus, SecureInput};
+use openlogi_ipc::AgentStatus;
 
 use crate::app::menu::open_config_folder;
 use crate::state::AppState;
@@ -207,12 +207,9 @@ impl Attention {
         if !status.accessibility_granted {
             return Some(Self::Accessibility);
         }
-        match &status.secure_input {
-            SecureInput::On(app) if has_key_bindings && status.hook_installed => Some(
-                Self::SecureInput(app.as_ref().map(|app| app.display_name.clone().into())),
-            ),
-            SecureInput::On(_) | SecureInput::Off => None,
-        }
+        status
+            .secure_input_pausing_keys(has_key_bindings)
+            .map(|app| Self::SecureInput(app.map(|app| app.display_name.clone().into())))
     }
 
     /// Whether adding the first key binding or removing the last one shows
@@ -297,7 +294,9 @@ fn accessibility_status(pal: Palette) -> impl IntoElement {
     // macOS-gated affordance (`.hover()` + `.on_click()`), so an ungated import
     // would be unused — and a hard error under `-D warnings` — on Linux/Windows.
     use gpui::InteractiveElement as _;
-    use gpui_base::Button as BaseButton;
+    use gpui_kit::base::Button as BaseButton;
+
+    use crate::ui::theme::FocusRingStyle as _;
 
     BaseButton::new("footer-accessibility")
         .accessibility_label(tr!("permissions.accessibility_not_granted_click_to_grant"))
@@ -308,7 +307,7 @@ fn accessibility_status(pal: Palette) -> impl IntoElement {
         .text_color(pal.text_primary)
         .cursor_pointer()
         .hover(|style| style.text_color(pal.text_muted))
-        .focus_visible(|style| style.text_color(pal.text_muted))
+        .focus_visible(move |style| style.focus_ring(pal))
         .child(
             div()
                 .size_1p5()
@@ -316,7 +315,7 @@ fn accessibility_status(pal: Palette) -> impl IntoElement {
                 .bg(rgb(theme::STATUS_CONNECTING)),
         )
         .child(div().child(tr!("permissions.accessibility_not_granted_click_to_grant")))
-        .on_click(|_, _, cx| super::request_accessibility(cx))
+        .on_click(super::request_accessibility)
 }
 
 #[cfg(not(target_os = "macos"))]

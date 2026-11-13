@@ -6,6 +6,7 @@ use gpui::{
 };
 use openlogi_core::hid::backlight::max_backlight_level;
 use openlogi_ipc::BacklightObservation;
+use openlogi_ui::color::{self, neutral};
 
 pub(crate) struct BacklightView {
     pub(crate) observation: BacklightObservation,
@@ -37,15 +38,15 @@ impl Render for BacklightView {
             .w(px(280.0))
             .h(px(88.0))
             .rounded(px(12.0))
-            .bg(gpui::hsla(0.0, 0.0, 0.08, 0.94))
-            .text_color(gpui::hsla(0.0, 0.0, 0.96, 1.0))
+            .bg(neutral(0.08, 0.94))
+            .text_color(neutral(0.96, 1.0))
             .child(level)
             .child(
                 div()
                     .w(px(220.0))
                     .h(px(8.0))
                     .rounded(px(4.0))
-                    .bg(gpui::hsla(0.0, 0.0, 0.25, 1.0))
+                    .bg(neutral(0.25, 1.0))
                     .child(
                         div()
                             .h_full()
@@ -55,7 +56,9 @@ impl Render for BacklightView {
                                     max_level,
                                 )))
                             .rounded(px(4.0))
-                            .bg(gpui::hsla(0.58, 0.75, 0.62, 1.0)),
+                            // The brand accent, as the settings app and the
+                            // lock-key glyph paint it.
+                            .bg(color::accent()),
                     ),
             )
     }

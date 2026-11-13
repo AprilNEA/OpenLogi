@@ -12,20 +12,19 @@
 
 use gpui::{
     AnyElement, App, Context, InteractiveElement, IntoElement, ParentElement, Styled, Window, div,
+    prelude::FluentBuilder as _,
 };
-use gpui_component::{
+use gpui_kit::component::{
     Disableable as _, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     slider::Slider,
-    v_flex,
 };
-use openlogi_core::binding::ButtonId;
 use openlogi_core::hid::ForceSensingInfo;
 
-use super::hotspots::MouseControlId;
 use crate::state::{AppState, DeviceKey, ForceSensingLoad};
 use crate::ui::commit_slider::{CommitSlider, SliderRange};
+use crate::ui::slider_row::SliderRow;
 use crate::ui::status::{retry_line, status_line};
 use crate::ui::theme::{Palette, Typography as _};
 
@@ -44,16 +43,13 @@ pub(super) struct ForceSensingFacts {
 }
 
 impl ForceSensingFacts {
-    /// The selected device's facts, or `None` when the row must not show:
-    /// `selected` is not the haptic panel, an app profile is being edited
-    /// (the force is device-wide, as the wheel-hold switch is), no device is
-    /// selected, the device has no force-sensing button whose force its
-    /// probe found changeable, it has no route to write through, or its
-    /// reading says the force may not change.
-    pub(super) fn current(selected: Option<MouseControlId>, cx: &App) -> Option<Self> {
-        if selected != Some(MouseControlId::Button(ButtonId::HapticPanel)) {
-            return None;
-        }
+    /// The selected device's facts for the selected haptic panel's
+    /// inspector, or `None` when the row must not show: an app profile is
+    /// being edited (the force is device-wide, as the wheel-hold switch is),
+    /// no device is selected, the device has no force-sensing button whose
+    /// force its probe found changeable, it has no route to write through,
+    /// or its reading says the force may not change.
+    pub(super) fn current(cx: &App) -> Option<Self> {
         let state = AppState::try_read(cx)?;
         if state.editing_app().is_some() || !state.current_force_sensing_supported() {
             return None;
@@ -174,12 +170,13 @@ fn reset_button(resettable: bool) -> impl IntoElement {
 
 /// The row: the title and what the setting does, then the slider between
 /// its "Light" and "Firm" ends, a status line while the reading is on its
-/// way, or a retry line when the read failed. A hairline above it parts the
-/// device-wide setting from the button's bindings.
+/// way, or a retry line when the read failed, laid out as every slider
+/// setting is. A hairline above it parts the device-wide setting from the
+/// button's bindings.
 pub(super) fn force_sensing_row(press_force: PressForce<'_>, pal: Palette) -> AnyElement {
     let PressForce { facts, slider } = press_force;
     let key = facts.key.clone();
-    let body = match (slider, &facts.load) {
+    let control = match (slider, &facts.load) {
         (Some(slider), _) => h_flex()
             .w_full()
             .items_center()
@@ -219,38 +216,30 @@ pub(super) fn force_sensing_row(press_force: PressForce<'_>, pal: Palette) -> An
             | ForceSensingLoad::Unsupported(_),
         ) => status_line(tr!("pointer.reading_press_force"), pal).into_any_element(),
     };
-    v_flex()
+    div()
         .debug_selector(|| "force-sensing-row".into())
-        .gap_2()
         .w_full()
         .pt_3()
         .border_t_1()
         .border_color(pal.border)
         .child(
-            v_flex()
-                .child(div().text_body().child(tr!("pointer.press_force")))
-                .child(
-                    div()
-                        .text_caption()
-                        .text_color(pal.text_muted)
-                        .child(tr!("pointer.press_force_description")),
-                ),
+            SliderRow::new(tr!("pointer.press_force"), control)
+                .description(tr!("pointer.press_force_description"))
+                .when(facts.refused, |row| {
+                    row.hint(
+                        div()
+                            .debug_selector(|| "force-sensing-refusal".into())
+                            .child(tr!("pointer.press_force_not_applied")),
+                    )
+                }),
         )
-        .child(body)
-        .children(facts.refused.then(|| {
-            div()
-                .debug_selector(|| "force-sensing-refusal".into())
-                .text_caption()
-                .text_color(pal.text_muted)
-                .child(tr!("pointer.press_force_not_applied"))
-        }))
         .into_any_element()
 }
 
 #[cfg(test)]
 mod tests {
     use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext, px, size};
-    use gpui_component::slider::{SliderEvent, SliderState};
+    use gpui_kit::component::slider::{SliderEvent, SliderState};
     use openlogi_core::binding::ButtonId;
     use openlogi_core::config::Config;
     use openlogi_core::hid::ForceSensingInfo;
@@ -273,7 +262,7 @@ mod tests {
         &mut VisualTestContext,
         UnboundedReceiver<Command>,
     ) {
-        cx.update(gpui_component::init);
+        cx.update(gpui_kit::init);
         let (state, mut receiver) = mouse_state(true, Config::ephemeral());
         install(state, cx);
         answer_force_read(&mut receiver, reading);
@@ -297,10 +286,7 @@ mod tests {
         cx: &VisualTestContext,
     ) -> Option<Entity<SliderState>> {
         panel.read_with(cx, |panel, _| {
-            panel
-                .force_sensing
-                .as_ref()
-                .map(|row| row.slider.slider().clone())
+            panel.press_force().map(|row| row.slider.slider().clone())
         })
     }
 
@@ -309,7 +295,7 @@ mod tests {
         let (panel, cx, mut receiver) = panel(PANEL, cx);
         let slider = slider(&panel, cx).expect("a changeable force shows the slider");
         panel.read_with(cx, |panel, cx| {
-            let row = panel.force_sensing.as_ref().expect("the row");
+            let row = panel.press_force().expect("the row");
             assert_eq!(row.slider.value(cx), PANEL.current);
         });
         slider.read_with(cx, |state, _| {
@@ -373,7 +359,7 @@ mod tests {
         cx.update(|window, cx| window.draw(cx).clear(cx));
 
         panel.read_with(cx, |panel, cx| {
-            let row = panel.force_sensing.as_ref().expect("the row");
+            let row = panel.press_force().expect("the row");
             assert_eq!(row.slider.value(cx), 4500);
         });
     }
@@ -480,7 +466,7 @@ mod tests {
 
     #[gpui::test]
     fn a_mouse_without_a_force_sensing_button_shows_no_row(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(gpui_kit::init);
         let (state, _receiver) = mouse_state(false, Config::ephemeral());
         install(state, cx);
         let (panel, cx) = cx.add_window_view(MouseModelView::new);

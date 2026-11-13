@@ -648,6 +648,14 @@ A cassette may retain an unassociated report as evidence, but replay injects it
 only at an explicit step/barrier. Otherwise a scheduler difference would turn
 recorded timing into a flaky test.
 
+Capture drops an unmatched HID++ report that no recorded request could have
+taken as its answer: a receiver or device notification, or a reply to another
+host driver on the same node (on Linux, hid-logitech-dj and hid-logitech-hidpp
+drive a receiver through the hidraw node capture reads, and hid-logitech-hidpp
+tags its requests with software ID 1). It rejects the recording
+when some recorded request could have taken the report, because that request's
+recorded answer may then belong to another sender.
+
 ### Completion
 
 A replay case reports:
@@ -693,7 +701,7 @@ Race tests should synchronize on explicit barriers such as “request written”
 
 ## Test suites generated from the corpus
 
-The current implementation discovers all nine contributed specimens and replays all 63 declared reads. `openlogi-fixture` owns strict filesystem loading behind its optional `fs` feature; the default schema and privacy APIs remain host-free. `ReplayTopology::for_device` owns capture and corpus topology. `ReplayBackend::from_profile` supports the single-device HID++ contributions currently recorded and rejects unsupported target shapes.
+The current implementation discovers all eleven contributed specimens and replays all 77 declared reads. `openlogi-fixture` owns strict filesystem loading behind its optional `fs` feature; the default schema and privacy APIs remain host-free. `ReplayTopology::for_device` owns capture and corpus topology. `ReplayBackend::from_profile` supports the single-device HID++ contributions currently recorded and rejects unsupported target shapes.
 
 CLI operation expectations, Agent lifecycle gates, mock RPC/socket behavior, and desktop projection are mandatory workspace tests. The following sections also describe extensions that require additional captures: firmware, complete enumeration sessions, physical writes, and hardware-in-loop validation are not covered by the current read corpus. See [the corpus contract](../fixtures/README.md#automatic-verification) for the exact boundary of each executed suite.
 

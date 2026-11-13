@@ -25,11 +25,7 @@ openlogi-assets = { path = "../openlogi-assets" }
 openlogi-ipc = { path = "../openlogi-ipc" }
 openlogi-permissions = { path = "../openlogi-permissions" }
 tarpc = { workspace = true }
-gpui = { workspace = true }
-gpui_platform = { workspace = true }
-gpui-component = { workspace = true }
-gpui-base = { workspace = true }
-gpui-kit-assets = { workspace = true }
+gpui-kit = { workspace = true }
 swr-core = { workspace = true }
 swr-gpui = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "process"] }
@@ -69,6 +65,9 @@ objc2 = { workspace = true }
 objc2-app-kit = { workspace = true, features = ["NSApplication", "NSAppearance"] }
 objc2-foundation = { workspace = true, features = ["NSProcessInfo", "NSString", "NSError"] }
 objc2-service-management = { workspace = true, features = ["std", "SMAppService", "SMErrors", "objc2", "objc2-foundation"] }
+# The panel floated over System Settings that the user drags the agent's
+# bundle from: the pane's `+` picker cannot browse into the app bundle.
+gpui-tcc = { git = "https://github.com/AprilNEA/gpui-tcc", tag = "v0.1.1" }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 winreg = "0.55"
@@ -78,7 +77,7 @@ workspace = true
 
 [dev-dependencies]
 openlogi-ipc = { path = "../openlogi-ipc", features = ["test-support"] }
-gpui = { workspace = true, features = ["test-support"] }
+gpui-kit = { workspace = true, features = ["test-support"] }
 openlogi-device = { path = "../openlogi-device" }
 openlogi-fixture = { workspace = true, features = ["fs"] }
 tempfile = "3.27.0"

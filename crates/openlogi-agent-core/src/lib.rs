@@ -15,6 +15,7 @@ pub mod backlight_overlay;
 pub mod capture_plan;
 mod dpi;
 pub mod event_monitor;
+pub mod flow;
 pub mod hardware;
 pub mod lock_keys;
 pub mod notices;
@@ -23,6 +24,8 @@ pub mod orchestrator;
 pub mod pointer_speed;
 pub mod receiver_access;
 pub mod runtime;
+#[cfg(test)]
+mod test_support;
 pub mod watchers;
 
 pub use dpi::{DpiCycleState, DpiCycles};

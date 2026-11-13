@@ -11,7 +11,7 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{AnyElement, App, Context, InteractiveElement, IntoElement, ParentElement, Window, div};
-use gpui_component::slider::Slider;
+use gpui_kit::component::slider::Slider;
 use openlogi_core::hid::PointerSpeed;
 
 use crate::state::{AppState, DeviceKey, PointerSpeedLoad};

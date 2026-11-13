@@ -162,8 +162,12 @@ to start while it is running.
 
 The script covers an online mouse (DPI and SmartShift writes persist and read
 back, battery drains so poll-driven repaints are visible), an offline mouse, a
-lighting-capable keyboard, a directly-attached device, and a full Bolt pairing
-flow (discovery → passkey → paired). Its agent version carries a `-mock` suffix,
+lighting-capable keyboard, a directly-attached device, a full Bolt pairing
+flow (discovery → passkey → paired), and Flow pairing: two nearby computers
+appear, choosing one or typing any address shows the code `418672`, and the
+other computer's user confirms 3 s after you do. The paired computer is saved
+in the profile's `config.toml`, as the agent saves it, and the snapshot lists
+the peers saved there. Its agent version carries a `-mock` suffix,
 so a mock session is identifiable in the UI. It is a dev tool only and is never
 bundled.
 
@@ -178,6 +182,11 @@ offline 1            # it goes offline; reads and writes fail
 fail 3 error         # the keyboard stays online, but every request fails
 lock caps on         # the overlay shows the Caps Lock indicator
 backlight 2 4        # the overlay shows backlight level 2 of 4
+flow link Work PC unstable  # a saved Flow peer's link: connected, unstable, or lost
+flow incoming        # with Flow pairing open, a computer pairs with this one
+flow confirm         # the other computer's user confirms the code first
+flow fail timeout    # the attempt fails: cancel, mismatch, timeout, unreachable,
+                     # busy, version, lost, or save
 disconnect           # every client loses its connection and reconnects
 ```
 
@@ -202,6 +211,65 @@ Gallery mode opens one isolated window and bypasses the normal single-instance,
 config, agent, asset-sync, and updater startup paths. The environment variable is
 ignored by release builds.
 
+### Headless rendering in a sandbox
+
+An Amp orb has no physical display, but its Desktop tab runs a labwc Wayland
+compositor with one 1280×720 output (`HEADLESS-1`) and Xwayland on `:0`. The
+mock agent and the GUI can run there, and screenshots and input work through
+Wayland tools. `.agents/setup` installs them: `grim` captures the output, `wtype`
+types, and `wlrctl` moves, clicks, and scrolls the pointer and lists windows.
+Debian 12 has no `wlrctl` package, so setup builds v0.2.2 from source into
+`/usr/local/bin` and keeps its build dependencies installed. `ydotool` needs
+`/dev/uinput`, which only root can open in an orb, and `xdotool` cannot drive
+Wayland windows.
+
+[`.agents/scripts/orb-gui.sh`](../.agents/scripts/orb-gui.sh) wraps the steps
+below:
+
+```sh
+.agents/scripts/orb-gui.sh start                 # Desktop, build, mock and GUI
+.agents/scripts/orb-gui.sh start --fixture fixtures/devices/mx-master-3s-001/profile.json
+OPENLOGI_COMPONENT_GALLERY=1 .agents/scripts/orb-gui.sh restart   # gallery
+.agents/scripts/orb-gui.sh move 640 400          # hover
+.agents/scripts/orb-gui.sh click 1058 58         # Settings on the device list
+.agents/scripts/orb-gui.sh run wtype 'search text'
+.agents/scripts/orb-gui.sh run wlrctl pointer scroll 5
+.agents/scripts/orb-gui.sh shot /tmp/settings.png
+.agents/scripts/orb-gui.sh stop
+```
+
+What it does, and what to keep if you run the steps by hand:
+
+- `amp orb desktop ensure` starts the Desktop and writes its environment to
+  `~/.cache/amp/desktop/environment`: `WAYLAND_DISPLAY=wayland-0`,
+  `XDG_RUNTIME_DIR=~/.cache/amp/desktop/runtime`, and `DISPLAY=:0`. Source that
+  file before running any of the tools above.
+- The Desktop also opens a maximized Chrome. The script minimizes it with
+  `wlrctl toplevel minimize app_id:google-chrome`, so agent-browser can still use it.
+- Launch the GUI with `WAYLAND_DISPLAY` set. Under the X11 backend GPUI runs, but
+  its window never reaches a `grim` capture.
+- The mock and the GUI must see the same `XDG_RUNTIME_DIR`: the dev IPC socket is
+  `$XDG_RUNTIME_DIR/openlogi-dev/agent.sock`. Start the mock first, wait for the
+  socket, then start the GUI with `OPENLOGI_DEV_AGENT=0`.
+- Run both as orb services (`amp orb service start <name> --command …`), never
+  with `nohup`, `&`, or tmux: those processes die when the Amp CLI restarts. The
+  script names them `openlogi-mock` and `openlogi-gui`; read their output with
+  `amp orb service logs <name>`. After a code change, rebuild, then stop and start
+  `openlogi-gui` (`orb-gui.sh restart`).
+- The first launch opens a "Check for updates?" window over the device list.
+  `start` presses Tab and Return to answer Not now, which records the answer in
+  the dev config.
+- `wlrctl pointer move` is relative. For absolute coordinates, move by
+  `-10000 -10000` to pin the pointer at the top-left corner first.
+- The pointer stays where the last command left it, so captures keep its hover
+  state. `shot` waits half a second for GPUI to repaint after the last input.
+- `view_media` is rate-limited. To inspect many captures, join them first, for
+  example `magick a.png b.png +append -resize 50% ab.png`.
+
+The Desktop renders at scale 1, so captures are 1280×720 at 1×. Mock success in
+an orb proves rendering and IPC-driven state only, not HID writes, permissions,
+input hooks, or the macOS build.
+
 ## Project layout
 
 ```
@@ -213,6 +281,7 @@ crates/
   openlogi-hid/     device discovery, HID++ reads/writes, and control capture over async-hid
   openlogi-assets/  device-render registry schema + cached HTTP fetch from OpenLogi asset mirrors
   openlogi-cli/     CLI implementation: command tree + `run()`, called by the `openlogi` binary
+  openlogi-flow/    Flow protobuf protocol, framing, pairing, identity, and QUIC transport
   openlogi-agent-core/  shared orchestration + the agent/GUI IPC contract
   openlogi-agent/   the `openlogi-agent` binary — background agent owning device I/O and the hook
   openlogi-hook/    OS mouse hook: macOS CGEventTap, Linux evdev/uinput, Windows WH_MOUSE_LL
@@ -545,10 +614,15 @@ The Environment IDs are not secrets; they are the repository variables
 environment secret shadows the repository secret of the same name, so a job
 sees the release token only inside the `release` GitHub environment, and a job
 outside it that asks for the release Environment fails in `op run` with the
-automation token. The `release` GitHub environment admits only `v*` tag refs
-and requires a review, so a branch dispatch with `sign` fails before any
-secret is read, and each tag run pauses twice for approval: once when the
-build legs reach the environment, once when `publish` does. The Azure
+automation token. The `release` GitHub environment admits only `v*` tag refs,
+so a branch dispatch with `sign` fails before any secret is read. It requires
+no review: the review lives in the separate `release-approval` environment,
+which holds no secrets, admits only `v*` tags, and requires a reviewer. The
+`version` job enters it, and every signing and publishing job needs `version`,
+so each tag run pauses once for approval, before anything builds. A review on
+`release` itself would pause every job that enters it as it becomes ready —
+macOS and Windows EXE together, then Windows MSI after the EXEs, then
+`publish` — so keep it off there. The Azure
 federated credential is bound to the environment
 (`repo:AprilNEA/OpenLogi:environment:release`), which is why the Windows jobs
 were in it first.
@@ -855,7 +929,8 @@ translations land in git.
 
 Each run:
 
-1. Snapshots every `locales/*.toml`.
+1. Snapshots every `locales/*.toml` and writes the per-locale count of values
+   equal to English to the job summary (a backlog metric; it never fails the job).
 2. Uploads `en.toml` **sources**.
 3. Uploads **per-language translations** already in git (`import_eq_suggestions`
    off so `value == English` is not stored as a finished translation).
@@ -894,4 +969,6 @@ Local helpers (with Crowdin credentials configured):
 devenv tasks run openlogi:i18n-upload    # en.toml sources + per-language translations
 devenv tasks run openlogi:i18n-download  # download + merge + i18n tests
 python3 .github/scripts/i18n/merge_crowdin_download.py --self-test
+python3 .github/scripts/i18n/english_fill_in_report.py \
+  --locales crates/openlogi-ui/locales --en crates/openlogi-ui/locales/en.toml
 ```

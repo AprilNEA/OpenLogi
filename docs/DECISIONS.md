@@ -4,6 +4,71 @@ Durable "why we did it this way" records that are not obvious from the code.
 Add a dated entry when a non-obvious architectural or dependency decision is
 made or revisited.
 
+## 2026-11: The agent saves a paired Flow computer in `config.toml`
+
+Until now the agent only read `config.toml`; the GUI and `openlogi api` wrote
+it. Flow pairing makes the agent write it, in one place: once both users
+confirmed the code, the agent saves the other computer's public key as a
+`[[flow.peers]]` entry, then reloads the file as it does after a GUI save.
+
+- **The agent, because the ceremony is the agent's.** `openlogi-flow`'s
+  `PairingSession` counts a pairing as complete only after its
+  `PeerKeyStore` saved the key, and only then answers the other computer
+  `PAIRED`. The GUI is an IPC client that can close at any moment. Sending
+  the key to the GUI to save would let a closed window leave the other
+  computer trusting this one while this one does not trust it back.
+- **The same writer as everyone else.** The store goes through
+  `ConfigFile::save`: it checks that the file did not change since it was
+  read, holds the lock, and replaces the file atomically. When another writer
+  changed the file, it reads it again and adds the peer to the new contents;
+  when another writer holds the lock, it waits 20 ms. It gives up after five
+  tries and the pairing fails as `SaveFailed`.
+- **It only adds.** A new key gets an entry with a unique name and no screen
+  edge; the user places the computer in the GUI. A key already saved keeps its
+  entry and name and gains the typed address, if any. Nothing is removed or
+  renamed.
+- **The GUI must read the file again after `Paired`.** A `ConfigFile` it read
+  before the pairing is now stale, so its next save reports a conflict, as it
+  would after a hand edit.
+
+Pairing runs on an endpoint of its own (port 42425, mDNS service
+`_openlogi-pair._udp`) only while the GUI's pairing window keeps it open. It
+trusts no key, so it carries nothing but the ceremony; the Flow runtime's
+endpoint keeps trusting only the pinned keys.
+
+Verified by loopback tests in which two agent pairing endpoints pair through
+real QUIC and save each other in their own config files, and by store tests
+that merge into an existing file. No pairing between two real computers has
+been run yet.
+
+## 2026-11: Flow is set up in its own window, opened from the device list
+
+Flow is configured in a standalone window, as Settings and Add Device are. A
+Flow button in the main window's header, between the view switcher and
+Settings, opens it or focuses it. The button's dot repeats the window's
+status: green when at least one peer can be reached, amber when something
+blocks switching, none when Flow is off or nothing is paired. Its tooltip
+and accessible label say the same in words.
+
+The window puts the arrangement first: this computer in the centre, each peer
+on the edge `[flow.layout]` maps to it, moved by dragging or with the arrow
+keys. Under it, one sentence says which edge reaches which peer and what keeps
+the others from working. An inspector edits the selected peer: link state,
+edge, and each device's Easy-Switch channel on it. The window edits only this
+computer's edges; the way back is set on the peer.
+
+- **Not a Settings page** (as in #1882). Position becomes a "right of this
+  computer" select with no picture of the arrangement, and Flow's status
+  stays out of sight. Flow is an arrangement users come back to when a
+  machine moves or goes offline, not a preference they set once.
+- **Not a tab in the main window.** A Devices | Flow tab squeezes the canvas
+  into the device list's column and truncates names, and the home page stops
+  being the device list. A Flow tab per device (as in #1035) repeats one
+  per-computer arrangement on every device.
+
+The cost is a third top-level window. The header button is what makes it
+discoverable.
+
 ## 2026-10: Backlight writes invalidate other clients' device readings
 
 A successful CLI backlight write could leave the already-open GUI showing the

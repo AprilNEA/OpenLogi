@@ -3,12 +3,10 @@
 use std::path::Path;
 
 use gpui::App;
-use openlogi_core::device::{DeviceInventory, DeviceModelInfo, ModelTransport, PairedDevice};
 use openlogi_core::diagnostics::{
     AppInfo, AssetInfo, AssetSource, ConnectionKind, DeviceDiag, DiagnosticsReport, InventoryState,
     ReceiverDiag, RenderState,
 };
-use openlogi_core::hid::{DeviceRoute, ReceiverBrand};
 use openlogi_core::update_feed::UpdateChannel;
 use openlogi_ipc::{InventoryHealth, PROTOCOL_VERSION, VirtualKeyboardStatus};
 
@@ -133,26 +131,26 @@ fn collect_receivers(state: &AppState) -> Vec<ReceiverDiag> {
 }
 
 fn collect_devices(state: &AppState) -> Vec<DeviceDiag> {
-    let inventories = state.last_inventory();
     state
         .devices()
         .iter()
         .map(|record| {
-            let paired = find_paired(&record.model_key, inventories);
-            let model = paired.and_then(|p| p.model_info.as_ref());
+            // Each row reads its own record. A model key is not unique: every
+            // device reporting all-zero model ids shares `00000` (#2312).
+            let model = record.model_info.as_ref();
             DeviceDiag {
                 display_name: record.display_name.clone(),
                 kind: record.kind,
-                codename: paired.and_then(|p| p.codename.clone()),
-                connection: connection_for(record.route.as_ref(), record.receiver_brand, model),
-                online: record.online,
+                codename: record.codename.clone(),
+                connection: ConnectionKind::of(record.route.as_ref(), record.receiver_brand, model),
+                online: record.is_online(),
                 battery: record.battery.clone(),
                 capabilities: record.capabilities,
                 dpi: dpi_summary(state.dpi_load_for(&record.device_key())),
                 // Diagnostics are model-level by contract. The runtime config
                 // key may contain a receiver UID or raw-device serial.
                 config_key: record.model_key.clone(),
-                wpid: paired.and_then(|p| p.wpid),
+                wpid: record.wpid,
                 model_ids: model.map(|m| m.model_ids),
                 extended_model_id: model.map(|m| m.extended_model_id),
                 transports: model.map(|m| m.transports),
@@ -164,61 +162,6 @@ fn collect_devices(state: &AppState) -> Vec<DeviceDiag> {
             }
         })
         .collect()
-}
-
-fn find_paired<'a>(
-    model_key: &str,
-    inventories: &'a [DeviceInventory],
-) -> Option<&'a PairedDevice> {
-    inventories.iter().flat_map(|inv| &inv.paired).find(|p| {
-        p.model_info
-            .as_ref()
-            .is_some_and(|m| m.model_key() == model_key)
-    })
-}
-
-/// Refine the HID++ route into a user-facing connection type.
-///
-/// A `Direct` route carries the vendor/product id of the HID node this
-/// session actually enumerated, which — for a multi-transport device —
-/// pinpoints the transport that's live *right now* via
-/// [`DeviceModelInfo::transport_for_product_id`]. Falling back to the
-/// static, unordered transport flags (as this used to do unconditionally)
-/// mislabels a USB-connected multi-transport device as Bluetooth, since a
-/// device that supports both always has both flags set: see issue #1218.
-fn connection_for(
-    route: Option<&DeviceRoute>,
-    receiver_brand: Option<ReceiverBrand>,
-    model: Option<&DeviceModelInfo>,
-) -> ConnectionKind {
-    match route {
-        Some(DeviceRoute::Bolt { .. }) => ConnectionKind::BoltReceiver,
-        Some(DeviceRoute::Unifying { .. }) => match receiver_brand {
-            Some(ReceiverBrand::Nano) => ConnectionKind::NanoReceiver,
-            Some(ReceiverBrand::Lightspeed) => ConnectionKind::LightspeedReceiver,
-            Some(ReceiverBrand::Bolt | ReceiverBrand::Unifying) | None => {
-                ConnectionKind::UnifyingReceiver
-            }
-        },
-        Some(DeviceRoute::Direct { product_id, .. }) => {
-            match model.and_then(|m| m.transport_for_product_id(*product_id)) {
-                Some(ModelTransport::Bluetooth | ModelTransport::Btle) => {
-                    ConnectionKind::BluetoothDirect
-                }
-                Some(ModelTransport::Equad | ModelTransport::Usb) => ConnectionKind::Wired,
-                // Product id didn't match a known slot (no model info yet, or
-                // an unrecognized PID) — fall back to the old best-effort
-                // guess from the static capability flags.
-                None => match model.map(|m| m.transports) {
-                    Some(t) if t.bluetooth || t.btle => ConnectionKind::BluetoothDirect,
-                    Some(t) if t.usb => ConnectionKind::Wired,
-                    _ => ConnectionKind::Unknown,
-                },
-            }
-        }
-        Some(DeviceRoute::RawHid { .. }) => ConnectionKind::Wired,
-        None => ConnectionKind::Unknown,
-    }
 }
 
 fn dpi_summary(load: DpiLoad) -> Option<String> {
@@ -257,134 +200,102 @@ fn arch_label() -> &'static str {
 }
 
 #[cfg(test)]
-mod connection_for_tests {
-    use openlogi_core::device::DeviceTransports;
+mod collect_devices_tests {
+    use openlogi_core::config::Config;
+    use openlogi_core::device::{
+        DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports, PairedDevice, ReceiverInfo,
+    };
 
-    use super::{ConnectionKind, DeviceModelInfo, DeviceRoute, ReceiverBrand, connection_for};
+    use super::{ConnectionKind, collect_devices};
+    use crate::services::assets::AssetResolver;
+    use crate::state::{AppState, Sources};
 
-    /// G915 X LS from issue #1218: reports all three transports (USB, eQuad,
-    /// BTLE), model_ids packed BTLE/eQuad/USB per the ascending-bit-order
-    /// contract in [`DeviceModelInfo::model_ids`].
-    fn g915_x_ls_model() -> DeviceModelInfo {
-        DeviceModelInfo {
-            entity_count: 3,
-            serial_number: None,
-            unit_id: [0, 0, 0, 0],
-            transports: DeviceTransports {
-                usb: true,
-                equad: true,
-                btle: true,
-                bluetooth: false,
+    /// A receiver with one online device whose model ids are all zero, so its
+    /// model key is `00000`, the same as every other such device.
+    fn zero_model_id_inventory(
+        receiver_product_id: u16,
+        receiver_uid: &str,
+        kind: DeviceKind,
+        codename: &str,
+        wpid: u16,
+    ) -> DeviceInventory {
+        DeviceInventory {
+            receiver: ReceiverInfo {
+                name: "Receiver".into(),
+                vendor_id: 0x046d,
+                product_id: receiver_product_id,
+                unique_id: Some(receiver_uid.into()),
             },
-            model_ids: [0xb38a, 0x40b5, 0xc356],
-            extended_model_id: 0x01,
+            paired: vec![PairedDevice {
+                slot: 1,
+                codename: Some(codename.into()),
+                wpid: Some(wpid),
+                kind,
+                online: true,
+                battery: None,
+                model_info: Some(DeviceModelInfo {
+                    entity_count: 0,
+                    serial_number: None,
+                    unit_id: [0; 4],
+                    transports: DeviceTransports::default(),
+                    model_ids: [0; 3],
+                    extended_model_id: 0,
+                }),
+                capabilities: None,
+                settings_revision: 0,
+                hidpp10: false,
+            }],
         }
     }
 
+    /// #2312: a K750 on a Unifying receiver and a G602 on a Nano receiver
+    /// both report all-zero model ids. Each row names its own device, in
+    /// either inventory order.
     #[test]
-    fn multi_transport_device_over_usb_direct_is_wired() {
-        let model = g915_x_ls_model();
-        let route = DeviceRoute::Direct {
-            vendor_id: 0x046d,
-            product_id: 0xc356, // the USB slot in model_ids
-        };
-        assert_eq!(
-            connection_for(Some(&route), None, Some(&model)),
-            ConnectionKind::Wired,
-            "a device plugged in over USB must be labeled wired even though \
-             it also supports Bluetooth/BTLE"
+    fn each_row_names_its_own_device_when_model_ids_collide() {
+        let k750 = zero_model_id_inventory(
+            0xc52b,
+            "BE2E95ED",
+            DeviceKind::Keyboard,
+            "Wireless Solar Keyboard K750",
+            0x400f,
         );
-    }
+        let g602 = zero_model_id_inventory(
+            0xc537,
+            "F762998E",
+            DeviceKind::Mouse,
+            "Wireless Gaming Mouse",
+            0x402c,
+        );
+        for inventories in [[k750.clone(), g602.clone()], [g602.clone(), k750.clone()]] {
+            let resolver = AssetResolver::new();
+            let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+            let mut state =
+                AppState::new(Sources::in_memory(Config::ephemeral(), &resolver, commands));
+            let _ = state.refresh_inventories(&inventories, &[], &resolver, &[]);
+            state.store_inventory_snapshot(&inventories);
 
-    #[test]
-    fn multi_transport_device_over_btle_direct_is_bluetooth() {
-        let model = g915_x_ls_model();
-        let route = DeviceRoute::Direct {
-            vendor_id: 0x046d,
-            product_id: 0xb38a, // the BTLE slot in model_ids
-        };
-        assert_eq!(
-            connection_for(Some(&route), None, Some(&model)),
-            ConnectionKind::BluetoothDirect,
-            "the same multi-transport device connected over BTLE must be \
-             labeled Bluetooth, proving the label follows the live route \
-             rather than a fixed preference order"
-        );
-    }
-
-    #[test]
-    fn unrecognized_product_id_falls_back_to_capability_guess() {
-        let model = g915_x_ls_model();
-        let route = DeviceRoute::Direct {
-            vendor_id: 0x046d,
-            product_id: 0xdead, // matches none of model_ids
-        };
-        // No live match: falls back to the old best-effort guess from the
-        // static transport flags (bluetooth/btle preferred there too).
-        assert_eq!(
-            connection_for(Some(&route), None, Some(&model)),
-            ConnectionKind::BluetoothDirect
-        );
-    }
-
-    #[test]
-    fn missing_model_info_falls_back_to_unknown() {
-        let route = DeviceRoute::Direct {
-            vendor_id: 0x046d,
-            product_id: 0xc356,
-        };
-        assert_eq!(
-            connection_for(Some(&route), None, None),
-            ConnectionKind::Unknown
-        );
-    }
-
-    #[test]
-    fn bolt_and_unifying_routes_are_unaffected_by_transports() {
-        let model = g915_x_ls_model();
-        assert_eq!(
-            connection_for(
-                Some(&DeviceRoute::Bolt {
-                    receiver_uid: "r1".to_string(),
-                    slot: 1,
-                }),
-                None,
-                Some(&model)
-            ),
-            ConnectionKind::BoltReceiver
-        );
-        assert_eq!(
-            connection_for(
-                Some(&DeviceRoute::Unifying {
-                    receiver_uid: "r1".to_string(),
-                    slot: 1,
-                }),
-                None,
-                Some(&model)
-            ),
-            ConnectionKind::UnifyingReceiver
-        );
-    }
-
-    #[test]
-    fn receiver_product_families_use_the_registered_brand() {
-        let route = DeviceRoute::Unifying {
-            receiver_uid: "r1".to_string(),
-            slot: 1,
-        };
-        for (brand, expected) in [
-            (None, ConnectionKind::UnifyingReceiver),
-            (
-                Some(ReceiverBrand::Unifying),
-                ConnectionKind::UnifyingReceiver,
-            ),
-            (Some(ReceiverBrand::Nano), ConnectionKind::NanoReceiver),
-            (
-                Some(ReceiverBrand::Lightspeed),
-                ConnectionKind::LightspeedReceiver,
-            ),
-        ] {
-            assert_eq!(connection_for(Some(&route), brand, None), expected);
+            let rows: Vec<_> = collect_devices(&state)
+                .into_iter()
+                .map(|row| (row.connection, row.codename, row.wpid))
+                .collect();
+            assert_eq!(rows.len(), 2, "{rows:?}");
+            assert!(
+                rows.contains(&(
+                    ConnectionKind::UnifyingReceiver,
+                    Some("Wireless Solar Keyboard K750".to_string()),
+                    Some(0x400f),
+                )),
+                "{rows:?}"
+            );
+            assert!(
+                rows.contains(&(
+                    ConnectionKind::NanoReceiver,
+                    Some("Wireless Gaming Mouse".to_string()),
+                    Some(0x402c),
+                )),
+                "{rows:?}"
+            );
         }
     }
 }

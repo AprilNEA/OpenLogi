@@ -429,6 +429,7 @@ fn persisted_action_variant_names_are_stable() {
                 .parse()
                 .unwrap_or_else(|error| panic!("valid shortcut failed: {error}")),
         ),
+        Action::HoldModifier("Ctrl".parse().expect("valid modifier")),
     ]);
     let mut actual: Vec<String> = actions.into_iter().map(persisted_name).collect();
     actual.sort();
@@ -443,9 +444,13 @@ fn persisted_action_variant_names_are_stable() {
         "Cut",
         "CycleDpiPresets",
         "DpiShift",
+        "EasySwitchChannel1",
+        "EasySwitchChannel2",
+        "EasySwitchChannel3",
         "Find",
         "HorizontalScrollLeft",
         "HorizontalScrollRight",
+        "HoldModifier",
         "HoldShortcut",
         "LaunchpadShow",
         "LeftClick",
@@ -496,6 +501,41 @@ fn persisted_action_variant_names_are_stable() {
     ];
     expected.sort_unstable();
     assert_eq!(actual, expected);
+}
+
+#[test]
+fn hold_modifier_round_trips_and_labels_and_categorises() {
+    #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+    struct Wrapper {
+        binding: Action,
+    }
+
+    let wrapper = Wrapper {
+        binding: Action::HoldModifier("Ctrl+Shift".parse().expect("valid modifier set")),
+    };
+    let encoded = toml::to_string(&wrapper).expect("action serializes");
+    assert!(
+        encoded.contains("HoldModifier = \"Ctrl+Shift\""),
+        "unexpected encoding: {encoded}"
+    );
+    assert_eq!(toml::from_str::<Wrapper>(&encoded), Ok(wrapper));
+
+    let action = Action::HoldModifier("Ctrl".parse().expect("valid modifier"));
+    assert_eq!(action.label(), "Hold Ctrl");
+    assert_eq!(action.category(), Category::Editing);
+    assert!(action.translation_key().is_none());
+    assert_eq!(action.effect(), Effect::AgentSide);
+    assert_eq!(
+        action.held_modifier(),
+        Some("Ctrl".parse().expect("valid modifier"))
+    );
+    assert!(action.held_chord().is_none());
+    assert!(action.is_held());
+
+    let chord = Action::HoldShortcut("Ctrl+A".parse().expect("valid shortcut"));
+    assert!(chord.held_modifier().is_none());
+    assert!(chord.is_held());
+    assert!(!Action::Copy.is_held());
 }
 
 #[test]

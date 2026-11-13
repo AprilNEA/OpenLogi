@@ -75,6 +75,21 @@ impl CameraControl {
             _ => None,
         }
     }
+
+    /// Whether a batch that applies `autos` hands this control over to its
+    /// auto mode, so the batch must not write the control's manual value.
+    ///
+    /// The camera rejects a manual write to a control its auto mode owns. A
+    /// batch that switches the auto on *and* carries the gated value — a reset
+    /// to defaults, or a profile that engages every auto mode — would fail on
+    /// that value, and the caller would discard the whole batch. The toggle
+    /// expresses the intent; the manual value is redundant. Switching the auto
+    /// *off* is exactly when the value must be written, so that stays writable.
+    #[must_use]
+    pub fn handed_to_auto(self, autos: &[(AutoToggle, bool)]) -> bool {
+        self.auto_toggle()
+            .is_some_and(|gate| autos.contains(&(gate, true)))
+    }
 }
 
 /// An auto-mode toggle paired with a manual control (focus / exposure / white
@@ -146,7 +161,7 @@ impl ControlRange {
 
 #[cfg(test)]
 mod tests {
-    use super::ControlRange;
+    use super::{AutoToggle, CameraControl, ControlRange};
 
     #[test]
     fn discrete_range_rejects_missing_values() {
@@ -161,6 +176,44 @@ mod tests {
         assert!(range.supports(1));
         assert!(!range.supports(2));
         assert!(range.supports(3));
+    }
+
+    #[test]
+    fn a_control_handed_to_auto_is_skipped() {
+        let autos = [(AutoToggle::Exposure, true)];
+        // Exposure is gated by the toggle being switched on...
+        assert!(CameraControl::Exposure.handed_to_auto(&autos));
+        // ...while ungated controls, and controls gated by a *different*
+        // toggle, still apply.
+        assert!(!CameraControl::Zoom.handed_to_auto(&autos));
+        assert!(!CameraControl::Focus.handed_to_auto(&autos));
+    }
+
+    #[test]
+    fn a_control_taken_off_auto_still_applies() {
+        // Switching auto *off* is exactly when the manual value must be written.
+        let autos = [(AutoToggle::Focus, false)];
+        assert!(!CameraControl::Focus.handed_to_auto(&autos));
+    }
+
+    #[test]
+    fn an_unmentioned_toggle_leaves_its_control_writable() {
+        assert!(!CameraControl::WhiteBalance.handed_to_auto(&[]));
+    }
+
+    #[test]
+    fn a_reset_that_engages_every_auto_writes_only_the_ungated_values() {
+        // The controls panel's reset (and the built-in profiles) switch every
+        // auto mode on in the same batch as a value for every control. Only
+        // the three auto-owned values drop out; everything else still lands.
+        let autos = AutoToggle::ALL.map(|toggle| (toggle, true));
+        for control in CameraControl::ALL {
+            let gated = matches!(
+                control,
+                CameraControl::Focus | CameraControl::Exposure | CameraControl::WhiteBalance
+            );
+            assert_eq!(control.handed_to_auto(&autos), gated, "{control:?}");
+        }
     }
 }
 

@@ -23,6 +23,7 @@ mod notice;
 mod platform;
 mod ring;
 mod session;
+mod windowing;
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -38,7 +39,7 @@ use crate::backlight::BacklightView;
 use crate::ipc::OverlayCommand;
 use crate::notice::NoticeShelf;
 use crate::platform::RingPlacement;
-use crate::ring::{RingPointer, RingView};
+use crate::ring::{Geometry, RingPointer, RingView};
 use crate::session::{
     ClickAwaySession, claim_the_role, close_all_ring_windows, close_ring_windows,
     spawn_click_away_dismissal,
@@ -74,17 +75,29 @@ fn main() -> Result<()> {
     // GPUI owns the singleton, but `app.run` has not finished launching yet.
     platform::configure_application();
     app = app.with_quit_mode(gpui::QuitMode::Explicit);
+    if let Some(mode) = windowing::initial() {
+        app = app.with_windowing(mode);
+    }
     app.run(move |cx| {
         // GPUI's didFinishLaunching callback resets the policy to Regular.
         // Reapply the helper policy after that reset, without constructing
         // NSApplication before GPUI has installed its subclass.
         platform::configure_application();
+        windowing::install(cx);
         let live_session = Arc::new(ClickAwaySession::new());
         spawn_click_away_dismissal(cx, Arc::clone(&live_session));
         let shelf = Rc::new(RefCell::new(NoticeShelf::default()));
         cx.spawn(async move |cx| {
             while let Some(observed) = notices.recv().await {
                 openlogi_core::locale::activate(observed.language.as_deref());
+                // Connect before the shelf records the list as shown, so a
+                // list that could not be shown is still new the next time.
+                if !observed.notices.is_empty()
+                    && let Err(error) = cx.update(windowing::connect).await
+                {
+                    warn!(%error, "could not connect to the display for a notice");
+                    continue;
+                }
                 let Some(cards) = shelf.borrow_mut().observe(observed.notices) else {
                     continue;
                 };
@@ -97,6 +110,12 @@ fn main() -> Result<()> {
             // nothing showing when the time is up, or when it is gone.
             while let Some(observed) = lock_keys.recv().await {
                 openlogi_core::locale::activate(observed.language.as_deref());
+                if observed.shown.is_some()
+                    && let Err(error) = cx.update(windowing::connect).await
+                {
+                    warn!(%error, "could not connect to the display for a lock-key indicator");
+                    continue;
+                }
                 cx.update(|cx| lock_key::present(cx, observed.shown));
             }
         })
@@ -111,8 +130,16 @@ fn main() -> Result<()> {
                     continue;
                 };
                 openlogi_core::locale::activate(invocation.language.as_deref());
+                if let Err(error) = cx.update(windowing::connect).await {
+                    warn!(%error, "could not connect to the display for the Actions Ring");
+                    let _ = commands.send(OverlayCommand::Cancel {
+                        session_id: invocation.session_id,
+                    });
+                    continue;
+                }
                 cx.update(|cx| {
                     close_all_ring_windows(cx);
+                    let edge = gpui::px(Geometry::of(invocation.size).window);
                     #[cfg_attr(
                         windows,
                         expect(
@@ -120,7 +147,7 @@ fn main() -> Result<()> {
                             reason = "only the Wayland placement drains its openings"
                         )
                     )]
-                    let mut placement = match RingPlacement::capture(cx) {
+                    let mut placement = match RingPlacement::capture(cx, edge) {
                         Ok(placement) => placement,
                         Err(error) => {
                             warn!(%error, "could not locate Actions Ring display");
@@ -190,6 +217,12 @@ fn main() -> Result<()> {
                     visible = observation.visible,
                     "backlight observation received"
                 );
+                if observation.visible
+                    && let Err(error) = cx.update(windowing::connect).await
+                {
+                    warn!(%error, "could not connect to the display for the backlight indicator");
+                    continue;
+                }
                 cx.update(|cx| {
                     for handle in cx.windows() {
                         if let Some(view) = handle.downcast::<BacklightView>() {

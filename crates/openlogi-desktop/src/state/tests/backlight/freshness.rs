@@ -30,6 +30,8 @@ fn snapshot(cx: &mut gpui::TestAppContext, inventory: Vec<DeviceInventory>) {
         pairing: None,
         foreground: ForegroundApps::default(),
         lights: Vec::new(),
+        flow: openlogi_ipc::FlowStatus::default(),
+        config_revision: openlogi_core::config::ConfigRevision::default(),
     };
     cx.update(|cx| {
         AppState::update(cx, |state, _| {

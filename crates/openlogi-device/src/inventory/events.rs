@@ -22,6 +22,8 @@
 //!
 //! [`PairedDevice::settings_revision`]: openlogi_core::device::PairedDevice::settings_revision
 
+mod lock_keys;
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
@@ -53,6 +55,7 @@ use tokio::sync::Notify;
 use tokio::sync::{mpsc, watch};
 use tracing::debug;
 
+use self::lock_keys::{LockKeyState, ReadConnection};
 use crate::ReceiverProtocol;
 
 /// A HID++ lifecycle source that requested authoritative inventory
@@ -530,28 +533,9 @@ struct DeviceEvents {
     /// channel. Owned here, never reset by [`EventSubscriptionHandle::register_device`]:
     /// a re-probe does not undo a change the user made on the device.
     settings_revision: u64,
-    /// The device's last lock-key state, to tell which key a `0x4220`
-    /// broadcast changed. `None` while unknown: then a broadcast only records
-    /// its state, because no key can be named as changed.
-    lock_keys: Option<LockKeys>,
-    /// Whether the lock state was read since the device came online. One
-    /// attempt per connection: a failed read is not retried on every
-    /// reconciliation, and the next broadcast records the state instead.
-    lock_keys_read: bool,
-    /// How often the device came back since it was registered, so a
-    /// lock-state read started before a comeback does not record its answer
-    /// after it.
-    lock_keys_connection: u64,
-}
-
-impl DeviceEvents {
-    /// Forget the lock state: the device was away, and its keys may have
-    /// changed meanwhile, so the next scan reads them again.
-    fn forget_lock_keys(&mut self) {
-        self.lock_keys = None;
-        self.lock_keys_read = false;
-        self.lock_keys_connection = self.lock_keys_connection.wrapping_add(1);
-    }
+    /// The device's lock-key state, to tell which key a `0x4220` broadcast
+    /// changed.
+    lock_keys: LockKeyState,
 }
 
 /// A lock-state read in flight: which device it asks, and on which of its
@@ -560,7 +544,7 @@ impl DeviceEvents {
 struct LockKeyRead {
     device_index: u8,
     feature_index: u8,
-    connection: u64,
+    connection: ReadConnection,
 }
 
 struct SubscriptionState {
@@ -593,7 +577,10 @@ impl SubscriptionState {
             }
             // The slot connected or dropped between scans, which may never
             // see it offline.
-            self.forget_lock_keys(v10::Message::from(raw).header().device_index);
+            self.update_lock_keys(
+                v10::Message::from(raw).header().device_index,
+                LockKeyState::forget,
+            );
             return Some(HidppEventSource::ReceiverConnection);
         }
 
@@ -611,7 +598,7 @@ impl SubscriptionState {
             .and_then(|device| device.features.recognizes(&message))?;
         if source == HidppEventSource::WirelessDeviceStatus {
             // A reconnection, which the scans may never see as offline.
-            self.forget_lock_keys(device_index);
+            self.update_lock_keys(device_index, LockKeyState::forget);
         }
         if source.changes_settings() {
             // Bumped before the reconciliation request is sent, so the
@@ -669,7 +656,7 @@ impl SubscriptionState {
             .unwrap_or_else(PoisonError::into_inner)
             .iter_mut()
             .find(|device| is_lock_broadcast(device))
-            .and_then(|device| device.lock_keys.replace(new));
+            .and_then(|device| device.lock_keys.record_broadcast(new));
         if let Some(old) = old {
             for update in LockKeyUpdate::changes(header.device_index, old, new) {
                 self.notifier.notify_lock_key(update);
@@ -678,8 +665,9 @@ impl SubscriptionState {
         true
     }
 
-    /// [`DeviceEvents::forget_lock_keys`] for `device_index`, if registered.
-    fn forget_lock_keys(&self, device_index: u8) {
+    /// Apply `transition` to the lock-key state of `device_index`, if
+    /// registered.
+    fn update_lock_keys(&self, device_index: u8, transition: impl FnOnce(&mut LockKeyState)) {
         if let Some(device) = self
             .devices
             .write()
@@ -687,7 +675,7 @@ impl SubscriptionState {
             .iter_mut()
             .find(|device| device.device_index == device_index)
         {
-            device.forget_lock_keys();
+            transition(&mut device.lock_keys);
         }
     }
 }
@@ -719,15 +707,13 @@ impl EventSubscriptionHandle {
                 device_index,
                 features,
                 settings_revision: 0,
-                lock_keys: None,
-                lock_keys_read: false,
-                lock_keys_connection: 0,
+                lock_keys: LockKeyState::default(),
             });
         }
     }
 
-    /// The read to start for an `online` `device_index` whose lock state has
-    /// not been read since it came online: the cue to read it once.
+    /// The read to start for an `online` `device_index` whose lock state is
+    /// still unread on this connection: the cue to read it once.
     /// An offline device has its state forgotten instead: its keys may change
     /// before it comes back, so the next connection reads them again.
     fn lock_keys_to_read(&self, device_index: u8, online: bool) -> Option<LockKeyRead> {
@@ -740,36 +726,24 @@ impl EventSubscriptionHandle {
             .iter_mut()
             .find(|device| device.device_index == device_index)?;
         if !online {
-            device.forget_lock_keys();
+            device.lock_keys.forget();
             return None;
         }
         let feature_index = device.features.lock_key_state?;
-        if device.lock_keys_read {
-            return None;
-        }
-        device.lock_keys_read = true;
+        let connection = device.lock_keys.start_read()?;
         Some(LockKeyRead {
             device_index,
             feature_index,
-            connection: device.lock_keys_connection,
+            connection,
         })
     }
 
-    /// Record the lock state `read` answered, unless a broadcast recorded a
-    /// state while the read was in flight, or the device came back meanwhile:
-    /// then the answer is from the connection before.
+    /// Record the lock state `read` answered, as
+    /// [`LockKeyState::record_read_answer`] allows.
     fn record_lock_keys(&self, read: LockKeyRead, keys: LockKeys) {
-        if let Some(device) = self
-            .state
-            .devices
-            .write()
-            .unwrap_or_else(PoisonError::into_inner)
-            .iter_mut()
-            .find(|device| device.device_index == read.device_index)
-            && device.lock_keys_connection == read.connection
-        {
-            device.lock_keys.get_or_insert(keys);
-        }
+        self.state.update_lock_keys(read.device_index, |state| {
+            state.record_read_answer(read.connection, keys);
+        });
     }
 
     /// Read the lock state of an `online` `device_index` once per connection,
@@ -788,7 +762,12 @@ impl EventSubscriptionHandle {
             LockKeyStateFeature::new(Arc::clone(channel), device_index, read.feature_index);
         match feature.get_lock_state().await {
             Ok(keys) => self.record_lock_keys(read, keys),
-            Err(error) => debug!(device_index, ?error, "lock-key state read failed"),
+            Err(error) => {
+                debug!(device_index, ?error, "lock-key state read failed");
+                self.state.update_lock_keys(device_index, |state| {
+                    state.record_read_failure(read.connection);
+                });
+            }
         }
     }
 
@@ -933,9 +912,7 @@ mod tests {
         state.devices.write().unwrap().push(DeviceEvents {
             device_index: 2,
             settings_revision: 0,
-            lock_keys: None,
-            lock_keys_read: false,
-            lock_keys_connection: 0,
+            lock_keys: LockKeyState::default(),
             features: EventFeatureIndices {
                 wireless_status: Some(5),
                 unified_battery: None,
@@ -977,9 +954,7 @@ mod tests {
         state.devices.write().unwrap().push(DeviceEvents {
             device_index: 3,
             settings_revision: 0,
-            lock_keys: None,
-            lock_keys_read: false,
-            lock_keys_connection: 0,
+            lock_keys: LockKeyState::default(),
             features: EventFeatureIndices {
                 wireless_status: Some(5),
                 unified_battery: Some(7),
@@ -1050,9 +1025,7 @@ mod tests {
         state.devices.write().unwrap().push(DeviceEvents {
             device_index: 0xff,
             settings_revision: 0,
-            lock_keys: None,
-            lock_keys_read: false,
-            lock_keys_connection: 0,
+            lock_keys: LockKeyState::default(),
             features: EventFeatureIndices {
                 wireless_status: None,
                 unified_battery: None,
@@ -1127,9 +1100,7 @@ mod tests {
         state.devices.write().unwrap().push(DeviceEvents {
             device_index: 1,
             settings_revision: 0,
-            lock_keys: None,
-            lock_keys_read: false,
-            lock_keys_connection: 0,
+            lock_keys: LockKeyState::default(),
             features: EventFeatureIndices {
                 battery_status: Some(4),
                 battery_voltage: Some(6),
@@ -1707,15 +1678,22 @@ mod tests {
             None,
             "nothing is read offline"
         );
-        assert_eq!(state.decode(lock_report(0, 0x02), false), None);
-        assert_eq!(drain(&mut updates), []);
         let read = handle.lock_keys_to_read(1, true).expect("read again");
 
-        // That broadcast already recorded Caps Lock on, so a read answering
-        // later with the older state does not replace it.
+        // A broadcast while the read is in flight records Caps Lock on, and
+        // names nothing: the old state is gone. The read answering later
+        // with the older state does not replace it.
+        assert_eq!(state.decode(lock_report(0, 0x02), false), None);
+        assert_eq!(drain(&mut updates), []);
         handle.record_lock_keys(read, LockKeys::empty());
         assert_eq!(state.decode(lock_report(0, 0x00), false), None);
         assert_eq!(drain(&mut updates), [(LockKey::CapsLock, false)]);
+
+        // A broadcast before the read already tells the whole state, so that
+        // connection reads nothing.
+        assert_eq!(handle.lock_keys_to_read(1, false), None);
+        assert_eq!(state.decode(lock_report(0, 0x02), false), None);
+        assert_eq!(handle.lock_keys_to_read(1, true), None);
     }
 
     #[test]
@@ -1780,18 +1758,19 @@ mod tests {
             state.decode(connection, false),
             Some(HidppEventSource::ReceiverConnection)
         );
-        // The old state is gone: a broadcast names no key, it only records.
+        // The old state is gone: the next scan reads it again, and a
+        // broadcast meanwhile names no key, it only records.
+        assert!(handle.lock_keys_to_read(1, true).is_some(), "read again");
         assert_eq!(state.decode(lock_report(0, 0x00), false), None);
         assert_eq!(drain(&mut updates), []);
-        assert!(handle.lock_keys_to_read(1, true).is_some(), "read again");
 
         assert_eq!(
             state.decode(reconnection(1, 4), false),
             Some(HidppEventSource::WirelessDeviceStatus)
         );
+        assert!(handle.lock_keys_to_read(1, true).is_some(), "read again");
         assert_eq!(state.decode(lock_report(0, 0x02), false), None);
         assert_eq!(drain(&mut updates), []);
-        assert!(handle.lock_keys_to_read(1, true).is_some(), "read again");
     }
 
     /// A read can answer after its device came back. That answer is from the

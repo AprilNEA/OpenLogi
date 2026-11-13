@@ -223,6 +223,30 @@ pub struct Capabilities {
     /// HID++ `0x8110` button spy.
     #[serde(default)]
     pub button_spy: bool,
+    /// A headset's sidetone level can be read and changed — HID++ `0x8300
+    /// Sidetone`. Appended after `button_spy`: crosses the IPC and the
+    /// persisted identity.
+    #[serde(default)]
+    pub sidetone: bool,
+    /// A G-series keyboard's G-key column can be handed to software — HID++
+    /// `0x8010 GamingGKeys`. Appended after `sidetone`: crosses the IPC and
+    /// the persisted identity.
+    #[serde(default)]
+    pub g_keys: bool,
+    /// The keyboard reports its M1–M3 bank keys — HID++ `0x8020
+    /// GamingMKeys`. Appended: crosses the IPC and the persisted identity.
+    #[serde(default)]
+    pub m_keys: bool,
+    /// The keyboard reports its MR key — HID++ `0x8030 MacroRecord`.
+    /// Appended: crosses the IPC and the persisted identity.
+    #[serde(default)]
+    pub macro_record: bool,
+    /// The device can be moved to another Easy-Switch host slot — HID++
+    /// `0x1814 ChangeHost`. Unlike [`Self::easy_switch`], it does not need
+    /// the slots' names. Appended: crosses the IPC and the persisted
+    /// identity.
+    #[serde(default)]
+    pub change_host: bool,
 }
 
 impl Capabilities {
@@ -278,6 +302,11 @@ impl Capabilities {
             disable_keys: ids.contains(&0x4521),
             onboard_profiles: ids.contains(&0x8100),
             button_spy: ids.contains(&0x8110),
+            sidetone: ids.contains(&0x8300),
+            g_keys: ids.contains(&0x8010),
+            m_keys: ids.contains(&0x8020),
+            macro_record: ids.contains(&0x8030),
+            change_host: ids.contains(&0x1814),
         }
     }
 
@@ -377,23 +406,53 @@ pub struct BatteryInfo {
 /// The charge at or below which a discharging battery needs attention.
 const LOW_BATTERY_PERCENT: u8 = 20;
 
+/// The charge at or below which a discharging battery is critically low.
+const CRITICAL_BATTERY_PERCENT: u8 = 10;
+
+/// How urgently a battery reading needs the user's attention. See
+/// [`BatteryInfo::attention`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum BatteryAttention {
+    /// Low: worth a warning tone and a one-time notice.
+    Low,
+    /// Critically low: also worth a mark on the menu-bar icon.
+    Critical,
+}
+
 impl BatteryInfo {
-    /// Whether this reading should draw the user's attention: a discharging
-    /// battery at 20% or less, or, on a device that reports no percentage, at
-    /// the firmware's low or critical level.
+    /// How urgently this reading needs the user's attention, or `None` when it
+    /// does not: a discharging battery at 20% or less is low and at 10% or
+    /// less critical. On a device that reports no percentage, the firmware's
+    /// low and critical levels stand in.
     ///
-    /// Every low-battery cue asks this one rule: the settings app's warning
-    /// tone and caption, and the agent's low-battery notice.
+    /// Every battery cue asks this one rule: the settings app's warning tone
+    /// and caption, the agent's low-battery notice, and the menu bar.
     #[must_use]
-    pub fn needs_attention(&self) -> bool {
-        let low = match self.percentage {
-            Some(percentage) => percentage <= LOW_BATTERY_PERCENT,
-            None => matches!(self.level, BatteryLevel::Low | BatteryLevel::Critical),
-        };
-        low && !matches!(
+    pub fn attention(&self) -> Option<BatteryAttention> {
+        if matches!(
             self.status,
             BatteryStatus::Charging | BatteryStatus::ChargingSlow | BatteryStatus::Full
-        )
+        ) {
+            return None;
+        }
+        match (self.percentage, self.level) {
+            (Some(percentage), _) if percentage <= CRITICAL_BATTERY_PERCENT => {
+                Some(BatteryAttention::Critical)
+            }
+            (Some(percentage), _) if percentage <= LOW_BATTERY_PERCENT => {
+                Some(BatteryAttention::Low)
+            }
+            (None, BatteryLevel::Critical) => Some(BatteryAttention::Critical),
+            (None, BatteryLevel::Low) => Some(BatteryAttention::Low),
+            _ => None,
+        }
+    }
+
+    /// Whether this reading should draw the user's attention at all — see
+    /// [`Self::attention`].
+    #[must_use]
+    pub fn needs_attention(&self) -> bool {
+        self.attention().is_some()
     }
 }
 
@@ -724,8 +783,8 @@ pub struct DeviceInventory {
 #[cfg(test)]
 mod tests {
     use super::{
-        BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind,
-        DeviceModelInfo, DeviceTransports, LightValueRange, LightValueUnit, LockKey,
+        BatteryAttention, BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory,
+        DeviceKind, DeviceModelInfo, DeviceTransports, LightValueRange, LightValueUnit, LockKey,
         ModelTransport, PairedDevice, ReceiverInfo, prettify_codename,
     };
 
@@ -760,6 +819,53 @@ mod tests {
             );
             assert!(!battery(None, BatteryLevel::Critical, powered).needs_attention());
         }
+    }
+
+    #[test]
+    fn a_battery_at_ten_percent_or_less_is_critical() {
+        let discharging = |percentage, level| BatteryInfo {
+            percentage,
+            level,
+            status: BatteryStatus::Discharging,
+        };
+        let good = BatteryLevel::Good;
+
+        assert_eq!(
+            discharging(Some(10), good).attention(),
+            Some(BatteryAttention::Critical)
+        );
+        assert_eq!(
+            discharging(Some(11), good).attention(),
+            Some(BatteryAttention::Low)
+        );
+        assert_eq!(
+            discharging(Some(20), good).attention(),
+            Some(BatteryAttention::Low)
+        );
+        assert_eq!(discharging(Some(21), good).attention(), None);
+        // The percentage decides on its own, in both directions.
+        assert_eq!(
+            discharging(Some(15), BatteryLevel::Critical).attention(),
+            Some(BatteryAttention::Low)
+        );
+        assert_eq!(
+            discharging(Some(5), BatteryLevel::Good).attention(),
+            Some(BatteryAttention::Critical)
+        );
+        // Without one, the firmware's level stands in.
+        assert_eq!(
+            discharging(None, BatteryLevel::Critical).attention(),
+            Some(BatteryAttention::Critical)
+        );
+        assert_eq!(
+            discharging(None, BatteryLevel::Low).attention(),
+            Some(BatteryAttention::Low)
+        );
+        let charging = BatteryInfo {
+            status: BatteryStatus::Charging,
+            ..discharging(Some(3), BatteryLevel::Critical)
+        };
+        assert_eq!(charging.attention(), None);
     }
 
     #[test]
@@ -826,6 +932,11 @@ mod tests {
                     disable_keys: false,
                     onboard_profiles: false,
                     button_spy: false,
+                    sidetone: false,
+                    g_keys: false,
+                    m_keys: false,
+                    macro_record: false,
+                    change_host: false,
                 }),
                 settings_revision: 0,
                 hidpp10: false,
@@ -950,6 +1061,11 @@ mod tests {
                 disable_keys: false,
                 onboard_profiles: false,
                 button_spy: false,
+                sidetone: false,
+                g_keys: false,
+                m_keys: false,
+                macro_record: false,
+                change_host: false,
             }
         );
         assert!(!Capabilities::from_feature_ids(&[0x0003, 0x1b04]).thumbwheel);
@@ -978,8 +1094,17 @@ mod tests {
                 disable_keys: false,
                 onboard_profiles: false,
                 button_spy: false,
+                sidetone: false,
+                g_keys: false,
+                m_keys: false,
+                macro_record: false,
+                change_host: false,
             }
         );
+        // A G713: the gaming-key features and onboard profiles, no
+        // ReprogControls — its G-keys never make `buttons` true.
+        let g713 = Capabilities::from_feature_ids(&[0x0001, 0x8010, 0x8020, 0x8030, 0x8100]);
+        assert!(g713.g_keys && g713.m_keys && g713.macro_record && !g713.buttons);
         // No driving features → nothing offered.
         assert_eq!(
             Capabilities::from_feature_ids(&[0x0000, 0x0003]),
@@ -999,6 +1124,9 @@ mod tests {
         // alone switches channels but cannot name them.
         assert!(Capabilities::from_feature_ids(&[0x0001, 0x1815]).easy_switch);
         assert!(!Capabilities::from_feature_ids(&[0x0001, 0x1814]).easy_switch);
+        // 0x1814 ChangeHost moves the device between slots without 0x1815.
+        assert!(Capabilities::from_feature_ids(&[0x0001, 0x1814]).change_host);
+        assert!(!Capabilities::from_feature_ids(&[0x0001, 0x1815]).change_host);
         // 0x2205 sets the speed only where no DPI feature does (M590, MX
         // Ergo); a mouse with both keeps its DPI control.
         let scaled = Capabilities::from_feature_ids(&[0x0001, 0x2205]);
@@ -1009,6 +1137,9 @@ mod tests {
         // changed; the 0x19b0 haptic engine alone does not.
         assert!(Capabilities::from_feature_ids(&[0x0001, 0x19c0]).force_sensing);
         assert!(!Capabilities::from_feature_ids(&[0x0001, 0x19b0]).force_sensing);
+        // The G535's table: sidetone, and battery through 0x1f20.
+        let headset = Capabilities::from_feature_ids(&[0x0001, 0x0003, 0x0005, 0x8300, 0x1f20]);
+        assert!(headset.sidetone && !headset.buttons && !headset.pointer);
     }
 
     #[test]

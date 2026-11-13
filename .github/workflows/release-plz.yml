@@ -17,7 +17,7 @@ env:
 jobs:
   release-pr:
     name: release-plz PR
-    runs-on: ubuntu-latest
+    runs-on: nscloud-ubuntu-24.04-amd64-8x16
     permissions:
       contents: write
       pull-requests: write
@@ -166,7 +166,7 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch' ||
       startsWith(github.event.head_commit.message, 'chore: release')
-    runs-on: ubuntu-latest
+    runs-on: nscloud-ubuntu-24.04-amd64-8x16
     permissions:
       contents: write
       pull-requests: read

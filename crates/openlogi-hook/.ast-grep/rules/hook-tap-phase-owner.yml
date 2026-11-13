@@ -1,0 +1,20 @@
+# Owner: macos::watchdog::WatchdogSignals::advance — the tap phase's one writer.
+id: hook-tap-phase-owner
+language: rust
+severity: error
+message: Move the tap phase with WatchdogSignals::publish (or the thread-exit guard). WatchdogSignals::advance is the phase cell's only writer, so a step out of order is refused instead of stored, and every progress-judged phase is published after fresh progress.
+files:
+  - crates/openlogi-hook/src/**/*.rs
+rule:
+  all:
+    - pattern: $SIGNALS.phase.$WRITE($$$ARGS)
+    - not:
+        inside:
+          kind: function_item
+          has:
+            field: name
+            regex: ^advance$
+          stopBy: end
+constraints:
+  WRITE:
+    regex: ^(store|swap|compare_exchange(_weak)?|try_update|fetch_[a-z_]+|get_mut|as_ptr)$

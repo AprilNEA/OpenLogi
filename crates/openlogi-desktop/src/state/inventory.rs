@@ -17,10 +17,9 @@ use crate::state::devices::{
 };
 
 use super::device_key::DeviceKey;
-use super::device_session::DeviceSession;
 use super::events::StateEvents;
 use super::load::Load;
-use super::{AppState, INVENTORY_MISS_GRACE, StateEvent};
+use super::{AppState, StateEvent};
 
 impl AppState {
     /// Every known device model that can be resolved to an asset depot.
@@ -67,11 +66,9 @@ impl AppState {
         cameras: &[openlogi_camera::Camera],
     ) -> StateEvents {
         let new_list = build_device_list(inventories, standalone, resolver, &self.config, cameras);
-        // Adoption runs before anything else touches the config. Only an
-        // online record's identity was actually read this snapshot, so only an
-        // online sighting can attribute its route to a device with confidence
-        // — an offline route/identity pairing would be a guess. The agent
-        // never writes config, so the GUI is the only adopter.
+        // Adoption runs before anything else touches the config, and only for
+        // a record the snapshot read online (`DeviceRecord::sighting_key`).
+        // The agent never writes config, so the GUI is the only adopter.
         //
         // Ordering is load-bearing: `persist_identities` keys off each
         // record's `config_key`, so running it first would write a bare
@@ -86,11 +83,10 @@ impl AppState {
         //
         // The rebuild only fixes `new_list`; `merge_inventory_snapshot` below
         // can still re-inject a grace-kept record naming the consumed key
-        // from `self.device_list`. What actually keeps that record from
-        // getting a bare entry written back under it is that
-        // `persist_identities`' `if !record.online { continue; }` (below)
-        // skips it — a grace-kept record is never online. That guard existing
-        // for its own reason is what this rebuild silently depends on.
+        // from the previous list — even one still shown online. What keeps
+        // that record from getting a bare entry written back under it is
+        // that `persist_identities` writes only a record's `sighting_key`,
+        // and a grace-kept `Presence` is never a sighting.
         let new_list = if adopted {
             build_device_list(inventories, standalone, resolver, &self.config, cameras)
         } else {
@@ -125,8 +121,16 @@ impl AppState {
         // nobody thought to add — `battery` and the resolved `asset` were
         // both being swallowed here. Structural comparison also makes the
         // guard immune to new fields, which is what an allowlist can never
-        // be.
-        if merged_list == self.devices.records {
+        // be. The one exception is a grace-kept card's miss count: nothing
+        // renders it, but the next merge counts on from it, so it is kept
+        // without reporting a change.
+        if merged_list.len() == self.devices.records.len()
+            && merged_list
+                .iter()
+                .zip(&self.devices.records)
+                .all(|(new, old)| new.shows_as(old))
+        {
+            self.devices.records = merged_list;
             return StateEvents::none();
         }
 
@@ -164,7 +168,7 @@ impl AppState {
             .filter(|new| {
                 self.devices.records.iter().any(|old| {
                     old.config_key == new.config_key
-                        && (old.route != new.route || old.online != new.online)
+                        && (old.route != new.route || old.is_online() != new.is_online())
                 })
             })
             .map(DeviceRecord::device_key)
@@ -184,6 +188,7 @@ impl AppState {
         }
         for key in &reconnected {
             self.pointer_speed_reconnected(key);
+            self.sidetone_reconnected(key);
             self.force_sensing_reconnected(key);
         }
         for key in &disable_keys_invalidated {
@@ -223,15 +228,9 @@ impl AppState {
 
         for previous in &self.devices.records {
             let inv = previous.inventory_key();
-            let key = previous.device_key();
-            if let Some(record) = by_key.remove(&inv) {
-                clear_inventory_misses(&mut self.devices.sessions, &key);
-                merged.push(record);
-                continue;
-            }
-
-            if let Some(record) = adopted.remove(&inv) {
-                clear_inventory_misses(&mut self.devices.sessions, &key);
+            // Listed again: the snapshot's record replaces the previous one
+            // whole, presence included, which ends any grace it was in.
+            if let Some(record) = by_key.remove(&inv).or_else(|| adopted.remove(&inv)) {
                 merged.push(record);
                 continue;
             }
@@ -244,42 +243,20 @@ impl AppState {
                 .as_ref()
                 .is_some_and(|route| folded_routes.contains(route))
             {
-                clear_inventory_misses(&mut self.devices.sessions, &key);
                 continue;
             }
 
-            // An all-zero direct unit id is only a transient probe result. If
-            // the next snapshot resolves a physical serial/unit key, retaining
-            // this record through the normal miss grace would show both cards.
-            if !previous.is_persistent() {
-                clear_inventory_misses(&mut self.devices.sessions, &key);
-                continue;
-            }
-
-            // Cameras reappear under a new capture id after a port change —
-            // do not grace-keep a stale cam-live entry beside the new one.
-            if previous.kind == openlogi_core::device::DeviceKind::Camera {
-                clear_inventory_misses(&mut self.devices.sessions, &key);
-                continue;
-            }
-
-            let entry = self.devices.sessions.entry(key).or_default();
-            entry.inventory_misses = entry.inventory_misses.saturating_add(1);
-            let misses = entry.inventory_misses;
-            if misses <= INVENTORY_MISS_GRACE {
+            if let Some(kept) = previous.missed() {
                 debug!(
                     key = %inv,
-                    misses,
+                    presence = ?kept.presence,
                     "keeping device through transient inventory miss"
                 );
-                merged.push(previous.clone());
+                merged.push(kept);
             }
         }
 
-        for record in by_key.into_values() {
-            clear_inventory_misses(&mut self.devices.sessions, &record.device_key());
-            merged.push(record);
-        }
+        merged.extend(by_key.into_values());
         // Adopted records whose known card was never in the previous list
         // (identity known only from config) still belong in the gallery.
         merged.extend(adopted.into_values());
@@ -352,7 +329,7 @@ impl AppState {
             // be the *other* same-model device.
             let mut candidates: Vec<String> = by_key
                 .iter()
-                .filter(|(_, record)| same_wire(record) && !record.online)
+                .filter(|(_, record)| same_wire(record) && !record.is_online())
                 .map(|(k, _)| k.clone())
                 .collect();
             for previous in &self.devices.records {
@@ -367,7 +344,7 @@ impl AppState {
                 if candidates.is_empty()
                     && by_key
                         .iter()
-                        .any(|(_, record)| same_wire(record) && record.online)
+                        .any(|(_, record)| same_wire(record) && record.is_online())
                 {
                     by_key.remove(&key);
                 }
@@ -466,7 +443,7 @@ impl super::AppState {
         else {
             return StateEvents::none();
         };
-        if record.online {
+        if record.is_online() {
             return StateEvents::none();
         }
         let config_key = record.persistent_config_key().map(str::to_string);
@@ -618,8 +595,8 @@ impl super::AppState {
         config_key: Option<&str>,
     ) -> bool {
         self.devices.records.iter().any(|record| {
-            record.online
-                && record.route.as_ref() != Some(unpaired)
+            record.is_online()
+                && record.addressable_route() != Some(unpaired)
                 && (record.record_key() == record_key
                     || config_key.is_some_and(|key| record.persistent_config_key() == Some(key)))
         })
@@ -657,6 +634,7 @@ impl super::AppState {
         self.devices.replace(records, selected);
         self.devices.sessions.remove(&device_key);
         self.pointer.reads.remove(&device_key);
+        self.disable_keys_reads.forget(&device_key);
         StateEvent::InventoryChanged.into()
     }
 }
@@ -664,10 +642,7 @@ impl super::AppState {
 pub(super) fn persist_identities(config: &mut Config, list: &[DeviceRecord]) -> bool {
     let mut changed = false;
     for record in list {
-        if !record.online {
-            continue;
-        }
-        let Some(config_key) = record.persistent_config_key() else {
+        let Some(config_key) = record.sighting_key() else {
             continue;
         };
         let capabilities = record.capabilities.unwrap_or_default();
@@ -693,7 +668,8 @@ pub(super) fn persist_identities(config: &mut Config, list: &[DeviceRecord]) -> 
     changed
 }
 
-/// Fold every online, persistent record's route into its canonical config
+/// Fold the route of every record the snapshot read online under a
+/// persistent key ([`DeviceRecord::sighting_key`]) into its canonical config
 /// entry, so a device reached both ways in one snapshot resolves to the one
 /// entry its settings actually live under.
 ///
@@ -714,16 +690,12 @@ pub(super) fn persist_identities(config: &mut Config, list: &[DeviceRecord]) -> 
 /// fold the legacy entry onto itself and the branch would never converge.
 pub(super) fn adopt_routes(config: &mut Config, list: &[DeviceRecord]) -> bool {
     let mut route_counts: BTreeMap<&str, usize> = BTreeMap::new();
-    for record in list {
-        if record.is_persistent() && record.online {
-            *route_counts.entry(record.route_key.as_str()).or_insert(0) += 1;
-        }
+    let sightings = || list.iter().filter(|record| record.sighting_key().is_some());
+    for record in sightings() {
+        *route_counts.entry(record.route_key.as_str()).or_insert(0) += 1;
     }
     let mut adopted = false;
-    for record in list {
-        if !record.is_persistent() || !record.online {
-            continue;
-        }
+    for record in sightings() {
         if route_counts
             .get(record.route_key.as_str())
             .is_some_and(|&count| count > 1)
@@ -766,22 +738,11 @@ pub(super) fn settings_moved(old: &[DeviceRecord], new: &[DeviceRecord]) -> Vec<
 pub(super) fn reconnected(old: &[DeviceRecord], new: &[DeviceRecord]) -> Vec<DeviceKey> {
     new.iter()
         .filter(|new| {
-            new.online
+            new.is_online()
                 && old.iter().any(|old| {
-                    old.config_key == new.config_key && (!old.online || old.route != new.route)
+                    old.config_key == new.config_key && (!old.is_online() || old.route != new.route)
                 })
         })
         .map(DeviceRecord::device_key)
         .collect()
-}
-
-/// Reset `key`'s consecutive-miss counter — the device was just confirmed
-/// present (live, adopted, or freshly appeared) or is a kind that never earns
-/// grace (transient, camera). Leaves the rest of the device's session row
-/// untouched. A free function, not an `AppState` method, so callers can hold
-/// it alongside a live borrow of the device catalog.
-fn clear_inventory_misses(sessions: &mut BTreeMap<DeviceKey, DeviceSession>, key: &DeviceKey) {
-    if let Some(entry) = sessions.get_mut(key) {
-        entry.inventory_misses = 0;
-    }
 }

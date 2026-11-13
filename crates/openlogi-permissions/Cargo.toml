@@ -19,9 +19,13 @@ objc2-io-kit = { workspace = true, features = ["std", "hidsystem"] }
 opener = { workspace = true }
 tracing = { workspace = true }
 
-# Only for the Logitech vendor ID — `openlogi-core` is pure types, no I/O.
+# `openlogi-core` only for the Logitech vendor ID — it is pure types, no I/O.
 [target.'cfg(target_os = "linux")'.dependencies]
-openlogi-core = { version = "0.8.20", path = "../openlogi-core" }
+openlogi-core = { version = "0.9.0", path = "../openlogi-core" }
+thiserror = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+tempfile = "3.27.0"
 
 [lints]
 workspace = true

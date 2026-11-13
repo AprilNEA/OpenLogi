@@ -30,6 +30,7 @@
 mod button_debounce;
 mod foreground;
 pub(crate) mod pointer;
+pub(crate) mod probe;
 mod supervisor;
 mod wheel;
 #[cfg(test)]

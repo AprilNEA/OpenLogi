@@ -5,14 +5,15 @@
 //! The agent owns all device I/O, so the GUI never opens a device — it routes
 //! "apply now" / "read" commands here, and polls snapshots.
 
-mod backlight;
+pub(crate) mod backlight;
 mod haptic_restore;
+mod settings;
 
 use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant};
 
 use futures::StreamExt as _;
-use openlogi_agent_core::action_ring::ActionRingManager;
+use openlogi_agent_core::action_ring::{ActionRingActivation, ActionRingManager};
 use openlogi_agent_core::backlight_overlay::BacklightOverlayManager;
 use openlogi_agent_core::event_monitor::SharedEventMonitor;
 use openlogi_agent_core::observable::ObservableState;
@@ -25,14 +26,15 @@ use openlogi_hid::{
     BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
     ForceSensingInfo, HapticRestore, HapticRestoreOutcome, HapticWaveform, HidppOperation,
     LightCommand, OnboardState, PointerSpeed, ReceiverSelector, ReportRate, ReportRateInfo,
-    ScrollWheelMode, SmartShiftStatus, WriteError,
+    ScrollWheelMode, SidetoneLevel, SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus,
-    BacklightObservation, ClientKind, ConfigReloadError, Generation, Identity, LockKeyObservation,
-    MonitorEvent, NoticeObservation, Observation, PROTOCOL_VERSION, PairingCommandError,
-    PairingFailure, PairingUpdate, RingObservation, SavedConfig, SavedConfigVerdict,
+    BacklightObservation, ClientKind, ConfigReloadError, FlowIdentity, FlowPairTarget,
+    FlowPairingCommandError, Generation, Identity, LockKeyObservation, MonitorEvent,
+    NoticeObservation, Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure,
+    PairingUpdate, RingObservation, SavedConfig, SavedConfigVerdict,
 };
 use succession::Compat;
 
@@ -119,6 +121,10 @@ impl AgentServer {
                 #[cfg(target_os = "macos")]
                 let show_in_menu_bar = config.app_settings.show_in_menu_bar;
                 let language = config.app_settings.language.clone();
+                // The menu reads the config on the main thread, from its own
+                // copy.
+                #[cfg(target_os = "macos")]
+                crate::tray::set_config(Arc::new(config.clone()));
                 match saved {
                     None => self.orchestrator.lock().await.reload_config(config),
                     Some(saved) => self
@@ -127,6 +133,7 @@ impl AgentServer {
                         .await
                         .reload_saved_config(config, revision, saved),
                 }
+                self.observable.set_config_revision(revision);
                 self.dispatcher.cancel_all_buttons();
                 // The GUI's launch-at-login toggle reaches us through this
                 // reload, so re-reconcile the autostart from the new config.
@@ -139,13 +146,10 @@ impl AgentServer {
                 // item now rather than at the next agent launch.
                 #[cfg(target_os = "macos")]
                 crate::tray::set_visible(show_in_menu_bar, app_icon);
-                // And the interface language: re-resolve the process locale
-                // (the Windows popup rebuilds per show and picks it up alone)
-                // and rebuild the macOS menu, whose titles were stamped at
-                // install.
+                // And the interface language: re-resolve the process locale.
+                // Both tray menus rebuild each time they open and pick it up
+                // alone.
                 openlogi_core::locale::activate(language.as_deref());
-                #[cfg(target_os = "macos")]
-                crate::tray::relocalize();
                 Ok(revision)
             }
             Err(error) => {
@@ -220,21 +224,11 @@ impl Agent for AgentServer {
         route: DeviceRoute,
         status: SmartShiftStatus,
     ) -> Result<(), WriteError> {
-        self.shared
-            .device(&route)
-            .run(HidppOperation::WriteSmartShift, |c| async move {
-                openlogi_hid::set_smartshift_on(&c, status).await
-            })
-            .await
+        self.shared.set_smartshift(&route, status).await
     }
 
     async fn read_dpi(self, _: Context, route: DeviceRoute) -> Result<DpiInfo, WriteError> {
-        self.shared
-            .device(&route)
-            .run(HidppOperation::ReadDpiCapabilities, |c| async move {
-                openlogi_hid::get_dpi_info_on(&c).await
-            })
-            .await
+        self.shared.read_dpi(&route).await
     }
 
     async fn read_smartshift(
@@ -242,12 +236,7 @@ impl Agent for AgentServer {
         _: Context,
         route: DeviceRoute,
     ) -> Result<SmartShiftStatus, WriteError> {
-        self.shared
-            .device(&route)
-            .run(HidppOperation::ReadSmartShift, |c| async move {
-                openlogi_hid::get_smartshift_status_on(&c).await
-            })
-            .await
+        self.shared.read_smartshift(&route).await
     }
 
     async fn read_wheel(
@@ -268,21 +257,11 @@ impl Agent for AgentServer {
         _: Context,
         route: DeviceRoute,
     ) -> Result<BacklightState, WriteError> {
-        self.shared
-            .device(&route)
-            .run(HidppOperation::ReadBacklight, |c| async move {
-                openlogi_hid::get_backlight_on(&c).await
-            })
-            .await
+        self.shared.read_backlight(&route).await
     }
 
     async fn read_fn_lock(self, _: Context, route: DeviceRoute) -> Result<FnLockState, WriteError> {
-        self.shared
-            .keyboard_device(&route)
-            .run(HidppOperation::ReadFnLock, |c| async move {
-                openlogi_hid::get_fn_lock_on(&c).await
-            })
-            .await
+        self.shared.read_fn_lock(&route).await
     }
 
     async fn read_disable_keys(
@@ -440,6 +419,17 @@ impl Agent for AgentServer {
             .rename_easy_switch_host(&route, slot, name)
             .await
     }
+
+    async fn switch_host(self, _: Context, route: DeviceRoute, host: u8) -> Result<(), WriteError> {
+        self.shared
+            .device(&route)
+            .run(HidppOperation::ChangeHost, |c| async move {
+                let changed = openlogi_hid::switch_host_on(&c, host).await?;
+                info!(%route, host, changed, "switch_host");
+                Ok(())
+            })
+            .await
+    }
     async fn reload_saved_config(
         self,
         _: Context,
@@ -455,6 +445,23 @@ impl Agent for AgentServer {
     ) -> Result<SavedConfigVerdict, ConfigReloadError> {
         let revision = self.reload(Some(&saved)).await?;
         Ok(saved_config_verdict(&saved, revision))
+    }
+
+    async fn read_sidetone(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<SidetoneLevel, WriteError> {
+        self.shared.read_sidetone(&route).await
+    }
+
+    async fn set_sidetone(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        level: SidetoneLevel,
+    ) -> Result<SidetoneLevel, WriteError> {
+        self.shared.set_sidetone(&route, level).await
     }
 
     async fn observe_notices(self, _: Context, since: Generation) -> NoticeObservation {
@@ -503,19 +510,13 @@ impl Agent for AgentServer {
         route: DeviceRoute,
         enabled: bool,
     ) -> Result<(), WriteError> {
-        self.shared
-            .hardware()
-            .apply_light(&route, LightCommand::Power(enabled))
-            .await?;
-        if !self
-            .orchestrator
-            .lock()
-            .await
-            .set_manual_light_power(&route, enabled)
-        {
-            warn!(?route, "manual light power applied without camera override");
-        }
-        Ok(())
+        orchestrator::write_manual_light_power(
+            &self.orchestrator,
+            &self.shared.hardware(),
+            &route,
+            enabled,
+        )
+        .await
     }
 
     async fn next_action_ring(self, _: Context) -> Option<ActionRingInvocation> {
@@ -554,16 +555,7 @@ impl Agent for AgentServer {
         slot: ActionRingSlot,
     ) -> Result<(), ActionRingCommandError> {
         let activation = self.action_ring.activate(session_id, slot)?;
-        self.dispatcher
-            .dispatch(&activation.action, Some(&activation.device_key));
-        self.ring_haptics.play(
-            activation.haptic_route,
-            HapticWaveform::DampStateChange,
-            "activation",
-        );
-        // After the confirmation buzz, so it plays before the engine is
-        // handed back.
-        self.ring_haptics.end_session(session_id);
+        run_ring_activation(&self.dispatcher, &self.ring_haptics, session_id, activation);
         Ok(())
     }
 
@@ -571,6 +563,61 @@ impl Agent for AgentServer {
         self.action_ring.cancel(session_id);
         self.ring_haptics.end_session(session_id);
     }
+
+    async fn read_flow_identity(self, _: Context) -> Result<FlowIdentity, FlowPairingCommandError> {
+        self.shared.flow.pairing().identity().await
+    }
+
+    async fn start_flow_pairing(self, _: Context) -> Result<(), FlowPairingCommandError> {
+        self.shared.flow.pairing().start().await
+    }
+
+    async fn pair_flow_peer(
+        self,
+        _: Context,
+        target: FlowPairTarget,
+    ) -> Result<(), FlowPairingCommandError> {
+        self.shared.flow.pairing().pair(target).await
+    }
+
+    async fn confirm_flow_pairing(self, _: Context) -> Result<(), FlowPairingCommandError> {
+        self.shared.flow.pairing().confirm().await
+    }
+
+    async fn cancel_flow_pairing(self, _: Context) -> Result<(), FlowPairingCommandError> {
+        self.shared.flow.pairing().cancel().await
+    }
+
+    async fn stop_flow_pairing(self, _: Context) {
+        self.shared.flow.pairing().stop().await;
+    }
+
+    async fn action_ring_unhover(
+        self,
+        _: Context,
+        session_id: u64,
+    ) -> Result<(), ActionRingCommandError> {
+        self.action_ring.unhover(session_id)
+    }
+}
+
+/// Run the action a ring session closed on, whether a click on the overlay
+/// or the release of a held trigger chose it, and confirm it with a buzz.
+pub(crate) fn run_ring_activation(
+    dispatcher: &ActionDispatcher,
+    haptics: &RingHapticPlayer,
+    session_id: u64,
+    activation: ActionRingActivation,
+) {
+    dispatcher.dispatch(&activation.action, Some(&activation.device_key));
+    haptics.play(
+        activation.haptic_route,
+        HapticWaveform::DampStateChange,
+        "activation",
+    );
+    // After the confirmation buzz, so it plays before the engine is handed
+    // back.
+    haptics.end_session(session_id);
 }
 
 /// Coalescing Actions Ring haptic player: at most one waveform is in flight,
@@ -1075,6 +1122,7 @@ impl RingHapticPlayer {
 /// `main` holds the single-instance lock (`agent.lock`), so no other live agent
 /// owns this socket and any leftover is from a dead instance.
 pub async fn run(server: AgentServer) {
+    tokio::spawn(reload_after_flow_pairing(server.clone()));
     let listener = match transport::bind() {
         Ok(listener) => listener,
         Err(e) => {
@@ -1101,6 +1149,16 @@ pub async fn run(server: AgentServer) {
                     tokio::spawn(response);
                 }),
         );
+    }
+}
+
+/// Reload `config.toml` each time Flow pairing saved a peer in it, so the
+/// peer reaches Flow and the snapshot the way a saved edit would.
+async fn reload_after_flow_pairing(server: AgentServer) {
+    let mut saved = server.shared.flow.pairing().saved();
+    while saved.changed().await.is_ok() {
+        // A failed reload logged why and kept the config it had.
+        let _ = server.reload(None).await;
     }
 }
 

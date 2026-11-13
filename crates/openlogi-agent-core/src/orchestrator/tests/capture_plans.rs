@@ -69,13 +69,19 @@ fn a_device_wake_does_not_rearm_other_routes_but_system_resume_does() {
             orch.reapply_after_system_resume();
         }
         orch.refresh_inventory(&devices, &[], false);
-        let resumed = orch.shared.capture_plans.borrow();
+        let resumed = orch.shared.capture_plans.borrow().clone();
         for (old, new) in before.plans().iter().zip(resumed.plans()) {
             assert_ne!(
                 old.target.rearm_generation, new.target.rearm_generation,
                 "a system wake must retain its request to rearm every online route"
             );
         }
+        orch.refresh_inventory(&devices, &[], false);
+        assert_eq!(
+            orch.shared.capture_plans.borrow().as_ref(),
+            resumed.as_ref(),
+            "the refresh that rearmed every route drains the wake's request"
+        );
     }
 }
 
@@ -501,6 +507,61 @@ fn hook_maps_publish_selection_and_preserve_capture_observations() {
     let maps = orch.shared.hook_maps.read().expect("hook maps");
     assert_eq!(maps.selected_device.as_deref(), Some("a"));
     assert!(maps.shift_held.contains("a"));
+}
+
+/// The hook tells another mouse's press from the selected device's by the
+/// selected device's route, so the snapshot names it and keeps the diversions
+/// sessions reported on it across a rebuild (#2381).
+#[test]
+fn hook_maps_name_the_selected_route_its_diversions_are_kept_under() {
+    let mut orch = orchestrator(Config::default());
+    orch.devices = vec![dev("a", 1, true), dev("b", 2, true)];
+    orch.rebuild();
+    let route = mouse_route("AA00", 1);
+    {
+        let mut maps = orch.shared.hook_maps.write().expect("hook maps");
+        assert_eq!(maps.selected_device.as_deref(), Some("a"));
+        assert_eq!(maps.selected_route.as_ref(), Some(&route));
+        maps.diverted_buttons.record(
+            &crate::runtime::HidppSessionId::with_epoch("a", 3),
+            &route,
+            ButtonId::MiddleClick,
+        );
+    }
+    orch.reload_config(Config::default());
+    let maps = orch.shared.hook_maps.read().expect("hook maps");
+    assert_eq!(maps.selected_route.as_ref(), Some(&route));
+    assert!(
+        maps.diverted_buttons
+            .diverted_on(&route, ButtonId::MiddleClick)
+    );
+}
+
+/// A mouse seen on two links has an entry per link under one key. The hook
+/// names the link of the entry selection picked, where its capture session
+/// runs, not the first entry with that key.
+#[test]
+fn hook_maps_name_the_route_of_the_selected_entry_when_two_links_share_a_key() {
+    let direct = DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xb034,
+    };
+    let mut orch = orchestrator(Config::default());
+    orch.devices = vec![
+        dev("mx", 1, false),
+        AgentDevice {
+            route: Some(direct.clone()),
+            ..dev("mx", 0, true)
+        },
+    ];
+    orch.reload_config(Config::default());
+    assert_eq!(orch.current_key(), Some("mx"));
+    let maps = orch.shared.hook_maps.read().expect("hook maps");
+    assert_eq!(
+        maps.selected_route.as_ref(),
+        Some(&direct),
+        "the offline Bolt entry runs no session"
+    );
 }
 
 fn assert_side_gesture_capture_follows_platform_ownership_and_hook_availability(button: ButtonId) {

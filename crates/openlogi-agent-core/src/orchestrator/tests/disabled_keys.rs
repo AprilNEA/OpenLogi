@@ -7,7 +7,7 @@ use openlogi_core::hid::{DisableKeysMask, HidppOperation, WriteError};
 use openlogi_device::test_support::publish_scripted_channel;
 use std::sync::atomic::{AtomicU8, Ordering};
 
-struct Keyboard {
+pub(super) struct Keyboard {
     route: DeviceRoute,
     disabled: Arc<AtomicU8>,
     writes: Arc<std::sync::Mutex<Vec<u8>>>,
@@ -25,7 +25,10 @@ impl Keyboard {
         Self::publish_on(shared, route).await
     }
 
-    async fn publish_on(shared: &SharedHandles, route: DeviceRoute) -> Self {
+    /// A keyboard at `route` that supports Caps Lock, Insert and a key this
+    /// version does not know (`0xa1`), and starts with Caps Lock and that
+    /// unknown key disabled (`0x81`).
+    pub(super) async fn publish_on(shared: &SharedHandles, route: DeviceRoute) -> Self {
         let disabled = Arc::new(AtomicU8::new(0x81));
         let device_disabled = Arc::clone(&disabled);
         let writes = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -38,32 +41,35 @@ impl Keyboard {
             &shared.channel_registry,
             "keyboard",
             route.clone(),
-            move |request| {
-                if request.len() < 7 {
-                    return None;
-                }
-                let value = match (request[2], request[3] >> 4) {
-                    (0, 1) => 4,
-                    (0, 0) => {
-                        let feature = u16::from_be_bytes([request[4], request[5]]);
-                        device_requested_features
-                            .lock()
-                            .expect("requested features")
-                            .push(feature);
-                        if feature == 0x4521 { 5 } else { 0 }
+            crate::test_support::reporting_unit(
+                Arc::new(std::sync::Mutex::new(crate::test_support::UNIT)),
+                move |request| {
+                    if request.len() < 7 {
+                        return None;
                     }
-                    (5, 0) => 0xa1,
-                    (5, 1) => device_disabled.load(Ordering::SeqCst),
-                    (5, 2) => {
-                        device_writes.lock().expect("writes").push(request[4]);
-                        device_disabled.store(request[4], Ordering::SeqCst);
-                        device_notice.notify_one();
-                        0
-                    }
-                    _ => return None,
-                };
-                Some(vec![0x10, request[1], request[2], request[3], value, 0, 0])
-            },
+                    let value = match (request[2], request[3] >> 4) {
+                        (0, 1) => 4,
+                        (0, 0) => {
+                            let feature = u16::from_be_bytes([request[4], request[5]]);
+                            device_requested_features
+                                .lock()
+                                .expect("requested features")
+                                .push(feature);
+                            if feature == 0x4521 { 5 } else { 0 }
+                        }
+                        (5, 0) => 0xa1,
+                        (5, 1) => device_disabled.load(Ordering::SeqCst),
+                        (5, 2) => {
+                            device_writes.lock().expect("writes").push(request[4]);
+                            device_disabled.store(request[4], Ordering::SeqCst);
+                            device_notice.notify_one();
+                            0
+                        }
+                        _ => return None,
+                    };
+                    Some(vec![0x10, request[1], request[2], request[3], value, 0, 0])
+                },
+            ),
         )
         .await;
         Self {
@@ -82,7 +88,7 @@ impl Keyboard {
             .sync_policy(&self.route, Some(DisableKeysMask::CAPS_LOCK));
     }
 
-    fn assert_writes(&self, expected: &[u8]) {
+    pub(super) fn assert_writes(&self, expected: &[u8]) {
         assert_eq!(*self.writes.lock().expect("writes"), expected);
     }
 
@@ -506,6 +512,88 @@ async fn retired_policy_cannot_be_recovered_by_late_manual_cancellation() {
         assert!(!orchestrator.needs_reapply_confirmation());
         keyboard.assert_writes(&[0x81, 0x80]);
     }
+}
+
+/// A manual write bound to one keyboard writes nothing to another one that
+/// answers on its route, such as a keyboard paired into the same receiver
+/// slot, and reaches the keyboard it names.
+#[tokio::test]
+async fn a_manual_write_for_another_keyboard_writes_nothing() {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let shared = orchestrator(Config::default()).shared();
+        let keyboard = Keyboard::publish(&shared).await;
+
+        let error = shared
+            .reaching([0x87, 0x65, 0x43, 0x21])
+            .set_disable_keys(&keyboard.route, DisableKeysMask::EMPTY)
+            .await
+            .expect_err("another keyboard answers on the route");
+        assert!(matches!(error, WriteError::DeviceNotFound), "{error:?}");
+        keyboard.assert_writes(&[]);
+
+        shared
+            .reaching(crate::test_support::UNIT)
+            .set_disable_keys(&keyboard.route, DisableKeysMask::EMPTY)
+            .await
+            .expect("the keyboard it names");
+        keyboard.assert_writes(&[0x80]);
+    })
+    .await
+    .expect("both writes finish");
+}
+
+/// Confirming which keyboard a bound write reaches is device I/O inside the
+/// requester's deadline: a keyboard that does not answer the identity read
+/// costs the requester no more than the write budget, and the write gives
+/// the receiver back with the requester, writing nothing.
+#[tokio::test]
+async fn identity_preflight_counts_against_disable_keys_deadline() {
+    use std::time::Duration;
+
+    use openlogi_fixture::RequestMatch;
+
+    let shared = orchestrator(Config::default()).shared();
+    let keyboard = Keyboard::publish(&shared).await;
+    // `getDeviceInfo` on the scripted `0x0003`.
+    let identity = keyboard
+        .reports
+        .hold_next_response(RequestMatch::Hidpp20, &[0x10, 0xff, 0x0e, 0x00, 0, 0, 0]);
+    let bound = shared.reaching(crate::test_support::UNIT);
+    let mut write = std::pin::pin!(bound.set_disable_keys(&keyboard.route, DisableKeysMask::EMPTY));
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !identity.is_request_written() {
+            assert!(futures_lite::future::poll_once(&mut write).await.is_none());
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("the identity read reached the keyboard");
+
+    // The requester's deadline already runs while the keyboard is silent.
+    tokio::time::pause();
+    assert!(futures_lite::future::poll_once(&mut write).await.is_none());
+    tokio::time::advance(crate::hardware::WRITE_TIMEOUT + Duration::from_millis(1)).await;
+    let error = futures_lite::future::poll_once(&mut write)
+        .await
+        .expect("the requester's deadline covers the identity read")
+        .expect_err("the keyboard never answered");
+    assert!(
+        matches!(error, WriteError::RequestTimedOut { .. }),
+        "{error:?}"
+    );
+    tokio::time::resume();
+
+    let lease = tokio::time::timeout(
+        Duration::from_secs(2),
+        shared
+            .receiver_access
+            .acquire_exclusive(ExclusiveAccessReason::Pairing),
+    )
+    .await
+    .expect("the write gave the receiver back with its requester");
+    drop(lease);
+    identity.release();
+    keyboard.assert_writes(&[]);
 }
 
 #[tokio::test]

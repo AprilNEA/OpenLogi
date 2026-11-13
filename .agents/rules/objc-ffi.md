@@ -38,10 +38,11 @@ files; **keep this table in sync when you add or move one**:
 | `openlogi-hid/src/permissions.rs` | `IOHIDCheckAccess` / `IOHIDRequestAccess` (the prompting half of Input Monitoring) |
 | `openlogi-hook/src/macos.rs` | the CGEventTap (on `core-graphics`, see below), the Accessibility-trust check/prompt, the off-tap `NSWorkspace` frontmost-app read, and the `CGGetEventTapList` enumeration |
 | `openlogi-hook/src/macos/foreground.rs` | the `NSWorkspace` activation observer, the `NSRunningApplication` conversion behind every frontmost-app read, and the Safari PID snapshot |
+| `openlogi-hook/src/macos/probe.rs` | Flow's pointer probe: the modifier read (`CGEventSourceFlagsState`), `CGGetActiveDisplayList` / `CGDisplayBounds`, and the `CGWarpMouseCursorPosition` warp |
 | `openlogi-hook/src/macos/secure_input.rs` | the Secure Event Input read: `IsSecureEventInputEnabled` (hand-declared, see below) and the `kCGSSessionSecureInputPID` entry of `CGSessionCopyCurrentDictionary`, named through `foreground.rs`'s `NSRunningApplication` conversion |
 | `openlogi-hook/src/macos/sender.rs` | the HID sender-id lookup and the IOKit registry walk that resolves it to a device |
 | `openlogi-inject/src/inject/macos.rs` | CGEvent key and click synthesis, media-key `NSEvent`s |
-| `openlogi-inject/src/inject/macos/scroll.rs` | CGEvent scroll synthesis, including the continuous-scroll phase fields |
+| `openlogi-inject/src/inject/macos/scroll.rs` | CGEvent scroll synthesis, including the continuous-scroll phase fields, and the zoom retyping of wheel events while Accessibility Zoom's scroll modifiers are held (`+[NSEvent modifierFlags]` and the `com.apple.universalaccess` defaults) |
 | `openlogi-inject/src/inject/macos/ax.rs` | the shared `AXUIElement` attribute reads (`CFRetained` adoption of the Copy-rule out-pointer) and `AXChildren` iteration |
 | `openlogi-inject/src/inject/macos/browser.rs` | Safari's toolbar-button navigation over `ax.rs`, and the off-thread `NSWorkspace` Safari validation |
 | `openlogi-inject/src/inject/macos/menu_shortcut.rs` | the hidden probe `NSMenu` AppKit remaps for the keyboard layout, and pressing the frontmost app's matching menu item through AX |
@@ -68,12 +69,19 @@ notifications — the `com.apple.accessibility.api` distributed notification and
 tccd's `com.apple.tcc.access.changed` Darwin notification — are observed by the
 external [`axwatch`](https://crates.io/crates/axwatch) crate
 (`CFNotificationCenter` there, not here); `openlogi-hook`'s `grant::ProbeCue`
-and `openlogi-agent-core`'s grant watchers only consume its wakes.
+and `openlogi-agent-core`'s grant watchers only consume its wakes. The System
+Settings drag guide for the agent's Accessibility and Input Monitoring grants
+lives in the external [`gpui-tcc`](https://github.com/AprilNEA/gpui-tcc) crate
+(the `NSWorkspace` icon and frontmost-app reads, the
+`CGWindowListCopyWindowInfo` lookup of the System Settings window, and the
+overlay `NSWindow` level and `NSVisualEffectView` material are there, not
+here); `openlogi-desktop/src/platform/permission_guide.rs` only decides when
+to present it and which agent bundle it holds.
 
-The rest of `openlogi-desktop/src/platform/` (`updater.rs`, on `gpui_updater`)
-carries **no** ObjC FFI — don't add any. Neither do `openlogi-core`'s
-`single_instance.rs` (fs4 lock) or `openlogi-agent`'s `autostart/macos.rs`
-(legacy-plist cleanup via `std::fs`).
+The rest of `openlogi-desktop/src/platform/` (`updater.rs`, on `gpui_updater`,
+and `permission_guide.rs`, on `gpui_tcc`) carries **no** ObjC FFI — don't add
+any. Neither do `openlogi-core`'s `single_instance.rs` (fs4 lock) or
+`openlogi-agent`'s `autostart/macos.rs` (legacy-plist cleanup via `std::fs`).
 
 ## Ownership: `Retained<T>`, never raw `id`
 
@@ -156,13 +164,14 @@ Rules:
 - **Checking never prompts; prompting belongs to whoever owns the resource.**
   The agent raises the Accessibility prompt (it owns the tap) and calls
   `IOHIDRequestAccess` before opening HID; the GUI only reads status and
-  deep-links to System Settings (`open_pane`). Never call the prompting half from
-  the GUI — the grant would land on the wrong code-signing identity (issue #214,
-  see `disclaim`). This split is also why the ready-made permission crates don't
-  fit: they model one app asking for itself. `permission-flow` additionally
-  brings its own onboarding UI and links the Swift runtime into every downstream
-  binary; `macos-accessibility-client` is a raw-`extern` wrapper where this file
-  requires typed bindings.
+  deep-links to System Settings (`open_pane`, or the `gpui-tcc` drag guide,
+  which opens the same pane and prompts nothing). Never call the prompting
+  half from the GUI — the grant would land on the wrong code-signing identity
+  (issue #214, see `disclaim`). This split is also why the ready-made
+  permission crates don't fit: they model one app asking for itself.
+  `permission-flow` additionally brings its own onboarding UI and links the
+  Swift runtime into every downstream binary; `macos-accessibility-client` is
+  a raw-`extern` wrapper where this file requires typed bindings.
 - **TCC matches the full Designated Requirement, not the bundle ID** ([TN3127]).
   Re-signing one bundle ID with a different *kind* of certificate leaves a record
   that can never match again, and toggling the checkbox does not rewrite the
@@ -273,6 +282,8 @@ under a `SAFETY` comment. Where it currently lives on macOS:
 - `hook/macos/secure_input.rs` — the `CGSession` dictionary cast.
 - `hook/macos/sender.rs` — the sender-id `extern` calls and the IOKit registry
   walk, including the Create-rule `CFString` / `CFNumber` wraps.
+- `hook/macos/probe.rs` — the `CGGetActiveDisplayList` out-pointers; the rest of
+  Flow's pointer probe is safe `objc2-core-graphics`.
 - `inject/macos/ax.rs` — AX attribute-copy out-pointers and the unchecked
   `AXChildren` element type; each child is downcast before use.
 - `inject/macos/browser.rs` — typed AX creation, `AXPress`, and
@@ -337,6 +348,8 @@ temporaries. The call sites that keep an explicit
   Safari process.
 - `openlogi-inject`'s menu-shortcut press — the action worker, where the
   `NSWorkspace` frontmost-app reads autorelease temporaries.
+- `openlogi-inject`'s wheel-event zoom check — the scroll worker and hook
+  threads, where the `NSUserDefaults` suite read autoreleases temporaries.
 - `openlogi-camera`'s device enumeration — every `AVCaptureDevice` string is
   copied out before the pool drains, so no `Retained<T>` escapes it.
 

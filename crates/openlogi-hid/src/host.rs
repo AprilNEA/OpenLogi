@@ -28,6 +28,7 @@ use openlogi_device::pairing::PairingReceiver;
 use openlogi_device::write::{
     self as device, Dpi, DpiInfo, FeatureEntry, FirmwareEntity, HapticWaveform, LightingMethod,
     LitraModel, PointerScaling, ReprogControlEntry, ScrollResolution, ScrollWheelMode,
+    SidetoneLevel,
 };
 use openlogi_device::{ButtonSpyError, ButtonSpyWatch, LightWatch};
 use openlogi_device::{DeviceIoGate, DeviceIoSignal, DeviceRoute};
@@ -68,6 +69,20 @@ pub async fn get_dpi_info(route: &DeviceRoute) -> Result<DpiInfo, WriteError> {
 /// Write a new sensor DPI to the device `route` reaches.
 pub async fn set_dpi(route: &DeviceRoute, dpi: Dpi) -> Result<(), WriteError> {
     device::set_dpi(&*native_backend(), route, dpi).await
+}
+
+/// Read the sidetone level of the headset `route` reaches.
+pub async fn get_sidetone(route: &DeviceRoute) -> Result<SidetoneLevel, WriteError> {
+    device::get_sidetone(&*native_backend(), route).await
+}
+
+/// Write a sidetone level to the headset `route` reaches and return the
+/// level it confirms.
+pub async fn set_sidetone(
+    route: &DeviceRoute,
+    level: SidetoneLevel,
+) -> Result<SidetoneLevel, WriteError> {
+    device::set_sidetone(&*native_backend(), route, level).await
 }
 
 /// Read the pointer-motion scaling of the device `route` reaches.
@@ -218,6 +233,16 @@ pub async fn set_keyboard_color_with(
     .await
 }
 
+/// Light each `0x8081` zone of the keyboard `route` reaches alone, so a person
+/// can name the key each zone id drives. See [`device::walk_per_key_zones`].
+pub async fn walk_per_key_zones(
+    route: &DeviceRoute,
+    lit: openlogi_core::color::Rgb,
+    observe: impl AsyncFnMut(device::LitZone) -> device::ZoneWalkStep,
+) -> Result<(), WriteError> {
+    device::walk_per_key_zones(&*native_backend(), route, lit, observe).await
+}
+
 /// Play a haptic waveform on the device `route` reaches.
 pub async fn play_haptic(route: &DeviceRoute, waveform: HapticWaveform) -> Result<(), WriteError> {
     device::play_haptic(&*native_backend(), route, waveform).await
@@ -254,6 +279,16 @@ pub async fn watch_litra(
 /// Walk the HID++ feature table of the device `route` reaches.
 pub async fn dump_features(route: &DeviceRoute) -> Result<Vec<FeatureEntry>, WriteError> {
     device::dump_features(&*native_backend(), route).await
+}
+
+/// Call one HID++ 2.0 feature of the device `route` reaches with raw
+/// parameters. See [`device::raw_feature_calls`].
+pub async fn raw_feature_calls(
+    route: &DeviceRoute,
+    feature_id: u16,
+    calls: &[device::RawFeatureCall],
+) -> Result<Option<device::RawFeatureAnswers>, WriteError> {
+    device::raw_feature_calls(&*native_backend(), route, feature_id, calls).await
 }
 
 /// Walk the firmware entities of the device `route` reaches.

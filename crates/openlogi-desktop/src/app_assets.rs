@@ -37,11 +37,11 @@ impl AssetSource for AppAssets {
         if let Some(bytes) = ActionIcons.load(path)? {
             return Ok(Some(bytes));
         }
-        gpui_kit_assets::Assets.load(path)
+        gpui_kit::assets::Assets.load(path)
     }
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
-        gpui_kit_assets::Assets.list(path)
+        gpui_kit::assets::Assets.list(path)
     }
 }
 
@@ -58,6 +58,7 @@ mod tests {
             openlogi_ui::action_icons::RING_CANCEL_ICON,
             "icons/check.svg",
             "icons/chevron-down.svg",
+            crate::features::audio::AUDIO_ICON,
         ] {
             let bytes = AppAssets.load(path).unwrap().unwrap();
             assert!(

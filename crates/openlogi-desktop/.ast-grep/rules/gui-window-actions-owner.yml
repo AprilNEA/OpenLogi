@@ -1,0 +1,14 @@
+# Owner: app::menu::install, above both application content and Kit overlays.
+id: gui-window-actions-owner
+language: rust
+severity: error
+message: Register CloseWindow, Minimize, and Zoom in app::menu::install; view-local handlers cannot receive actions from Kit's sibling overlays.
+files:
+  - crates/openlogi-desktop/src/**/*.rs
+ignores:
+  - crates/openlogi-desktop/src/app/menu.rs
+  - "**/tests.rs"
+  - "**/tests/**"
+rule:
+  kind: reference_type
+  regex: '&(.*::)?(CloseWindow|Minimize|Zoom)$'

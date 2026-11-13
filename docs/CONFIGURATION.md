@@ -31,6 +31,17 @@ refused rather than overwriting the external edit. Relaunch to load that
 revision. Opening the GUI also tells the resident agent to reload the current
 file, so hand edits and runtime behavior converge immediately.
 
+On macOS, a change made from the menu-bar menu is saved by the agent, the way
+`openlogi api --save` saves: an online device takes the change first, so a
+value it refuses is never saved, and the file is saved only while it is still
+at the revision the agent read. When another writer saved in between, nothing
+is saved and the device's submenu says so; choose the change again. The agent
+then reloads the file, and an open GUI picks up the change without a relaunch.
+A sleeping mouse's DPI preset and wheel mode, and whether OpenLogi manages a
+device, are saved and applied when the device reconnects; the other menu
+controls need the device online. The backlight and sidetone stay on the device
+and are not saved.
+
 Schema versions newer than the running build are rejected before their fields
 are parsed. v1 binding maps and the v2–v3 gesture-owner layout migrate on load.
 The v3 physical-device-key transition cannot safely assign older model-scoped
@@ -41,10 +52,12 @@ profiles so they keep their native direction. v9 adds the `[apps]` alias table;
 v8 files load unchanged.
 v10 adds the per-device `disabled_keys` policy. Older readers reject a v10
 header before parsing its fields. A v9 file without the policy still loads.
+v11 adds the `[flow]` section. Older readers reject a v11 header before
+parsing its fields. A v10 file without the section loads with Flow disabled.
 
 ## Shape
 
-`schema_version` is required and currently `10`. `selected_device` is an
+`schema_version` is required and currently `11`. `selected_device` is an
 optional physical device key.
 
 `[app_settings]` contains application-wide preferences:
@@ -248,7 +261,8 @@ Common device fields are:
   in the settings app
 - `host_switch_targets` for keyboards with Easy-Switch keys (HID++ `0x1814`):
   the config keys of the mice and other devices that move with the keyboard
-  when it switches hosts. A linked device moves to its slot whose host name
+  when it switches hosts. The desktop app edits the list from the keyboard's
+  Device tab (**Switch together**). A linked device moves to its slot whose host name
   (HID++ `0x1815`) matches the keyboard's new slot, and otherwise to the slot
   with the same number. The agent also writes the linked device's `0x1814`
   cookies, so that Logi Options+ on the keyboard's other hosts moves the same
@@ -286,6 +300,19 @@ Common device fields are:
   own force, and the agent never writes one. The desktop app sets it with the
   Press force slider in the Haptic Sense Panel's inspector on the mouse page,
   which saves the force the device reads back
+- `g_key_owner` for G-series keyboards with HID++ `0x8010` G-keys:
+  `"openlogi"` hands the whole G1–G5 row to OpenLogi, so every G-key runs its
+  binding and an unbound one does nothing; absent or `"keyboard"` leaves the
+  keyboard's onboard actions. While it is on, `gaming_key_mode` says what the
+  keys above the row do. `"profiles"` (the default) makes M1–M3 switch G1–G5
+  between three sets of bindings, starting on M1 whenever capture starts, and
+  leaves MR recording macros on the keyboard. `"nine_buttons"` makes G1–G5,
+  M1–M3 and MR nine keys with a binding each, where G1–G5 use their M1
+  bindings. G-key bindings live in the device's `bindings` as `KeyG1` …
+  `KeyG5` for M1 and `M2:KeyG1` … `M3:KeyG5` for the later profiles; M1–M3
+  and MR are `KeyM1` … `KeyM3` and `KeyMR`. Changing the mode keeps them all.
+  `g_key_profile_names` optionally names the profiles (`M2 = "Work"`); the
+  names only label them in the desktop app
 - `identity` and `disabled_gestures`, which are application-managed metadata
 
 `[keyboard.bindings]` contains global key triggers such as `f1` or
@@ -426,6 +453,51 @@ its first identifier on this platform. It does not offer an application in
 Recent applications or All applications when that application already runs
 under a profile. The desktop app does not create aliases; write them here.
 
+### Flow
+
+`[flow]` holds the cross-machine device handoff settings. Without it, Flow is
+disabled. Pairing writes each peer with its pinned public key; write the layout
+and devices here. Its fields are:
+
+- `enabled` and `require_modifier` (both default `false`). With
+  `require_modifier` on, the cursor crosses a configured screen edge only while
+  Control is held.
+- `[[flow.peers]]`: one trusted machine each, with a `name`, its
+  `public_key` (`ed25519:` and 64 lower-case hex digits), and optional
+  `addresses`. Each address is an IP, a hostname, or `host:port`, tried
+  alongside mDNS results; a bare value uses Flow's default port.
+- `[[flow.layout]]`: the `edge` of this machine's screen (`left`, `right`,
+  `top`, or `bottom`) that leads to `peer`.
+- `[[flow.devices]]`: a device Flow may move. `key` is its identity key,
+  `serial:` or `unit:`; a route key such as
+  `receiver:<receiver-id>:slot:<number>` is rejected. `peer_channels` maps
+  `self` and each peer name to the 0-based Easy-Switch slot, `0` to `2`, that
+  the device uses for that machine.
+
+```toml
+[flow]
+enabled = true
+
+[[flow.peers]]
+name = "work-laptop"
+public_key = "ed25519:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+addresses = ["work-laptop.tailnet.example", "10.0.0.7"]
+
+[[flow.layout]]
+edge = "right"
+peer = "work-laptop"
+
+[[flow.devices]]
+key = "unit:0f1e2d3c"
+peer_channels = { self = 0, "work-laptop" = 1 }
+```
+
+The config stops loading when a peer name is empty, `self`, or has surrounding
+whitespace or control characters, two peers share a name or public key, two
+layout entries use the same edge, a layout entry or `peer_channels` names a
+peer that `[[flow.peers]]` does not define, two device entries share a key, a
+device has no `self` slot, or two machines share one slot.
+
 ## Actions
 
 Action names are the serialized Rust variant names, including `Copy`,
@@ -458,6 +530,32 @@ and the mouse reconnects at its saved speed, or at the speed for none saved.
 After an agent restart, precision mode is off. A mouse with a saved speed gets
 that speed when the agent connects to it. A mouse without one keeps the
 slowest speed until precision mode is switched on and off again.
+
+`EasySwitchChannel1`, `EasySwitchChannel2` and `EasySwitchChannel3` (shown as
+**Easy-Switch Channel 1** to **3** in the action list) move a device to one of
+its Easy-Switch channels, as its own channel key does (HID++ `0x1814`). Bind
+one to a mouse button, a keyboard control or an Actions Ring slot; the device
+that fires it is the one that moves.
+
+- The device disconnects from this computer once the request is out, and
+  returns when its own channel key is pressed. A channel with no paired
+  computer is refused before anything is sent, but only on a device that
+  reports its channels (HID++ `0x1815`). A device with `0x1814` alone, such
+  as the MX Master 3, cannot be checked: the request is sent to whatever the
+  channel holds.
+- A keyboard with `host_switch_targets`, or a device listed there, moves with
+  the rest of its link, as when the keyboard's own host key is pressed. The
+  channel number is then the keyboard's: Channel 2 on the mouse moves the
+  keyboard to its channel 2, and the mouse to the slot for the same computer.
+- A function key (F1–F12) binds across every keyboard, so the agent cannot tell
+  which keyboard pressed it. The editor does not offer these actions there, and
+  the agent passes such a key through if a hand edit binds one.
+- A button that the OS input hook delivers, rather than HID++ diversion, names
+  no device. Its bindings belong to the selected device, so the action moves
+  the selected one.
+- If the device's receiver slot is paired to another device before the request
+  runs, the request is refused.
+
 Payload actions use a one-key inline table:
 
 ```toml
@@ -489,6 +587,19 @@ Print Screen, such as ShareX or Greenshot, receives it. On Windows and macOS,
 the `Screenshot` and `CaptureRegion` actions press the system's own screenshot
 shortcuts instead.
 
+Keypad keys have their own names, since `+` separates chord tokens and a keypad
+digit is a different key from the top-row one: `Numpad0`–`Numpad9`,
+`NumpadPlus`, `NumpadMinus`, `NumpadMultiply`, `NumpadDivide`, `NumpadDecimal`,
+`NumpadEnter`, and `NumpadEquals` (the `=` key on Mac keypads), as in
+`Ctrl+Alt+Shift+NumpadMinus`. `NumpadEnter` stays distinct from `Enter`.
+Num Lock and Clear are not shortcut keys: HID usage `0x53` means Num Lock on
+PC keyboards and Clear on Mac keyboards, and the separate Keypad Clear usage
+`0xD8` has no portable mapping. OpenLogi does not toggle Num Lock to send a
+keypad shortcut. As on a physical keypad, Linux and Windows may read a keypad
+digit as its navigation key while Num Lock is off. On Windows, `NumpadEquals`
+uses the OEM keypad-equals virtual key; support depends on the keyboard layout
+and receiving application.
+
 `CustomShortcut` emits an immediate key-down/key-up pair. `HoldShortcut` keeps
 the chord down until the originating physical button is released, and also
 releases it if capture is interrupted, the binding becomes invalid, or the
@@ -504,6 +615,22 @@ and dismiss it. The same shape covers ``Cmd+` ``, `Alt+Tab`, and an IDE's
 `Ctrl+Tab`. A chord with no modifier degrades to a plain tap of its key. If
 another button is already holding the same key through `HoldShortcut`, the tap
 is skipped and only the modifiers go down, so that button keeps its key held.
+
+`HoldModifier` holds one or more bare modifiers with no ordinary key, under
+those same lifetime and release rules. The shortcut actions all require a key
+and reject a bare modifier string, so this is the shape that binds a button to
+Ctrl, Shift, Alt, Cmd, or Super alone. The held modifier composes with input
+from other devices: hold it on the mouse, type on the keyboard, and the
+keystroke arrives modified. Combine modifiers with `+`, as in `HoldModifier =
+"Ctrl+Shift"`, using the chord modifier names above.
+
+On macOS the held modifier composes through the virtual HID keyboard that
+release builds type synthesized keys on: a modifier it holds is part of the
+hardware modifier state, exactly like one held on a real keyboard. Builds
+without that keyboard, such as local and development builds, post keys as
+`CGEvent`s instead. There the modifier is still held, so menus switch to their
+alternate items, but keys typed on another keyboard do not pick it up, as with
+every other synthesized key.
 
 A `{ short = ..., long = ... }` binding waits for the button's outcome instead
 of firing on press. Releasing before 500 ms fires `short`; keeping the button

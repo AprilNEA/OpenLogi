@@ -1,11 +1,15 @@
 //! Per-device settings the orchestrator derives: wheel mode, host-switch links and the DPI cycle.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
+use openlogi_core::hid::{HidppOperation, WriteError};
 use openlogi_hid::reprog_controls::BACK_CIDS;
 use openlogi_hid::session::gesture::MainWheelDivert;
 
 use super::*;
+use crate::receiver_access::ExclusiveAccessReason;
+use crate::test_support::publish_dpi_mouse;
 
 /// A wheel-hold button scrolls sideways the way its main wheel scrolls: with
 /// the native invert bit, as the link it is reached by is set; without it, as
@@ -711,51 +715,6 @@ fn dpi_shift_returns_to_the_dpi_saved_for_the_current_link() {
     assert_eq!(state.current, Some(Dpi::new(800)));
 }
 
-/// A `0x2201` mouse at `route` that lists 800 and 1600 DPI and keeps the
-/// last DPI written. `accept` runs on each DPI write and says whether the
-/// mouse takes it.
-async fn publish_dpi_mouse(
-    shared: &crate::orchestrator::SharedHandles,
-    route: DeviceRoute,
-    accept: impl Fn() -> bool + Send + Sync + 'static,
-) {
-    const DPI: u8 = 4;
-    const INVALID_ARGUMENT: u8 = 2;
-    let current = std::sync::Mutex::new(800u16);
-    openlogi_device::test_support::publish_scripted_channel(
-        &shared.channel_registry,
-        "dpi-mouse",
-        route,
-        move |request| {
-            let mut response = vec![0; 20];
-            response[..4].copy_from_slice(request.get(..4)?);
-            response[0] = 0x11;
-            let mut current = current.lock().unwrap();
-            match (request[2], request[3] >> 4) {
-                (0, 1) => response[4] = 4,
-                (0, 0) => {
-                    response[4] = if request[4..6] == [0x22, 0x01] {
-                        DPI
-                    } else {
-                        0
-                    }
-                }
-                (DPI, 1) => response[5..9].copy_from_slice(&[0x03, 0x20, 0x06, 0x40]),
-                (DPI, 2) => response[5..7].copy_from_slice(&current.to_be_bytes()),
-                (DPI, 3) if accept() => {
-                    *current = u16::from_be_bytes([request[5], request[6]]);
-                }
-                (DPI, 3) => {
-                    response[2..6].copy_from_slice(&[0xff, DPI, request[3], INVALID_ARGUMENT]);
-                }
-                _ => return None,
-            }
-            Some(response)
-        },
-    )
-    .await;
-}
-
 /// A DPI written from the Pointer panel is where a DPI shift returns, even
 /// when it equals the saved DPI and a reload therefore changes nothing.
 #[tokio::test]
@@ -768,7 +727,7 @@ async fn a_panel_dpi_write_is_where_a_dpi_shift_returns() {
     let mut orch = orchestrator(config);
     orch.devices = vec![mouse];
     orch.rebuild();
-    publish_dpi_mouse(&orch.shared, route.clone(), || true).await;
+    publish_dpi_mouse(&orch.shared.channel_registry, route.clone(), || true).await;
     // A preset action picks 800.
     if let Ok(mut cycles) = orch.shared.dpi_cycle.write() {
         cycles.by_key.get_mut("mouse").unwrap().set(0);
@@ -796,7 +755,7 @@ async fn a_rejected_panel_dpi_write_makes_a_dpi_shift_read_the_mouse() {
     let mut orch = orchestrator(config);
     orch.devices = vec![mouse];
     orch.rebuild();
-    publish_dpi_mouse(&orch.shared, route.clone(), || false).await;
+    publish_dpi_mouse(&orch.shared.channel_registry, route.clone(), || false).await;
     // A preset action picked 800 earlier.
     if let Ok(mut cycles) = orch.shared.dpi_cycle.write() {
         cycles.by_key.get_mut("mouse").unwrap().set(0);
@@ -825,7 +784,7 @@ async fn a_rejected_panel_dpi_write_keeps_a_preset_picked_meanwhile() {
     orch.devices = vec![mouse];
     orch.rebuild();
     let cycles = Arc::clone(&orch.shared.dpi_cycle);
-    publish_dpi_mouse(&orch.shared, route.clone(), move || {
+    publish_dpi_mouse(&orch.shared.channel_registry, route.clone(), move || {
         cycles
             .write()
             .unwrap()
@@ -846,6 +805,43 @@ async fn a_rejected_panel_dpi_write_keeps_a_preset_picked_meanwhile() {
         panic!("DPI cycle lock should not be poisoned");
     };
     assert_eq!(dpi.by_key["mouse"].current, Some(Dpi::new(800)));
+}
+
+/// A DPI write a newer one superseded before its turn writes nothing and
+/// says so, so the caller does not save a DPI the mouse never took.
+#[tokio::test]
+async fn a_superseded_dpi_write_answers_superseded_without_writing() {
+    let mouse = dev("mouse", 1, true);
+    let route = mouse.route.clone().unwrap();
+    let mut orch = orchestrator(Config::default());
+    orch.devices = vec![mouse];
+    orch.rebuild();
+    let writes = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&writes);
+    publish_dpi_mouse(&orch.shared.channel_registry, route.clone(), move || {
+        counted.fetch_add(1, Ordering::SeqCst);
+        true
+    })
+    .await;
+    let lease = orch
+        .shared
+        .receiver_access
+        .acquire_exclusive(ExclusiveAccessReason::Pairing)
+        .await;
+    let mut old = std::pin::pin!(orch.shared.set_dpi(&route, Dpi::new(800)));
+    assert!(futures_lite::future::poll_once(&mut old).await.is_none());
+    let mut new = std::pin::pin!(orch.shared.set_dpi(&route, Dpi::new(1600)));
+    assert!(futures_lite::future::poll_once(&mut new).await.is_none());
+    drop(lease);
+
+    assert_eq!(
+        old.await.expect_err("superseded"),
+        WriteError::WriteSuperseded {
+            operation: HidppOperation::WriteDpi,
+        }
+    );
+    new.await.expect("the newer write");
+    assert_eq!(writes.load(Ordering::SeqCst), 1);
 }
 
 /// A mouse that reconnects is back at its onboard DPI, so a DPI shift reads
@@ -1016,6 +1012,58 @@ fn keyboard_spec_is_absent_without_a_real_binding_or_for_a_disabled_keyboard() {
     assert!(
         sole_keyboard_spec(&orch).is_none(),
         "a disabled keyboard is left fully native"
+    );
+}
+
+/// A G-series keyboard's G-key row is OpenLogi's only once the user takes it
+/// over, bound or not, and then its M keys follow the cluster mode.
+#[test]
+fn a_taken_over_g_key_row_captures_without_bindings() {
+    use openlogi_core::binding::ModeKey;
+    use openlogi_core::config::{GKeyOwner, GamingKeyMode};
+
+    let g915 = || {
+        let mut device = keyboard("g915", 1, true);
+        device.capabilities = Some(Capabilities {
+            g_keys: true,
+            m_keys: true,
+            macro_record: true,
+            ..Capabilities::default()
+        });
+        device
+    };
+    let mut orch = orchestrator(Config::default());
+    orch.devices = vec![g915()];
+    assert!(
+        sole_keyboard_spec(&orch).is_none(),
+        "the onboard G-key actions stay until the user takes the row"
+    );
+
+    let mut config = Config::default();
+    config.set_g_key_owner("g915", GKeyOwner::OpenLogi);
+    let mut orch = orchestrator(config.clone());
+    orch.devices = vec![g915()];
+    let spec = sole_keyboard_spec(&orch).expect("a taken row captures");
+    assert!(spec.gaming.take_g_row);
+    assert!(spec.wanted.is_empty());
+    assert_eq!(
+        spec.gaming.mode_keys.iter().copied().collect::<Vec<_>>(),
+        [ModeKey::M1, ModeKey::M2, ModeKey::M3],
+        "MR keeps recording macros while M1–M3 switch profiles"
+    );
+
+    config.set_gaming_key_mode("g915", GamingKeyMode::NineButtons);
+    let mut orch = orchestrator(config.clone());
+    orch.devices = vec![g915()];
+    let spec = sole_keyboard_spec(&orch).expect("a taken row captures");
+    assert_eq!(spec.gaming_mode, GamingKeyMode::NineButtons);
+    assert_eq!(spec.gaming.mode_keys.len(), 4);
+
+    let mut orch = orchestrator(config);
+    orch.devices = vec![keyboard("g915", 1, true)];
+    assert!(
+        sole_keyboard_spec(&orch).is_none(),
+        "a keyboard without 0x8010 has no row to take"
     );
 }
 

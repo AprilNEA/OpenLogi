@@ -1,4 +1,6 @@
+use crate::ui::theme::FocusRingStyle as _;
 use std::collections::{BTreeMap, BTreeSet};
+use std::mem;
 use std::sync::Arc;
 
 use gpui::{
@@ -7,14 +9,15 @@ use gpui::{
     StatefulInteractiveElement as _, Styled, Subscription, Window, canvas, div, hsla, img,
     prelude::FluentBuilder as _, px, rgb, size,
 };
-use gpui_base::{Button as BaseButton, ElementExt as _};
-use gpui_component::{
+use gpui_kit::base::{Button as BaseButton, ElementExt as _};
+use gpui_kit::component::{
     h_flex,
     input::{InputEvent, InputState},
     v_flex,
 };
 use openlogi_core::binding::{Action, ButtonId, GamingLayout, GestureDirection};
 
+use super::editor_mode::{EditorMode, PickerDrafts};
 use super::force_sensing::{ForceSensingFacts, ForceSensingSlider, PressForce};
 use super::geometry::{
     LABEL_H, LabelDistribution, asset_dimensions_for_png, asset_has_button_labels,
@@ -22,8 +25,7 @@ use super::geometry::{
 };
 use super::hotspots::{Hotspot, MOUSE_MODEL_SIZE, MouseControlId};
 use super::inspector::{
-    ActionPickerContext, BindingInspectorData, InvalidDrafts, ShortcutError, ShortcutMode,
-    binding_inspector,
+    ActionPickerContext, BindingInspectorData, ShortcutError, binding_inspector,
 };
 use super::leader_lines::{Geometry as LeaderGeometry, Label, paint as paint_leader_lines};
 use crate::app::{glow_canvas, keyboard_glow};
@@ -73,7 +75,7 @@ fn held_actions(offer_gshift: bool) -> &'static [Action] {
 const MODEL_VERTICAL_RESERVE: f32 = 154.;
 
 mod labels;
-use labels::{CardSize, ValueMetrics, binding_label_for_control, label_control};
+use labels::{CardSize, MAX_VALUE_LINES, ValueMetrics, binding_label_for_control, label_control};
 /// Floor for the scaled model height. Below this the evenly-slotted side labels
 /// (≈[`LABEL_H`](super::geometry::LABEL_H) each) start to overlap; the window's minimum height is sized to
 /// keep the viewport above [`MODEL_VERTICAL_RESERVE`] + this.
@@ -186,24 +188,13 @@ pub struct MouseModelView {
     focus_handle: FocusHandle,
     current_device_key: Option<DeviceKey>,
     hovered: Option<MouseControlId>,
-    selected: Option<MouseControlId>,
-    /// The gesture direction whose action is open in the fixed inspector.
-    gesture_active_dir: Option<GestureDirection>,
-    action_picker_open: bool,
+    mode: EditorMode,
     action_search: Entity<InputState>,
     pub(super) custom_shortcut_input: Entity<InputState>,
     pub(super) custom_application_input: Entity<InputState>,
     pub(super) custom_command_input: Entity<InputState>,
-    /// Which custom editors' last "Add" attempt failed to parse, so their
-    /// captions can show an inline error.
-    pub(super) invalid_drafts: InvalidDrafts,
-    pub(super) shortcut_mode: ShortcutMode,
-    /// The custom shortcut recording in progress, if any.
-    shortcut_recorder: Option<ShortcutRecorder>,
     /// The Record button's area; a recording lasts while focus stays in it.
     shortcut_record_focus: FocusHandle,
-    /// The press-force slider while the haptic panel's inspector shows it.
-    pub(super) force_sensing: Option<ForceSensingSlider>,
     /// The canvas area as last laid out, which the model and its cards fit
     /// inside. `None` until the first frame measures it.
     canvas_room: Option<Size<Pixels>>,
@@ -227,7 +218,7 @@ impl MouseModelView {
         });
         cx.subscribe(&custom_shortcut_input, |view, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
-                view.invalid_drafts.shortcut = None;
+                view.edit_picker_drafts(|drafts| drafts.invalid.shortcut = None);
                 cx.notify();
             }
         })
@@ -240,7 +231,7 @@ impl MouseModelView {
             &custom_application_input,
             |view, _, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
-                    view.invalid_drafts.application = false;
+                    view.edit_picker_drafts(|drafts| drafts.invalid.application = false);
                     cx.notify();
                 }
             },
@@ -252,7 +243,7 @@ impl MouseModelView {
         });
         cx.subscribe(&custom_command_input, |view, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
-                view.invalid_drafts.command = false;
+                view.edit_picker_drafts(|drafts| drafts.invalid.command = false);
                 cx.notify();
             }
         })
@@ -270,58 +261,48 @@ impl MouseModelView {
             focus_handle: cx.focus_handle(),
             current_device_key: None,
             hovered: None,
-            selected: None,
-            gesture_active_dir: None,
-            action_picker_open: false,
+            mode: EditorMode::Idle,
             action_search,
             custom_shortcut_input,
             custom_application_input,
             custom_command_input,
-            invalid_drafts: InvalidDrafts::default(),
-            shortcut_mode: ShortcutMode::Tap,
-            shortcut_recorder: None,
             shortcut_record_focus: cx.focus_handle(),
-            force_sensing: None,
             canvas_room: None,
             _state_obs: state_obs,
         }
     }
 
-    /// Clear every custom-action draft (text and any invalid state) — called
-    /// whenever the picker opens for a new target, so a shortcut, application
-    /// or command typed for one button doesn't reappear for another.
-    pub(super) fn clear_custom_action_drafts(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.custom_shortcut_input
-            .update(cx, |input, cx| input.set_value("", window, cx));
-        self.custom_application_input
-            .update(cx, |input, cx| input.set_value("", window, cx));
-        self.custom_command_input
-            .update(cx, |input, cx| input.set_value("", window, cx));
-        self.invalid_drafts = InvalidDrafts::default();
-        self.shortcut_mode = ShortcutMode::Tap;
-        self.shortcut_recorder = None;
+    /// Edit `control` in the inspector, closing the picker; selecting the
+    /// control already edited changes nothing. Callers must `cx.notify()`.
+    pub(super) fn select(&mut self, control: MouseControlId) {
+        self.mode = mem::take(&mut self.mode).select(control);
     }
 
-    /// Set (or clear, with `None`) the activated gesture direction. Callers must
-    /// `cx.notify()` to re-render.
-    pub(crate) fn set_gesture_selected_dir(&mut self, dir: Option<GestureDirection>) {
-        self.gesture_active_dir = dir;
-        self.action_picker_open = false;
-        self.shortcut_recorder = None;
+    /// Show `direction` in the selected button's gesture inspector, closing
+    /// the picker. Callers must `cx.notify()`.
+    pub(super) fn select_gesture_direction(&mut self, direction: GestureDirection) {
+        self.mode = mem::take(&mut self.mode).select_gesture_direction(direction);
     }
 
-    pub(super) fn toggle_action_picker(&mut self) {
-        self.action_picker_open = !self.action_picker_open;
-        self.shortcut_recorder = None;
+    /// Open the action picker on the selection with every custom-action
+    /// draft cleared, so a shortcut, application or command typed for one
+    /// button doesn't reappear for another. Callers must `cx.notify()`.
+    pub(super) fn open_action_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for input in [
+            &self.action_search,
+            &self.custom_shortcut_input,
+            &self.custom_application_input,
+            &self.custom_command_input,
+        ] {
+            input.update(cx, |input, cx| input.set_value("", window, cx));
+        }
+        self.mode = mem::take(&mut self.mode).open_picker();
     }
 
+    /// Close the action picker, ending any recording. Callers must
+    /// `cx.notify()`.
     pub(super) fn close_action_picker(&mut self) {
-        self.action_picker_open = false;
-        self.shortcut_recorder = None;
+        self.mode = mem::take(&mut self.mode).close_picker();
     }
 
     /// Start recording the custom shortcut, or stop the recording in
@@ -331,25 +312,42 @@ impl MouseModelView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.shortcut_recorder.take().is_none() {
-            let area = self.shortcut_record_focus.clone();
-            self.shortcut_recorder = Some(ShortcutRecorder::start(&area, window, cx));
-        }
+        let area = &self.shortcut_record_focus;
+        self.mode = mem::take(&mut self.mode)
+            .toggle_recording(|| ShortcutRecorder::start(area, window, cx));
         cx.notify();
+    }
+
+    /// Change the open picker's drafts; nothing while it is closed. Callers
+    /// must `cx.notify()`.
+    pub(super) fn edit_picker_drafts(&mut self, edit: impl FnOnce(&mut PickerDrafts)) {
+        if let Some(drafts) = self.mode.drafts_mut() {
+            edit(drafts);
+        }
+    }
+
+    /// The press-force slider, while the haptic panel's inspector shows it.
+    pub(super) fn press_force(&self) -> Option<&ForceSensingSlider> {
+        self.mode.press_force()
     }
 
     /// The action picker's state, as the inspector reads it.
     fn action_picker_context<'a>(&'a self, view: &'a Entity<Self>) -> ActionPickerContext<'a> {
+        let drafts = self.mode.drafts().copied();
+        let PickerDrafts {
+            shortcut_mode,
+            invalid,
+        } = drafts.unwrap_or_default();
         ActionPickerContext {
-            open: self.action_picker_open,
+            open: drafts.is_some(),
             search: &self.action_search,
             shortcut_input: &self.custom_shortcut_input,
             application_input: &self.custom_application_input,
             command_input: &self.custom_command_input,
-            shortcut_mode: self.shortcut_mode,
-            shortcut_recording: self.shortcut_recorder.is_some(),
+            shortcut_mode,
+            shortcut_recording: self.mode.is_recording(),
             shortcut_record_focus: &self.shortcut_record_focus,
-            invalid: self.invalid_drafts,
+            invalid,
             view,
         }
     }
@@ -360,10 +358,7 @@ impl MouseModelView {
         }
         self.current_device_key = device_key;
         self.hovered = None;
-        self.selected = None;
-        self.gesture_active_dir = None;
-        self.action_picker_open = false;
-        self.shortcut_recorder = None;
+        self.mode = EditorMode::Idle;
     }
 
     /// Keep the canvas area measured in the last frame, and lay the model out
@@ -407,15 +402,6 @@ impl MouseModelView {
             thumbwheel,
             values,
         )
-    }
-
-    pub(super) fn select(&mut self, control: MouseControlId) {
-        if self.selected != Some(control) {
-            self.selected = Some(control);
-            self.gesture_active_dir = None;
-            self.action_picker_open = false;
-            self.shortcut_recorder = None;
-        }
     }
 }
 
@@ -465,9 +451,10 @@ impl MouseModelView {
         );
     }
 
-    /// Follow a device change, then keep the press-force slider in step with
-    /// the selection it may have cleared. Runs before `render` reads the
-    /// state for the frame, since the slider sync needs the context mutably.
+    /// Follow a device change, then keep a selected haptic panel's
+    /// press-force slider in step with the device. Runs before `render` reads
+    /// the state for the frame, since the slider sync needs the context
+    /// mutably.
     fn sync_selection(
         &mut self,
         window: &mut Window,
@@ -478,8 +465,9 @@ impl MouseModelView {
                 .and_then(AppState::current_record)
                 .map(DeviceRecord::device_key),
         );
-        let facts = ForceSensingFacts::current(self.selected, cx);
-        ForceSensingSlider::sync(&mut self.force_sensing, facts.as_ref(), window, cx);
+        let press_force = self.mode.press_force_mut()?;
+        let facts = ForceSensingFacts::current(cx);
+        ForceSensingSlider::sync(press_force, facts.as_ref(), window, cx);
         facts
     }
 }
@@ -494,20 +482,22 @@ impl RecordsShortcut for MouseModelView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.shortcut_recorder = None;
-        match recording {
-            Recording::Chord(combo) => {
-                self.custom_shortcut_input.update(cx, |input, cx| {
-                    input.set_value(combo.rendered_label(), window, cx);
-                });
-                self.invalid_drafts.shortcut = None;
-            }
-            Recording::Cancelled => {}
-            Recording::Unsupported => {
-                self.invalid_drafts.shortcut = Some(ShortcutError::Unrecognized);
-            }
-            Recording::ShiftedSymbol => {
-                self.invalid_drafts.shortcut = Some(ShortcutError::ShiftedSymbol);
+        self.mode = mem::take(&mut self.mode).stop_recording();
+        if let Some(drafts) = self.mode.drafts_mut() {
+            match recording {
+                Recording::Chord(combo) => {
+                    self.custom_shortcut_input.update(cx, |input, cx| {
+                        input.set_value(combo.rendered_label(), window, cx);
+                    });
+                    drafts.invalid.shortcut = None;
+                }
+                Recording::Cancelled => {}
+                Recording::Unsupported => {
+                    drafts.invalid.shortcut = Some(ShortcutError::Unrecognized);
+                }
+                Recording::ShiftedSymbol => {
+                    drafts.invalid.shortcut = Some(ShortcutError::ShiftedSymbol);
+                }
             }
         }
         cx.notify();
@@ -557,7 +547,8 @@ impl Render for MouseModelView {
             labels,
         } = self.fitted_layout(asset, layout, thumbwheel, value, window);
 
-        let highlight = self.hovered.or(active).or(self.selected);
+        let selected = self.mode.control();
+        let highlight = self.hovered.or(active).or(selected);
         let view = cx.entity();
         let hovered = self.hovered;
         let profile_status = profile_canvas_status(cx);
@@ -572,14 +563,8 @@ impl Render for MouseModelView {
             height: mouse_h,
             card,
         };
-        let hotspots_layer = hotspots_layer(
-            &hotspots_outer,
-            model,
-            hovered,
-            active,
-            self.selected,
-            &view,
-        );
+        let hotspots_layer =
+            hotspots_layer(&hotspots_outer, model, hovered, active, selected, &view);
         let model_band = div()
             .child(breathing_art)
             .child(leader_canvas)
@@ -591,7 +576,7 @@ impl Render for MouseModelView {
                     binding,
                     hovered == Some(label.id) || active == Some(label.id),
                     model,
-                    self.selected == Some(label.id),
+                    selected == Some(label.id),
                     &view,
                 )
             }))
@@ -600,8 +585,7 @@ impl Render for MouseModelView {
 
         let inspector = binding_inspector(
             BindingInspectorData {
-                selected: self.selected,
-                gesture_direction: self.gesture_active_dir,
+                selected: self.mode.selection(),
                 bindings,
                 layout,
                 gesture_maps,
@@ -610,7 +594,7 @@ impl Render for MouseModelView {
                 wheel_hold,
                 editing_app: editing_app.as_deref(),
                 overridden,
-                press_force: PressForce::of(force_sensing.as_ref(), self.force_sensing.as_ref()),
+                press_force: PressForce::of(force_sensing.as_ref(), self.press_force()),
                 extra_actions,
                 hidden_actions,
             },
@@ -730,7 +714,7 @@ fn model_layout(
     let has_labels =
         asset.is_none_or(|asset| asset_has_button_labels(asset, layout)) && viewport_w >= 960.;
     let content_w = room.width.clamp(MODEL_MIN_CONTENT_W, MODEL_CONTENT_MAX_W);
-    let (label_distribution, card_w) = label_columns(content_w, values.widest + values.chrome_w);
+    let (label_distribution, card_w) = label_columns(content_w, values.fit_w[0] + values.chrome_w);
     let gutter = card_w + SIDE_GAP;
     let left_gutter = if has_labels { gutter } else { 0. };
     let right_gutter = if has_labels && label_distribution == LabelDistribution::BothSides {
@@ -793,9 +777,10 @@ fn label_columns(content_w: f32, needed_w: f32) -> (LabelDistribution, f32) {
     )
 }
 
-/// The cards `card_w` wide: one value line when the widest value fits it,
-/// otherwise two, as long as `count` cards that tall still fit `room_h`
-/// with their gaps. Past that the value keeps one line and its ellipsis.
+/// The cards `card_w` wide, with as many value lines as the longest value
+/// needs at that width — up to [`MAX_VALUE_LINES`] — as long as `count`
+/// cards that tall still fit `room_h` with their gaps. Past that a value
+/// keeps the lines that fit and ends in an ellipsis.
 fn card_size(
     card_w: f32,
     values: ValueMetrics,
@@ -803,23 +788,26 @@ fn card_size(
     distribution: LabelDistribution,
     room_h: f32,
 ) -> CardSize {
+    let needed = values
+        .lines_at(card_w - values.chrome_w)
+        .unwrap_or(MAX_VALUE_LINES);
     let one_line = CardSize {
         w: card_w,
         h: LABEL_H,
         value_lines: 1,
     };
-    let two_lines = CardSize {
-        h: LABEL_H + values.line_h,
-        value_lines: 2,
-        ..one_line
-    };
-    if values.widest > card_w - values.chrome_w
-        && labels_fit(count, distribution, two_lines.h, room_h)
-    {
-        two_lines
-    } else {
-        one_line
-    }
+    // Each line makes every card taller: the most that still fit.
+    std::iter::successors(Some(one_line), |card| {
+        Some(CardSize {
+            h: card.h + values.line_h,
+            value_lines: card.value_lines + 1,
+            ..*card
+        })
+    })
+    .take(needed)
+    .take_while(|card| card.value_lines == 1 || labels_fit(count, distribution, card.h, room_h))
+    .last()
+    .unwrap_or(one_line)
 }
 
 /// The model's size fit inside a `max_w` × `target_h` box at the render's
@@ -1056,7 +1044,8 @@ struct HotspotTrigger {
 }
 
 impl RenderOnce for HotspotTrigger {
-    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let pal = theme::palette(cx);
         let highlighted = self.hovered || self.selected;
         let selected = self.selected;
         let view = self.view;
@@ -1093,12 +1082,7 @@ impl RenderOnce for HotspotTrigger {
                         hsla(0., 0., 0.18, 0.85)
                     }),
             )
-            .focus_visible(|style| {
-                style
-                    .rounded_full()
-                    .border_2()
-                    .border_color(rgb(ACCENT_BLUE))
-            })
+            .focus_visible(move |style| style.rounded_full().focus_ring(pal))
             .on_click(move |_event, _window, cx| {
                 click_view.update(cx, |this, cx| {
                     this.select(btn);

@@ -13,6 +13,7 @@ publish = false
 [dependencies]
 axwatch = { workspace = true }
 openlogi-core = { path = "../openlogi-core", features = ["worker"] }
+openlogi-flow = { path = "../openlogi-flow" }
 openlogi-inject = { path = "../openlogi-inject" }
 openlogi-hid = { path = "../openlogi-hid" }
 openlogi-hook = { path = "../openlogi-hook" }
@@ -29,6 +30,8 @@ resvg = { version = "0.46", default-features = false }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+# The machine name Flow peers show for this computer.
+gethostname = "1.1.0"
 
 [lints]
 workspace = true
@@ -40,4 +43,5 @@ openlogi-device = { path = "../openlogi-device", features = ["test-support"] }
 openlogi-fixture = { workspace = true, features = ["fs"] }
 # Keypad identities the orchestrator tests stand a wired keypad up from.
 openlogi-device-registry = { workspace = true }
+tempfile = "3.27.0"
 tokio = { workspace = true, features = ["test-util"] }

@@ -157,12 +157,15 @@ pub(crate) fn spawn(startup: Startup, cx: &mut gpui::App) {
                 update = updates.recv(), if ipc_open => {
                     // `None` means the IPC client thread is gone (runtime /
                     // thread spawn failure) — without this the window would
-                    // show its connecting spinner forever.
+                    // show its connecting spinner forever. Every answer it sent
+                    // has been drained, so the commands it still held will never
+                    // be answered.
                     let Some(update) = update else {
                         ipc_open = false;
                         warn!("IPC update channel closed — agent state unavailable");
                         cx.update(|cx| {
                             set_agent_link(state::AgentLink::Unreachable { retrying: false }, cx);
+                            AppState::apply(cx, AppState::abandon_light_writes);
                         });
                         continue;
                     };
@@ -189,7 +192,7 @@ pub(crate) fn spawn(startup: Startup, cx: &mut gpui::App) {
                 // per-key in-flight state makes the exclusion the cache's job.
                 Some(()) = sync_done.recv() => rt.on_sync_finished(cx),
                 Some(cmd) = deeplinks.recv() => {
-                    cx.update(|cx| app::deeplink::dispatch(cmd, cx));
+                    cx.update(|cx| rt.deeplinks.dispatch(cmd, cx));
                 }
                 else => break,
             }
@@ -256,6 +259,9 @@ struct Runtime {
     /// sync the current devices without waiting for the next snapshot.
     inventories: Vec<DeviceInventory>,
     standalone: Vec<StandaloneDevice>,
+    /// `openlogi://` commands, including a link waiting for the device list
+    /// each snapshot refreshes.
+    deeplinks: app::deeplink::Deeplinks,
 }
 
 impl Runtime {
@@ -277,6 +283,7 @@ impl Runtime {
             sync_tx,
             inventories: Vec::new(),
             standalone: Vec::new(),
+            deeplinks: app::deeplink::Deeplinks::default(),
         }
     }
 
@@ -289,7 +296,7 @@ impl Runtime {
         match update {
             ipc::GuiUpdate::Snapshot(snapshot) => {
                 self.apply_snapshot(&snapshot, cx);
-                self.snapshot = Some(snapshot);
+                self.snapshot = Some(*snapshot);
             }
             ipc::GuiUpdate::Reconnecting => {
                 cx.update(|cx| AppState::apply(cx, AppState::agent_link_lost));
@@ -325,6 +332,9 @@ impl Runtime {
             ipc::GuiUpdate::PairingCancelled => {
                 cx.update(windows::add_device::apply_cancelled);
             }
+            ipc::GuiUpdate::FlowPairingRefused(refusal) => cx.update(|cx| {
+                AppState::apply(cx, |state| state.apply_flow_pairing_refusal(refusal));
+            }),
             ipc::GuiUpdate::ConfigLoadResult { result } => {
                 cx.update(|cx| apply_config_load(result, cx));
             }
@@ -358,6 +368,11 @@ impl Runtime {
             ipc::GuiUpdate::PointerSpeedWritten { key, result } => {
                 cx.update(|cx| {
                     AppState::apply(cx, |state| state.apply_pointer_speed_written(&key, result));
+                });
+            }
+            ipc::GuiUpdate::SidetoneWritten { key, result } => {
+                cx.update(|cx| {
+                    AppState::apply(cx, |state| state.apply_sidetone_written(&key, result));
                 });
             }
             ipc::GuiUpdate::ForceSensingWritten {
@@ -441,6 +456,8 @@ impl Runtime {
                         state.asset_models(),
                     )
                 });
+            #[cfg(target_os = "macos")]
+            crate::platform::permission_guide::dismiss_once_granted(&snapshot.status, cx);
             // A reconnect can drop an in-flight reply without changing the
             // inventory. Retry any cache entry that the reply lifecycle reset
             // to Unknown on every completed snapshot; resolved entries no-op.
@@ -450,6 +467,7 @@ impl Runtime {
             if changes.inventory_changed() {
                 app::menu::rebuild(cx);
             }
+            self.deeplinks.retry(cx);
             (auto_download, asset_source, models)
         });
         // Offer the merged set to the cache on every snapshot and let it decide:

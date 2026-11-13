@@ -35,6 +35,7 @@ mod device_list;
 mod device_settings;
 mod disable_keys_native_write;
 mod disabled_keys;
+mod flow;
 mod light_changes;
 mod light_reload;
 mod lock_keys;
@@ -43,6 +44,7 @@ mod os_layout;
 mod pointer_speed;
 mod publication;
 mod reapply;
+mod saved_settings;
 
 /// An orchestrator wired to a state cell nobody subscribes to. The publishing
 /// paths still run, so a mutator that stops republishing shows up here rather

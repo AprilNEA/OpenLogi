@@ -1,0 +1,25 @@
+# Owner: openlogi_ipc::AgentStatus::secure_input_pausing_keys — whether
+# Secure Event Input is pausing anything OpenLogi does (a key binding made
+# through the OS hook, with the hook installed), and which app holds it. The
+# settings app's attention bar and the menu bar's issue row both ask it. The
+# secure-input watcher, which produces the reading, is the other legitimate
+# reader.
+id: ipc-secure-input-pause-owner
+language: rust
+severity: error
+message: Whether Secure Event Input pauses anything is openlogi_ipc::AgentStatus::secure_input_pausing_keys's; call it instead of matching SecureInput::On here.
+note: |
+  The rule lived in the settings app's attention bar until the menu bar
+  needed it too. A second reading of SecureInput::On would tell the user key
+  bindings are paused when they have none, or when no hook runs them. See
+  "Single source of truth" in AGENTS.md.
+files:
+  - crates/**/*.rs
+ignores:
+  - crates/openlogi-ipc/src/**
+  - crates/openlogi-agent-core/src/watchers/secure_input.rs
+  - "**/tests.rs"
+  - "**/tests/**"
+rule:
+  kind: tuple_struct_pattern
+  regex: '^SecureInput::On\b'

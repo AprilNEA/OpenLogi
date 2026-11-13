@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use super::application_target::ApplicationTarget;
 use super::category::Category;
 use super::key_combo::KeyCombo;
+use super::modifiers::BareModifiers;
 
 /// What pressing a [`ButtonId`](crate::binding::ButtonId) should do.
 ///
@@ -234,6 +235,35 @@ pub enum Action {
     /// Move the pressing keypad to its next binding page, wrapping from the
     /// last page to page 1. Appended — variant order is wire format.
     NextKeypadPage,
+    /// Hold one or more bare modifiers (Ctrl, Shift, Alt, Cmd, Super, or any
+    /// combination) for the lifetime of the physical button press, with no
+    /// ordinary key. The held state composes with input from other devices:
+    /// a keystroke typed on the keyboard meanwhile arrives modified. On macOS
+    /// that needs the virtual HID keyboard that release builds use.
+    ///
+    /// [`BareModifiers`] names modifiers exactly as [`KeyCombo`] does.
+    ///
+    /// Lifecycle: modifiers down on press start, up on every terminal outcome
+    /// (release, capture cancellation, invalid binding, shutdown). A one-shot
+    /// dispatcher with no release context degrades to a no-op rather than a
+    /// balanced tap: a lone modifier tap is never what the binding means, and
+    /// on its own Alt focuses the menu bar on Windows and Super opens the
+    /// Start menu or the desktop's launcher.
+    HoldModifier(BareModifiers),
+    /// Move the device that fired the action to its first Easy-Switch
+    /// channel, as its own channel key would (HID++ `0x1814`). See
+    /// [`Action::easy_switch_host`].
+    ///
+    /// A channel that has no paired computer is refused before anything is
+    /// sent, but only on a device that reports its channels (`0x1815`
+    /// HostsInfo). One with `0x1814` alone, like the MX Master 3, cannot be
+    /// checked: the request is sent, and the device may leave this computer
+    /// until its own channel key brings it back.
+    EasySwitchChannel1,
+    /// Move the device to its second Easy-Switch channel.
+    EasySwitchChannel2,
+    /// Move the device to its third Easy-Switch channel.
+    EasySwitchChannel3,
 }
 
 /// Which of a held chord's keys stay down for the lifetime of the press.
@@ -335,6 +365,9 @@ macro_rules! for_each_unit_action {
             ShowActionsRing "Actions Ring" "action_ring.actions_ring" System Grid,
             PreviousKeypadPage "Previous Keypad Page" "actions.previous_keypad_page" System PreviousTab,
             NextKeypadPage "Next Keypad Page" "actions.next_keypad_page" System NextTab,
+            EasySwitchChannel1 "Easy-Switch Channel 1" "actions.easy_switch_channel_1" System Channel1,
+            EasySwitchChannel2 "Easy-Switch Channel 2" "actions.easy_switch_channel_2" System Channel2,
+            EasySwitchChannel3 "Easy-Switch Channel 3" "actions.easy_switch_channel_3" System Channel3,
             // Media
             PlayPause "Play / Pause" "actions.play_pause" Media Play,
             NextTrack "Next Track" "actions.next_track" Media NextTrack,
@@ -389,6 +422,7 @@ macro_rules! derive_action_core {
                         }
                         None => format!("Tap {}", combo.rendered_key()),
                     },
+                    Action::HoldModifier(mods) => format!("Hold {}", mods.rendered_label()),
                 }
             }
 
@@ -409,7 +443,8 @@ macro_rules! derive_action_core {
                     | Action::Workflow(_)
                     | Action::OpenApplication(_)
                     | Action::HoldShortcut(_)
-                    | Action::TapKeyHoldingModifiers(_) => None,
+                    | Action::TapKeyHoldingModifiers(_)
+                    | Action::HoldModifier(_) => None,
                 }
             }
 
@@ -439,7 +474,8 @@ macro_rules! derive_action_core {
                     | Action::RunShellCommand(_)
                     | Action::Workflow(_)
                     | Action::HoldShortcut(_)
-                    | Action::TapKeyHoldingModifiers(_) => Category::Editing,
+                    | Action::TapKeyHoldingModifiers(_)
+                    | Action::HoldModifier(_) => Category::Editing,
                     Action::SetDpiPreset(_) => Category::Dpi,
                     Action::OpenApplication(_) => Category::System,
                 }
@@ -470,6 +506,34 @@ macro_rules! derive_action_core {
 for_each_unit_action!(derive_action_core);
 
 impl Action {
+    /// The zero-based Easy-Switch channel this action moves its device to,
+    /// or `None` for any other action.
+    #[must_use]
+    pub fn easy_switch_host(&self) -> Option<u8> {
+        match self {
+            Self::EasySwitchChannel1 => Some(0),
+            Self::EasySwitchChannel2 => Some(1),
+            Self::EasySwitchChannel3 => Some(2),
+            _ => None,
+        }
+    }
+
+    /// Whether this action acts on the device that fired it, so a trigger
+    /// that cannot name its device — a global function-key binding, which
+    /// any keyboard may send — must not bind it: the selected device would
+    /// stand in for the keyboard that was pressed.
+    #[must_use]
+    pub fn needs_firing_device(&self) -> bool {
+        Self::NEEDS_FIRING_DEVICE.contains(self)
+    }
+
+    /// Every action [`Self::needs_firing_device`] holds for.
+    pub const NEEDS_FIRING_DEVICE: [Self; 3] = [
+        Self::EasySwitchChannel1,
+        Self::EasySwitchChannel2,
+        Self::EasySwitchChannel3,
+    ];
+
     /// The chord whose output must remain down until the originating press
     /// ends, together with which of its keys stay down. `None` for an
     /// instantaneous action.
@@ -482,10 +546,22 @@ impl Action {
         }
     }
 
+    /// The bare modifiers whose output must remain down until the originating
+    /// press ends, or `None` for actions that hold a chord or nothing.
+    #[must_use]
+    pub fn held_modifier(&self) -> Option<BareModifiers> {
+        match self {
+            Self::HoldModifier(mods) => Some(*mods),
+            _ => None,
+        }
+    }
+
     /// Whether the action lasts as long as its press. Only a source that
     /// delivers both edges can run it, so the catalog leaves these out.
     #[must_use]
     pub fn is_held(&self) -> bool {
-        self.held_chord().is_some() || matches!(self, Self::DpiShift | Self::GShift)
+        self.held_chord().is_some()
+            || self.held_modifier().is_some()
+            || matches!(self, Self::DpiShift | Self::GShift)
     }
 }
