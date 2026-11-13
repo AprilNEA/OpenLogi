@@ -314,6 +314,40 @@ fn a_reload_writes_a_changed_force_only_to_an_online_enabled_device() {
     );
 }
 
+/// A display-key brightness is written only to a device that measured
+/// `0x8040`: a keypad whose feature table is not known yet, or one without
+/// the feature, keeps its own level whatever is saved.
+#[test]
+fn key_brightness_requires_measured_support() {
+    let level = openlogi_core::config::KeyDisplayBrightness::try_new(40).expect("valid level");
+    let mut config = Config::default();
+    config.set_key_display_brightness("pad", Some(level));
+    let mut keypad = dev("pad", 1, true);
+
+    keypad.capabilities = None;
+    assert_eq!(configured_key_brightness(&config, &keypad), None);
+    keypad.capabilities = Some(Capabilities::default());
+    assert_eq!(configured_key_brightness(&config, &keypad), None);
+    keypad.capabilities = Some(Capabilities {
+        key_brightness: true,
+        ..Capabilities::default()
+    });
+    assert_eq!(configured_key_brightness(&config, &keypad), Some(level));
+
+    let unmeasured = {
+        let mut device = dev("unmeasured", 2, true);
+        device.capabilities = None;
+        device
+    };
+    let mut both = config.clone();
+    both.set_key_display_brightness("unmeasured", Some(level));
+    assert_eq!(
+        changed_key_brightness(&Config::default(), &both, &[keypad, unmeasured]),
+        vec![(bolt(1), level)],
+        "only the measured keypad is written"
+    );
+}
+
 fn bolt(slot: u8) -> DeviceRoute {
     DeviceRoute::Bolt {
         receiver_uid: "AA00".into(),

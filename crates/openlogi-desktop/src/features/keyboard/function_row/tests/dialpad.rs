@@ -399,3 +399,30 @@ fn each_console_device_shows_its_own_setting(cx: &mut gpui::TestAppContext) {
     window.update(|window, _| window.remove_window());
     cx.run_until_parked();
 }
+
+/// The brightness control appears only once the keypad has reported the
+/// feature that sets it (`0x8040`): being the keypad model is not enough,
+/// so a keypad whose feature table is not known yet shows none.
+#[gpui::test]
+fn key_brightness_requires_measured_support(cx: &mut gpui::TestAppContext) {
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+
+    init_ui(cx);
+    let (state, _commands) = crate::state::tests::keypad_pages::unmeasured_keypad_state();
+    assert!(!state.current_key_brightness_supported());
+    let (view, window) = open_keys_view(cx, state);
+    assert!(
+        window.debug_bounds("key-brightness").is_none(),
+        "an unmeasured keypad offers no brightness"
+    );
+    drop(view);
+    window.update(|window, _| window.remove_window());
+
+    let (state, _commands) = crate::state::tests::keypad_pages::keypad_state();
+    assert!(state.current_key_brightness_supported());
+    let (view, window) = open_keys_view(cx, state);
+    assert!(window.debug_bounds("key-brightness").is_some());
+    drop(view);
+    window.update(|window, _| window.remove_window());
+}

@@ -889,7 +889,16 @@ struct PaneVisuals {
 #[derive(Clone, Copy, Debug)]
 struct DeviceSettings {
     dial_speed: ThumbwheelSensitivity,
-    key_brightness: Option<KeyDisplayBrightness>,
+    key_brightness: KeyBrightnessSetting,
+}
+
+/// Whether the setting bar offers a keypad's LCD brightness, and at what.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KeyBrightnessSetting {
+    /// The device has not measured the feature that sets it (`0x8040`).
+    Unsupported,
+    /// The saved level, or `None` while OpenLogi leaves the panel as it is.
+    Offered(Option<KeyDisplayBrightness>),
 }
 
 impl DeviceSettings {
@@ -899,8 +908,12 @@ impl DeviceSettings {
             dial_speed: device.map_or(ThumbwheelSensitivity::DEFAULT, |(state, key)| {
                 state.device_thumbwheel_sensitivity(key)
             }),
-            key_brightness: device
-                .and_then(|(state, key)| state.device_key_display_brightness(key)),
+            key_brightness: match device {
+                Some((state, key)) if state.current_key_brightness_supported() => {
+                    KeyBrightnessSetting::Offered(state.device_key_display_brightness(key))
+                }
+                Some(_) | None => KeyBrightnessSetting::Unsupported,
+            },
         }
     }
 }
@@ -933,7 +946,12 @@ impl FunctionRowView {
                         &pal,
                         cx,
                     ))
-                    .child(self.key_brightness_control(settings.key_brightness, window, cx)),
+                    .children(match settings.key_brightness {
+                        KeyBrightnessSetting::Offered(level) => {
+                            Some(self.key_brightness_control(level, window, cx))
+                        }
+                        KeyBrightnessSetting::Unsupported => None,
+                    }),
             ),
             PaneKind::Keyboard => gaming.map(|gaming| {
                 setting_bar().child(gaming_bar(gaming, self.g_profile, &view, &pal, cx))

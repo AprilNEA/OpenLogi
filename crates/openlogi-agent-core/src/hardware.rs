@@ -1660,24 +1660,40 @@ async fn write_native_wheel_mode(
     Ok(NativeWheelWrite::Written)
 }
 
-/// Write a keypad's LCD brightness in the background, logging the outcome.
+/// Spawn an OS thread that writes a keypad's LCD brightness, unless a newer
+/// brightness write for the keypad was requested after `ticket`. Setting a
+/// level is idempotent, so only the newest request needs to land: an older
+/// one still waiting for its turn stands down. Failures are logged.
 pub(crate) fn write_key_brightness_in_background(
     op: DeviceOp,
+    ticket: WriteTicket,
     brightness: openlogi_core::config::KeyDisplayBrightness,
 ) {
     let index = op.route.device_index();
+    let turn = op.access.transport_turns.turn_for(&op.route);
     op.spawn_timed_write(
         "key brightness write",
         move |op| async move {
-            tokio::time::timeout(WRITE_TIMEOUT, async {
-                let shared = op.resolve()?;
-                openlogi_hid::set_key_display_brightness_on(&shared, brightness).await
-            })
+            within_turn(
+                &ticket,
+                &turn,
+                || async {
+                    let shared = op.resolve()?;
+                    openlogi_hid::set_key_display_brightness_on(&shared, brightness)
+                        .await
+                        .map(Some)
+                },
+                || async { Ok(None) },
+            )
             .await
         },
         move |result| {
             log_outcome(index, "key brightness write", result, |level| {
-                debug!(index, level, "key brightness written");
+                if let Some(level) = level {
+                    debug!(index, level, "key brightness written");
+                } else {
+                    debug!(index, "key brightness write superseded by a newer one");
+                }
             });
         },
     );

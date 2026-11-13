@@ -81,11 +81,12 @@ use devices::{
     FollowerCookieState, FollowerCookieWrite, RECONNECT_REAPPLY_CONFIRM_RETRIES,
     VOLATILE_REAPPLY_CONFIRM_RETRIES, assignments_changed, build_devices, bump_settings_epoch,
     carry_lifecycle_budgets, changed_follower_cookies, changed_force_sensing,
-    config_keeps_os_layout, configured_dpi, configured_force_sensing, configured_report_rate,
-    configured_wheel_mode, host_switch_links, is_hidpp_device, keeps_os_layout, main_wheel_divert,
-    newly_kept_os_layouts, os_layout_appeared, pick_current, plan_disabled_keys_recovery,
-    plan_reapply, published_inventories, reconnect_follower_cookies, same_device_lifecycle,
-    saved_speed, settings_moved, stable_id, wheel_inverted,
+    changed_key_brightness, config_keeps_os_layout, configured_dpi, configured_force_sensing,
+    configured_key_brightness, configured_report_rate, configured_wheel_mode, host_switch_links,
+    is_hidpp_device, keeps_os_layout, main_wheel_divert, newly_kept_os_layouts, os_layout_appeared,
+    pick_current, plan_disabled_keys_recovery, plan_reapply, published_inventories,
+    reconnect_follower_cookies, same_device_lifecycle, saved_speed, settings_moved, stable_id,
+    wheel_inverted,
 };
 
 /// The minimal per-device facts the agent needs: the config key (binding /
@@ -204,6 +205,8 @@ pub struct SharedHandles {
     sidetone_order: WriteOrder,
     /// Orders the GUI's backlight writes per keyboard.
     backlight_order: WriteOrder,
+    /// Orders every path's LCD brightness writes per keypad.
+    key_brightness_order: WriteOrder,
     /// Orders host renames per device.
     host_name_order: WriteOrder,
     /// Orders the Easy-Switch actions' channel switches per device, so a
@@ -655,6 +658,22 @@ impl SharedHandles {
         );
     }
 
+    /// Write a keypad's LCD brightness without waiting, for the config-reload
+    /// and reconnect paths. The ticket is taken here, when the change is
+    /// accepted, so of two saves in quick succession the newer one is the
+    /// level the keypad keeps.
+    fn write_key_brightness_in_background(
+        &self,
+        route: &DeviceRoute,
+        brightness: openlogi_core::config::KeyDisplayBrightness,
+    ) {
+        crate::hardware::write_key_brightness_in_background(
+            self.device(route),
+            self.key_brightness_order.request(route),
+            brightness,
+        );
+    }
+
     /// [`Self::set_force_sensing`] without waiting, for the config-reload and
     /// reconnect paths; the outcome is logged.
     fn write_force_sensing_in_background(&self, route: &DeviceRoute, force: u16) {
@@ -927,6 +946,7 @@ impl Orchestrator {
             force_sensing_order: WriteOrder::default(),
             sidetone_order: WriteOrder::default(),
             backlight_order: WriteOrder::default(),
+            key_brightness_order: WriteOrder::default(),
             host_name_order: WriteOrder::default(),
             host_switch_order: WriteOrder::default(),
             follower_cookie_order: WriteOrder::default(),
@@ -2108,13 +2128,9 @@ impl Orchestrator {
         }
         // A keypad's panel comes back at its firmware brightness after a
         // power cycle, so the saved level is written on every reconnect.
-        if route.keypad().is_some()
-            && let Some(brightness) = self.config.key_display_brightness(key)
-        {
-            crate::hardware::write_key_brightness_in_background(
-                self.shared.device(&route),
-                brightness,
-            );
+        if let Some(brightness) = configured_key_brightness(&self.config, dev) {
+            self.shared
+                .write_key_brightness_in_background(&route, brightness);
         }
         if let Some(force) = configured_force_sensing(&self.config, dev) {
             self.shared.write_force_sensing_in_background(&route, force);
@@ -2625,29 +2641,14 @@ impl Orchestrator {
         }
     }
 
-    /// Push a changed keypad LCD brightness to the online keypad it belongs
-    /// to. An unrelated save writes nothing, as for
+    /// Push a changed display-key brightness to the online, enabled device
+    /// that measured `0x8040` — [`changed_key_brightness`] picks the writes.
+    /// An unrelated save writes nothing, as for
     /// [`Self::apply_changed_fn_locks`].
     fn apply_changed_key_brightness(&self, previous: &Config) {
-        // A disabled device gets no writes of any kind, as on reconnect.
-        for dev in self
-            .devices
-            .iter()
-            .filter(|dev| dev.online && self.config.device_enabled(&dev.config_key))
-        {
-            let Some(route) = dev.route.clone().filter(|route| route.keypad().is_some()) else {
-                continue;
-            };
-            let brightness = self.config.key_display_brightness(&dev.config_key);
-            if brightness == previous.key_display_brightness(&dev.config_key) {
-                continue;
-            }
-            if let Some(brightness) = brightness {
-                crate::hardware::write_key_brightness_in_background(
-                    self.shared.device(&route),
-                    brightness,
-                );
-            }
+        for (route, brightness) in changed_key_brightness(previous, &self.config, &self.devices) {
+            self.shared
+                .write_key_brightness_in_background(&route, brightness);
         }
     }
 

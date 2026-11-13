@@ -274,6 +274,16 @@ impl AppState {
         events
     }
 
+    /// Whether the selected device measured a settable display-key
+    /// brightness (HID++ `0x8040`). Being a keypad is not enough: the
+    /// control shows only once the device has reported the feature.
+    #[must_use]
+    pub fn current_key_brightness_supported(&self) -> bool {
+        self.current_record()
+            .and_then(|record| record.capabilities)
+            .is_some_and(|capabilities| capabilities.key_brightness)
+    }
+
     /// The keypad LCD brightness the user set for `key`, or `None` while
     /// OpenLogi leaves the panel at whatever level it already shows.
     #[must_use]

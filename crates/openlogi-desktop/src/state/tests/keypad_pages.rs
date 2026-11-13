@@ -9,7 +9,24 @@ use openlogi_core::config::DeviceIdentity;
 use openlogi_core::device_order::PhysicalDeviceKey;
 
 pub(crate) fn keypad_state() -> (AppState, tokio::sync::mpsc::UnboundedReceiver<Command>) {
-    numpad_state(
+    keypad_state_with(Capabilities {
+        key_brightness: true,
+        ..Capabilities::presumed_from_kind(DeviceKind::Numpad)
+    })
+}
+
+/// The MX Creative Keypad before its feature table was read: its kind is
+/// known, `0x8040` is not.
+pub(crate) fn unmeasured_keypad_state() -> (AppState, tokio::sync::mpsc::UnboundedReceiver<Command>)
+{
+    keypad_state_with(Capabilities::presumed_from_kind(DeviceKind::Numpad))
+}
+
+/// The MX Creative Keypad on its direct node, reporting `capabilities`.
+fn keypad_state_with(
+    capabilities: Capabilities,
+) -> (AppState, tokio::sync::mpsc::UnboundedReceiver<Command>) {
+    numpad_state_with(
         ReceiverInfo {
             name: "MX Creative Keypad".to_string(),
             vendor_id: 0x046d,
@@ -17,6 +34,7 @@ pub(crate) fn keypad_state() -> (AppState, tokio::sync::mpsc::UnboundedReceiver<
             unique_id: None,
         },
         openlogi_core::hid::DIRECT_DEVICE_INDEX,
+        capabilities,
     )
 }
 
@@ -25,6 +43,19 @@ pub(crate) fn keypad_state() -> (AppState, tokio::sync::mpsc::UnboundedReceiver<
 fn numpad_state(
     receiver: ReceiverInfo,
     slot: u8,
+) -> (AppState, tokio::sync::mpsc::UnboundedReceiver<Command>) {
+    numpad_state_with(
+        receiver,
+        slot,
+        Capabilities::presumed_from_kind(DeviceKind::Numpad),
+    )
+}
+
+/// [`numpad_state`] for a number pad reporting `capabilities`.
+fn numpad_state_with(
+    receiver: ReceiverInfo,
+    slot: u8,
+    capabilities: Capabilities,
 ) -> (AppState, tokio::sync::mpsc::UnboundedReceiver<Command>) {
     let inventory = DeviceInventory {
         receiver,
@@ -43,7 +74,7 @@ fn numpad_state(
                 model_ids: [0xc354, 0, 0],
                 extended_model_id: 0,
             }),
-            capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Numpad)),
+            capabilities: Some(capabilities),
             settings_revision: 0,
             hidpp10: false,
         }],
