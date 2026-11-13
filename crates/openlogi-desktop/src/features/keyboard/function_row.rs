@@ -85,8 +85,7 @@ mod live_key;
 use callout_layout::{CalloutLayout, CardRect, callout_layout, side_bands_width};
 use dialpad::{DialpadPane, DialpadPhotoPane, DialpadRender, dialpad_canvas};
 use gaming::gaming_bar;
-use key_colors::ColorField;
-use key_face::{FaceDraft, KeyPanelTab, panel_tabs};
+use key_face::{AppearanceState, KeyPanelTab, panel_tabs};
 pub(crate) use key_points::KeyTarget;
 #[cfg(test)]
 use key_points::{EVEN_SPACING_END, EVEN_SPACING_START, key_x_fractions};
@@ -229,14 +228,9 @@ pub struct FunctionRowView {
     key_brightness: CommitSlider<KeyDisplayBrightness>,
     /// Whether a grid key's panel edits its action or its face.
     panel_tab: KeyPanelTab,
-    /// The label and colour inputs of the grid key whose face is being
-    /// edited.
-    face: Option<FaceDraft>,
-    /// Whether the last picture chosen for a face was not one the keypad
-    /// can show.
-    face_image_rejected: bool,
-    /// Which colour chooser's custom hex input holds no colour.
-    face_hex_invalid: Option<ColorField>,
+    /// The Appearance editor: the inputs of the grid key whose face is
+    /// being edited, and what they reported.
+    appearance: AppearanceState,
     /// The Live tab's fields for the grid key being edited.
     live: Option<live_key::LiveDraft>,
     /// The selected key's custom shortcut editor.
@@ -313,9 +307,7 @@ impl FunctionRowView {
             dial_speed,
             key_brightness,
             panel_tab: KeyPanelTab::default(),
-            face: None,
-            face_image_rejected: false,
-            face_hex_invalid: None,
+            appearance: AppearanceState::Closed,
             live: None,
             shortcut: None,
             shortcut_record_focus: cx.focus_handle(),
@@ -400,9 +392,7 @@ impl FunctionRowView {
         self.text_state = None;
         self.workflow_draft.clear();
         self.application_invalid = false;
-        self.face = None;
-        self.face_image_rejected = false;
-        self.face_hex_invalid = None;
+        self.appearance.close();
         self.shortcut = None;
         // A live-key draft belongs to the key it was opened on; the next key
         // starts without it.

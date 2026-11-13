@@ -17,6 +17,7 @@ use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::{Disableable as _, Selectable as _, Sizable as _, h_flex, v_flex};
 use openlogi_core::binding::GridSlot;
 use openlogi_core::config::{KeyFaceStyle, KeySymbol};
+use tracing::debug;
 
 use super::FunctionRowView;
 use super::key_colors::{ColorField, background_section, text_and_icon_colors};
@@ -91,6 +92,120 @@ pub(super) fn is_key_face_image(path: &Path) -> bool {
         })
 }
 
+/// What the Appearance tab's inputs last reported: a picture the keypad
+/// cannot show, a custom colour that is no colour. It belongs to the draft
+/// it was reported in, so it lives inside [`AppearanceState::Editing`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct AppearanceFeedback {
+    /// The last picture chosen was not one the keypad can show.
+    pub(super) image_rejected: bool,
+    /// Which colour chooser's custom hex input holds no colour.
+    pub(super) hex_invalid: Option<ColorField>,
+}
+
+/// The Appearance editor: closed, or editing one grid key's face together
+/// with what its inputs reported. Its methods are the only writers, so
+/// feedback can never outlive the draft it was given for — closing, a reset
+/// and a change of key all drop both.
+#[derive(Default)]
+pub(super) enum AppearanceState {
+    /// No face is being edited.
+    #[default]
+    Closed,
+    /// The face of `draft.slot` is being edited.
+    Editing {
+        draft: Box<FaceDraft>,
+        feedback: AppearanceFeedback,
+    },
+}
+
+impl AppearanceState {
+    /// The draft being edited, if any.
+    pub(super) fn draft(&self) -> Option<&FaceDraft> {
+        match self {
+            Self::Closed => None,
+            Self::Editing { draft, .. } => Some(draft.as_ref()),
+        }
+    }
+
+    /// The draft, when it edits `slot`.
+    pub(super) fn draft_for(&self, slot: GridSlot) -> Option<&FaceDraft> {
+        self.draft().filter(|draft| draft.slot == slot)
+    }
+
+    /// The draft, mutably, when it edits `slot`.
+    pub(super) fn draft_for_mut(&mut self, slot: GridSlot) -> Option<&mut FaceDraft> {
+        match self {
+            Self::Editing { draft, .. } if draft.slot == slot => Some(draft.as_mut()),
+            Self::Closed | Self::Editing { .. } => None,
+        }
+    }
+
+    /// What the open draft's inputs reported; nothing while closed.
+    pub(super) fn feedback(&self) -> AppearanceFeedback {
+        match self {
+            Self::Closed => AppearanceFeedback::default(),
+            Self::Editing { feedback, .. } => *feedback,
+        }
+    }
+
+    /// Start editing with `draft`, with nothing reported yet.
+    fn open(&mut self, draft: FaceDraft) {
+        *self = Self::Editing {
+            draft: Box::new(draft),
+            feedback: AppearanceFeedback::default(),
+        };
+    }
+
+    /// Stop editing, dropping the draft and everything it reported.
+    pub(super) fn close(&mut self) {
+        *self = Self::Closed;
+    }
+
+    /// Note whether the picture just chosen was refused. Nothing to note
+    /// while closed.
+    fn set_image_rejected(&mut self, rejected: bool) {
+        if let Self::Editing { feedback, .. } = self {
+            feedback.image_rejected = rejected;
+        }
+    }
+
+    /// Note which custom colour input holds no colour, or none.
+    pub(super) fn set_hex_invalid(&mut self, field: Option<ColorField>) {
+        if let Self::Editing { feedback, .. } = self {
+            feedback.hex_invalid = field;
+        }
+    }
+}
+
+/// A picture asked for one grid key's face on one device. The file chooser
+/// answers asynchronously, so its answer is applied only while the editor
+/// still edits what it was asked for: a device or key changed meanwhile
+/// would otherwise get the picture.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct FacePick {
+    device: String,
+    slot: GridSlot,
+}
+
+impl FacePick {
+    /// A pick for `slot` on the device with config key `device`.
+    pub(super) fn new(device: String, slot: GridSlot) -> Self {
+        Self { device, slot }
+    }
+
+    /// Whether the selected `device` and the face being `editing` are still
+    /// the ones this pick was asked for.
+    pub(super) fn is_current(&self, device: Option<&str>, editing: Option<GridSlot>) -> bool {
+        device == Some(self.device.as_str()) && editing == Some(self.slot)
+    }
+}
+
+/// The device a key face edit saves to now ([`AppState::key_face_device`]).
+fn selected_device(cx: &App) -> Option<String> {
+    AppState::try_read(cx)?.key_face_device().map(str::to_owned)
+}
+
 impl FunctionRowView {
     /// Make sure the label inputs edit `slot`, seeding them from its saved
     /// face when they were made for another key (or none).
@@ -100,7 +215,7 @@ impl FunctionRowView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.face.as_ref().is_some_and(|draft| draft.slot == slot) {
+        if self.appearance.draft_for(slot).is_some() {
             return;
         }
         let style = AppState::try_read(cx)
@@ -166,7 +281,7 @@ impl FunctionRowView {
             );
             input
         });
-        self.face = Some(FaceDraft {
+        self.appearance.open(FaceDraft {
             slot,
             lines: [first, second],
             search,
@@ -179,7 +294,9 @@ impl FunctionRowView {
 
     /// Save the label the two line inputs hold.
     fn commit_face_label(&mut self, cx: &mut Context<Self>) {
-        let Some(draft) = &self.face else { return };
+        let Some(draft) = self.appearance.draft() else {
+            return;
+        };
         let slot = draft.slot;
         let [first, second] = &draft.lines;
         let label = joined_label(&first.read(cx).value(), &second.read(cx).value());
@@ -193,8 +310,14 @@ impl FunctionRowView {
     }
 
     /// Ask for a picture and put it on `slot`'s face; a file the agent
-    /// cannot draw is refused with a note instead.
+    /// cannot draw is refused with a note instead. The answer is dropped
+    /// when the selected device or the key being edited changed while the
+    /// chooser was open (see [`FacePick`]).
     fn choose_face_image(slot: GridSlot, cx: &mut Context<Self>) {
+        let Some(device) = selected_device(cx) else {
+            return;
+        };
+        let pick = FacePick::new(device, slot);
         let selected = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
@@ -209,8 +332,18 @@ impl FunctionRowView {
                 return;
             };
             let _ = view.update(cx, |view, cx| {
-                view.face_image_rejected = !is_key_face_image(&path);
-                if !view.face_image_rejected {
+                let device = selected_device(cx);
+                let editing = view.appearance.draft().map(|draft| draft.slot);
+                if !pick.is_current(device.as_deref(), editing) {
+                    debug!(
+                        ?pick,
+                        "key picture chosen for a face no longer edited — dropped"
+                    );
+                    return;
+                }
+                let accepted = is_key_face_image(&path);
+                view.appearance.set_image_rejected(!accepted);
+                if accepted {
                     commit_face(cx, slot, |style| style.image = Some(path));
                 }
                 cx.notify();
@@ -231,7 +364,8 @@ impl FunctionRowView {
         let style = AppState::try_read(cx)
             .map(|state| state.current_key_face(slot))
             .unwrap_or_default();
-        let draft = self.face.as_ref().filter(|draft| draft.slot == slot);
+        let draft = self.appearance.draft_for(slot);
+        let feedback = self.appearance.feedback();
         let symbol = draft.map(|draft| symbol_section(draft, style.symbol.as_ref(), view, pal, cx));
         let label = draft.map(|draft| {
             let [first, second] = &draft.lines;
@@ -256,7 +390,7 @@ impl FunctionRowView {
             .children(label.map(|label| div().px_2().child(label)))
             .child(editor_section(tr!("keyboard.key_background"), pal))
             .children(draft.map(|draft| {
-                background_section(slot, &style, &draft.hex, self.face_hex_invalid, pal, cx)
+                background_section(slot, &style, &draft.hex, feedback.hex_invalid, pal, cx)
             }))
             // A picture fills the key, so its background shows only behind
             // the label band; say so instead of letting a pick look ignored.
@@ -270,19 +404,20 @@ impl FunctionRowView {
                 )
             })
             .children(draft.map(|draft| {
-                text_and_icon_colors(slot, &style, &draft.hex, self.face_hex_invalid, pal)
+                text_and_icon_colors(slot, &style, &draft.hex, feedback.hex_invalid, pal)
             }))
             .child(editor_section(tr!("keyboard.key_image"), pal))
             .child(image_section(
                 slot,
                 style.image.as_deref(),
-                self.face_image_rejected,
+                feedback.image_rejected,
                 view,
                 pal,
             ))
             .child(
                 div().px_1().pt_1().child(
                     Button::new("key-face-reset")
+                        .debug_selector(|| "key-face-reset".into())
                         .ghost()
                         .small()
                         .label(tr!("keyboard.key_reset_appearance"))
@@ -292,9 +427,10 @@ impl FunctionRowView {
                                 state.commit_key_face(slot, KeyFaceStyle::default())
                             });
                             // The label went too: reseed the inputs from the
-                            // reset face on the next render.
+                            // reset face on the next render, without what the
+                            // old inputs reported.
                             view_for_reset.update(cx, |view, cx| {
-                                view.face = None;
+                                view.appearance.close();
                                 cx.notify();
                             });
                         }),

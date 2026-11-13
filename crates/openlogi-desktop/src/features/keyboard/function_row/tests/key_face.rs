@@ -4,7 +4,10 @@
 
 use std::path::Path;
 
-use super::super::key_face::{KeyPanelTab, is_key_face_image, joined_label, label_lines};
+use super::super::key_colors::ColorField;
+use super::super::key_face::{
+    AppearanceFeedback, FacePick, KeyPanelTab, is_key_face_image, joined_label, label_lines,
+};
 use super::*;
 use openlogi_core::binding::{GridSlot, KeypadPage};
 use openlogi_core::config::KeyFaceStyle;
@@ -91,7 +94,10 @@ fn the_appearance_tab_styles_the_key_on_the_edited_page(cx: &mut gpui::TestAppCo
         key: GridKey::Middle,
     };
     view.read_with(cx, |view, _| {
-        assert!(view.face.is_some(), "the label inputs edit the key");
+        assert!(
+            view.appearance.draft().is_some(),
+            "the label inputs edit the key"
+        );
     });
 
     let toggle = cx.debug_bounds("key-face-icon").expect("the icon toggle");
@@ -339,6 +345,113 @@ fn the_live_tab_scrolls_to_its_last_field_in_a_short_window(cx: &mut gpui::TestA
     assert!(
         increment.top() >= viewport.top() && increment.bottom() <= viewport.bottom(),
         "scrolling reaches the increment field: {increment:?} in {viewport:?}"
+    );
+
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}
+
+/// The file chooser answers after the user may have moved on: its picture
+/// is applied only to the device and key it was asked for. Another selected
+/// device, another key, or a closed editor drops it.
+#[test]
+fn key_image_pick_rejects_changed_device() {
+    let slot = GridSlot {
+        page: KeypadPage::FIRST,
+        key: GridKey::Middle,
+    };
+    let other_slot = GridSlot {
+        page: KeypadPage::FIRST,
+        key: GridKey::TopLeft,
+    };
+    let pick = FacePick::new("keypad-a".into(), slot);
+
+    assert!(pick.is_current(Some("keypad-a"), Some(slot)));
+    assert!(
+        !pick.is_current(Some("keypad-b"), Some(slot)),
+        "another device was selected while the chooser was open"
+    );
+    assert!(!pick.is_current(None, Some(slot)), "no device is selected");
+    assert!(
+        !pick.is_current(Some("keypad-a"), Some(other_slot)),
+        "another key is being edited"
+    );
+    assert!(
+        !pick.is_current(Some("keypad-a"), None),
+        "the editor was closed"
+    );
+}
+
+/// What the Appearance inputs reported belongs to the draft it was reported
+/// in: Reset drops both, so the fresh draft opens without the old colour
+/// error.
+#[gpui::test]
+fn resetting_a_face_drops_its_input_feedback(cx: &mut gpui::TestAppContext) {
+    use gpui::{Modifiers, ScrollDelta, ScrollEvent, point, size};
+
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    let (state, _commands) = crate::state::tests::keypad_pages::keypad_state();
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        cx.set_reduce_motion(true);
+        let state = cx.new(|_| state);
+        AppState::set_global(state, cx);
+    });
+    let (view, cx) = cx.add_window_view(|_, cx| FunctionRowView::new(cx));
+    cx.simulate_resize(size(px(1400.), px(1000.)));
+    view.update(cx, |view, cx| {
+        view.select_key(Some(4), cx);
+        view.set_panel_tab(KeyPanelTab::Appearance, cx);
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    // A custom colour that is no colour, and a style that can be reset.
+    view.update(cx, |view, _| {
+        view.appearance.set_hex_invalid(Some(ColorField::ALL[0]));
+    });
+    let toggle = cx.debug_bounds("key-face-icon").expect("the icon toggle");
+    cx.simulate_click(toggle.center(), Modifiers::default());
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    view.read_with(cx, |view, _| {
+        assert_eq!(
+            view.appearance.feedback().hex_invalid,
+            Some(ColorField::ALL[0])
+        );
+    });
+    assert!(
+        cx.debug_bounds("key-face-color-invalid").is_some(),
+        "the colour error shows"
+    );
+
+    // The button sits at the end of the scrolling Appearance tab.
+    let toggle = cx.debug_bounds("key-face-icon").expect("the icon toggle");
+    for _ in 0..3 {
+        cx.simulate_event(ScrollEvent {
+            position: toggle.center(),
+            delta: ScrollDelta::Pixels(point(px(0.), px(-2000.))),
+            ..Default::default()
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+    }
+    let reset = cx.debug_bounds("key-face-reset").expect("the reset button");
+    cx.simulate_click(reset.center(), Modifiers::default());
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    view.read_with(cx, |view, _| {
+        assert!(
+            view.appearance.draft().is_some(),
+            "a fresh draft edits the key again"
+        );
+        assert_eq!(
+            view.appearance.feedback(),
+            AppearanceFeedback::default(),
+            "the old draft's colour error went with it"
+        );
+    });
+    assert!(
+        cx.debug_bounds("key-face-color-invalid").is_none(),
+        "the fresh draft shows no colour error"
     );
 
     drop(view);

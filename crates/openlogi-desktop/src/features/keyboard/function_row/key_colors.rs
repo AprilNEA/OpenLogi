@@ -259,19 +259,21 @@ impl FunctionRowView {
     /// Save the colour typed into `field`'s custom input, or flag the input
     /// when it holds no colour. A blank input saves nothing.
     pub(super) fn commit_face_hex(&mut self, field: ColorField, cx: &mut App) {
-        let Some(draft) = &self.face else { return };
+        let Some(draft) = self.appearance.draft() else {
+            return;
+        };
         let slot = draft.slot;
         let text = draft.hex[field.index()].read(cx).value().to_string();
         if text.trim().is_empty() {
-            self.face_hex_invalid = None;
+            self.appearance.set_hex_invalid(None);
             return;
         }
         match parse_hex(&text) {
             Some(color) => {
-                self.face_hex_invalid = None;
+                self.appearance.set_hex_invalid(None);
                 commit_face(cx, slot, |style| field.set(style, Some(color)));
             }
-            None => self.face_hex_invalid = Some(field),
+            None => self.appearance.set_hex_invalid(Some(field)),
         }
     }
 }
@@ -500,6 +502,7 @@ fn color_chooser(
         .when(invalid == Some(field), |chooser| {
             chooser.child(
                 div()
+                    .debug_selector(|| "key-face-color-invalid".into())
                     .px_2()
                     .text_caption()
                     .text_color(pal.text_danger)

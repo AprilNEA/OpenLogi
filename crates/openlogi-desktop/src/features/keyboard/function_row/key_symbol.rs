@@ -245,7 +245,7 @@ impl FunctionRowView {
     /// Show `mode`'s chooser for the face being edited. Choosing the action
     /// icon is itself a pick: it removes the symbol.
     fn set_symbol_mode(&mut self, slot: GridSlot, mode: SymbolMode, cx: &mut App) {
-        if let Some(draft) = self.face.as_mut().filter(|draft| draft.slot == slot) {
+        if let Some(draft) = self.appearance.draft_for_mut(slot) {
             draft.symbol_mode = mode;
         }
         if mode == SymbolMode::ActionIcon {
@@ -255,7 +255,9 @@ impl FunctionRowView {
 
     /// Save the emoji the input holds, once it holds one.
     pub(super) fn commit_face_emoji(&mut self, cx: &mut App) {
-        let Some(draft) = &self.face else { return };
+        let Some(draft) = self.appearance.draft() else {
+            return;
+        };
         let slot = draft.slot;
         if let Some(symbol) = emoji_symbol(&draft.emoji.read(cx).value()) {
             commit_face(cx, slot, |style| style.symbol = Some(symbol));
