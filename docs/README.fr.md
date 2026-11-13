@@ -165,7 +165,7 @@ Les fonctionnalités disponibles dépendent de ce que chaque appareil signale ; 
 | Touches multimédia | Natif | Natif | D-Bus MPRIS |
 | Actions du gestionnaire de fenêtres (bureaux, Mission Control, …) | Natif | Équivalents natifs | GNOME, KDE (KWin), Hyprland ; certaines actions propres à macOS sont sans effet |
 | Icône de barre des menus / zone de notification | ✓ | ✓ | — |
-| Mises à jour intégrées | Sparkle | Intégré | Intégré |
+| Mises à jour intégrées | Sparkle | Intégré | Paquets des versions, via le gestionnaire de paquets |
 
 ## Installation
 
