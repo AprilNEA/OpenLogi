@@ -16,7 +16,7 @@ use openlogi_agent_core::live_keys::{LiveReader, read_source};
 use openlogi_agent_core::orchestrator::Orchestrator;
 use openlogi_agent_core::watchers::key_display::PictureRevisions;
 use tokio::sync::{Mutex, mpsc};
-use tokio::time::MissedTickBehavior;
+use tokio::time::{Interval, MissedTickBehavior};
 use tracing::debug;
 
 /// How often the watcher looks for due keys and ended activations.
@@ -25,8 +25,7 @@ const TICK: Duration = Duration::from_secs(1);
 /// Keep the live keys current until the process exits.
 pub(crate) async fn watch(orchestrator: Arc<Mutex<Orchestrator>>) {
     let mut reader = LiveReader::new(read_source);
-    let mut tick = tokio::time::interval(TICK);
-    tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut tick = live_tick();
     let (pictures_tx, mut pictures_rx) = mpsc::unbounded_channel();
     // At most one picture-version read at a time: one stuck on an
     // unavailable share holds back only the next one, never the watcher.
@@ -75,4 +74,32 @@ fn read_picture_revisions(
             debug!("live-key watcher gone — picture versions dropped");
         }
     });
+}
+
+/// The watcher's schedule: every [`TICK`], the first one a full period after
+/// the agent starts — the orchestrator publishes its first key faces itself,
+/// so nothing is due at once — and a late tick delays the next rather than
+/// bursting to catch up.
+fn live_tick() -> Interval {
+    let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + TICK, TICK);
+    tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    tick
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// With the clock paused, Tokio jumps straight to the next deadline: the
+    /// first tick must land a full period after the watcher starts, not at
+    /// once.
+    #[tokio::test(start_paused = true)]
+    async fn live_watcher_waits_one_period() {
+        let start = tokio::time::Instant::now();
+        let mut tick = live_tick();
+        tick.tick().await;
+        assert_eq!(start.elapsed(), TICK, "the first tick comes one period in");
+        tick.tick().await;
+        assert_eq!(start.elapsed(), TICK * 2);
+    }
 }
