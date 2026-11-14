@@ -75,9 +75,9 @@ fn held_for_swipe(press: PressToken) -> PressPhase {
     PressPhase::HeldAsGesture { hold }
 }
 
-/// The token of a released hold and whether it was a click; `None` for any
+/// The token of a released hold and its remaining gesture; `None` for any
 /// other release.
-fn ended_hold(released: Option<PressPhase>) -> Option<(PressToken, bool)> {
+fn ended_hold(released: Option<PressPhase>) -> Option<(PressToken, Option<GestureDirection>)> {
     match released? {
         PressPhase::HeldAsGesture { hold } => Some(hold.end()),
         _ => None,
@@ -157,7 +157,7 @@ fn accumulate_tags_a_committed_swipe_with_the_held_press() {
     );
     assert_eq!(
         ended_hold(presses.release(ButtonId::Back)),
-        Some((press, false))
+        Some((press, None))
     );
 }
 
@@ -250,7 +250,7 @@ fn begin_is_first_wins_while_a_hold_is_active() {
     ));
     assert_eq!(
         ended_hold(presses.release(ButtonId::Back)),
-        Some((first, false))
+        Some((first, None))
     );
 }
 
@@ -262,7 +262,7 @@ fn end_matches_the_held_button_and_returns_its_token() {
     assert_eq!(ended_hold(presses.release(ButtonId::Forward)), None);
     assert_eq!(
         ended_hold(presses.release(ButtonId::Back)),
-        Some((press, true))
+        Some((press, Some(GestureDirection::Click)))
     );
 }
 
@@ -288,13 +288,70 @@ fn an_interrupt_ends_the_hold_before_it_commits_a_phantom_swipe() {
 }
 
 #[test]
+fn fast_hook_gesture_dispatches_the_swipe_before_ending_its_press() {
+    use super::super::button::ButtonRuntimeEvent;
+
+    let (dispatcher, mut owner, events) = test_dispatcher();
+    let hooks = Arc::new(RwLock::new(HookMaps {
+        gestures: BTreeMap::from([(
+            ButtonId::Back,
+            BTreeMap::from([
+                (GestureDirection::Click, Action::MissionControl),
+                (GestureDirection::Left, Action::PreviousDesktop),
+            ]),
+        )]),
+        ..HookMaps::default()
+    }));
+    let mouse = EventDevice {
+        vendor_id: Some(0x046d),
+        product_name: Some("Logitech MX Master 3".into()),
+        ..EventDevice::default()
+    };
+    let button = |pressed| {
+        handle_button(
+            ButtonId::Back,
+            pressed,
+            Some(&mouse),
+            &hooks,
+            &dispatcher,
+            || None,
+        )
+    };
+    assert_eq!(button(true), EventDisposition::Suppress);
+    handle_moved(-120, 5, &hooks, &dispatcher);
+    assert_eq!(button(false), EventDisposition::Suppress);
+    let ButtonRuntimeEvent::Started(press) =
+        events.recv_timeout(Duration::from_secs(1)).expect("down")
+    else {
+        panic!("started");
+    };
+    let ButtonRuntimeEvent::Triggered {
+        press: triggered,
+        action,
+    } = events.recv_timeout(Duration::from_secs(1)).expect("swipe")
+    else {
+        panic!("triggered");
+    };
+    assert_eq!(triggered.token(), press.token());
+    assert_eq!(action, Action::PreviousDesktop);
+    let ButtonRuntimeEvent::Ended { press: ended, .. } =
+        events.recv_timeout(Duration::from_secs(1)).expect("up")
+    else {
+        panic!("ended");
+    };
+    assert_eq!(ended.token(), press.token());
+    assert!(owner.shutdown());
+    assert!(events.try_recv().is_err(), "a swipe must not also click");
+}
+
+#[test]
 fn resolve_gesture_click_prefers_explicit_then_falls_back_to_default() {
     let gestures = BTreeMap::from([(
         ButtonId::Back,
         BTreeMap::from([(GestureDirection::Click, Action::Copy)]),
     )]);
     assert_eq!(
-        resolve_gesture_click(&gestures, ButtonId::Back),
+        resolve_gesture_action(&gestures, ButtonId::Back, GestureDirection::Click),
         Action::Copy
     );
 
@@ -302,7 +359,10 @@ fn resolve_gesture_click_prefers_explicit_then_falls_back_to_default() {
         ButtonId::Back,
         BTreeMap::from([(GestureDirection::Click, Action::None)]),
     )]);
-    assert_eq!(resolve_gesture_click(&off, ButtonId::Back), Action::None);
+    assert_eq!(
+        resolve_gesture_action(&off, ButtonId::Back, GestureDirection::Click),
+        Action::None
+    );
 }
 
 #[test]
@@ -754,13 +814,13 @@ fn resolve_gesture_click_falls_back_when_click_is_absent() {
         BTreeMap::from([(GestureDirection::Up, Action::Copy)]),
     )]);
     assert_eq!(
-        resolve_gesture_click(&no_click, ButtonId::Back),
+        resolve_gesture_action(&no_click, ButtonId::Back, GestureDirection::Click),
         default_binding(ButtonId::Back)
     );
 
     let empty = BTreeMap::new();
     assert_eq!(
-        resolve_gesture_click(&empty, ButtonId::Forward),
+        resolve_gesture_action(&empty, ButtonId::Forward, GestureDirection::Click),
         default_binding(ButtonId::Forward)
     );
 }
