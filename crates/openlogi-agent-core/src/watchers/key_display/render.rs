@@ -10,6 +10,7 @@
 //!
 //! The result is encoded as the baseline JPEG the vendor image write carries.
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
@@ -69,7 +70,9 @@ pub struct StyledFace {
 /// A picture on a key: its file, and which version of that file. Equal
 /// faces render equal tiles, so the version is part of the face: a file
 /// replaced at the same path — or one unreadable when it was chosen and
-/// readable now — is a different face, and the key is drawn again.
+/// readable now — is a different face, and the key is drawn again. The
+/// version comes from [`PictureRevisions`], read off the orchestrator's
+/// lock, so making a face never touches the file.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct KeyPicture {
     path: PathBuf,
@@ -86,22 +89,70 @@ struct FileRevision {
 }
 
 impl KeyPicture {
-    /// The picture at `path` as it is on disk now. A file that cannot be
-    /// read has no revision, so its becoming readable changes the face.
-    #[must_use]
-    pub fn current(path: PathBuf) -> Self {
-        let revision = std::fs::metadata(&path).ok().map(|meta| FileRevision {
-            modified: meta.modified().ok(),
-            len: meta.len(),
-        });
-        Self { path, revision }
-    }
-
     /// The picture's file.
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
     }
+}
+
+/// The versions of the pictures on keys, as last read from disk.
+///
+/// Reading a version is a file-system call, which can stall on a slow or
+/// unavailable share, so it happens in [`Self::read`], off the async
+/// threads and outside the orchestrator's lock; making a face only looks
+/// the version up ([`Self::picture`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PictureRevisions(BTreeMap<PathBuf, Option<FileRevision>>);
+
+impl PictureRevisions {
+    /// Read the version of each picture in `paths`. Blocking: run it off the
+    /// async threads, and never under a lock other work waits on. A network
+    /// or device path, which a stat could hang on, is never touched, and a
+    /// file that cannot be read has no version, so its becoming readable
+    /// changes the face.
+    #[must_use]
+    pub fn read(paths: impl IntoIterator<Item = PathBuf>) -> Self {
+        Self(
+            paths
+                .into_iter()
+                .map(|path| {
+                    let revision = is_local_picture_path(&path)
+                        .then(|| std::fs::metadata(&path).ok())
+                        .flatten()
+                        .map(|meta| FileRevision {
+                            modified: meta.modified().ok(),
+                            len: meta.len(),
+                        });
+                    (path, revision)
+                })
+                .collect(),
+        )
+    }
+
+    /// `path` as a key picture, with the version last read — none while it
+    /// has not been read.
+    #[must_use]
+    pub fn picture(&self, path: &Path) -> KeyPicture {
+        KeyPicture {
+            path: path.to_owned(),
+            revision: self.0.get(path).copied().flatten(),
+        }
+    }
+}
+
+/// Whether `path` is a picture OpenLogi may touch at all: not a network
+/// share or device path, which a stat or a read could hang on. The one
+/// check both the version read and [`load_picture`] apply.
+fn is_local_picture_path(path: &Path) -> bool {
+    use std::path::{Component, Prefix};
+    !matches!(
+        path.components().next(),
+        Some(Component::Prefix(prefix)) if matches!(
+            prefix.kind(),
+            Prefix::UNC(..) | Prefix::VerbatimUNC(..) | Prefix::DeviceNS(..) | Prefix::Verbatim(..)
+        )
+    )
 }
 
 /// The one glyph a styled face draws above its label: the user's symbol, else
@@ -459,13 +510,7 @@ const MAX_PICTURE_ALLOC: u64 = 128 * 1024 * 1024;
 /// [`MAX_PICTURE_ALLOC`], so a decompression bomb fails instead of taking
 /// the agent's memory.
 pub(super) fn load_picture(path: &Path) -> Result<image::DynamicImage, String> {
-    use std::path::{Component, Prefix};
-    if let Some(Component::Prefix(prefix)) = path.components().next()
-        && matches!(
-            prefix.kind(),
-            Prefix::UNC(..) | Prefix::VerbatimUNC(..) | Prefix::DeviceNS(..) | Prefix::Verbatim(..)
-        )
-    {
+    if !is_local_picture_path(path) {
         return Err("network and device paths are not read".to_owned());
     }
     let metadata = std::fs::metadata(path).map_err(|error| error.to_string())?;

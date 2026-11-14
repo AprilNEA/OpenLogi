@@ -1292,6 +1292,64 @@ fn keypad_key_faces_follow_the_bound_actions() {
     assert_eq!(spec.display.key_size, 118);
 }
 
+/// Making the keypad's faces touches no file: a picture's version is only
+/// looked up, as last read by the watcher outside the orchestrator's lock,
+/// so a picture on a stalled share cannot hold up device updates. Handing in
+/// a newly read version repaints the key; an unchanged one publishes
+/// nothing.
+#[test]
+fn picture_revision_reads_do_not_block_device_updates() {
+    use crate::watchers::key_display::{KeyFace, PictureRevisions};
+    use openlogi_core::config::KeyFaceStyle;
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("key.png");
+    std::fs::write(&path, b"first").expect("picture written");
+    let mut config = Config::default();
+    config.set_key_face_style(
+        "keypad",
+        ButtonId::grid(GridKey::Middle),
+        Some(KeyFaceStyle {
+            image: Some(path.clone()),
+            ..KeyFaceStyle::default()
+        }),
+    );
+    let mut orch = orchestrator(config);
+    orch.devices = vec![wired_keypad("keypad", true)];
+    let picture_of = |orch: &Orchestrator| {
+        let specs = orch.key_display_specs_for();
+        let [spec] = specs.as_slice() else {
+            panic!("one keypad publishes one spec: {specs:?}");
+        };
+        match &spec.faces[&GridKey::Middle] {
+            KeyFace::Styled(face) => face.image.clone().expect("the face has its picture"),
+            other => panic!("a styled face, got {other:?}"),
+        }
+    };
+
+    assert_eq!(orch.key_picture_paths(), BTreeSet::from([path.clone()]));
+    assert_eq!(
+        picture_of(&orch),
+        PictureRevisions::default().picture(&path),
+        "no version is read while making the faces"
+    );
+
+    let read = PictureRevisions::read(orch.key_picture_paths());
+    orch.set_picture_revisions(read.clone());
+    let first = picture_of(&orch);
+    assert_eq!(first, read.picture(&path));
+    assert_ne!(first, PictureRevisions::default().picture(&path));
+
+    std::fs::write(&path, b"replaced, and longer").expect("picture replaced");
+    assert_eq!(picture_of(&orch), first, "still no file access of its own");
+    orch.set_picture_revisions(PictureRevisions::read(orch.key_picture_paths()));
+    assert_ne!(
+        picture_of(&orch),
+        first,
+        "the replaced picture is a new face"
+    );
+}
+
 /// Only a device whose panel the registry describes gets a spec — a bound
 /// numpad-kind device on another route does not — and a keypad that is
 /// offline or disabled publishes nothing to paint.

@@ -63,7 +63,7 @@ use crate::runtime::{PageTurn, PointerSelection};
 use crate::watchers::host_switch::{HostSwitchLink, HostSwitchLinks, LinkedHostSwitch};
 use crate::watchers::inventory::InventoryRefresh;
 use crate::watchers::key_display::{
-    KeyDisplaySpec, KeyFace, KeyPicture, SharedKeyDisplaySpecs, StyledFace,
+    KeyDisplaySpec, KeyFace, PictureRevisions, SharedKeyDisplaySpecs, StyledFace,
 };
 use crate::watchers::keyboard::{KeyboardSpec, SharedKeyboardSpecs};
 use crate::watchers::light::{WatchedLight, WatchedLights};
@@ -811,6 +811,9 @@ pub struct Orchestrator {
     low_battery: LowBatteryWatch,
     /// The live keypad keys' values and the active one.
     live: crate::live_keys::LiveKeys,
+    /// The versions of the key pictures, read by the live-key watcher off
+    /// this lock ([`Self::set_picture_revisions`]).
+    picture_revisions: PictureRevisions,
 }
 
 /// See [`Orchestrator::inventory`] (the field) — the agent-side superset of
@@ -1020,6 +1023,7 @@ impl Orchestrator {
             observable,
             low_battery: LowBatteryWatch::default(),
             live: crate::live_keys::LiveKeys::default(),
+            picture_revisions: PictureRevisions::default(),
         };
         orch.rebuild();
         orch.observable
@@ -1344,13 +1348,30 @@ impl Orchestrator {
         }
     }
 
-    /// Republish what the keypads' LCD keys show when a picture on one of
-    /// them changed on disk. A face carries its picture's file version
-    /// ([`KeyPicture`]), so a file replaced at the same path — which saves
+    /// Every picture a key face is configured with, for the live-key watcher
+    /// to read the versions of ([`PictureRevisions::read`]) outside this
+    /// orchestrator's lock. Touches no file.
+    #[must_use]
+    pub fn key_picture_paths(&self) -> BTreeSet<std::path::PathBuf> {
+        self.config
+            .devices
+            .values()
+            .flat_map(|device| device.key_faces.values())
+            .filter_map(|style| style.image.clone())
+            .collect()
+    }
+
+    /// Take in freshly read picture versions and repaint the keys whose
+    /// picture changed on disk. A face carries its picture's version
+    /// ([`KeyPicture`](crate::watchers::key_display::KeyPicture)), so a
+    /// file replaced at the same path — which saves
     /// no config — is drawn again within a watcher tick. Publishes nothing
     /// when every face is unchanged.
-    pub fn refresh_key_displays(&self) {
-        publish_arc_if_changed(&self.key_display_specs_tx, self.key_display_specs_for());
+    pub fn set_picture_revisions(&mut self, revisions: PictureRevisions) {
+        if self.picture_revisions != revisions {
+            self.picture_revisions = revisions;
+            publish_arc_if_changed(&self.key_display_specs_tx, self.key_display_specs_for());
+        }
     }
 
     /// A press of the live key `slot` on `device_key`: activate or end it.
@@ -1580,7 +1601,11 @@ impl Orchestrator {
                             let id = (dev.config_key.clone(), slot);
                             live_face(style, self.live.value(&id), self.live.is_active(&id))
                         } else {
-                            key_face(bindings.get(&ButtonId::grid(key)), style)
+                            key_face(
+                                bindings.get(&ButtonId::grid(key)),
+                                style,
+                                &self.picture_revisions,
+                            )
                         };
                         (key, face)
                     })
@@ -2890,7 +2915,11 @@ fn is_bound_key(binding: &Binding) -> bool {
 ///
 /// A key the user styled ([`KeyFaceStyle`]) draws that style instead, with
 /// the action's icon only when the style asks for it.
-fn key_face(binding: Option<&Binding>, style: Option<&KeyFaceStyle>) -> KeyFace {
+fn key_face(
+    binding: Option<&Binding>,
+    style: Option<&KeyFaceStyle>,
+    pictures: &PictureRevisions,
+) -> KeyFace {
     let icon = binding
         .and_then(Binding::key_action)
         .map(|action| ActionRingIcon::for_action(&action));
@@ -2904,7 +2933,7 @@ fn key_face(binding: Option<&Binding>, style: Option<&KeyFaceStyle>) -> KeyFace 
         foreground: style.color.unwrap_or(Rgb::WHITE),
         icon_color: style.icon_color.or(style.color).unwrap_or(Rgb::WHITE),
         gradient: style.gradient,
-        image: style.image.clone().map(KeyPicture::current),
+        image: style.image.as_deref().map(|path| pictures.picture(path)),
         symbol: style.symbol.as_ref().and_then(KeySymbol::normalized),
         progress: None,
         highlight: false,
