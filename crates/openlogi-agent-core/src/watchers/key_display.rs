@@ -24,7 +24,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use openlogi_core::binding::GridKey;
-use openlogi_hid::{DeviceRoute, HidppOperation, KeyDisplay, KeyImageJpeg, write_key_image_on};
+use openlogi_hid::{
+    DeviceRoute, HidppOperation, KeyDisplay, KeyImageJpeg, KeyImageWrites, write_key_image_on,
+};
 use tokio::sync::{oneshot, watch};
 use tokio::time::Instant;
 use tracing::{debug, warn};
@@ -298,24 +300,33 @@ async fn manage(
 ) -> ManagerCompletion {
     let mut painted = Painted::default();
     let mut tiles = Tiles::default();
-    loop {
+    let writes = KeyImageWrites::default();
+    let completion = loop {
         let wanted = Arc::clone(&specs.borrow_and_update());
         let pending = painted.plan(&wanted, Instant::now());
         tokio::select! {
-            () = paint_all(&pending, &mut painted, &mut tiles, &access) => {}
-            _ = &mut shutdown => return ManagerCompletion::Graceful,
+            () = paint_all(&pending, &mut painted, &mut tiles, &access, &writes) => {}
+            _ = &mut shutdown => break ManagerCompletion::Graceful,
         }
         let retry = painted.next_retry();
         tokio::select! {
             changed = specs.changed() => {
                 if changed.is_err() {
-                    return ManagerCompletion::Unexpected;
+                    break ManagerCompletion::Unexpected;
                 }
             }
             () = wait_for_deadline(retry) => {}
-            _ = &mut shutdown => return ManagerCompletion::Graceful,
+            _ = &mut shutdown => break ManagerCompletion::Graceful,
         }
-    }
+    };
+    // An image that stopped being awaited still holds the channel's request
+    // pause until the keypad acknowledges it or its deadline passes, on a
+    // task of this worker's runtime. The runtime is dropped once this
+    // returns, which would cancel that task and release the pause early —
+    // letting teardown's HID++ requests reach a keypad still taking the
+    // image. Every image ends first.
+    writes.settled().await;
+    completion
 }
 
 /// Paint every key in `pending`, recording each acknowledged one and each
@@ -329,6 +340,7 @@ async fn paint_all(
     painted: &mut Painted,
     tiles: &mut Tiles,
     access: &DeviceAccess,
+    writes: &KeyImageWrites,
 ) {
     let mut failed: Vec<&DeviceRoute> = Vec::new();
     for paint in pending {
@@ -343,7 +355,7 @@ async fn paint_all(
         let result = access
             .op(route)
             .run(HidppOperation::WriteKeyImage, |channel| async move {
-                write_key_image_on(&channel, display, key, &tile).await
+                write_key_image_on(&channel, display, key, &tile, writes).await
             })
             .await;
         match result {

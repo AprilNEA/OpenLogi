@@ -79,7 +79,7 @@ pub use write::{
     DpiInfo, DpiLed, DpiTarget, EasySwitchHosts, EasySwitchSlot, FeatureEntry, FirmwareEntity,
     FirmwareEntityInfo, ForceSensingInfo, HapticRestore, HapticRestoreOutcome, HapticWaveform,
     HidppFeatureErrorKind, HidppOperation, HostConnection, HostOs, HostOsInfo, HostOsKind,
-    KEY_IMAGE_SINGLE_PACKET_MAX, KeyDisplay, KeyImageJpeg, LITRA_BEAM_PRODUCT_ID,
+    KEY_IMAGE_SINGLE_PACKET_MAX, KeyDisplay, KeyImageJpeg, KeyImageWrites, LITRA_BEAM_PRODUCT_ID,
     LITRA_GLOW_PRODUCT_ID, LightChange, LightCommand, LightControls, LightWatch, LightingMethod,
     LitraDescriptor, LitraModel, OsLayoutOutcome, OsMask, OsVersion, PointerSpeed,
     RAW_BATTERY_FEATURES, RAW_FEATURE_PARAMS, RawFeatureAnswers, RawFeatureCall, RawFeatureReply,

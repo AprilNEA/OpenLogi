@@ -80,7 +80,8 @@ pub use hires_wheel::{
 };
 pub use key_brightness::{get_key_display_brightness_on, set_key_display_brightness_on};
 pub use key_display::{
-    KEY_IMAGE_SINGLE_PACKET_MAX, KeyDisplay, KeyImageJpeg, key_display_for, write_key_image_on,
+    KEY_IMAGE_SINGLE_PACKET_MAX, KeyDisplay, KeyImageJpeg, KeyImageWrites, key_display_for,
+    write_key_image_on,
 };
 pub use lighting::{
     LightingMethod, LightingWrite, LitZone, RgbControlLease, ZoneWalkStep, release_rgb_control,

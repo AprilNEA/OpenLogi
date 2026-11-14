@@ -179,9 +179,15 @@ fn an_ack_with_any_other_status_is_a_refusal() {
 async fn a_tile_the_device_refuses_fails_instead_of_counting_as_written() {
     let (shared, _handle) = answering(Some(ack_with_status([0x01, 0x00]))).await;
 
-    let error = write_key_image_on(&shared, display(), GridKey::TopLeft, &jpeg(900))
-        .await
-        .unwrap_err();
+    let error = write_key_image_on(
+        &shared,
+        display(),
+        GridKey::TopLeft,
+        &jpeg(900),
+        &KeyImageWrites::default(),
+    )
+    .await
+    .unwrap_err();
 
     assert!(matches!(error, WriteError::Hidpp(message) if message.contains("01 00")));
 }
@@ -190,9 +196,15 @@ async fn a_tile_the_device_refuses_fails_instead_of_counting_as_written() {
 async fn a_written_tile_lands_at_its_key_and_completes_on_the_ack() {
     let (shared, handle) = keypad(true).await;
 
-    write_key_image_on(&shared, display(), GridKey::BottomMiddle, &jpeg(900))
-        .await
-        .unwrap();
+    write_key_image_on(
+        &shared,
+        display(),
+        GridKey::BottomMiddle,
+        &jpeg(900),
+        &KeyImageWrites::default(),
+    )
+    .await
+    .unwrap();
 
     let images: Vec<_> = handle
         .written_reports()
@@ -208,9 +220,15 @@ async fn a_written_tile_lands_at_its_key_and_completes_on_the_ack() {
 async fn a_tile_the_device_never_acknowledges_times_out() {
     let (shared, _handle) = keypad(false).await;
 
-    let error = write_key_image_on(&shared, display(), GridKey::TopLeft, &jpeg(900))
-        .await
-        .unwrap_err();
+    let error = write_key_image_on(
+        &shared,
+        display(),
+        GridKey::TopLeft,
+        &jpeg(900),
+        &KeyImageWrites::default(),
+    )
+    .await
+    .unwrap_err();
 
     assert!(matches!(
         error,
@@ -228,9 +246,15 @@ async fn a_key_off_the_panel_writes_nothing() {
         ..display()
     };
 
-    let error = write_key_image_on(&shared, one_key, GridKey::Middle, &jpeg(10))
-        .await
-        .unwrap_err();
+    let error = write_key_image_on(
+        &shared,
+        one_key,
+        GridKey::Middle,
+        &jpeg(10),
+        &KeyImageWrites::default(),
+    )
+    .await
+    .unwrap_err();
 
     assert!(matches!(error, WriteError::Hidpp(_)));
     assert!(
@@ -280,7 +304,14 @@ async fn an_image_waits_for_the_request_in_flight() {
     });
     held.request_written().await;
     let image = tokio::spawn(async move {
-        write_key_image_on(&shared, display(), GridKey::TopLeft, &jpeg(900)).await
+        write_key_image_on(
+            &shared,
+            display(),
+            GridKey::TopLeft,
+            &jpeg(900),
+            &KeyImageWrites::default(),
+        )
+        .await
     });
     tokio::time::sleep(Duration::from_millis(20)).await;
     let is_image = |report: &Vec<u8>| report.first() == Some(&IMAGE_HEADER[0]);
@@ -322,7 +353,13 @@ async fn a_cancelled_image_holds_requests_until_its_ack_times_out() {
 
     let cancelled = tokio::time::timeout(
         Duration::from_millis(100),
-        write_key_image_on(&shared, display(), GridKey::TopLeft, &jpeg(900)),
+        write_key_image_on(
+            &shared,
+            display(),
+            GridKey::TopLeft,
+            &jpeg(900),
+            &KeyImageWrites::default(),
+        ),
     )
     .await;
     assert!(cancelled.is_err(), "the image is still awaiting its ack");
@@ -348,4 +385,47 @@ async fn a_cancelled_image_holds_requests_until_its_ack_times_out() {
     tokio::time::sleep(ACK_TIMEOUT).await;
     request.await.unwrap().unwrap();
     assert!(handle.written_reports().iter().any(is_ping));
+}
+
+/// An owner shutting down waits for an image whose caller already gave up:
+/// it holds the request pause until the keypad acknowledges it or its
+/// deadline passes, and dropping the runtime before then would cancel it
+/// and release the pause early. With nothing running, there is nothing to
+/// wait for.
+#[tokio::test(start_paused = true)]
+async fn key_display_shutdown_keeps_pause_until_ack() {
+    use std::sync::Arc;
+
+    use crate::channel::scripted::ping_reply;
+
+    let writes = KeyImageWrites::default();
+    tokio::time::timeout(Duration::from_millis(1), writes.settled())
+        .await
+        .expect("nothing running settles at once");
+
+    // Never acknowledges an image; answers the protocol ping.
+    let (raw, _handle) = ScriptedRawHidChannel::with_dynamic_responder(|request| {
+        (request.first() != Some(&IMAGE_HEADER[0]))
+            .then(|| ping_reply(request))
+            .flatten()
+    });
+    let channel = scripted_channel(raw).await;
+    let shared = SharedChannel::new(Arc::clone(&channel), KEYPAD);
+    let cancelled = tokio::time::timeout(
+        Duration::from_millis(100),
+        write_key_image_on(&shared, display(), GridKey::TopLeft, &jpeg(900), &writes),
+    )
+    .await;
+    assert!(cancelled.is_err(), "the image is still awaiting its ack");
+
+    let mut settled = std::pin::pin!(writes.settled());
+    assert!(
+        tokio::time::timeout(ACK_TIMEOUT / 2, &mut settled)
+            .await
+            .is_err(),
+        "shutdown waits while the image holds the pause"
+    );
+    tokio::time::timeout(ACK_TIMEOUT, settled)
+        .await
+        .expect("the image ends at its acknowledgement deadline");
 }

@@ -24,13 +24,14 @@
 //! keys sit is the product's identity fact, owned by
 //! [`openlogi_device_registry::keypad`].
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use openlogi_core::binding::GridKey;
 pub use openlogi_device_registry::keypad::KeyDisplay;
 use openlogi_device_registry::keypad::PanelPoint;
-use tokio::sync::oneshot;
+use tokio::sync::{Notify, oneshot};
 use tracing::debug;
 
 use super::{HidppOperation, WriteError, write_whole_raw_report};
@@ -61,6 +62,54 @@ const ACK_TIMEOUT: Duration = Duration::from_secs(2);
 /// How long an image waits for the HID++ requests already in flight: the
 /// default request timeout, after which an unanswered request has given up.
 const PAUSE_TIMEOUT: Duration = hidpp::channel::SEND_RESPONSE_TIMEOUT;
+
+/// The key-image writes started for one owner that are still running.
+///
+/// Once its first packet is out, an image runs to the device's
+/// acknowledgement or its deadline with the channel's request pause held,
+/// even after its caller gave up ([`write_key_image_on`]) — on a task of the
+/// caller's runtime. An owner about to let that runtime go waits for
+/// [`Self::settled`] first: dropping the runtime would cancel the image
+/// mid-write and release the pause while the keypad is still taking it.
+#[derive(Clone, Debug, Default)]
+pub struct KeyImageWrites(Arc<RunningWrites>);
+
+#[derive(Debug, Default)]
+struct RunningWrites {
+    running: AtomicUsize,
+    settled: Notify,
+}
+
+/// One running image write, counted until it ends — or is cancelled.
+struct RunningWrite(Arc<RunningWrites>);
+
+impl KeyImageWrites {
+    fn start(&self) -> RunningWrite {
+        self.0.running.fetch_add(1, Ordering::SeqCst);
+        RunningWrite(Arc::clone(&self.0))
+    }
+
+    /// Wait until every image write started through these handles has
+    /// ended — acknowledged, refused, or past its deadline. Each one is
+    /// bounded by its own deadlines, so this is too.
+    pub async fn settled(&self) {
+        loop {
+            let settled = self.0.settled.notified();
+            if self.0.running.load(Ordering::SeqCst) == 0 {
+                return;
+            }
+            settled.await;
+        }
+    }
+}
+
+impl Drop for RunningWrite {
+    fn drop(&mut self) {
+        if self.0.running.fetch_sub(1, Ordering::SeqCst) == 1 {
+            self.0.settled.notify_waiters();
+        }
+    }
+}
 
 /// The LCD key panel of the device at `route`, or `None` when its keys are not
 /// displays: only a keypad the route reaches ([`DeviceRoute::keypad`]) has
@@ -109,12 +158,13 @@ impl KeyImageJpeg {
 /// HID++ requests on the channel wait while the image is written (see
 /// [`hidpp::channel::HidppChannel::pause_requests`]). Once its first packet
 /// is out, the image runs to the device's acknowledgement or its timeout
-/// even if this future is dropped.
+/// even if this future is dropped, counted in `writes` until it ends.
 pub async fn write_key_image_on(
     shared: &SharedChannel,
     display: KeyDisplay,
     key: GridKey,
     image: &KeyImageJpeg,
+    writes: &KeyImageWrites,
 ) -> Result<(), WriteError> {
     let origin = display
         .key_origin(key.position())
@@ -147,7 +197,9 @@ pub async fn write_key_image_on(
     // Once the first packet goes out, the image runs to its ack or its
     // timeout with the pause held, even when the caller gives up meanwhile:
     // a request must not reach the keypad while it is still taking the image.
+    let running = writes.start();
     let transaction = tokio::spawn(async move {
+        let _running = running;
         let _pause = pause;
         let _ack_listener = ack_listener;
         for packet in &packets {
