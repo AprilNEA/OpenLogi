@@ -10,6 +10,17 @@ const KEYPAD: DeviceRoute = DeviceRoute::Direct {
     product_id: 0xc354,
 };
 
+/// How long a test waits for a report, a reply or a task it expects before
+/// it fails, instead of hanging the run.
+const DEADLINE: Duration = Duration::from_secs(5);
+
+/// `future`'s output, or a failure naming `what` once [`DEADLINE`] passes.
+async fn within<F: std::future::Future>(future: F, what: &str) -> F::Output {
+    tokio::time::timeout(DEADLINE, future)
+        .await
+        .unwrap_or_else(|_| panic!("expected {what} within {DEADLINE:?}"))
+}
+
 fn display() -> KeyDisplay {
     key_display_for(&KEYPAD).expect("the MX Creative Keypad's keys are displays")
 }
@@ -302,7 +313,7 @@ async fn an_image_waits_for_the_request_in_flight() {
                 .await
         }
     });
-    held.request_written().await;
+    within(held.request_written(), "the ping reached the keypad").await;
     let image = tokio::spawn(async move {
         write_key_image_on(
             &shared,
@@ -321,8 +332,14 @@ async fn an_image_waits_for_the_request_in_flight() {
     );
 
     held.release();
-    request.await.unwrap().unwrap();
-    image.await.unwrap().unwrap();
+    within(request, "the ping got its reply")
+        .await
+        .unwrap()
+        .unwrap();
+    within(image, "the image was written after the ping")
+        .await
+        .unwrap()
+        .unwrap();
     let written = handle.written_reports();
     let ping_at = written.iter().position(|report| report[2] == 0x00).unwrap();
     let image_at = written.iter().position(is_image).unwrap();
@@ -383,6 +400,9 @@ async fn a_cancelled_image_holds_requests_until_its_ack_times_out() {
     );
 
     tokio::time::sleep(ACK_TIMEOUT).await;
+    // Bounded by the request's own response timeout, which runs on real
+    // time: a Tokio deadline here would fire at once, since the paused clock
+    // skips ahead while the reply comes from the scripted channel's thread.
     request.await.unwrap().unwrap();
     assert!(handle.written_reports().iter().any(is_ping));
 }

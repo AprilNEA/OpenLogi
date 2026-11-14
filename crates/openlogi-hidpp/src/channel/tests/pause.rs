@@ -6,6 +6,24 @@
 
 use super::*;
 
+/// How long a test waits for a pause it expects to be taken before it fails,
+/// instead of hanging the run. A request is bounded by its own response
+/// timeout; taking a pause has none.
+const DEADLINE: Duration = Duration::from_secs(5);
+
+/// `future`'s output, or a failure naming `what` once [`DEADLINE`] passes.
+/// Runtime-agnostic, like these tests' executor.
+async fn within<F: std::future::Future>(future: F, what: &str) -> F::Output {
+    let future = std::pin::pin!(future);
+    let deadline = futures_timer::Delay::new(DEADLINE);
+    match futures::future::select(future, deadline).await {
+        futures::future::Either::Left((output, _)) => output,
+        futures::future::Either::Right(((), _)) => {
+            panic!("expected {what} within {DEADLINE:?}")
+        }
+    }
+}
+
 /// Poll `future` a few times with short sleeps between, and require it to
 /// stay pending.
 async fn assert_stays_pending<F: std::future::Future + Unpin>(future: &mut F) {
@@ -37,7 +55,7 @@ fn a_request_waits_while_a_pause_holds_the_channel() {
         let (raw, handle) = MockRawHidChannel::new();
         let channel = channel_with_reader(raw).await;
         // Nothing is in flight, so the pause is taken at once.
-        let pause = channel.pause_requests().await;
+        let pause = within(channel.pause_requests(), "the free channel's pause").await;
 
         let reply = short_msg(0x11);
         let mut request =
@@ -72,7 +90,7 @@ fn a_pause_waits_for_the_requests_in_flight() {
 
         handle.send_incoming(reply).await;
         assert_eq!(request.await.unwrap(), reply);
-        let _pause = pause.await;
+        let _pause = within(pause, "the pause once the request was answered").await;
         assert_pending_empty(&channel);
     });
 }
@@ -101,7 +119,7 @@ fn a_waiting_pause_holds_back_new_requests() {
 
         handle.send_incoming(first_reply).await;
         assert_eq!(first.await.unwrap(), first_reply);
-        let pause = pause.await;
+        let pause = within(pause, "the pause once the first request was answered").await;
         assert_stays_pending(&mut later).await;
         assert_eq!(
             handle.written_reports().len(),
