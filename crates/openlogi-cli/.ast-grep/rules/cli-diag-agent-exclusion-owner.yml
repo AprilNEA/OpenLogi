@@ -1,0 +1,22 @@
+# Owner: openlogi_cli::cmd::diag::exclude_agent — how a direct-hardware
+# diagnostic keeps the agent off the devices: the agent's instance lock, held
+# for the whole command, then the endpoint check.
+id: cli-diag-agent-exclusion-owner
+language: rust
+severity: error
+message: A diag subcommand that writes to a device directly takes crate::cmd::diag::exclude_agent and holds its guard; do not acquire the agent's instance lock here.
+note: |
+  `diag hidpp` carried this lock-then-probe sequence inline, and the onboard
+  startup-DPI write needed the same one. See "Single source of truth" in
+  AGENTS.md. Tests that play the agent's part acquire the lock directly.
+files:
+  - crates/openlogi-cli/src/cmd/diag/**/*.rs
+rule:
+  pattern: single_instance::acquire($$$ARGS)
+  not:
+    inside:
+      kind: mod_item
+      has:
+        field: name
+        regex: ^tests$
+      stopBy: end

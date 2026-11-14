@@ -90,7 +90,10 @@ pub use litra::{
     encode_command as encode_litra_command, find_litra, litra_model_for_route, matches_litra,
     read_state as read_litra_state, watch as watch_litra,
 };
-pub use onboard::{get_onboard, get_onboard_on};
+pub use onboard::{
+    OnboardDefaultDpi, OnboardDefaultDpiChange, get_onboard, get_onboard_on,
+    set_onboard_default_dpi,
+};
 pub use openlogi_core::hid::{DisableKeysMask, DisableKeysState};
 pub use openlogi_core::hid::{
     EasySwitchHosts, EasySwitchSlot, HostConnection, HostOsInfo, HostOsKind,

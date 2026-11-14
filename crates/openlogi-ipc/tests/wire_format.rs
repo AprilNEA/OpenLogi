@@ -989,6 +989,7 @@ fn device_inventory() {
 #[test]
 fn onboard_state() {
     assert_wire(&HidppOperation::ReadOnboard, "1c");
+    assert_wire(&HidppOperation::WriteOnboard, "21");
     assert_wire(
         &AgentRequest::ReadOnboard {
             route: DeviceRoute::Bolt {
