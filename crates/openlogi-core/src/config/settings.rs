@@ -394,6 +394,43 @@ impl From<VerticalScrollSensitivity> for f32 {
     }
 }
 
+/// Raw movement units between repeated actions in one held gesture.
+///
+/// Positive values keep the accumulator's carry arithmetic bounded and prevent
+/// a stationary report from firing another action. The default preserves the
+/// existing 600-unit spacing; this does not change the first swipe's threshold.
+#[nutype(
+    const_fn,
+    validate(greater = 0),
+    derive(
+        Debug,
+        Clone,
+        Copy,
+        PartialEq,
+        Eq,
+        TryFrom,
+        Into,
+        Display,
+        Serialize,
+        Deserialize
+    )
+)]
+pub struct GestureRepeatDistance(i32);
+
+impl GestureRepeatDistance {
+    /// Existing repeat spacing, used when a device has no override.
+    pub const DEFAULT: Self = match Self::try_new(600) {
+        Ok(value) => value,
+        Err(_) => panic!("valid default gesture repeat distance"),
+    };
+}
+
+impl Default for GestureRepeatDistance {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
 /// Thumb-wheel responsiveness on OpenLogi's `1..=100` scale.
 #[nutype(
     const_fn,

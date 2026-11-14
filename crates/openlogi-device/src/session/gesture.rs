@@ -34,6 +34,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use hidpp::feature::hires_wheel::{self, HiResWheelEvent};
 use hidpp::protocol::v20;
 use openlogi_core::binding::{ButtonId, GestureDirection};
+use openlogi_core::config::GestureRepeatDistance;
 use tokio::sync::mpsc;
 use tracing::{debug, info};
 
@@ -205,6 +206,8 @@ pub struct CaptureSpec {
     pub divert_main_wheel: Option<MainWheelDivert>,
     /// G-series host mode or onboard profile.
     pub onboard: Option<OnboardTarget>,
+    /// Movement between repeated gesture actions.
+    pub gesture_repeat_distance: GestureRepeatDistance,
 }
 
 /// Capture the controls selected by `spec` on `route` until `host.shutdown`
@@ -246,7 +249,12 @@ pub async fn run_capture_session(
     {
         let _ = host.sink.send(CapturedInput::HostModeEntered);
     }
-    Ok(run_capture(shared, GestureCapture::new(armed), host).await)
+    Ok(run_capture(
+        shared,
+        GestureCapture::new(armed, spec.gesture_repeat_distance),
+        host,
+    )
+    .await)
 }
 
 /// Gesture capture as [`run_capture`] drives it: the armed controls, and the
@@ -263,10 +271,10 @@ struct GestureCapture {
 }
 
 impl GestureCapture {
-    fn new(armed: ArmedControls) -> Self {
+    fn new(armed: ArmedControls, repeat_distance: GestureRepeatDistance) -> Self {
         Self {
             armed,
-            accum: Arc::default(),
+            accum: Arc::new(Mutex::new(CaptureAccum::new(repeat_distance))),
             thumb_status: Arc::new(Mutex::new(RotationStatus::Inactive)),
             spy_edges: Arc::default(),
         }
@@ -281,6 +289,12 @@ impl ArmedCapture for GestureCapture {
         let armed = &self.armed;
         info!(
             index = device_index,
+            gesture_repeat_distance = self
+                .accum
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .repeat_distance()
+                .into_inner(),
             gesture_sources = armed.gesture_cids.len(),
             gesture_buttons = armed.gesture_button_cids.len(),
             dpi_buttons = armed.dpi_cids.len(),
@@ -409,7 +423,9 @@ impl ArmedCapture for GestureCapture {
     }
 
     fn reset_input_state(&self) {
-        *self.accum.lock().unwrap_or_else(PoisonError::into_inner) = CaptureAccum::default();
+        let mut accum = self.accum.lock().unwrap_or_else(PoisonError::into_inner);
+        *accum = CaptureAccum::new(accum.repeat_distance());
+        drop(accum);
         // A power cycle ends any roll in progress; carrying it over would
         // swallow the first tap after the reconnect.
         *self

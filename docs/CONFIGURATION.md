@@ -154,6 +154,13 @@ again.
 
 Common device fields are:
 
+- `gesture_repeat_distance`: positive raw movement units between repeated actions
+  during one held gesture. Absent uses the existing 600-unit spacing. For example,
+  `gesture_repeat_distance = 20` repeats every 20 units after the first swipe.
+  This affects both HID++ gesture buttons and OS-hook gestures. It changes neither
+  the initial swipe threshold nor the hold delay; smaller values can repeat rapidly.
+  Capture is re-armed on configuration reload and retains the setting after reconnect.
+
 - `custom_name`, `enabled`, `dpi`, `dpi_presets`, thumb-wheel sensitivity,
   scroll inversion, and scroll resolution
 - `smooth_wheel` for mice with a HID++ `0x2121` wheel: `true` smooths that
