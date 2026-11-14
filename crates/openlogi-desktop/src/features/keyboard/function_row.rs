@@ -906,7 +906,10 @@ struct DeviceSettings {
 enum KeyBrightnessSetting {
     /// The device has not measured the feature that sets it (`0x8040`).
     Unsupported,
-    /// The keypad measured it.
+    /// The keypad measured it but is offline: a release could not reach
+    /// it, so the bar says so instead of offering the slider.
+    Offline,
+    /// The keypad measured it and is online.
     Offered {
         /// What the keypad reads, else the saved level; `None` while
         /// neither is known.
@@ -924,11 +927,14 @@ impl DeviceSettings {
                 state.device_thumbwheel_sensitivity(key)
             }),
             key_brightness: match state {
-                Some(state) if state.current_key_brightness_supported() => {
+                Some(state) if state.current_key_brightness_writable() => {
                     KeyBrightnessSetting::Offered {
                         brightness: state.current_key_brightness(),
                         refused: state.current_key_brightness_refused(),
                     }
+                }
+                Some(state) if state.current_key_brightness_supported() => {
+                    KeyBrightnessSetting::Offline
                 }
                 Some(_) | None => KeyBrightnessSetting::Unsupported,
             },
@@ -969,6 +975,7 @@ impl FunctionRowView {
                             brightness,
                             refused,
                         } => Some(self.key_brightness_control(brightness, refused, window, cx)),
+                        KeyBrightnessSetting::Offline => Some(key_brightness_offline(&pal)),
                         KeyBrightnessSetting::Unsupported => None,
                     }),
             ),
@@ -977,6 +984,27 @@ impl FunctionRowView {
             }),
         }
     }
+}
+
+/// What the setting bar shows for an offline keypad's brightness: why there
+/// is no slider.
+fn key_brightness_offline(pal: &Palette) -> gpui::Div {
+    h_flex()
+        .debug_selector(|| "key-brightness-offline".into())
+        .gap_2()
+        .items_center()
+        .child(
+            div()
+                .text_caption()
+                .text_color(pal.text_muted)
+                .child(tr!("keyboard.key_brightness")),
+        )
+        .child(
+            div()
+                .text_caption()
+                .text_color(pal.text_muted)
+                .child(tr!("keyboard.key_brightness_offline")),
+        )
 }
 
 /// The row of device settings above the device: wraps onto a second line

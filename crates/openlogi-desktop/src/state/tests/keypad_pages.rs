@@ -9,22 +9,35 @@ use openlogi_core::config::DeviceIdentity;
 use openlogi_core::device_order::PhysicalDeviceKey;
 
 pub(crate) fn keypad_state() -> (AppState, tokio::sync::mpsc::UnboundedReceiver<Command>) {
-    keypad_state_with(Capabilities {
+    keypad_state_with(measured_keypad(), true)
+}
+
+/// What a probe of the MX Creative Keypad measures.
+fn measured_keypad() -> Capabilities {
+    Capabilities {
         key_brightness: true,
         ..Capabilities::presumed_from_kind(DeviceKind::Numpad)
-    })
+    }
 }
 
 /// The MX Creative Keypad before its feature table was read: its kind is
 /// known, `0x8040` is not.
 pub(crate) fn unmeasured_keypad_state() -> (AppState, tokio::sync::mpsc::UnboundedReceiver<Command>)
 {
-    keypad_state_with(Capabilities::presumed_from_kind(DeviceKind::Numpad))
+    keypad_state_with(Capabilities::presumed_from_kind(DeviceKind::Numpad), true)
 }
 
-/// The MX Creative Keypad on its direct node, reporting `capabilities`.
+/// The measured MX Creative Keypad, asleep: its node and route are still
+/// listed, but it does not answer.
+pub(crate) fn asleep_keypad_state() -> (AppState, tokio::sync::mpsc::UnboundedReceiver<Command>) {
+    keypad_state_with(measured_keypad(), false)
+}
+
+/// The MX Creative Keypad on its direct node, reporting `capabilities`,
+/// answering or asleep.
 fn keypad_state_with(
     capabilities: Capabilities,
+    online: bool,
 ) -> (AppState, tokio::sync::mpsc::UnboundedReceiver<Command>) {
     numpad_state_with(
         ReceiverInfo {
@@ -35,6 +48,7 @@ fn keypad_state_with(
         },
         openlogi_core::hid::DIRECT_DEVICE_INDEX,
         capabilities,
+        online,
     )
 }
 
@@ -48,14 +62,17 @@ fn numpad_state(
         receiver,
         slot,
         Capabilities::presumed_from_kind(DeviceKind::Numpad),
+        true,
     )
 }
 
-/// [`numpad_state`] for a number pad reporting `capabilities`.
+/// [`numpad_state`] for a number pad reporting `capabilities`, answering
+/// or asleep.
 fn numpad_state_with(
     receiver: ReceiverInfo,
     slot: u8,
     capabilities: Capabilities,
+    online: bool,
 ) -> (AppState, tokio::sync::mpsc::UnboundedReceiver<Command>) {
     let inventory = DeviceInventory {
         receiver,
@@ -64,7 +81,7 @@ fn numpad_state_with(
             codename: Some("MX Creative Keypad".to_string()),
             wpid: None,
             kind: DeviceKind::Numpad,
-            online: true,
+            online,
             battery: None,
             model_info: Some(DeviceModelInfo {
                 entity_count: 4,

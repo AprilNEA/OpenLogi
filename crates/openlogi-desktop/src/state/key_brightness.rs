@@ -18,7 +18,7 @@
 use std::collections::HashMap;
 
 use openlogi_core::config::KeyDisplayBrightness;
-use openlogi_core::hid::WriteError;
+use openlogi_core::hid::{DeviceRoute, WriteError};
 use tracing::{debug, warn};
 
 use super::device_key::DeviceKey;
@@ -34,6 +34,24 @@ impl AppState {
     #[must_use]
     pub fn current_key_brightness_supported(&self) -> bool {
         self.current_record().is_some_and(has_key_brightness)
+    }
+
+    /// Whether a release of the brightness slider can reach the active
+    /// keypad now: it measured `0x8040` and is online on a route. An offline
+    /// keypad's slider is not offered — the app says why instead — since a
+    /// release could neither be written nor saved.
+    #[must_use]
+    pub fn current_key_brightness_writable(&self) -> bool {
+        self.writable_key_brightness().is_some()
+    }
+
+    /// The active keypad's device key and the route its brightness is
+    /// written on, when [`Self::current_key_brightness_writable`].
+    fn writable_key_brightness(&self) -> Option<(DeviceKey, DeviceRoute)> {
+        let record = self
+            .current_record()
+            .filter(|record| has_key_brightness(record))?;
+        Some((record.device_key(), record.addressable_route()?.clone()))
     }
 
     /// What is known of the active keypad's brightness reading.
@@ -82,15 +100,11 @@ impl AppState {
     /// Write `brightness` to the active keypad through the agent. The slider
     /// shows it at once; the keypad's read-back arrives as
     /// [`Self::apply_key_brightness_written`], which saves it if this is
-    /// still the newest write and the keypad took it. No-op unless the
-    /// keypad measured `0x8040` and has a route.
+    /// still the newest write and the keypad took it. No-op unless
+    /// [`Self::current_key_brightness_writable`].
     pub fn commit_key_brightness(&mut self, brightness: KeyDisplayBrightness) -> StateEvents {
         let events = self.for_current_device(StateEvent::KeyBrightnessChanged);
-        let Some((key, route)) = self
-            .current_record()
-            .filter(|record| has_key_brightness(record))
-            .and_then(|record| Some((record.device_key(), record.route.clone()?)))
-        else {
+        let Some((key, route)) = self.writable_key_brightness() else {
             debug!(%brightness, "no keypad with display-key brightness — ignoring the release");
             return events;
         };

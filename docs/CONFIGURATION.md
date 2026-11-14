@@ -435,7 +435,8 @@ The keypad's LCD keys have three more per-device settings:
   it is. Of several quick changes, the newest is the level that stays. The
   app's slider shows the level the keypad reads, writes it straight to the
   keypad and saves it once the keypad reads it back; a level the keypad does
-  not take is noted beside the slider and not saved.
+  not take is noted beside the slider and not saved. While the keypad is
+  asleep or unplugged the app shows no slider and says why.
   `openlogi api key-brightness --save` sets it from the command line.
 - `key_faces`, by grid key: how a key is drawn instead of its action's icon.
 

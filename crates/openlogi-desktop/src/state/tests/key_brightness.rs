@@ -244,3 +244,21 @@ fn superseded_brightness_does_not_save_matching_readback(cx: &mut gpui::TestAppC
         "a matching reading after a superseded write saves nothing"
     );
 }
+
+/// An asleep keypad still lists its route, but a release could reach it
+/// neither as a write nor as a save: it is not writable, and a release
+/// sends nothing.
+#[test]
+fn offline_keypad_brightness_cannot_accept_release() {
+    let (mut state, mut receiver) = super::keypad_pages::asleep_keypad_state();
+    drain(&mut receiver);
+    assert!(
+        state.current_key_brightness_supported(),
+        "the measurement stays"
+    );
+    assert!(!state.current_key_brightness_writable());
+
+    let _ = state.commit_key_brightness(level(30));
+
+    assert!(writes(&drain(&mut receiver)).is_empty());
+}

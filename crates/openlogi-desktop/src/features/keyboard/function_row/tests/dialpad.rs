@@ -471,3 +471,22 @@ fn a_refused_key_brightness_shows_a_note(cx: &mut gpui::TestAppContext) {
     drop(view);
     window.update(|window, _| window.remove_window());
 }
+
+/// An asleep keypad's bar says why there is no brightness slider instead of
+/// offering one whose release would go nowhere.
+#[gpui::test]
+fn an_asleep_keypad_offers_no_brightness_slider(cx: &mut gpui::TestAppContext) {
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+
+    init_ui(cx);
+    let (state, _commands) = crate::state::tests::keypad_pages::asleep_keypad_state();
+    let (view, window) = open_keys_view(cx, state);
+    assert!(window.debug_bounds("key-brightness").is_none());
+    assert!(
+        window.debug_bounds("key-brightness-offline").is_some(),
+        "the bar says why"
+    );
+    drop(view);
+    window.update(|window, _| window.remove_window());
+}
