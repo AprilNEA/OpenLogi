@@ -16,9 +16,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Weak};
 
-use std::time::Instant;
-
-use openlogi_core::binding::{Action, Binding, ButtonId, GKeyProfile, Rotary};
+use openlogi_core::binding::{Binding, ButtonId, GKeyProfile, Rotary};
 use openlogi_core::bindings::{GamingPress, gaming_press};
 use openlogi_core::config::{GamingKeyMode, ThumbwheelSensitivity};
 use openlogi_hid::{
@@ -40,7 +38,7 @@ use crate::runtime::{ActionDispatcher, HidppSessionId};
 
 mod rotary;
 
-use rotary::{RotaryAccumulators, RotaryOutput, RotaryTurn};
+use rotary::{RotaryAccumulators, RotaryOutput};
 
 /// Everything the watcher needs to capture one keyboard: where it is, which
 /// `0x1b04` controls to divert and which keypad grid keys to observe (only
@@ -207,19 +205,13 @@ fn dispatch_input(
     rotary: &mut RotaryAccumulators,
 ) {
     match input {
-        CapturedInput::Rotation {
-            rotary: control,
-            increments,
-            per_revolution,
-        } => {
-            let Some(turn) = RotaryTurn::new(control, increments, per_revolution) else {
+        CapturedInput::Rotation { .. } => {
+            let Some((turn, action, output)) =
+                rotary.rotation(input, &bindings.bindings, bindings.rotary_sensitivity)
+            else {
                 return;
             };
-            let action = bindings
-                .bindings
-                .get(&turn.button)
-                .map_or(Action::None, Binding::click_action);
-            match rotary.advance(turn, &action, bindings.rotary_sensitivity, Instant::now()) {
+            match output {
                 RotaryOutput::Idle => {}
                 // A diverted roller no longer scrolls by itself, and the
                 // keyboard plane has no smoothing runtime: post it directly.

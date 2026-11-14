@@ -36,6 +36,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Instant;
 
 use hidpp::feature::CreatableFeature as _;
 use hidpp::feature::gaming_g_keys::{GKeys, GamingGKeysEvent, GamingGKeysFeature};
@@ -981,6 +982,7 @@ impl ArmedCapture for ArmedKeys {
                         rotary,
                         increments: i16::from(rotation.delta),
                         per_revolution,
+                        at: Instant::now(),
                     });
                 }
                 return;

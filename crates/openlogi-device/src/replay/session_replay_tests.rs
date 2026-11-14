@@ -225,13 +225,16 @@ async fn keyboard_capture_replay_diverts_and_hands_back_a_dialpad_roller() {
             .expect("the session neither reported the dial's turn nor ended");
         // `None`: the session ended — its wake lookup is still held — without
         // ever reporting the turn.
-        assert_eq!(
-            rotation,
-            Some(CapturedInput::Rotation {
-                rotary: Rotary::Dial,
-                increments: -2,
-                per_revolution: 180,
-            }),
+        assert!(
+            matches!(
+                rotation,
+                Some(CapturedInput::Rotation {
+                    rotary: Rotary::Dial,
+                    increments: -2,
+                    per_revolution: 180,
+                    ..
+                })
+            ),
             "the dial's two counter-clockwise increments, turned while its \
              diversion was being armed, were never reported"
         );

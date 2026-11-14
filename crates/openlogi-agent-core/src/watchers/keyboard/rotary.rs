@@ -6,12 +6,13 @@
 //! — a dial is how a creative app nudges a value, so a fast turn must not be
 //! throttled the way the thumb wheel's flick guard throttles it.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 
-use openlogi_core::binding::{Action, ButtonId, Rotary};
+use openlogi_core::binding::{Action, Binding, ButtonId, Rotary};
 use openlogi_core::config::ThumbwheelSensitivity;
 use openlogi_core::scroll::ScrollDelta;
+use openlogi_hid::session::gesture::CapturedInput;
 
 /// Scroll notches one full revolution produces at default sensitivity, and the
 /// discrete steps it is divided into — about a mouse wheel's worth.
@@ -86,13 +87,44 @@ impl RotaryTurn {
 }
 
 impl RotaryAccumulators {
-    /// Advance `turn` under its direction's `action`.
+    /// What one captured rotation does under `bindings`: the direction it
+    /// turned, the action that direction runs, and what to emit. `None` for
+    /// any other input, or a turn of zero.
+    ///
+    /// The turn is judged at the time its report arrived, carried in the
+    /// input, never at the time it is dispatched: a batch that queued up
+    /// keeps the pauses between its turns, so a step that idled out stays
+    /// forgotten.
+    pub(super) fn rotation(
+        &mut self,
+        input: CapturedInput,
+        bindings: &BTreeMap<ButtonId, Binding>,
+        sensitivity: ThumbwheelSensitivity,
+    ) -> Option<(RotaryTurn, Action, RotaryOutput)> {
+        let CapturedInput::Rotation {
+            rotary,
+            increments,
+            per_revolution,
+            at,
+        } = input
+        else {
+            return None;
+        };
+        let turn = RotaryTurn::new(rotary, increments, per_revolution)?;
+        let action = bindings
+            .get(&turn.button)
+            .map_or(Action::None, Binding::click_action);
+        let output = self.advance(turn, &action, sensitivity, at);
+        Some((turn, action, output))
+    }
+
+    /// Advance `turn` under its direction's `action`, at `at`.
     pub(super) fn advance(
         &mut self,
         turn: RotaryTurn,
         action: &Action,
         sensitivity: ThumbwheelSensitivity,
-        now: Instant,
+        at: Instant,
     ) -> RotaryOutput {
         if matches!(action, Action::None) {
             self.directions.remove(&turn.button);
@@ -110,17 +142,18 @@ impl RotaryAccumulators {
                 action: action.clone(),
                 sensitivity,
                 increments: 0,
-                last: now,
+                last: at,
             });
         if progress.action != *action
             || progress.sensitivity != sensitivity
-            || now.duration_since(progress.last) > STEP_DECAY
+            // A clock that stepped back reads as no time passed.
+            || at.saturating_duration_since(progress.last) > STEP_DECAY
         {
             progress.action = action.clone();
             progress.sensitivity = sensitivity;
             progress.increments = 0;
         }
-        progress.last = now;
+        progress.last = at;
         progress.increments = progress.increments.saturating_add(turn.magnitude);
         let step = increments_per_step(turn, multiplier);
         let fires = progress.increments / step;
@@ -214,6 +247,52 @@ mod tests {
         );
         // 40 / 24 rounds to a step of 2 increments.
         assert_eq!(out, RotaryOutput::Fire(2));
+    }
+
+    /// Two turns that arrived further apart than the decay, dispatched back
+    /// to back from the queue: the pause between them still forgets the
+    /// first one's partial step.
+    #[test]
+    fn queued_rotations_keep_their_idle_gap() {
+        let mut acc = RotaryAccumulators::default();
+        let button = Rotary::Roller.positive();
+        let bindings = BTreeMap::from([(button, Binding::Single(Action::Paste))]);
+        let sens = ThumbwheelSensitivity::DEFAULT;
+        let per_revolution = 240;
+        let step = increments_per_step(
+            turn(Rotary::Roller, 1, per_revolution),
+            sens.scroll_multiplier(),
+        );
+        let half = i16::try_from(step / 2 + 1).expect("a small step");
+        let arrived = Instant::now();
+        let input = |at| CapturedInput::Rotation {
+            rotary: Rotary::Roller,
+            increments: half,
+            per_revolution,
+            at,
+        };
+        let first = input(arrived);
+        let second = input(arrived + STEP_DECAY + Duration::from_millis(50));
+
+        let outputs: Vec<RotaryOutput> = [first, second]
+            .into_iter()
+            .filter_map(|queued| acc.rotation(queued, &bindings, sens))
+            .map(|(_, _, output)| output)
+            .collect();
+
+        assert_eq!(
+            outputs,
+            [RotaryOutput::Idle, RotaryOutput::Idle],
+            "two halves a pause apart do not make a step"
+        );
+        let adjacent = input(arrived + STEP_DECAY + Duration::from_millis(60));
+        assert!(
+            matches!(
+                acc.rotation(adjacent, &bindings, sens),
+                Some((_, _, RotaryOutput::Fire(1)))
+            ),
+            "turns that arrived together still do"
+        );
     }
 
     #[test]
