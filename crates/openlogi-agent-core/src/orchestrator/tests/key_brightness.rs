@@ -2,6 +2,7 @@
 
 use super::*;
 use openlogi_core::config::KeyDisplayBrightness;
+use openlogi_core::hid::{HidppOperation, WriteError};
 use openlogi_device::test_support::publish_scripted_channel;
 use openlogi_fixture::RequestMatch;
 use std::sync::{Arc, Mutex};
@@ -125,4 +126,61 @@ async fn a_gui_brightness_write_answers_with_the_keypads_read_back() {
 
     assert_eq!(read, level);
     assert_eq!(*levels.lock().expect("levels"), [level.scale(0, 100)]);
+}
+
+/// An app write that a newer write supersedes before its turn — here the
+/// agent's own reload write — writes nothing and answers `WriteSuperseded`,
+/// never a reading the app could mistake for its own level landing.
+#[tokio::test]
+async fn a_superseded_gui_brightness_write_answers_superseded() {
+    let shared = orchestrator(Config::default()).shared();
+    let (route, levels, reports) = keypad(&shared).await;
+    let level = |percent| KeyDisplayBrightness::try_new(percent).expect("valid brightness");
+    let held = reports.hold_next_write_completion(
+        RequestMatch::Hidpp20,
+        &[0x10, 0xff, BRIGHTNESS_INDEX, 0x00, 0, 0, 0],
+    );
+    shared.write_key_brightness_in_background(&route, level(30));
+    tokio::time::timeout(Duration::from_secs(2), held.write_accepted())
+        .await
+        .expect("the first write reaches the keypad");
+
+    let app_write = {
+        let shared = shared.clone();
+        let route = route.clone();
+        tokio::spawn(async move { shared.set_key_brightness(&route, level(50)).await })
+    };
+    // Let the app's write take its ticket before the newer one.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    shared.write_key_brightness_in_background(&route, level(80));
+    held.release();
+
+    let answer = tokio::time::timeout(Duration::from_secs(5), app_write)
+        .await
+        .expect("the app's write answers")
+        .expect("the write task did not panic");
+    assert!(
+        matches!(
+            answer,
+            Err(WriteError::WriteSuperseded {
+                operation: HidppOperation::WriteKeyBrightness
+            })
+        ),
+        "a superseded write answers WriteSuperseded, got {answer:?}"
+    );
+    let newest = level(80).scale(0, 100);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while levels.lock().expect("levels").last() != Some(&newest) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the newest write lands");
+    assert!(
+        !levels
+            .lock()
+            .expect("levels")
+            .contains(&level(50).scale(0, 100)),
+        "the superseded level was never written"
+    );
 }

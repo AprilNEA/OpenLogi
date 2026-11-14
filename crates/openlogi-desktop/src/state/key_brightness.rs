@@ -111,12 +111,14 @@ impl AppState {
     /// numbered `write`, which asked for `brightness`.
     ///
     /// Only the newest write's answer counts; an older one changes nothing,
-    /// so the slider stays on the newer release. The agent answers a write
-    /// that a newer one superseded before its turn with a plain read, so an
-    /// `Ok` is saved only when the keypad reads back `brightness`; any other
-    /// reading is shown and nothing is saved. When the keypad refused or
-    /// could not be reached, it is asked again so the optimistic value does
-    /// not stand in for its own, and marked refused for
+    /// so the slider stays on the newer release. An `Ok` is saved only when
+    /// the keypad reads back `brightness`; any other reading is shown and
+    /// nothing is saved. A write the agent superseded before its turn — by
+    /// its own reload or reconnect write — answers
+    /// [`WriteError::WriteSuperseded`]: nothing is saved, it is no refusal,
+    /// and the keypad is read again. When the keypad refused or could not be
+    /// reached, it is asked again so the optimistic value does not stand in
+    /// for its own, and marked refused for
     /// [`Self::current_key_brightness_refused`].
     pub fn apply_key_brightness_written(
         &mut self,
@@ -128,6 +130,9 @@ impl AppState {
         let writes = &mut self.pointer.key_brightness_writes;
         let newest = match &result {
             Ok(_) => writes.landed(key, write),
+            // A newer write — the agent's own reload or reconnect write —
+            // decides the level: nothing was written, and nothing refused.
+            Err(WriteError::WriteSuperseded { .. }) => writes.superseded(key, write),
             Err(_) => writes.refused(key, write),
         };
         if !newest {
@@ -142,6 +147,10 @@ impl AppState {
                 } else {
                     debug!(key = %key, requested = %brightness, actual = %read, "the keypad shows another brightness — not saving the request");
                 }
+            }
+            Err(WriteError::WriteSuperseded { .. }) => {
+                debug!(key = %key, %brightness, "a newer brightness write superseded this one — re-reading the keypad");
+                self.pointer.reads.refresh_key_brightness(key);
             }
             Err(error) => {
                 warn!(%error, key = %key, "display-key brightness write did not land — re-reading the keypad");
@@ -247,6 +256,14 @@ impl KeyBrightnessWrites {
             self.by_device.insert(key.clone(), WriteStage::Refused);
         }
         newest
+    }
+
+    /// The write numbered `write` was superseded by a newer one before its
+    /// turn and wrote nothing. Answers whether it was the newest write from
+    /// the app to `key`'s keypad, which only then becomes idle — neither
+    /// landed nor refused.
+    pub(super) fn superseded(&mut self, key: &DeviceKey, write: u64) -> bool {
+        self.landed(key, write)
     }
 
     /// `key`'s keypad reconnected and the agent writes its saved level

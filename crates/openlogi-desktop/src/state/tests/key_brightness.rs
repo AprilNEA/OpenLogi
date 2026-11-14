@@ -212,3 +212,35 @@ fn an_unmeasured_keypad_is_neither_read_nor_written() {
 
     assert!(drain(&mut receiver).is_empty());
 }
+
+/// A write the agent superseded before its turn wrote nothing: even when
+/// the keypad then reads exactly the level asked for, nothing is saved from
+/// this answer, it is not shown as a refusal, and the keypad is read again.
+#[gpui::test]
+fn superseded_brightness_does_not_save_matching_readback(cx: &mut gpui::TestAppContext) {
+    let (key, config_key, mut receiver) = installed(level(100), cx);
+    let write = release(cx, &mut receiver, level(30));
+
+    let events = with_state(cx, |state| {
+        state.apply_key_brightness_written(
+            &key,
+            write,
+            level(30),
+            Err(WriteError::WriteSuperseded {
+                operation: openlogi_core::hid::HidppOperation::WriteKeyBrightness,
+            }),
+        )
+    });
+    cx.run_until_parked();
+
+    assert_eq!(events, [StateEvent::KeyBrightnessChanged(key)]);
+    assert!(!with_state(cx, |state| state.current_key_brightness_refused()));
+    assert_eq!(saved(cx, &config_key), None);
+    answer_read(&mut receiver, level(30));
+    cx.run_until_parked();
+    assert_eq!(
+        saved(cx, &config_key),
+        None,
+        "a matching reading after a superseded write saves nothing"
+    );
+}

@@ -458,11 +458,12 @@ impl SharedHandles {
 
     /// Write `brightness` to the display keys of the device at `route` and
     /// return the brightness it reads back. Ordered with the config-reload
-    /// and reconnect writes of the same keypad: when a newer brightness write for the device is requested before this
-    /// one gets its turn, this one reads the device instead of writing a
-    /// level that is about to be replaced, and its `Ok` carries the device's
-    /// brightness, which need not be `brightness`. Waiting for the turn does
-    /// not count against the write's deadline.
+    /// and reconnect writes of the same keypad: when a newer brightness write
+    /// for the device is requested before this one gets its turn, this one
+    /// writes nothing and answers [`WriteError::WriteSuperseded`], so its
+    /// caller saves nothing — even a reading that happens to match — and the
+    /// newer write decides the level. Waiting for the turn does not count
+    /// against the write's deadline.
     pub async fn set_key_brightness(
         &self,
         route: &DeviceRoute,
@@ -474,7 +475,11 @@ impl SharedHandles {
                 HidppOperation::WriteKeyBrightness,
                 &ticket,
                 |c| async move { openlogi_hid::set_key_display_brightness_on(&c, brightness).await },
-                |c| async move { openlogi_hid::get_key_display_brightness_on(&c).await },
+                |_| async {
+                    Err(WriteError::WriteSuperseded {
+                        operation: HidppOperation::WriteKeyBrightness,
+                    })
+                },
             )
             .await
     }
