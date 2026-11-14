@@ -1034,6 +1034,24 @@ mod tests {
         assert_eq!(capped, "0123");
     }
 
+    /// The command the app suggests for a live key runs in this shell and
+    /// prints the time: on Windows `cmd.exe` runs it, whose `date` would try to
+    /// set the date instead of printing one.
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn the_suggested_live_key_command_prints_the_time() {
+        use std::time::Duration;
+        let command = openlogi_core::config::LiveSource::example_command();
+        let out = super::shell_output(command, Duration::from_secs(10), 4096).expect("the shell runs");
+        let line = out.lines().next().unwrap_or_default().trim();
+        let is_time = line.split_once(':').is_some_and(|(hours, minutes)| {
+            (1..=2).contains(&hours.len())
+                && minutes.len() == 2
+                && hours.chars().chain(minutes.chars()).all(|c| c.is_ascii_digit())
+        });
+        assert!(is_time, "`{command}` printed {out:?}, not HH:MM");
+    }
+
     /// A command that leaves a child running in the background with its
     /// output still open answers at once: the child ends with the shell.
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]

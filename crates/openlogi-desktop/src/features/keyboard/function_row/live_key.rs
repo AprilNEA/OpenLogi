@@ -278,7 +278,7 @@ fn source_pills(slot: GridSlot, live: &LiveKey, batteries: &[(String, String)]) 
             tr!("keyboard.live_source_command"),
             match &live.source {
                 LiveSource::Command(command) => LiveSource::Command(command.clone()),
-                _ => LiveSource::Command("date +%H:%M".to_owned()),
+                _ => LiveSource::Command(LiveSource::example_command().to_owned()),
             },
             matches!(live.source, LiveSource::Command(_)),
         ),

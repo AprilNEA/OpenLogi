@@ -28,6 +28,18 @@ pub enum LiveSource {
     Clock,
 }
 
+impl LiveSource {
+    /// The command offered when a key's source is first set to
+    /// [`Self::Command`]: one that prints the time as `HH:MM` in the shell a
+    /// live key's command runs in (`openlogi_inject::shell_output`) — `sh` on
+    /// macOS and Linux, where `date` formats it, and `cmd.exe` on Windows,
+    /// whose `date` would instead try to set the date.
+    #[must_use]
+    pub const fn example_command() -> &'static str {
+        if cfg!(windows) { "time /t" } else { "date +%H:%M" }
+    }
+}
+
 /// One live key's configuration.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
