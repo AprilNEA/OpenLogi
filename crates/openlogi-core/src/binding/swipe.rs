@@ -63,7 +63,11 @@ fn detect_swipe_at_distance(dx: i32, dy: i32, distance: i32) -> Option<GestureDi
     if dominant < distance {
         return None;
     }
-    let cross_limit = GESTURE_SWIPE_DEADZONE.max(dominant.saturating_mul(35) / 100);
+    // Short repeats need the same relative straightness as an initial swipe;
+    // a fixed deadzone would accept almost-diagonal motion and reset its drift.
+    let deadzone =
+        GESTURE_SWIPE_DEADZONE * distance.min(GESTURE_SWIPE_THRESHOLD) / GESTURE_SWIPE_THRESHOLD;
+    let cross_limit = deadzone.max(dominant.saturating_mul(35) / 100);
     if abs_x > abs_y {
         if abs_y > cross_limit {
             return None;
@@ -196,7 +200,9 @@ impl SwipeAccumulator {
             } else {
                 self.repeat_cross.saturating_add(c)
             };
-            self.repeat = total.max(0);
+            // Keep reverse travel as debt: returning to the last commit is not
+            // new forward progress, even when the repeat distance is short.
+            self.repeat = total;
             if continues(dir, dx, dy) {
                 // The same straightness rule as a fresh swipe, seen in the
                 // committed direction's frame (`Right` = along it).
@@ -506,17 +512,19 @@ mod tests {
 
     #[test]
     fn accumulator_diagonal_motion_does_not_repeat() {
-        let mut acc = SwipeAccumulator::default();
-        acc.begin();
-        acc.backdate_hold_for_test();
-        assert_eq!(
-            acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
-            Some(GestureDirection::Right)
-        );
-        // Each report leans right, but together they are too diagonal to be
-        // a swipe, so they must not repeat Right.
-        for _ in 0..(GESTURE_REPEAT_DISTANCE / 10 + 5) {
-            assert_eq!(acc.accumulate(10, 9), None);
+        for distance in [20, 1, GESTURE_REPEAT_DISTANCE] {
+            let mut acc = SwipeAccumulator::with_repeat_distance(
+                GestureRepeatDistance::try_new(distance).unwrap(),
+            );
+            acc.begin();
+            acc.backdate_hold_for_test();
+            assert_eq!(
+                acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
+                Some(GestureDirection::Right)
+            );
+            for _ in 0..(GESTURE_REPEAT_DISTANCE / 10 + 5) {
+                assert_eq!(acc.accumulate(10, 9), None, "distance {distance}");
+            }
         }
     }
 
@@ -703,14 +711,22 @@ mod tests {
 
     #[test]
     fn accumulator_net_zero_wobble_after_a_swipe_never_fires() {
-        let mut acc = SwipeAccumulator::default();
-        acc.begin();
-        acc.backdate_hold_for_test();
-        let t = GESTURE_SWIPE_THRESHOLD + 10;
-        assert_eq!(acc.accumulate(t, 0), Some(GestureDirection::Right));
-        for _ in 0..20 {
-            assert_eq!(acc.accumulate(-15, 0), None);
-            assert_eq!(acc.accumulate(15, 0), None);
+        for distance in [20, 1, GESTURE_REPEAT_DISTANCE] {
+            for step in [15, 30] {
+                let mut acc = SwipeAccumulator::with_repeat_distance(
+                    GestureRepeatDistance::try_new(distance).unwrap(),
+                );
+                acc.begin();
+                acc.backdate_hold_for_test();
+                assert_eq!(
+                    acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
+                    Some(GestureDirection::Right)
+                );
+                for _ in 0..20 {
+                    assert_eq!(acc.accumulate(-step, 0), None, "distance {distance}");
+                    assert_eq!(acc.accumulate(step, 0), None, "distance {distance}");
+                }
+            }
         }
     }
 
