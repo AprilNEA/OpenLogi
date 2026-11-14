@@ -30,10 +30,12 @@ pub enum LiveSource {
 
 impl LiveSource {
     /// The command offered when a key's source is first set to
-    /// [`Self::Command`]: one that prints the time as `HH:MM` in the shell a
-    /// live key's command runs in (`openlogi_inject::shell_output`) — `sh` on
-    /// macOS and Linux, where `date` formats it, and `cmd.exe` on Windows,
-    /// whose `date` would instead try to set the date.
+    /// [`Self::Command`]: one that prints the time in the shell a live key's
+    /// command runs in (`openlogi_inject::shell_output`) — `sh` on macOS and
+    /// Linux, where `date` formats it as `HH:MM`, and `cmd.exe` on Windows,
+    /// whose `date` would instead try to set the date and whose `time /t`
+    /// prints the locale's short time (`14:23`, or `02:23 PM` on a 12-hour
+    /// clock).
     #[must_use]
     pub const fn example_command() -> &'static str {
         if cfg!(windows) {

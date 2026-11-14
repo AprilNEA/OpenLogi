@@ -1044,16 +1044,54 @@ mod tests {
         let command = openlogi_core::config::LiveSource::example_command();
         let out =
             super::shell_output(command, Duration::from_secs(10), 4096).expect("the shell runs");
-        let line = out.lines().next().unwrap_or_default().trim();
-        let is_time = line.split_once(':').is_some_and(|(hours, minutes)| {
-            (1..=2).contains(&hours.len())
-                && minutes.len() == 2
-                && hours
-                    .chars()
-                    .chain(minutes.chars())
-                    .all(|c| c.is_ascii_digit())
-        });
-        assert!(is_time, "`{command}` printed {out:?}, not HH:MM");
+        let line = out.lines().next().unwrap_or_default();
+        assert!(
+            shows_a_time(line),
+            "`{command}` printed {out:?}, not a time"
+        );
+    }
+
+    /// Whether `line` shows a time of day in some locale's short format: a
+    /// word of one or two digits, `:` or `.`, and two digits, with whatever
+    /// day-period marker the locale puts around it.
+    fn shows_a_time(line: &str) -> bool {
+        let digits = |text: &str| text.chars().all(|c| c.is_ascii_digit());
+        line.split_whitespace().any(|word| {
+            word.split_once([':', '.']).is_some_and(|(hours, minutes)| {
+                (1..=2).contains(&hours.len())
+                    && minutes.len() == 2
+                    && digits(hours)
+                    && digits(minutes)
+            })
+        })
+    }
+
+    /// `time /t` prints the locale's short time: a 24-hour or a 12-hour clock,
+    /// a day-period marker before or after it, `:` or `.` between hours and
+    /// minutes. Each is a time; `cmd.exe`'s refusal to set a date is not.
+    #[test]
+    fn a_time_in_any_short_format_counts() {
+        for time in [
+            "14:23",
+            "9:05",
+            "02:23 PM",
+            "2:23 PM",
+            "14.23",
+            "오후 2:23",
+            "14:23\r",
+        ] {
+            assert!(shows_a_time(time), "{time:?} is a time");
+        }
+        for other in [
+            "",
+            "Eingegebenes Datum kann nicht übernommen werden.",
+            "The system cannot accept the date entered.",
+            "1:2",
+            "123:45",
+            "14:2x",
+        ] {
+            assert!(!shows_a_time(other), "{other:?} is not a time");
+        }
     }
 
     /// A command that leaves a child running in the background with its
