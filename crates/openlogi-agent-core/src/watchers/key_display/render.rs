@@ -194,7 +194,7 @@ fn draw_styled(
     if let Some(picture) = &face.image {
         draw_picture(pixmap, picture.path());
     }
-    let lines = face.label.as_deref().map(label_lines).unwrap_or_default();
+    let lines = face.label.as_deref().map_or_default(label_lines);
     let glyph = face
         .symbol
         .as_ref()

@@ -170,9 +170,7 @@ impl FunctionRowView {
     pub(super) fn live_panel(&self, slot: GridSlot, pal: Palette, cx: &App) -> impl IntoElement {
         let state = AppState::try_read(cx);
         let live = state.and_then(|state| state.current_live_key(slot));
-        let batteries: Vec<(String, String)> = state
-            .map(AppState::live_battery_devices)
-            .unwrap_or_default();
+        let batteries: Vec<(String, String)> = state.map_or_default(AppState::live_battery_devices);
         let enabled = live.is_some();
         let toggle = Toggle::new("live-key-enabled")
             .accessibility_label(tr!("keyboard.live_show_value"))

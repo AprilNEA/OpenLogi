@@ -221,9 +221,7 @@ impl FunctionRowView {
         if self.appearance.draft_for(slot).is_some() {
             return;
         }
-        let style = AppState::try_read(cx)
-            .map(|state| state.current_key_face(slot))
-            .unwrap_or_default();
+        let style = AppState::try_read(cx).map_or_default(|state| state.current_key_face(slot));
         let [first, second] = label_lines(&style);
         let line = |seed: String,
                     placeholder: SharedString,
@@ -364,9 +362,7 @@ impl FunctionRowView {
         pal: Palette,
         cx: &App,
     ) -> impl IntoElement {
-        let style = AppState::try_read(cx)
-            .map(|state| state.current_key_face(slot))
-            .unwrap_or_default();
+        let style = AppState::try_read(cx).map_or_default(|state| state.current_key_face(slot));
         let draft = self.appearance.draft_for(slot);
         let feedback = self.appearance.feedback();
         let symbol = draft.map(|draft| symbol_section(draft, style.symbol.as_ref(), view, pal, cx));

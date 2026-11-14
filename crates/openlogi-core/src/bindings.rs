@@ -63,9 +63,8 @@ pub fn button_bindings_for(
         .copied()
         .map(|button| (button, Binding::Single(default_binding_on(layout, button))))
         .collect();
-    let live_slots: Vec<ButtonId> = config_key
-        .map(|key| config.live_key_slots(key).collect())
-        .unwrap_or_default();
+    let live_slots: Vec<ButtonId> =
+        config_key.map_or_default(|key| config.live_key_slots(key).collect());
     if config_key.is_some_and(|key| config.keypad_pages(key) > KeypadPage::FIRST)
         || !live_slots.is_empty()
     {

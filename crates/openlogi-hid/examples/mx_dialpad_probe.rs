@@ -35,8 +35,7 @@ fn dialpad_cids() -> Vec<u16> {
         product_id: PID,
     }
     .dialpad()
-    .map(|dialpad| dialpad.keys.iter().map(|key| key.cid).collect())
-    .unwrap_or_default()
+    .map_or_default(|dialpad| dialpad.keys.iter().map(|key| key.cid).collect())
 }
 
 fn hex(b: &[u8]) -> String {

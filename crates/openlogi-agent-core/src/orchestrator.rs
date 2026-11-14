@@ -1426,8 +1426,7 @@ impl Orchestrator {
             .config
             .devices
             .get(key)
-            .map(|device| device.live_keys.clone())
-            .unwrap_or_default();
+            .map_or_default(|device| device.live_keys.clone());
         let now = std::time::Instant::now();
         // A key whose time is up loses its frame here, not only on the next
         // watcher tick, and no longer takes the paging keys.
