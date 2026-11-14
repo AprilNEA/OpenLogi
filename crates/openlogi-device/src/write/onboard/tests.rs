@@ -3,6 +3,7 @@
 
 use std::assert_matches;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use super::*;
 use crate::channel::scripted::{ScriptedRawHidChannel, feature_error, scripted_channel};
@@ -23,6 +24,10 @@ const PROFILE: &[u8] = include_bytes!(concat!(
     "/../openlogi-hidpp/src/feature/onboard_profiles/superlight_profile_1.bin"
 ));
 const SECTOR_SIZE: usize = 255;
+/// How long one scripted write may take before the test fails. Each HID++
+/// request is already bounded by the channel's response timeout; this bounds
+/// the whole operation, so a stalled one fails with a clear message.
+const DEADLINE: Duration = Duration::from_secs(10);
 
 /// A PRO X SUPERLIGHT as measured: format-4 profiles in 255-byte sectors,
 /// reads past a sector refused, and a `memoryWrite` with no write started
@@ -161,6 +166,20 @@ async fn superlight_channel(mouse: &Arc<Mutex<Superlight>>) -> Arc<HidppChannel>
     scripted_channel(raw).await
 }
 
+/// Open a channel to `mouse` and write `dpi` as profile 1's startup DPI,
+/// failing the test if that does not finish within [`DEADLINE`].
+async fn write_within_deadline(
+    mouse: &Arc<Mutex<Superlight>>,
+    dpi: u16,
+) -> Result<OnboardDefaultDpiChange, WriteError> {
+    tokio::time::timeout(DEADLINE, async {
+        let channel = superlight_channel(mouse).await;
+        set_onboard_default_dpi_on_channel(&channel, SLOT, write(dpi)).await
+    })
+    .await
+    .expect("the scripted startup-DPI write did not finish within the deadline")
+}
+
 fn write(dpi: u16) -> OnboardDefaultDpi {
     OnboardDefaultDpi {
         unit: UNIT,
@@ -172,11 +191,7 @@ fn write(dpi: u16) -> OnboardDefaultDpi {
 #[tokio::test]
 async fn writes_one_whole_sector_as_start_chunks_end() {
     let mouse = Arc::new(Mutex::new(Superlight::new(UNIT)));
-    let channel = superlight_channel(&mouse).await;
-
-    let change = set_onboard_default_dpi_on_channel(&channel, SLOT, write(1200))
-        .await
-        .unwrap();
+    let change = write_within_deadline(&mouse, 1200).await.unwrap();
 
     assert_eq!(change.before, Some(Dpi::new(4950)));
     assert_eq!(change.after, Dpi::new(1200));
@@ -212,10 +227,8 @@ async fn writes_one_whole_sector_as_start_chunks_end() {
 #[tokio::test]
 async fn a_different_mouse_in_the_slot_gets_no_onboard_request() {
     let mouse = Arc::new(Mutex::new(Superlight::new([0xde, 0xad, 0xbe, 0xef])));
-    let channel = superlight_channel(&mouse).await;
-
     assert_matches!(
-        set_onboard_default_dpi_on_channel(&channel, SLOT, write(1200)).await,
+        write_within_deadline(&mouse, 1200).await,
         Err(WriteError::DeviceNotFound)
     );
     let mouse = mouse.lock().unwrap();
@@ -226,10 +239,8 @@ async fn a_different_mouse_in_the_slot_gets_no_onboard_request() {
 #[tokio::test]
 async fn an_unsupported_dpi_gets_no_onboard_request() {
     let mouse = Arc::new(Mutex::new(Superlight::new(UNIT)));
-    let channel = superlight_channel(&mouse).await;
-
     assert_matches!(
-        set_onboard_default_dpi_on_channel(&channel, SLOT, write(1225)).await,
+        write_within_deadline(&mouse, 1225).await,
         Err(WriteError::DpiUnsupported { .. })
     );
     assert!(mouse.lock().unwrap().onboard_calls.is_empty());
@@ -238,11 +249,7 @@ async fn an_unsupported_dpi_gets_no_onboard_request() {
 #[tokio::test]
 async fn a_profile_already_at_the_dpi_is_not_written() {
     let mouse = Arc::new(Mutex::new(Superlight::new(UNIT)));
-    let channel = superlight_channel(&mouse).await;
-
-    let change = set_onboard_default_dpi_on_channel(&channel, SLOT, write(4950))
-        .await
-        .unwrap();
+    let change = write_within_deadline(&mouse, 4950).await.unwrap();
 
     assert_eq!(change.before, Some(Dpi::new(4950)));
     let mouse = mouse.lock().unwrap();
