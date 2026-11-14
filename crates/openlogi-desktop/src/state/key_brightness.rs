@@ -15,6 +15,8 @@
 //! becomes the setting. A refusal sends the query back to the keypad and
 //! marks it refused until the next write lands or the keypad reconnects.
 
+use std::collections::HashMap;
+
 use openlogi_core::config::KeyDisplayBrightness;
 use openlogi_core::hid::WriteError;
 use tracing::{debug, warn};
@@ -65,8 +67,8 @@ impl AppState {
     pub fn current_key_brightness_refused(&self) -> bool {
         self.current_record().is_some_and(|record| {
             self.pointer
-                .refused_key_brightness
-                .contains(&record.device_key())
+                .key_brightness_writes
+                .is_refused(&record.device_key())
         })
     }
 
@@ -74,7 +76,7 @@ impl AppState {
     /// answer, if any.
     #[cfg(test)]
     pub(crate) fn pending_key_brightness_write(&self, key: &DeviceKey) -> Option<u64> {
-        self.pointer.pending_key_brightness_writes.get(key).copied()
+        self.pointer.key_brightness_writes.pending(key)
     }
 
     /// Write `brightness` to the active keypad through the agent. The slider
@@ -92,15 +94,10 @@ impl AppState {
             debug!(%brightness, "no keypad with display-key brightness — ignoring the release");
             return events;
         };
-        self.pointer.refused_key_brightness.remove(&key);
         self.pointer
             .reads
             .set_key_brightness_ready(&key, brightness);
-        let write = self.pointer.next_key_brightness_write;
-        self.pointer.next_key_brightness_write = write.saturating_add(1);
-        self.pointer
-            .pending_key_brightness_writes
-            .insert(key.clone(), write);
+        let write = self.pointer.key_brightness_writes.begin(&key);
         self.send_ipc(crate::services::ipc::SetKeyBrightness {
             route,
             brightness,
@@ -128,14 +125,17 @@ impl AppState {
         brightness: KeyDisplayBrightness,
         result: Result<KeyDisplayBrightness, WriteError>,
     ) -> StateEvents {
-        if self.pointer.pending_key_brightness_writes.get(key) != Some(&write) {
+        let writes = &mut self.pointer.key_brightness_writes;
+        let newest = match &result {
+            Ok(_) => writes.landed(key, write),
+            Err(_) => writes.refused(key, write),
+        };
+        if !newest {
             debug!(key = %key, write, %brightness, "a newer brightness write is pending — ignoring this answer");
             return StateEvents::none();
         }
-        self.pointer.pending_key_brightness_writes.remove(key);
         match result {
             Ok(read) => {
-                self.pointer.refused_key_brightness.remove(key);
                 self.pointer.reads.set_key_brightness_ready(key, read);
                 if read == brightness {
                     self.save_key_brightness(key, brightness);
@@ -145,7 +145,6 @@ impl AppState {
             }
             Err(error) => {
                 warn!(%error, key = %key, "display-key brightness write did not land — re-reading the keypad");
-                self.pointer.refused_key_brightness.insert(key.clone());
                 self.pointer.reads.refresh_key_brightness(key);
             }
         }
@@ -156,7 +155,7 @@ impl AppState {
     /// brightness again when a keypad connects, so a refused write no longer
     /// stands, and the keypad is read again so the slider follows it.
     pub(super) fn key_brightness_reconnected(&mut self, key: &DeviceKey) {
-        self.pointer.refused_key_brightness.remove(key);
+        self.pointer.key_brightness_writes.reconnected(key);
         self.pointer.reads.refresh_key_brightness(key);
     }
 
@@ -197,8 +196,149 @@ impl AppState {
     }
 }
 
+/// Where each keypad's display-key brightness writes stand: the one
+/// transition owner for "which write's answer counts" and "did the newest
+/// write land". Its methods are the only writers, so a keypad is never both
+/// pending and refused, and a refusal never outlives the next write.
+#[derive(Debug, Default)]
+pub(super) struct KeyBrightnessWrites {
+    /// Keypads not listed are idle: no write pending, the last one landed.
+    by_device: HashMap<DeviceKey, WriteStage>,
+    next: u64,
+}
+
+/// One keypad's brightness writes, unless idle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WriteStage {
+    /// The newest write sent, numbered, waiting for its answer. Only that
+    /// write's answer may change the shown brightness or save it.
+    Pending(u64),
+    /// The newest write did not land: the keypad refused it, or the agent
+    /// could not deliver it.
+    Refused,
+}
+
+impl KeyBrightnessWrites {
+    /// Number a new write to `key`'s keypad. It supersedes any earlier one
+    /// and clears a refusal.
+    pub(super) fn begin(&mut self, key: &DeviceKey) -> u64 {
+        let write = self.next;
+        self.next = write.saturating_add(1);
+        self.by_device
+            .insert(key.clone(), WriteStage::Pending(write));
+        write
+    }
+
+    /// The write numbered `write` landed. Answers whether it was the newest
+    /// write to `key`'s keypad, which only then becomes idle.
+    pub(super) fn landed(&mut self, key: &DeviceKey, write: u64) -> bool {
+        let newest = self.is_pending(key, write);
+        if newest {
+            self.by_device.remove(key);
+        }
+        newest
+    }
+
+    /// The write numbered `write` did not land. Answers whether it was the
+    /// newest write to `key`'s keypad, which only then is marked refused.
+    pub(super) fn refused(&mut self, key: &DeviceKey, write: u64) -> bool {
+        let newest = self.is_pending(key, write);
+        if newest {
+            self.by_device.insert(key.clone(), WriteStage::Refused);
+        }
+        newest
+    }
+
+    /// `key`'s keypad reconnected and the agent writes its saved level
+    /// again, so a refusal no longer stands. A pending write stays pending.
+    pub(super) fn reconnected(&mut self, key: &DeviceKey) {
+        if self.is_refused(key) {
+            self.by_device.remove(key);
+        }
+    }
+
+    /// Whether `key`'s keypad did not take the newest write.
+    pub(super) fn is_refused(&self, key: &DeviceKey) -> bool {
+        self.by_device.get(key) == Some(&WriteStage::Refused)
+    }
+
+    /// The number of the write to `key`'s keypad still waiting for its
+    /// answer, if any.
+    #[cfg(test)]
+    pub(super) fn pending(&self, key: &DeviceKey) -> Option<u64> {
+        match self.by_device.get(key)? {
+            WriteStage::Pending(write) => Some(*write),
+            WriteStage::Refused => None,
+        }
+    }
+
+    fn is_pending(&self, key: &DeviceKey, write: u64) -> bool {
+        self.by_device.get(key) == Some(&WriteStage::Pending(write))
+    }
+}
+
 fn has_key_brightness(record: &DeviceRecord) -> bool {
     record
         .capabilities
         .is_some_and(|capabilities| capabilities.key_brightness)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every transition from every stage: only the newest write's answer
+    /// moves a keypad, a refusal never survives the next write, and a
+    /// reconnect clears a refusal but not a pending write.
+    #[test]
+    fn writes_move_only_on_the_newest_answer() {
+        let pad = DeviceKey::from("pad");
+        let mut writes = KeyBrightnessWrites::default();
+        assert_eq!(
+            (writes.pending(&pad), writes.is_refused(&pad)),
+            (None, false)
+        );
+
+        let older = writes.begin(&pad);
+        let newer = writes.begin(&pad);
+        assert_eq!(writes.pending(&pad), Some(newer));
+        assert!(
+            !writes.landed(&pad, older),
+            "a superseded answer is not the newest"
+        );
+        assert!(!writes.refused(&pad, older), "nor is its failure");
+        assert_eq!(writes.pending(&pad), Some(newer));
+
+        writes.reconnected(&pad);
+        assert_eq!(
+            writes.pending(&pad),
+            Some(newer),
+            "a reconnect keeps a pending write"
+        );
+
+        assert!(writes.refused(&pad, newer));
+        assert!(writes.is_refused(&pad));
+        assert_eq!(writes.pending(&pad), None);
+        assert!(
+            !writes.landed(&pad, newer),
+            "an answered write is not answered twice"
+        );
+
+        let next = writes.begin(&pad);
+        assert!(!writes.is_refused(&pad), "a new write clears the refusal");
+        assert!(writes.landed(&pad, next));
+        assert_eq!(
+            (writes.pending(&pad), writes.is_refused(&pad)),
+            (None, false)
+        );
+
+        let failed = writes.begin(&pad);
+        assert!(writes.refused(&pad, failed));
+        writes.reconnected(&pad);
+        assert!(!writes.is_refused(&pad), "a reconnect clears a refusal");
+        assert!(
+            !writes.is_refused(&DeviceKey::from("other")),
+            "keypads are independent"
+        );
+    }
 }

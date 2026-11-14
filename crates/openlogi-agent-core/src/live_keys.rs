@@ -15,6 +15,7 @@ use openlogi_core::binding::{Action, ButtonId};
 use openlogi_core::config::{LiveKey, LiveSource};
 use openlogi_core::device::BatteryInfo;
 use tokio::sync::{Semaphore, mpsc};
+use tracing::debug;
 
 /// How long a source command may run before its value is given up.
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
@@ -316,7 +317,11 @@ where
                 let value = tokio::task::spawn_blocking(move || reader(&read))
                     .await
                     .unwrap_or_else(|_| LiveValue::unavailable());
-                let _ = done.send(LiveReadDone { id, ticket, value });
+                // The receiver lives in the reader: a failed send means the
+                // reader was dropped, and the watcher with it.
+                if done.send(LiveReadDone { id, ticket, value }).is_err() {
+                    debug!("live-key reader gone — read value dropped");
+                }
             });
         }
     }

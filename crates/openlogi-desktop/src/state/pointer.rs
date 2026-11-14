@@ -8,6 +8,7 @@ use swr_core::{Runtime, SwrClient};
 use crate::services::device_reads::DeviceReads;
 
 use super::device_key::DeviceKey;
+use super::key_brightness::KeyBrightnessWrites;
 use super::{AppState, DEFAULT_DPI};
 
 pub(super) struct PointerState {
@@ -29,14 +30,8 @@ pub(super) struct PointerState {
     /// save it.
     pub(super) pending_force_sensing_writes: HashMap<DeviceKey, u64>,
     pub(super) next_force_sensing_write: u64,
-    /// The keypads whose last display-key brightness write the keypad
-    /// refused or the agent could not deliver.
-    pub(super) refused_key_brightness: HashSet<DeviceKey>,
-    /// The newest display-key brightness write sent to each keypad whose
-    /// answer has not arrived yet. Only that write's answer may change the
-    /// shown brightness or save it.
-    pub(super) pending_key_brightness_writes: HashMap<DeviceKey, u64>,
-    pub(super) next_key_brightness_write: u64,
+    /// Where each keypad's display-key brightness writes stand.
+    pub(super) key_brightness_writes: KeyBrightnessWrites,
 }
 
 impl Default for PointerState {
@@ -51,9 +46,7 @@ impl Default for PointerState {
             refused_force_sensing: HashSet::new(),
             pending_force_sensing_writes: HashMap::new(),
             next_force_sensing_write: 0,
-            refused_key_brightness: HashSet::new(),
-            pending_key_brightness_writes: HashMap::new(),
-            next_key_brightness_write: 0,
+            key_brightness_writes: KeyBrightnessWrites::default(),
         }
     }
 }
