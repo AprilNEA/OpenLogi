@@ -196,7 +196,7 @@ pub use succession::Identity;
 ///      and `ActionRingIcon::{Channel1, Channel2, Channel3}` appended after
 ///      them — a device's move to another Easy-Switch channel, bound to a
 ///      button or an Actions Ring slot.
-///      `DeviceKind::Dialpad` appended, and `ButtonId` gains the
+/// v47: `DeviceKind::Dialpad` appended, and `ButtonId` gains the
 ///      `DialLeft`/`DialRight`/`RollerUp`/`RollerDown` names — the MX
 ///      Creative Dialpad's dial and roller. `HidppOperation::WriteKeyBrightness`
 ///      appended — the MX Creative Keypad's LCD brightness.
@@ -204,7 +204,7 @@ pub use succession::Identity;
 ///      value. `Capabilities::key_brightness` appended — measured `0x8040`
 ///      display-key brightness — with `HidppOperation::ReadKeyBrightness`
 ///      and the `read_key_brightness`/`set_key_brightness` calls.
-pub const PROTOCOL_VERSION: u32 = 46;
+pub const PROTOCOL_VERSION: u32 = 47;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
