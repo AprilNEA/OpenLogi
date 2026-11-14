@@ -92,14 +92,19 @@ mod tests {
 
     /// With the clock paused, Tokio jumps straight to the next deadline: the
     /// first tick must land a full period after the watcher starts, not at
-    /// once.
+    /// once. Each wait is bounded, so a schedule that stops ticking fails
+    /// here instead of hanging the test run.
     #[tokio::test(start_paused = true)]
     async fn live_watcher_waits_one_period() {
         let start = tokio::time::Instant::now();
         let mut tick = live_tick();
-        tick.tick().await;
+        tokio::time::timeout(TICK * 2, tick.tick())
+            .await
+            .expect("the first live tick never came");
         assert_eq!(start.elapsed(), TICK, "the first tick comes one period in");
-        tick.tick().await;
+        tokio::time::timeout(TICK * 2, tick.tick())
+            .await
+            .expect("the second live tick never came");
         assert_eq!(start.elapsed(), TICK * 2);
     }
 }
