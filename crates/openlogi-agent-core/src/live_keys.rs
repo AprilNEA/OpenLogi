@@ -114,28 +114,119 @@ pub enum Paging {
     Adjust(Option<Action>),
 }
 
-/// One configured key's source and what is known of it.
+/// One configured key's source and where its reads stand.
 #[derive(Debug)]
 struct Tracked {
-    /// The source the value and the read in flight belong to. A different
-    /// configured source starts the key over.
+    /// The source the reads belong to. A different configured source starts
+    /// the key over.
     source: LiveSource,
-    /// The last value read from `source`.
-    value: Option<LiveValue>,
-    /// When the last read of `source` was issued; `None`: due now.
-    read_at: Option<Instant>,
-    /// The read of `source` not answered yet. A key has at most one, so its
-    /// values arrive in the order they were read.
-    in_flight: Option<LiveReadTicket>,
+    read: ReadState,
 }
 
 impl Tracked {
     fn new(source: LiveSource) -> Self {
         Self {
             source,
-            value: None,
-            read_at: None,
-            in_flight: None,
+            read: ReadState::Due { value: None },
+        }
+    }
+}
+
+/// Where one key's reads stand, each phase carrying only what it may. The
+/// methods are the only writers: a key has at most one read in flight, so
+/// its values arrive in the order they were read, and a value is taken only
+/// from that read.
+#[derive(Debug)]
+enum ReadState {
+    /// Due at once: never read, or a paging step changed the value. Shows
+    /// `value`, the last one read, meanwhile.
+    Due { value: Option<LiveValue> },
+    /// A read in flight, still showing `value`.
+    Reading {
+        ticket: LiveReadTicket,
+        value: Option<LiveValue>,
+        next: NextRead,
+    },
+    /// `value` was read by the read issued at `read_at`.
+    Ready { value: LiveValue, read_at: Instant },
+}
+
+/// When a key is read again once its read in flight answers.
+#[derive(Clone, Copy, Debug)]
+enum NextRead {
+    /// Its refresh interval after the read was issued, at this instant.
+    After(Instant),
+    /// At once: a paging step changed the value while it was being read.
+    AtOnce,
+}
+
+impl ReadState {
+    /// The value the key shows.
+    fn value(&self) -> Option<&LiveValue> {
+        match self {
+            Self::Due { value } | Self::Reading { value, .. } => value.as_ref(),
+            Self::Ready { value, .. } => Some(value),
+        }
+    }
+
+    /// Whether the key is due for a read at `now`, read every `refresh`.
+    fn is_due(&self, now: Instant, refresh: Duration) -> bool {
+        match self {
+            Self::Due { .. } => true,
+            Self::Reading { .. } => false,
+            Self::Ready { read_at, .. } => now.saturating_duration_since(*read_at) >= refresh,
+        }
+    }
+
+    /// The read numbered `ticket` was issued at `now`.
+    fn start(&mut self, ticket: LiveReadTicket, now: Instant) {
+        let value = self.take_value();
+        *self = Self::Reading {
+            ticket,
+            value,
+            next: NextRead::After(now),
+        };
+    }
+
+    /// The read numbered `ticket` answered `value`. `None` when it is not
+    /// the read in flight; else whether the value shown changed.
+    fn answer(&mut self, ticket: LiveReadTicket, value: LiveValue) -> Option<bool> {
+        let Self::Reading {
+            ticket: reading,
+            value: shown,
+            next,
+        } = self
+        else {
+            return None;
+        };
+        if *reading != ticket {
+            return None;
+        }
+        let changed = shown.as_ref() != Some(&value);
+        *self = match *next {
+            NextRead::After(read_at) => Self::Ready { value, read_at },
+            NextRead::AtOnce => Self::Due { value: Some(value) },
+        };
+        Some(changed)
+    }
+
+    /// Read the key again as soon as it has no read in flight.
+    fn read_again(&mut self) {
+        match self {
+            Self::Due { .. } => {}
+            Self::Reading { next, .. } => *next = NextRead::AtOnce,
+            Self::Ready { .. } => {
+                *self = Self::Due {
+                    value: self.take_value(),
+                };
+            }
+        }
+    }
+
+    fn take_value(&mut self) -> Option<LiveValue> {
+        match std::mem::replace(self, Self::Due { value: None }) {
+            Self::Due { value } | Self::Reading { value, .. } => value,
+            Self::Ready { value, .. } => Some(value),
         }
     }
 }
@@ -171,17 +262,12 @@ impl LiveKeys {
             if tracked.source != key.source {
                 *tracked = Tracked::new(key.source.clone());
             }
-            let is_due = tracked.in_flight.is_none()
-                && tracked
-                    .read_at
-                    .is_none_or(|at| now.saturating_duration_since(at) >= key.refresh());
-            if !is_due {
+            if !tracked.read.is_due(now, key.refresh()) {
                 continue;
             }
             let ticket = LiveReadTicket(self.next_ticket);
             self.next_ticket += 1;
-            tracked.read_at = Some(now);
-            tracked.in_flight = Some(ticket);
+            tracked.read.start(ticket, now);
             due.push((id, key.source.clone(), ticket));
         }
         due
@@ -191,17 +277,10 @@ impl LiveKeys {
     /// in flight — the key was removed, or its source changed since — is
     /// dropped. Answers whether anything shown changed.
     pub fn set_value(&mut self, done: LiveReadDone) -> bool {
-        let Some(tracked) = self
-            .keys
+        self.keys
             .get_mut(&done.id)
-            .filter(|tracked| tracked.in_flight == Some(done.ticket))
-        else {
-            return false;
-        };
-        tracked.in_flight = None;
-        let changed = tracked.value.as_ref() != Some(&done.value);
-        tracked.value = Some(done.value);
-        changed
+            .and_then(|tracked| tracked.read.answer(done.ticket, done.value))
+            .unwrap_or(false)
     }
 
     /// End an active key whose time is up. Answers whether it ended.
@@ -248,7 +327,7 @@ impl LiveKeys {
         // A step changes the value: read it again as soon as the key has no
         // read in flight.
         if let Some(tracked) = self.keys.get_mut(&active.id) {
-            tracked.read_at = None;
+            tracked.read.read_again();
         }
         Paging::Adjust(if increment {
             key.effective_increment()
@@ -260,7 +339,7 @@ impl LiveKeys {
     /// What the key `id` shows, when read.
     #[must_use]
     pub fn value(&self, id: &LiveKeyId) -> Option<&LiveValue> {
-        self.keys.get(id)?.value.as_ref()
+        self.keys.get(id)?.read.value()
     }
 
     /// Whether `id` is the active key.
@@ -535,6 +614,37 @@ mod tests {
         // either.
         assert!(!keys.set_value(answer(&old_read, "old")));
         assert_eq!(keys.value(&key), Some(&LiveValue::text("new")));
+    }
+
+    /// A paging step while the key is being read does not start a second
+    /// read; the key is read again as soon as the first one answers, not a
+    /// refresh interval later.
+    #[test]
+    fn a_step_during_a_read_reads_again_once_it_answers() {
+        let mut keys = LiveKeys::default();
+        let mut volume = LiveKey::new(LiveSource::Volume);
+        volume.refresh_secs = 3600;
+        let lookup = |_: &ButtonId| Some(LiveKey::new(LiveSource::Volume));
+        let key = id(GridKey::Middle);
+        let t = Instant::now();
+        let first = keys.due([(key.clone(), &volume)], t);
+        keys.press(key.clone(), &volume, t);
+
+        assert!(matches!(
+            keys.paging("pad", true, lookup, t),
+            Paging::Adjust(_)
+        ));
+        assert!(
+            keys.due([(key.clone(), &volume)], t).is_empty(),
+            "no second read while the first is in flight"
+        );
+        assert!(keys.set_value(answer(&first, "40%")));
+        assert_eq!(
+            keys.due([(key.clone(), &volume)], t).len(),
+            1,
+            "read again at once, not an hour later"
+        );
+        assert_eq!(keys.value(&key), Some(&LiveValue::text("40%")));
     }
 
     /// Once its time is up, an active key no longer takes the paging keys —
