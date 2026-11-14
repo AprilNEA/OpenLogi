@@ -508,6 +508,15 @@ mod tests {
 
     use super::*;
 
+    /// The app offers the volume source where `LiveSource::is_readable_here`
+    /// says it reads, so that answer must match the platforms [`volume`] has
+    /// a reader for — the cfg arms above. A new backend changes both.
+    #[test]
+    fn the_volume_is_readable_exactly_where_it_has_a_reader() {
+        let has_reader = cfg!(any(target_os = "linux", target_os = "macos"));
+        assert_eq!(LiveSource::Volume.is_readable_here(), has_reader);
+    }
+
     fn id(key: GridKey) -> LiveKeyId {
         (
             "pad".into(),

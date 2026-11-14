@@ -260,29 +260,29 @@ fn source_pills(slot: GridSlot, live: &LiveKey, batteries: &[(String, String)]) 
                 AppState::apply(cx, |state| state.commit_live_key(slot, Some(next)));
             })
     };
-    let mut pills = vec![
-        choice(
-            "live-source-clock".into(),
-            tr!("keyboard.live_source_clock"),
-            LiveSource::Clock,
-            live.source == LiveSource::Clock,
-        ),
-        choice(
+    let mut pills = vec![choice(
+        "live-source-clock".into(),
+        tr!("keyboard.live_source_clock"),
+        LiveSource::Clock,
+        live.source == LiveSource::Clock,
+    )];
+    if offers_volume(live) {
+        pills.push(choice(
             "live-source-volume".into(),
             tr!("keyboard.live_source_volume"),
             LiveSource::Volume,
             live.source == LiveSource::Volume,
-        ),
-        choice(
-            "live-source-command".into(),
-            tr!("keyboard.live_source_command"),
-            match &live.source {
-                LiveSource::Command(command) => LiveSource::Command(command.clone()),
-                _ => LiveSource::Command(LiveSource::example_command().to_owned()),
-            },
-            matches!(live.source, LiveSource::Command(_)),
-        ),
-    ];
+        ));
+    }
+    pills.push(choice(
+        "live-source-command".into(),
+        tr!("keyboard.live_source_command"),
+        match &live.source {
+            LiveSource::Command(command) => LiveSource::Command(command.clone()),
+            _ => LiveSource::Command(LiveSource::example_command().to_owned()),
+        },
+        matches!(live.source, LiveSource::Command(_)),
+    ));
     for (index, (key, name)) in batteries.iter().enumerate() {
         pills.push(choice(
             format!("live-source-battery-{index}"),
@@ -294,9 +294,28 @@ fn source_pills(slot: GridSlot, live: &LiveKey, batteries: &[(String, String)]) 
     h_flex().gap_1().flex_wrap().children(pills)
 }
 
+/// Whether the volume is offered as a source: where it can be read, and for
+/// a key that already shows it (set up on another platform), so its pill
+/// still shows which source the key has.
+fn offers_volume(live: &LiveKey) -> bool {
+    LiveSource::Volume.is_readable_here() || live.source == LiveSource::Volume
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The volume is read on macOS and Linux only: elsewhere a new key is not
+    /// offered it, while a key that already shows it keeps its pill.
+    #[test]
+    fn the_volume_is_offered_only_where_it_is_read() {
+        let clock = LiveKey::new(LiveSource::Clock);
+        assert_eq!(
+            offers_volume(&clock),
+            cfg!(any(target_os = "linux", target_os = "macos")),
+        );
+        assert!(offers_volume(&LiveKey::new(LiveSource::Volume)));
+    }
 
     #[test]
     fn a_typed_command_is_a_shell_action_and_an_empty_one_is_none() {

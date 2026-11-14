@@ -477,7 +477,8 @@ The keypad's LCD keys have three more per-device settings:
   `on_press` and makes it active for `timeout_secs` (2–300, default 10):
   meanwhile the two keys under the grid run `decrement` and `increment`
   (the volume keys for a volume source) instead of turning the page. A second
-  press ends it. Volume is read on macOS and Linux only.
+  press ends it. Volume is read on macOS and Linux only, so the app offers it
+  only there; a key set to it elsewhere shows `—`.
 
 ### Application aliases
 

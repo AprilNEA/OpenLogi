@@ -38,6 +38,18 @@ impl LiveSource {
     pub const fn example_command() -> &'static str {
         if cfg!(windows) { "time /t" } else { "date +%H:%M" }
     }
+
+    /// Whether this platform can read the source. The volume is read on macOS
+    /// and Linux only (the agent's live-key reader has no Windows backend), so
+    /// a Windows volume key would only ever show its placeholder; every other
+    /// source reads everywhere.
+    #[must_use]
+    pub const fn is_readable_here(&self) -> bool {
+        match self {
+            Self::Volume => cfg!(any(target_os = "linux", target_os = "macos")),
+            Self::Command(_) | Self::Battery(_) | Self::Clock => true,
+        }
+    }
 }
 
 /// One live key's configuration.
