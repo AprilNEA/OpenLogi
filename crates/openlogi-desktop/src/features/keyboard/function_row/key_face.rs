@@ -16,7 +16,7 @@ use gpui_kit::component::button::{Button, ButtonGroup, ButtonVariants as _};
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::{Disableable as _, Selectable as _, Sizable as _, h_flex, v_flex};
 use openlogi_core::binding::GridSlot;
-use openlogi_core::config::{KeyFaceStyle, KeySymbol};
+use openlogi_core::config::{KeyFaceStyle, KeySymbol, is_local_picture_path};
 use tracing::debug;
 
 use super::FunctionRowView;
@@ -81,15 +81,18 @@ pub(super) fn joined_label(first: &str, second: &str) -> Option<String> {
 }
 
 /// Whether the agent can draw `path` on a key: a PNG or JPEG file, by its
-/// extension.
+/// extension, that is not on a network share or device path the agent never
+/// reads ([`is_local_picture_path`]). Decided without touching the file.
 pub(super) fn is_key_face_image(path: &Path) -> bool {
-    path.extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| {
-            ["png", "jpg", "jpeg"]
-                .iter()
-                .any(|known| ext.eq_ignore_ascii_case(known))
-        })
+    is_local_picture_path(path)
+        && path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| {
+                ["png", "jpg", "jpeg"]
+                    .iter()
+                    .any(|known| ext.eq_ignore_ascii_case(known))
+            })
 }
 
 /// What the Appearance tab's inputs last reported: a picture the keypad

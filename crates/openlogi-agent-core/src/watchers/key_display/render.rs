@@ -23,7 +23,7 @@ use image::codecs::jpeg::JpegEncoder;
 use image::imageops::FilterType;
 use openlogi_core::binding::ActionRingIcon;
 use openlogi_core::color::Rgb;
-use openlogi_core::config::{GradientDirection, KeyGradient, KeySymbol};
+use openlogi_core::config::{GradientDirection, KeyGradient, KeySymbol, is_local_picture_path};
 use openlogi_hid::{KEY_IMAGE_SINGLE_PACKET_MAX, KeyImageJpeg};
 use resvg::{tiny_skia, usvg};
 use thiserror::Error;
@@ -139,20 +139,6 @@ impl PictureRevisions {
             revision: self.0.get(path).copied().flatten(),
         }
     }
-}
-
-/// Whether `path` is a picture OpenLogi may touch at all: not a network
-/// share or device path, which a stat or a read could hang on. The one
-/// check both the version read and [`load_picture`] apply.
-fn is_local_picture_path(path: &Path) -> bool {
-    use std::path::{Component, Prefix};
-    !matches!(
-        path.components().next(),
-        Some(Component::Prefix(prefix)) if matches!(
-            prefix.kind(),
-            Prefix::UNC(..) | Prefix::VerbatimUNC(..) | Prefix::DeviceNS(..) | Prefix::Verbatim(..)
-        )
-    )
 }
 
 /// The one glyph a styled face draws above its label: the user's symbol, else

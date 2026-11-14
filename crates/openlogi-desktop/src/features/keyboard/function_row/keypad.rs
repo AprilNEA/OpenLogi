@@ -18,7 +18,7 @@ use gpui_kit::component::{
     Disableable as _, Icon, IconName, Selectable as _, Sizable as _, WindowExt as _, h_flex, v_flex,
 };
 use openlogi_core::binding::{Cid, GridKey, KeypadPage};
-use openlogi_core::config::{KeyFaceStyle, KeySymbol};
+use openlogi_core::config::{KeyFaceStyle, KeySymbol, is_local_picture_path};
 use openlogi_ui::lucide;
 
 use super::key_colors::{DEFAULT_COLOR, gradient_fill, icon_color};
@@ -414,9 +414,11 @@ fn lcd_face(
     let label = style
         .and_then(KeyFaceStyle::trimmed_label)
         .map(|label| SharedString::from(label.to_owned()));
+    // Decided from the path alone: a render never touches the file. A file
+    // that is missing or unreadable just loads to nothing, in the background.
     let picture = style
         .and_then(|style| style.image.clone())
-        .filter(|path| path.exists());
+        .filter(|path| is_local_picture_path(path));
     let caption = |text: SharedString, alpha: f32| {
         div()
             .max_w(px(key.w - 16.))
@@ -442,6 +444,7 @@ fn lcd_face(
         .when_some(picture, |face, path| {
             face.child(
                 img(path)
+                    .debug_selector(|| "key-face-picture".into())
                     .absolute()
                     .inset_0()
                     .size_full()
@@ -635,5 +638,55 @@ fn paging_glyph(cid: Cid) -> Option<&'static str> {
         cid if cid == Cid::new(0x01a1) => Some("‹"),
         cid if cid == Cid::new(0x01a2) => Some("›"),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use gpui::{Context, IntoElement, Render, Window, div};
+
+    use super::*;
+
+    /// One LCD face, drawn on its own.
+    struct Face(KeyFaceStyle);
+
+    impl Render for Face {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let shape = KeyShape {
+                w: 96.,
+                h: 96.,
+                radii: [8.; 4],
+            };
+            div().size_full().child(lcd_face(
+                None,
+                "Key".into(),
+                Some(&self.0),
+                shape,
+                KeyState::Rest,
+            ))
+        }
+    }
+
+    /// Drawing a face decides from the path alone whether its picture is
+    /// shown: no file check runs on the render thread — a missing file just
+    /// loads to nothing in the background — so a picture on a stalled share
+    /// cannot freeze the window.
+    #[gpui::test]
+    fn key_picture_checks_do_not_block_render(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        let missing = PathBuf::from("/nonexistent/openlogi/key.png");
+        let style = KeyFaceStyle {
+            image: Some(missing),
+            ..KeyFaceStyle::default()
+        };
+        let (_view, cx) = cx.add_window_view(|_, _| Face(style));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        assert!(
+            cx.debug_bounds("key-face-picture").is_some(),
+            "the picture is placed without checking the file"
+        );
     }
 }

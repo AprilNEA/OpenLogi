@@ -1,7 +1,7 @@
 //! How a keypad's LCD key looks beyond its action's icon: a label, colours
 //! and a picture the user chose.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -47,6 +47,26 @@ pub struct KeyFaceStyle {
     /// `background`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gradient: Option<KeyGradient>,
+}
+
+/// Whether a key picture at `path` may be touched at all — looked up, read,
+/// shown. A network share or device path is not: a stat or a read could hang
+/// on one that is slow or gone, so the agent never reads it and the settings
+/// app never shows or accepts it. Decided from the path alone, with no file
+/// access, so it is safe anywhere — a render included.
+///
+/// A path without a Windows prefix is always local by this rule; on other
+/// platforms a mounted share is just a directory.
+#[must_use]
+pub fn is_local_picture_path(path: &Path) -> bool {
+    use std::path::{Component, Prefix};
+    !matches!(
+        path.components().next(),
+        Some(Component::Prefix(prefix)) if matches!(
+            prefix.kind(),
+            Prefix::UNC(..) | Prefix::VerbatimUNC(..) | Prefix::DeviceNS(..) | Prefix::Verbatim(..)
+        )
+    )
 }
 
 /// A linear two-colour background gradient.
