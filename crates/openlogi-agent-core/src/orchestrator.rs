@@ -1314,11 +1314,7 @@ impl Orchestrator {
         due.into_iter()
             .map(|(id, source, ticket)| {
                 let battery = match &source {
-                    LiveSource::Battery(device) => self
-                        .devices
-                        .iter()
-                        .find(|dev| dev.config_key == *device)
-                        .and_then(|dev| dev.battery.clone()),
+                    LiveSource::Battery(device) => live_battery(&self.devices, device),
                     _ => None,
                 };
                 crate::live_keys::LiveRead {
@@ -2838,6 +2834,18 @@ fn write_value<T>(lock: &RwLock<T>, value: T, name: &str) {
         Ok(mut guard) => *guard = value,
         Err(e) => warn!(error = %e, lock = name, "lock poisoned — keeping stale value"),
     }
+}
+
+/// The battery a live key showing `config_key`'s battery reads. One device
+/// can have several records — a sleeping receiver slot and the cable it is
+/// on now — so the online, addressable record wins; the first record of the
+/// device is the fallback while none is.
+fn live_battery(devices: &[AgentDevice], config_key: &str) -> Option<BatteryInfo> {
+    devices
+        .iter()
+        .filter(|dev| dev.config_key == config_key)
+        .min_by_key(|dev| !(dev.online && dev.route.is_some()))
+        .and_then(|dev| dev.battery.clone())
 }
 
 /// Publish a fresh immutable snapshot only when its projected value changed.

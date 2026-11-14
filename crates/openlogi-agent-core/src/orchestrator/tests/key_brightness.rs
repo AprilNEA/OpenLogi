@@ -184,3 +184,37 @@ async fn a_superseded_gui_brightness_write_answers_superseded() {
         "the superseded level was never written"
     );
 }
+
+/// A live battery key follows the device's online record: a sleeping
+/// receiver slot sorted before the cable it is on now does not stand in for
+/// it. With no record online, the first one is the fallback.
+#[test]
+fn live_battery_prefers_online_route() {
+    use openlogi_core::device::{BatteryInfo, BatteryLevel, BatteryStatus};
+    let battery = |percentage| BatteryInfo {
+        percentage: Some(percentage),
+        level: BatteryLevel::Good,
+        status: BatteryStatus::Discharging,
+    };
+    let with_battery = |key: &str, slot, online, percentage| {
+        let mut device = dev(key, slot, online);
+        device.battery = Some(battery(percentage));
+        device
+    };
+
+    let devices = [
+        with_battery("pad", 1, false, 12),
+        with_battery("other", 3, true, 50),
+        with_battery("pad", 2, true, 80),
+    ];
+    assert_eq!(
+        super::super::live_battery(&devices, "pad"),
+        Some(battery(80))
+    );
+    assert_eq!(
+        super::super::live_battery(&[with_battery("pad", 1, false, 12)], "pad"),
+        Some(battery(12)),
+        "the only record stands in while none is online"
+    );
+    assert_eq!(super::super::live_battery(&devices, "missing"), None);
+}
