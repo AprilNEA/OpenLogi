@@ -394,7 +394,9 @@ pub fn shell_output(cmd: &str, timeout: std::time::Duration, max_bytes: usize) -
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    let (mut child, tree) = shell_tree::ProcessTree::spawn(&mut command).ok()?;
+    let (mut child, tree) = shell_tree::ProcessTree::spawn(&mut command)
+        .inspect_err(|error| tracing::warn!(%error, "shell command not started"))
+        .ok()?;
     let Some(stdout) = child.stdout.take() else {
         drop(tree);
         let _ = child.kill();

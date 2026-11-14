@@ -17,15 +17,50 @@ pub(super) struct ProcessTree {
     job: windows_sys::Win32::Foundation::HANDLE,
 }
 
+impl ProcessTree {
+    /// Start `command` with every process it starts held in one tree.
+    ///
+    /// A command whose tree cannot be held is not left running: without an
+    /// owner for its children, a timeout could end only the shell, and a
+    /// child it put in the background would keep running — and keep the
+    /// output pipe open. It is stopped and reaped, and the error returned.
+    pub(super) fn spawn(command: &mut Command) -> std::io::Result<(Child, Self)> {
+        Self::prepare(command);
+        Self::spawn_held(command, Self::hold)
+    }
+
+    /// Spawn `command` and hold its tree with `hold`, stopping and reaping
+    /// the child when `hold` fails.
+    fn spawn_held(
+        command: &mut Command,
+        hold: impl FnOnce(&Child) -> std::io::Result<Self>,
+    ) -> std::io::Result<(Child, Self)> {
+        let mut child = command.spawn()?;
+        match hold(&child) {
+            Ok(tree) => Ok((child, tree)),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                Err(error)
+            }
+        }
+    }
+}
+
 #[cfg(unix)]
 impl ProcessTree {
-    /// Start `command` in a process group of its own and hold that group.
-    pub(super) fn spawn(command: &mut Command) -> std::io::Result<(Child, Option<Self>)> {
+    /// Start the command in a process group of its own.
+    fn prepare(command: &mut Command) {
         use std::os::unix::process::CommandExt as _;
-        let child = command.process_group(0).spawn()?;
-        // The shell leads its group, so the group id is its pid.
-        let tree = i32::try_from(child.id()).ok().map(|group| Self { group });
-        Ok((child, tree))
+        command.process_group(0);
+    }
+
+    /// Hold the child's process group: the shell leads it, so the group id
+    /// is its pid.
+    fn hold(child: &Child) -> std::io::Result<Self> {
+        i32::try_from(child.id())
+            .map(|group| Self { group })
+            .map_err(|_| std::io::Error::other("the shell's pid is not a process group id"))
     }
 }
 
@@ -46,13 +81,16 @@ impl Drop for ProcessTree {
 
 #[cfg(windows)]
 impl ProcessTree {
-    /// Start `command` and put it in a job object that ends every process
-    /// in it when the job's last handle closes.
+    /// Nothing to set before the spawn: the job is assigned after it.
+    fn prepare(_command: &mut Command) {}
+
+    /// Put the child in a job object that ends every process in it when the
+    /// job's last handle closes.
     #[expect(
         unsafe_code,
         reason = "a job object is the Win32 way to end a process together with its children"
     )]
-    pub(super) fn spawn(command: &mut Command) -> std::io::Result<(Child, Option<Self>)> {
+    fn hold(child: &Child) -> std::io::Result<Self> {
         use std::os::windows::io::AsRawHandle as _;
         use windows_sys::Win32::Foundation::CloseHandle;
         use windows_sys::Win32::System::JobObjects::{
@@ -61,12 +99,11 @@ impl ProcessTree {
             SetInformationJobObject,
         };
 
-        let child = command.spawn()?;
         // SAFETY: null attributes and name are documented as valid; the
         // handle is checked before use and owned by the returned tree.
         let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
         if job.is_null() {
-            return Ok((child, None));
+            return Err(std::io::Error::last_os_error());
         }
         let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
         info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
@@ -85,12 +122,13 @@ impl ProcessTree {
                 && AssignProcessToJobObject(job, child.as_raw_handle()) != 0
         };
         if !held {
+            let error = std::io::Error::last_os_error();
             // SAFETY: `job` is a handle this function opened and nothing
             // else holds.
             unsafe { CloseHandle(job) };
-            return Ok((child, None));
+            return Err(error);
         }
-        Ok((child, Some(Self { job })))
+        Ok(Self { job })
     }
 }
 
@@ -102,5 +140,44 @@ impl Drop for ProcessTree {
         unsafe {
             windows_sys::Win32::Foundation::CloseHandle(self.job);
         }
+    }
+}
+
+#[cfg(test)]
+#[cfg(unix)]
+mod tests {
+    use std::process::{Command, Stdio};
+
+    use super::*;
+
+    /// Whether a process with `pid` still exists, as `kill -0` sees it.
+    fn alive(pid: u32) -> bool {
+        Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    /// A command whose tree cannot be held is stopped and reaped, not left
+    /// running without an owner for its children — the path a failed job
+    /// setup takes on Windows.
+    #[test]
+    fn shell_output_job_failure_leaves_no_child() {
+        let mut command = Command::new("sleep");
+        command.arg("30");
+        let mut pid = None;
+
+        let spawned = ProcessTree::spawn_held(&mut command, |child| {
+            pid = Some(child.id());
+            Err(std::io::Error::other("job setup failed"))
+        });
+
+        let error = spawned
+            .err()
+            .expect("a tree that cannot be held is an error");
+        assert_eq!(error.to_string(), "job setup failed");
+        let pid = pid.expect("the command was started");
+        assert!(!alive(pid), "the unheld command was stopped and reaped");
     }
 }
