@@ -6,6 +6,11 @@ use std::time::{Duration, Instant};
 
 const PREPARATION_TIMEOUT: Duration = Duration::from_secs(2);
 const CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long a confirmation sleeps before the state is read again. The
+/// active-Space notification is not posted for every switch, so a host that
+/// only waited for it would park on [`CONFIRMATION_TIMEOUT`] after a switch
+/// that already landed.
+pub(super) const CONFIRMATION_POLL: Duration = Duration::from_millis(20);
 
 /// Logi Options+ 2.8 drives its three-finger horizontal swipe from a timer of
 /// this period (`injectionPeriodInMs`, 16.6 ms), one frame per tick.
@@ -314,10 +319,21 @@ pub(super) fn run(
     let Some(target) = initial.target(direction)? else {
         return Ok(Outcome::Boundary);
     };
-    // Topology or active-Space changes during preparation invalidate the plan.
-    if backend.state()? != initial {
+    // A previous switch may still be settling while this one prepares: follow
+    // the newest Space instead of abandoning the plan, so a gesture that lands
+    // mid-slide still moves. A changed display topology never is followed.
+    let settled = backend.state()?;
+    if settled.display != initial.display || settled.ordered != initial.ordered {
         return Err(Failure::ContextChanged);
     }
+    let (initial, target) = if settled.current == initial.current {
+        (initial, target)
+    } else {
+        let Some(target) = settled.target(direction)? else {
+            return Ok(Outcome::Boundary);
+        };
+        (settled, target)
+    };
     backend.post(direction, gate)?;
     loop {
         let state = backend.state()?;
