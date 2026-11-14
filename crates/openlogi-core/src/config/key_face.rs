@@ -121,14 +121,15 @@ impl PictureRevisions {
         self.0.get(path).copied().flatten()
     }
 
-    /// The pictures read in both `self` and `newer` whose version differs —
-    /// those to draw again. A picture only one of them read is left out:
-    /// nothing was drawn from a version that was never known.
+    /// The pictures `newer` read whose version is not the one `self` read —
+    /// those to draw again. A picture `self` never read counts too: it may
+    /// have been drawn before any version was read, and replaced since, so
+    /// nothing says the version drawn is the one `newer` read.
     pub fn changed<'a>(&'a self, newer: &'a Self) -> impl Iterator<Item = &'a Path> {
         newer
             .0
             .iter()
-            .filter(|(path, revision)| self.0.get(*path).is_some_and(|old| old != *revision))
+            .filter(|(path, revision)| self.0.get(*path) != Some(*revision))
             .map(|(path, _)| path.as_path())
     }
 }

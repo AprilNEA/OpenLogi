@@ -773,4 +773,38 @@ mod tests {
             "the replaced picture is loaded again on the next draw"
         );
     }
+
+    /// A picture drawn before the first poll read its version, then replaced
+    /// before that poll, is loaded again: the first version the poll reads is
+    /// not known to be the one drawn.
+    #[gpui::test]
+    fn picture_replaced_before_first_poll_reloads_preview(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("key.png");
+        std::fs::write(&path, b"first").expect("picture written");
+        let style = KeyFaceStyle {
+            image: Some(path.clone()),
+            ..KeyFaceStyle::default()
+        };
+        let (_view, cx) = cx.add_window_view(|_, _| Face(style));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.run_until_parked();
+        let source = gpui::ImageSource::from(path.clone());
+        assert!(cx.update(|_, cx| source.is_asset_cached(cx)), "drawn once");
+
+        std::fs::write(&path, b"replaced before the first poll").expect("picture replaced");
+        let first_poll = PictureRevisions::read([path.clone()]);
+        assert!(cx.update(|_, cx| {
+            reload_replaced_pictures(&PictureRevisions::default(), &first_poll, cx)
+        }));
+        assert!(
+            !cx.update(|_, cx| source.is_asset_cached(cx)),
+            "the picture drawn before the first poll is loaded again"
+        );
+        assert!(
+            !cx.update(|_, cx| reload_replaced_pictures(&first_poll, &first_poll, cx)),
+            "a picture the poll already knows is not reloaded again"
+        );
+    }
 }
