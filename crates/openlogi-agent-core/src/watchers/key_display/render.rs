@@ -10,12 +10,10 @@
 //!
 //! The result is encoded as the baseline JPEG the vendor image write carries.
 
-use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
-use std::time::SystemTime;
 
 use image::ExtendedColorType;
 use image::ImageEncoder as _;
@@ -23,7 +21,10 @@ use image::codecs::jpeg::JpegEncoder;
 use image::imageops::FilterType;
 use openlogi_core::binding::ActionRingIcon;
 use openlogi_core::color::Rgb;
-use openlogi_core::config::{GradientDirection, KeyGradient, KeySymbol, is_local_picture_path};
+use openlogi_core::config::{
+    FileRevision, GradientDirection, KeyGradient, KeySymbol, PictureRevisions,
+    is_local_picture_path,
+};
 use openlogi_hid::{KEY_IMAGE_SINGLE_PACKET_MAX, KeyImageJpeg};
 use resvg::{tiny_skia, usvg};
 use thiserror::Error;
@@ -79,65 +80,21 @@ pub struct KeyPicture {
     revision: Option<FileRevision>,
 }
 
-/// What tells two versions of one file apart without reading it: its size
-/// and when it was last written. `None` fields stand for what the platform
-/// cannot report.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct FileRevision {
-    modified: Option<SystemTime>,
-    len: u64,
-}
-
 impl KeyPicture {
+    /// `path` as a key picture, with the version `revisions` last read —
+    /// none while it has not been read.
+    #[must_use]
+    pub fn of(path: &Path, revisions: &PictureRevisions) -> Self {
+        Self {
+            path: path.to_owned(),
+            revision: revisions.revision(path),
+        }
+    }
+
     /// The picture's file.
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
-    }
-}
-
-/// The versions of the pictures on keys, as last read from disk.
-///
-/// Reading a version is a file-system call, which can stall on a slow or
-/// unavailable share, so it happens in [`Self::read`], off the async
-/// threads and outside the orchestrator's lock; making a face only looks
-/// the version up ([`Self::picture`]).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct PictureRevisions(BTreeMap<PathBuf, Option<FileRevision>>);
-
-impl PictureRevisions {
-    /// Read the version of each picture in `paths`. Blocking: run it off the
-    /// async threads, and never under a lock other work waits on. A network
-    /// or device path, which a stat could hang on, is never touched, and a
-    /// file that cannot be read has no version, so its becoming readable
-    /// changes the face.
-    #[must_use]
-    pub fn read(paths: impl IntoIterator<Item = PathBuf>) -> Self {
-        Self(
-            paths
-                .into_iter()
-                .map(|path| {
-                    let revision = is_local_picture_path(&path)
-                        .then(|| std::fs::metadata(&path).ok())
-                        .flatten()
-                        .map(|meta| FileRevision {
-                            modified: meta.modified().ok(),
-                            len: meta.len(),
-                        });
-                    (path, revision)
-                })
-                .collect(),
-        )
-    }
-
-    /// `path` as a key picture, with the version last read — none while it
-    /// has not been read.
-    #[must_use]
-    pub fn picture(&self, path: &Path) -> KeyPicture {
-        KeyPicture {
-            path: path.to_owned(),
-            revision: self.0.get(path).copied().flatten(),
-        }
     }
 }
 

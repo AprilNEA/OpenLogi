@@ -53,7 +53,8 @@ pub use flow::{
 pub use function_key::FunctionKey;
 pub use identity::canonical_device_key;
 pub use key_face::{
-    GradientDirection, KeyFaceStyle, KeyGradient, KeySymbol, is_local_picture_path,
+    FileRevision, GradientDirection, KeyFaceStyle, KeyGradient, KeySymbol, PictureRevisions,
+    is_local_picture_path,
 };
 pub use key_trigger::{KeyModifiers, KeyTrigger, KeyboardConfig, ParseTriggerError};
 pub use live_key::{LiveKey, LiveSource};

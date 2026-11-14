@@ -1299,8 +1299,8 @@ fn keypad_key_faces_follow_the_bound_actions() {
 /// nothing.
 #[test]
 fn picture_revision_reads_do_not_block_device_updates() {
-    use crate::watchers::key_display::{KeyFace, PictureRevisions};
-    use openlogi_core::config::KeyFaceStyle;
+    use crate::watchers::key_display::{KeyFace, KeyPicture};
+    use openlogi_core::config::{KeyFaceStyle, PictureRevisions};
 
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("key.png");
@@ -1330,15 +1330,15 @@ fn picture_revision_reads_do_not_block_device_updates() {
     assert_eq!(orch.key_picture_paths(), BTreeSet::from([path.clone()]));
     assert_eq!(
         picture_of(&orch),
-        PictureRevisions::default().picture(&path),
+        KeyPicture::of(&path, &PictureRevisions::default()),
         "no version is read while making the faces"
     );
 
     let read = PictureRevisions::read(orch.key_picture_paths());
     orch.set_picture_revisions(read.clone());
     let first = picture_of(&orch);
-    assert_eq!(first, read.picture(&path));
-    assert_ne!(first, PictureRevisions::default().picture(&path));
+    assert_eq!(first, KeyPicture::of(&path, &read));
+    assert_ne!(first, KeyPicture::of(&path, &PictureRevisions::default()));
 
     std::fs::write(&path, b"replaced, and longer").expect("picture replaced");
     assert_eq!(picture_of(&orch), first, "still no file access of its own");

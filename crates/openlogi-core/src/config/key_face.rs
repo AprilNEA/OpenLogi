@@ -69,6 +69,70 @@ pub fn is_local_picture_path(path: &Path) -> bool {
     )
 }
 
+/// What tells two versions of one picture file apart without reading it: its
+/// size and when it was last written. `None` stands for what the platform
+/// cannot report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FileRevision {
+    modified: Option<std::time::SystemTime>,
+    len: u64,
+}
+
+/// The versions of the pictures on keys, as last read from disk.
+///
+/// Reading a version is a file-system call, which can stall on a slow or
+/// unavailable share, so it happens in [`Self::read`], off the threads that
+/// draw or hold a lock; everything else only looks a version up. The agent
+/// redraws a key, and the settings app reloads its preview, when a picture's
+/// version changes — a file replaced at the same path saves no config.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PictureRevisions(std::collections::BTreeMap<PathBuf, Option<FileRevision>>);
+
+impl PictureRevisions {
+    /// Read the version of each picture in `paths`. Blocking: run it off the
+    /// async and UI threads, and never under a lock other work waits on. A
+    /// path [`is_local_picture_path`] rejects is never touched, and a file
+    /// that cannot be read has no version, so its becoming readable is a
+    /// change.
+    #[cfg(feature = "fs")]
+    #[must_use]
+    pub fn read(paths: impl IntoIterator<Item = PathBuf>) -> Self {
+        Self(
+            paths
+                .into_iter()
+                .map(|path| {
+                    let revision = is_local_picture_path(&path)
+                        .then(|| std::fs::metadata(&path).ok())
+                        .flatten()
+                        .map(|meta| FileRevision {
+                            modified: meta.modified().ok(),
+                            len: meta.len(),
+                        });
+                    (path, revision)
+                })
+                .collect(),
+        )
+    }
+
+    /// The version of `path` last read: `None` while it has not been read, or
+    /// could not be.
+    #[must_use]
+    pub fn revision(&self, path: &Path) -> Option<FileRevision> {
+        self.0.get(path).copied().flatten()
+    }
+
+    /// The pictures read in both `self` and `newer` whose version differs —
+    /// those to draw again. A picture only one of them read is left out:
+    /// nothing was drawn from a version that was never known.
+    pub fn changed<'a>(&'a self, newer: &'a Self) -> impl Iterator<Item = &'a Path> {
+        newer
+            .0
+            .iter()
+            .filter(|(path, revision)| self.0.get(*path).is_some_and(|old| old != *revision))
+            .map(|(path, _)| path.as_path())
+    }
+}
+
 /// A linear two-colour background gradient.
 ///
 /// Written `gradient = { from = "ff5a00", to = "7800c8", direction = "diagonal" }`.

@@ -63,11 +63,12 @@ use crate::runtime::{PageTurn, PointerSelection};
 use crate::watchers::host_switch::{HostSwitchLink, HostSwitchLinks, LinkedHostSwitch};
 use crate::watchers::inventory::InventoryRefresh;
 use crate::watchers::key_display::{
-    KeyDisplaySpec, KeyFace, PictureRevisions, SharedKeyDisplaySpecs, StyledFace,
+    KeyDisplaySpec, KeyFace, KeyPicture, SharedKeyDisplaySpecs, StyledFace,
 };
 use crate::watchers::keyboard::{KeyboardSpec, SharedKeyboardSpecs};
 use crate::watchers::light::{WatchedLight, WatchedLights};
 use crate::{DpiCycleState, DpiCycles, PointerSpeeds};
+use openlogi_core::config::PictureRevisions;
 
 mod devices;
 mod lights;
@@ -1353,12 +1354,7 @@ impl Orchestrator {
     /// orchestrator's lock. Touches no file.
     #[must_use]
     pub fn key_picture_paths(&self) -> BTreeSet<std::path::PathBuf> {
-        self.config
-            .devices
-            .values()
-            .flat_map(|device| device.key_faces.values())
-            .filter_map(|style| style.image.clone())
-            .collect()
+        self.config.key_picture_paths()
     }
 
     /// Take in freshly read picture versions and repaint the keys whose
@@ -2933,7 +2929,10 @@ fn key_face(
         foreground: style.color.unwrap_or(Rgb::WHITE),
         icon_color: style.icon_color.or(style.color).unwrap_or(Rgb::WHITE),
         gradient: style.gradient,
-        image: style.image.as_deref().map(|path| pictures.picture(path)),
+        image: style
+            .image
+            .as_deref()
+            .map(|path| KeyPicture::of(path, pictures)),
         symbol: style.symbol.as_ref().and_then(KeySymbol::normalized),
         progress: None,
         highlight: false,

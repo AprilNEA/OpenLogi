@@ -18,7 +18,7 @@ use gpui_kit::component::{
     Disableable as _, Icon, IconName, Selectable as _, Sizable as _, WindowExt as _, h_flex, v_flex,
 };
 use openlogi_core::binding::{Cid, GridKey, KeypadPage};
-use openlogi_core::config::{KeyFaceStyle, KeySymbol, is_local_picture_path};
+use openlogi_core::config::{KeyFaceStyle, KeySymbol, PictureRevisions, is_local_picture_path};
 use openlogi_ui::lucide;
 
 use super::key_colors::{DEFAULT_COLOR, gradient_fill, icon_color};
@@ -371,6 +371,24 @@ impl RenderOnce for PhotoKey {
     }
 }
 
+/// Have the faces draw again every picture whose file changed between `old`
+/// and `new`: GPUI keeps a picture it loaded by its path alone, so a file
+/// replaced at the same path would show its old content until the app
+/// restarts. Dropping the cached entry makes the next draw load the file
+/// again. Answers whether any picture changed.
+pub(super) fn reload_replaced_pictures(
+    old: &PictureRevisions,
+    new: &PictureRevisions,
+    cx: &mut App,
+) -> bool {
+    let mut changed = false;
+    for path in old.changed(new) {
+        gpui::ImageSource::from(path.to_path_buf()).remove_asset(cx);
+        changed = true;
+    }
+    changed
+}
+
 /// An LCD grid key's face as the device shows it: the key's whole top in
 /// black, carrying the bound action's glyph in white (the same icon the agent
 /// writes to the key) with the action's name beneath, or blank when the key
@@ -687,6 +705,41 @@ mod tests {
         assert!(
             cx.debug_bounds("key-face-picture").is_some(),
             "the picture is placed without checking the file"
+        );
+    }
+
+    /// A picture replaced on disk at the same path is loaded again: its new
+    /// version drops what GPUI kept for the path, so the next draw reads the
+    /// new file. An unchanged picture keeps its loaded image.
+    #[gpui::test]
+    fn a_picture_replaced_on_disk_is_loaded_again(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("key.png");
+        std::fs::write(&path, b"first").expect("picture written");
+        let style = KeyFaceStyle {
+            image: Some(path.clone()),
+            ..KeyFaceStyle::default()
+        };
+        let (_view, cx) = cx.add_window_view(|_, _| Face(style));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.run_until_parked();
+        let source = gpui::ImageSource::from(path.clone());
+        assert!(cx.update(|_, cx| source.is_asset_cached(cx)), "drawn once");
+
+        let first = PictureRevisions::read([path.clone()]);
+        assert!(!cx.update(|_, cx| reload_replaced_pictures(&first, &first, cx)));
+        assert!(
+            cx.update(|_, cx| source.is_asset_cached(cx)),
+            "an unchanged picture stays loaded"
+        );
+
+        std::fs::write(&path, b"replaced, and longer").expect("picture replaced");
+        let second = PictureRevisions::read([path.clone()]);
+        assert!(cx.update(|_, cx| reload_replaced_pictures(&first, &second, cx)));
+        assert!(
+            !cx.update(|_, cx| source.is_asset_cached(cx)),
+            "the replaced picture is loaded again on the next draw"
         );
     }
 }

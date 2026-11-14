@@ -67,7 +67,10 @@ fn a_zero_sized_tile_is_refused() {
 
 /// `path` as a key picture with its version read now.
 fn picture(path: &Path) -> KeyPicture {
-    PictureRevisions::read([path.to_owned()]).picture(path)
+    KeyPicture::of(
+        path,
+        &openlogi_core::config::PictureRevisions::read([path.to_owned()]),
+    )
 }
 
 fn styled(face: StyledFace) -> KeyFace {

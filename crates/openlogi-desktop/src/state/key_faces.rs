@@ -33,6 +33,13 @@ impl AppState {
             .and_then(DeviceRecord::persistent_config_key)
     }
 
+    /// Every picture a key face shows, for the Keys view to read the versions
+    /// of off the UI thread. Touches no file.
+    #[must_use]
+    pub fn key_picture_paths(&self) -> std::collections::BTreeSet<std::path::PathBuf> {
+        self.config.key_picture_paths()
+    }
+
     /// Save `style` for the selected device's LCD key at `slot` and have the
     /// agent repaint it. A default style removes the entry; a style that
     /// would not change anything writes nothing and is still reported. A

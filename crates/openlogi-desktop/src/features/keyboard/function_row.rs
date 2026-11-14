@@ -47,7 +47,7 @@ use openlogi_core::binding::{
     Action, ActionRingIcon, ButtonId, GKeyProfile, KeypadPage, WorkflowStep,
 };
 use openlogi_core::config::{
-    GamingKeyMode, KeyDisplayBrightness, KeyFaceStyle, ThumbwheelSensitivity,
+    GamingKeyMode, KeyDisplayBrightness, KeyFaceStyle, PictureRevisions, ThumbwheelSensitivity,
 };
 
 use super::editors::{
@@ -94,7 +94,14 @@ use key_points::{
     photo_keypad_render, shows_g_keys,
 };
 use key_shortcut::ShortcutDraft;
-use keypad::{KeypadPane, KeypadPhotoPane, LastPage, keypad_page_bar, keypad_photo_render_size};
+use keypad::{
+    KeypadPane, KeypadPhotoPane, LastPage, keypad_page_bar, keypad_photo_render_size,
+    reload_replaced_pictures,
+};
+
+/// How often the pictures on key faces are checked for a file replaced on
+/// disk — the agent redraws the keys on the same one-second schedule.
+const PICTURE_POLL: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Narrowest width of the inspector column beside the device: the key
 /// overview, or the selected key's config panel. The column grows past it
@@ -237,6 +244,10 @@ pub struct FunctionRowView {
     shortcut: Option<ShortcutDraft>,
     /// The shortcut Record button's area, which holds focus while recording.
     shortcut_record_focus: FocusHandle,
+    /// The versions of the key-face pictures as last read, and the task that
+    /// reads them off the UI thread (see [`Self::watch_pictures`]).
+    picture_revisions: PictureRevisions,
+    _picture_watch: gpui::Task<()>,
     _state_obs: Subscription,
 }
 
@@ -308,8 +319,43 @@ impl FunctionRowView {
             live: None,
             shortcut: None,
             shortcut_record_focus: cx.focus_handle(),
+            picture_revisions: PictureRevisions::default(),
+            _picture_watch: Self::watch_pictures(cx),
             _state_obs: state_obs,
         }
+    }
+
+    /// Reload a key face's picture once its file is replaced on disk, which
+    /// saves no config and so repaints nothing on its own. Every
+    /// [`PICTURE_POLL`] the versions of the configured pictures are read on
+    /// the background executor — never in a render, which a stalled file
+    /// system would freeze — and a changed one is loaded again
+    /// ([`reload_replaced_pictures`]). One read at a time: the next waits for
+    /// the last.
+    fn watch_pictures(cx: &mut Context<Self>) -> gpui::Task<()> {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(PICTURE_POLL).await;
+                let Some(paths) =
+                    cx.update(|cx| AppState::try_read(cx).map(AppState::key_picture_paths))
+                else {
+                    continue;
+                };
+                let read = cx
+                    .background_executor()
+                    .spawn(async move { PictureRevisions::read(paths) })
+                    .await;
+                let applied = this.update(cx, |view, cx| {
+                    let old = std::mem::replace(&mut view.picture_revisions, read);
+                    if reload_replaced_pictures(&old, &view.picture_revisions, cx) {
+                        cx.notify();
+                    }
+                });
+                if applied.is_err() {
+                    break;
+                }
+            }
+        })
     }
 
     /// The dialpad's dial and roller speed, re-seated on a device switch or

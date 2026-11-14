@@ -716,6 +716,18 @@ impl Config {
             .filter(|button| button.grid_slot().is_some())
     }
 
+    /// Every picture file a key face of any device shows: the files whose
+    /// versions ([`PictureRevisions`](super::PictureRevisions)) are watched,
+    /// so a picture replaced on disk is drawn again.
+    #[must_use]
+    pub fn key_picture_paths(&self) -> std::collections::BTreeSet<std::path::PathBuf> {
+        self.devices
+            .values()
+            .flat_map(|device| device.key_faces.values())
+            .filter_map(|style| style.image.clone())
+            .collect()
+    }
+
     /// How `device_key` styles the LCD key at grid `slot`, if at all.
     #[must_use]
     pub fn key_face_style(&self, device_key: &str, slot: ButtonId) -> Option<&KeyFaceStyle> {

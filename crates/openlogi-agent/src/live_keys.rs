@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use openlogi_agent_core::live_keys::{LiveReader, read_source};
 use openlogi_agent_core::orchestrator::Orchestrator;
-use openlogi_agent_core::watchers::key_display::PictureRevisions;
+use openlogi_core::config::PictureRevisions;
 use tokio::sync::{Mutex, mpsc};
 use tokio::time::{Interval, MissedTickBehavior};
 use tracing::debug;
