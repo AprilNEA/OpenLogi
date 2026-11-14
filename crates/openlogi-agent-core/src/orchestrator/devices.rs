@@ -31,7 +31,17 @@ pub(super) fn configured_wheel_mode(
     if main_wheel_divert(config, dev, os_mouse_hook_available).is_some() {
         return None;
     }
-    let (resolution, inverted) = wheel_settings(config, dev)?;
+    let (resolution, _) = wheel_settings(config, dev)?;
+    // Never the wheel's own invert bit: it reverses the same signal macOS turns
+    // into Accessibility Zoom, so turning scrolling around would turn zooming
+    // around with it. The hook reverses the wheel in software instead
+    // (`Orchestrator::publish_scroll_inversion`), which can leave a zooming
+    // wheel alone. Writing the cleared bit here also undoes what an earlier
+    // build or another client set.
+    let inverted = dev
+        .capabilities
+        .is_some_and(|capabilities| capabilities.scroll_inversion)
+        .then_some(false);
     WheelModeChange::new(resolution, inverted)
 }
 
