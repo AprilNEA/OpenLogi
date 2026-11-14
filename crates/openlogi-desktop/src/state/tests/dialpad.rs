@@ -100,6 +100,37 @@ fn an_offline_dialpad_is_still_the_dialpad() {
     assert_eq!(offline("direct:046d:c548").current_dialpad(), None);
 }
 
+/// Turning a key live, or back, changes what it runs: the cached bindings the
+/// Action tab reads follow at once, not only after a reselection.
+#[test]
+fn live_toggle_refreshes_key_action_panel() {
+    use openlogi_core::binding::{Action, GridKey, GridSlot, KeypadPage};
+    use openlogi_core::config::{LiveKey, LiveSource};
+
+    let (mut state, _receiver) = super::keypad_pages::keypad_state();
+    let slot = GridSlot {
+        page: KeypadPage::FIRST,
+        key: GridKey::Middle,
+    };
+    let button = ButtonId::Grid(slot);
+    let _ = state.commit_binding(button, Action::Copy);
+    assert_eq!(state.button_bindings().get(&button), Some(&Action::Copy));
+
+    let _ = state.commit_live_key(slot, Some(LiveKey::new(LiveSource::Clock)));
+    let shown = state.button_bindings().get(&button).cloned();
+    assert!(
+        shown == Some(Action::ActivateLiveKey(button)),
+        "the panel shows the live key's activation, got {shown:?}"
+    );
+
+    let _ = state.commit_live_key(slot, None);
+    assert_eq!(
+        state.button_bindings().get(&button),
+        Some(&Action::Copy),
+        "a plain key shows its own binding again"
+    );
+}
+
 /// A key face is saved per grid key and page; restyling it the same way
 /// writes nothing, and resetting it to the default removes the entry.
 #[test]
@@ -177,10 +208,7 @@ fn a_live_key_saves_once_and_turns_back_into_a_plain_key() {
 
     let clock = LiveKey::new(LiveSource::Clock);
     let events = state.commit_live_key(slot, Some(clock.clone()));
-    assert_eq!(
-        events,
-        [StateEvent::DeviceConfigChanged(record.device_key())]
-    );
+    assert_eq!(events, [StateEvent::BindingsChanged(record.device_key())]);
     assert_eq!(state.current_live_key(slot), Some(clock.clone()));
     assert_eq!(reloads(&mut receiver), 1, "the agent starts the live key");
 

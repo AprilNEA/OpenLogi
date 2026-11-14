@@ -85,8 +85,13 @@ impl AppState {
 
     /// Make `slot` on the selected device a live key showing `live`, or a
     /// plain key again with `None`; the agent repaints it on reload.
+    ///
+    /// A live key's slot runs its activation instead of its binding
+    /// (`button_bindings_for`), so the cached binding projection is rebuilt
+    /// and the change announced as a binding change: the Action tab then
+    /// shows what the key runs now, as the LCD preview does.
     pub fn commit_live_key(&mut self, slot: GridSlot, live: Option<LiveKey>) -> StateEvents {
-        let events = self.for_current_device(StateEvent::DeviceConfigChanged);
+        let events = self.for_current_device(StateEvent::BindingsChanged);
         let Some(key) = self
             .current_record()
             .and_then(DeviceRecord::persistent_config_key)
@@ -108,6 +113,7 @@ impl AppState {
                 }
             }
         });
+        self.refresh_binding_projections();
         self.persist_and_reload("live key");
         events
     }
