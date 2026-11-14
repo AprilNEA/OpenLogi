@@ -36,7 +36,11 @@ impl LiveSource {
     /// whose `date` would instead try to set the date.
     #[must_use]
     pub const fn example_command() -> &'static str {
-        if cfg!(windows) { "time /t" } else { "date +%H:%M" }
+        if cfg!(windows) {
+            "time /t"
+        } else {
+            "date +%H:%M"
+        }
     }
 
     /// Whether this platform can read the source. The volume is read on macOS

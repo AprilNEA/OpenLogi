@@ -1042,12 +1042,16 @@ mod tests {
     fn the_suggested_live_key_command_prints_the_time() {
         use std::time::Duration;
         let command = openlogi_core::config::LiveSource::example_command();
-        let out = super::shell_output(command, Duration::from_secs(10), 4096).expect("the shell runs");
+        let out =
+            super::shell_output(command, Duration::from_secs(10), 4096).expect("the shell runs");
         let line = out.lines().next().unwrap_or_default().trim();
         let is_time = line.split_once(':').is_some_and(|(hours, minutes)| {
             (1..=2).contains(&hours.len())
                 && minutes.len() == 2
-                && hours.chars().chain(minutes.chars()).all(|c| c.is_ascii_digit())
+                && hours
+                    .chars()
+                    .chain(minutes.chars())
+                    .all(|c| c.is_ascii_digit())
         });
         assert!(is_time, "`{command}` printed {out:?}, not HH:MM");
     }
