@@ -389,6 +389,23 @@ pub(super) fn reload_replaced_pictures(
     changed
 }
 
+/// A face's picture, cropped to fill the key and rounded like the key: the
+/// face clips its children only to a rectangle, so the picture carries the
+/// key's corners itself instead of squaring them off.
+fn face_picture(path: std::path::PathBuf, key: KeyShape) -> gpui::Img {
+    let [tl, tr, br, bl] = key.radii.map(px);
+    img(path)
+        .debug_selector(|| "key-face-picture".into())
+        .absolute()
+        .inset_0()
+        .size_full()
+        .object_fit(ObjectFit::Cover)
+        .rounded_tl(tl)
+        .rounded_tr(tr)
+        .rounded_br(br)
+        .rounded_bl(bl)
+}
+
 /// An LCD grid key's face as the device shows it: the key's whole top in
 /// black, carrying the bound action's glyph in white (the same icon the agent
 /// writes to the key) with the action's name beneath, or blank when the key
@@ -459,16 +476,7 @@ fn lcd_face(
         .rounded_bl(bl)
         .bg(background)
         .overflow_hidden()
-        .when_some(picture, |face, path| {
-            face.child(
-                img(path)
-                    .debug_selector(|| "key-face-picture".into())
-                    .absolute()
-                    .inset_0()
-                    .size_full()
-                    .object_fit(ObjectFit::Cover),
-            )
-        });
+        .when_some(picture, |face, path| face.child(face_picture(path, key)));
     let empty = glyph_face.is_none() && label.is_none();
     let drawn = glyph_face.is_some();
     face.when_some(glyph_face, |face, glyph_face| {
@@ -705,6 +713,29 @@ mod tests {
         assert!(
             cx.debug_bounds("key-face-picture").is_some(),
             "the picture is placed without checking the file"
+        );
+    }
+
+    /// A picture takes its key's corners: the face clips its children only
+    /// to a rectangle, so a picture without them squares off the rounded key.
+    #[test]
+    fn a_picture_is_rounded_like_its_key() {
+        use gpui::Styled as _;
+        let key = KeyShape {
+            w: 96.,
+            h: 96.,
+            radii: [20., 8., 6., 4.],
+        };
+        let mut picture = face_picture(PathBuf::from("key.png"), key);
+        let corners = &picture.style().corner_radii;
+        assert_eq!(
+            [
+                corners.top_left,
+                corners.top_right,
+                corners.bottom_right,
+                corners.bottom_left
+            ],
+            key.radii.map(|radius| Some(px(radius).into())),
         );
     }
 
