@@ -1,7 +1,7 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, RwLock};
 
-use openlogi_core::binding::ButtonId;
+use openlogi_core::binding::{ButtonId, Rotary};
 use openlogi_core::hid::PairingError;
 use openlogi_fixture::{
     CassetteExchange, FIXTURE_SCHEMA_VERSION, HidCassette, ReportSupport, RequestMatch,
@@ -108,6 +108,224 @@ async fn keyboard_capture_replay_restores_original_reporting_on_normal_shutdown(
         KEYBOARD_ARMED_FLAGS,
         KEYBOARD_RESTORED_FLAGS,
     );
+}
+
+/// The MX Creative Dialpad's product ID: a direct route with it is the
+/// dialpad its registry entry describes.
+const DIALPAD_PRODUCT_ID: u16 = 0xbc00;
+
+/// The `0x4610` feature index the dialpad replay places `MultiRoller` at.
+const MULTI_ROLLER_FEATURE_INDEX: u8 = 0x03;
+
+/// The `0x4610` request or echoed reply for function `function` with
+/// `payload` on the dialpad replay's roller feature.
+fn roller_report(function: u8, payload: [u8; 3]) -> Vec<u8> {
+    hidpp20_short(0xff, MULTI_ROLLER_FEATURE_INDEX, function, payload)
+}
+
+/// The dialpad replay's request diverting the dial (roller 1).
+fn divert_dial_request() -> Vec<u8> {
+    roller_report(3, [1, 1, 0])
+}
+
+/// A dialpad replay whose session diverts the dial, then hands it back: the
+/// strict cassette fails on any other request, so the unbound roller is
+/// resolved but never written.
+async fn dialpad_dial_replay(name: &str) -> ArmedReplay {
+    let echoed = |function, payload| {
+        hidpp20_exchange(
+            roller_report(function, payload),
+            roller_report(function, payload),
+        )
+    };
+    ArmedReplay::enumerate_product(
+        keyboard_cassette(
+            name,
+            &[KEYBOARD_CID],
+            vec![
+                root_feature_lookup_exchange(0x4610, MULTI_ROLLER_FEATURE_INDEX, 0),
+                // Resolution of the dial (roller 1), then the roller (0).
+                hidpp20_exchange(
+                    roller_report(1, [1, 0, 0]),
+                    roller_report(1, [0xb4, 0, 0x1f]),
+                ),
+                hidpp20_exchange(
+                    roller_report(1, [0, 0, 0]),
+                    roller_report(1, [0x28, 0, 0x1f]),
+                ),
+                // Divert the dial.
+                echoed(3, [1, 1, 0]),
+                root_feature_lookup_exchange(0x1d4b, 0, 0),
+                // Hand the dial back.
+                echoed(3, [1, 0, 0]),
+            ],
+        ),
+        DIALPAD_PRODUCT_ID,
+    )
+    .await
+}
+
+/// A session wanting only the dial.
+fn dial_wanted() -> watch::Receiver<KeyboardWanted> {
+    watch::channel(KeyboardWanted {
+        rotary: BTreeSet::from([Rotary::Dial]),
+        ..KeyboardWanted::default()
+    })
+    .1
+}
+
+/// Turn `roller` by `delta` increments on the dialpad replay's device.
+fn turn_roller(replay: &ArmedReplay, roller: u8, delta: u8) {
+    let mut payload = [0; 16];
+    payload[0] = roller;
+    payload[1] = delta;
+    replay
+        .backend
+        .emit_channel_report(
+            CAPTURE_CHANNEL,
+            &hidpp20_long(0xff, MULTI_ROLLER_FEATURE_INDEX, 0, payload),
+        )
+        .expect("the rotation reaches the session");
+}
+
+/// How long a dialpad replay may take before it counts as hung.
+const DIALPAD_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// A dialpad session diverts the roller a bound direction names, reports its
+/// turns as rotations of that control — including a turn the dial sends
+/// while its diversion's reply is still on the way — and hands it back to
+/// native reporting before it completes. The strict cassette fails on any
+/// other request: the unbound small roller is resolved but never written.
+#[tokio::test]
+async fn keyboard_capture_replay_diverts_and_hands_back_a_dialpad_roller() {
+    let replay = dialpad_dial_replay("dialpad capture diverts the dial").await;
+    let divert_reply = replay
+        .backend
+        .hold_next_response(
+            CAPTURE_CHANNEL,
+            RequestMatch::Hidpp20,
+            &divert_dial_request(),
+        )
+        .expect("the dial's diversion reply can be held");
+    let (sink, mut captured) = mpsc::unbounded_channel();
+    let (shutdown, host) = replay.host(sink);
+    let capture = run_keyboard_capture_session(replay.route.clone(), dial_wanted(), host);
+    let turn_then_stop = async {
+        // The firmware diverts the dial once it has the request, and the dial
+        // can turn before its reply reaches the host: two increments
+        // counter-clockwise, sent while arming still waits.
+        divert_reply.request_written().await;
+        turn_roller(&replay, 1, 0xfe);
+        divert_reply.release();
+        replay.wireless_lookup.request_written().await;
+        // A turn of the undiverted roller, which must not be reported.
+        turn_roller(&replay, 0, 0x01);
+        let rotation = tokio::time::timeout(DIALPAD_DEADLINE, captured.recv())
+            .await
+            .expect("the session neither reported the dial's turn nor ended");
+        // `None`: the session ended — its wake lookup is still held — without
+        // ever reporting the turn.
+        assert!(
+            matches!(
+                rotation,
+                Some(CapturedInput::Rotation {
+                    rotary: Rotary::Dial,
+                    increments: -2,
+                    per_revolution: 180,
+                    ..
+                })
+            ),
+            "the dial's two counter-clockwise increments, turned while its \
+             diversion was being armed, were never reported"
+        );
+        replay.stop_after_arm(shutdown).await;
+        captured
+    };
+
+    let (outcome, mut captured) = tokio::time::timeout(DIALPAD_DEADLINE, async {
+        tokio::join!(capture, turn_then_stop)
+    })
+    .await
+    .expect("the dialpad session neither reported the dial nor shut down");
+
+    assert!(matches!(
+        outcome.expect("capture session shuts down cleanly"),
+        CaptureSessionOutcome::Restored
+    ));
+    assert!(
+        captured.try_recv().is_err(),
+        "the undiverted roller's turn was reported"
+    );
+    replay
+        .backend
+        .require_complete()
+        .expect("the dialpad cassette is strictly consumed");
+}
+
+/// A diversion whose native write stalls past the HID++ response deadline
+/// must finish before anything else is sent for that roller: a hand-back
+/// that overtook it would be undone by the late diversion, leaving the
+/// roller captured after teardown. The strict cassette fails on a hand-back
+/// written before the diversion completed.
+#[tokio::test]
+async fn roller_restore_waits_for_stalled_take() {
+    let replay = dialpad_dial_replay("dialpad restore waits for a stalled diversion").await;
+    let stalled = replay
+        .backend
+        .hold_next_write_completion(
+            CAPTURE_CHANNEL,
+            RequestMatch::Hidpp20,
+            &divert_dial_request(),
+        )
+        .expect("the dial's diversion write can be held");
+    let (sink, _captured) = mpsc::unbounded_channel();
+    let (shutdown, host) = replay.host(sink);
+    let mut capture = std::pin::pin!(run_keyboard_capture_session(
+        replay.route.clone(),
+        dial_wanted(),
+        host
+    ));
+
+    let stall = async {
+        stalled.write_accepted().await;
+        // Past the 5-second HID++ deadline: a bounded call gives up here and
+        // arming rolls back with a hand-back while the diversion is pending.
+        tokio::time::sleep(
+            hidpp::channel::SEND_RESPONSE_TIMEOUT + std::time::Duration::from_secs(1),
+        )
+        .await;
+    };
+    // Bounded too: a session that neither writes the diversion nor ends
+    // must fail here, not hang.
+    tokio::time::timeout(
+        hidpp::channel::SEND_RESPONSE_TIMEOUT + DIALPAD_DEADLINE,
+        async {
+            tokio::select! {
+                outcome = &mut capture => panic!(
+                    "the session ended while its diversion was still on the wire: {:?}",
+                    outcome.map(|_| ()).map_err(|_| "arming failed")
+                ),
+                () = stall => {}
+            }
+        },
+    )
+    .await
+    .expect("the session never wrote the dial's diversion");
+    stalled.release();
+    let (outcome, ()) = tokio::time::timeout(DIALPAD_DEADLINE, async {
+        tokio::join!(capture, replay.stop_after_arm(shutdown))
+    })
+    .await
+    .expect("the session arms and shuts down once the diversion completes");
+
+    assert!(matches!(
+        outcome.expect("capture session shuts down cleanly"),
+        CaptureSessionOutcome::Restored
+    ));
+    replay
+        .backend
+        .require_complete()
+        .expect("the dialpad cassette is strictly consumed, in order");
 }
 
 /// The `0x8010` feature index the G-key replay places `GamingGKeys` at.
@@ -450,14 +668,23 @@ struct ArmedReplay {
 
 impl ArmedReplay {
     async fn enumerate(cassette: HidCassette) -> Self {
+        Self::enumerate_product(cassette, DIRECT_PRODUCT_ID).await
+    }
+
+    /// [`Self::enumerate`] for a direct device with `product_id`, so the
+    /// route names a known product.
+    async fn enumerate_product(cassette: HidCassette, product_id: u16) -> Self {
         let node_id = NodeId::from("capture-node".to_string());
         let route = DeviceRoute::Direct {
             vendor_id: crate::LOGITECH_VENDOR_ID,
-            product_id: DIRECT_PRODUCT_ID,
+            product_id,
         };
         let backend = Arc::new(
             ReplayBackend::new(
-                replay_topology(direct_capture_node(node_id.clone()), CAPTURE_CHANNEL),
+                replay_topology(
+                    replay_node(node_id.clone(), product_id, "Capture Device"),
+                    CAPTURE_CHANNEL,
+                ),
                 vec![cassette],
             )
             .expect("capture replay topology is valid"),
@@ -711,10 +938,6 @@ async fn bolt_pairing_replay_cancels_discovery_and_restores_notifications() {
         .expect("pairing cassette is strictly consumed");
 }
 
-fn direct_capture_node(id: NodeId) -> ReplayNode {
-    replay_node(id, DIRECT_PRODUCT_ID, "Capture Device")
-}
-
 fn bolt_pairing_node(id: NodeId) -> ReplayNode {
     replay_node(id, BOLT_PRODUCT_ID, "Logi Bolt Receiver")
 }
@@ -829,6 +1052,7 @@ fn keyboard_keys(cids: &[u16]) -> KeyboardWanted {
             .collect(),
         grid: BTreeMap::new(),
         gaming: GamingWanted::default(),
+        rotary: BTreeSet::new(),
     }
 }
 

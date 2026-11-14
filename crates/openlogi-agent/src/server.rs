@@ -20,7 +20,7 @@ use openlogi_agent_core::observable::ObservableState;
 use openlogi_agent_core::orchestrator::{self, Orchestrator, SharedHandles};
 use openlogi_agent_core::runtime::ActionDispatcher;
 use openlogi_core::binding::ActionRingSlot;
-use openlogi_core::config::{ConfigFile, ConfigRevision, Lighting};
+use openlogi_core::config::{ConfigFile, ConfigRevision, KeyDisplayBrightness, Lighting};
 use openlogi_core::device::DeviceInventory;
 use openlogi_hid::{
     BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
@@ -598,6 +598,26 @@ impl Agent for AgentServer {
         session_id: u64,
     ) -> Result<(), ActionRingCommandError> {
         self.action_ring.unhover(session_id)
+    }
+    async fn read_key_brightness(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<KeyDisplayBrightness, WriteError> {
+        self.shared
+            .device(&route)
+            .run(HidppOperation::ReadKeyBrightness, |c| async move {
+                openlogi_hid::get_key_display_brightness_on(&c).await
+            })
+            .await
+    }
+    async fn set_key_brightness(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        brightness: KeyDisplayBrightness,
+    ) -> Result<KeyDisplayBrightness, WriteError> {
+        self.shared.set_key_brightness(&route, brightness).await
     }
 }
 

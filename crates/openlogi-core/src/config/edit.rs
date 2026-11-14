@@ -14,7 +14,9 @@ use std::time::Duration;
 
 use thiserror::Error;
 
-use super::{Config, ConfigError, ConfigFile, ConfigRevision, DisableKey, SmartShift};
+use super::{
+    Config, ConfigError, ConfigFile, ConfigRevision, DisableKey, KeyDisplayBrightness, SmartShift,
+};
 use crate::device_order::{DeviceIdentity, DeviceStableId};
 use crate::hid::{DisableKeysMask, Dpi, LightCommand, ReportRate};
 
@@ -90,6 +92,9 @@ pub enum DeviceSetting {
     KeepOsLayout(bool),
     /// [`DeviceConfig::report_rate`](super::DeviceConfig::report_rate).
     ReportRate(ReportRate),
+    /// A keypad's LCD brightness:
+    /// [`DeviceConfig::key_display_brightness`](super::DeviceConfig::key_display_brightness).
+    KeyDisplayBrightness(KeyDisplayBrightness),
     /// The known keys a keyboard disables:
     /// [`DeviceConfig::disabled_keys`](super::DeviceConfig::disabled_keys),
     /// from the mask the keyboard confirmed.
@@ -181,6 +186,7 @@ impl DeviceEdit {
             | DeviceSetting::FnLock(_)
             | DeviceSetting::KeepOsLayout(_)
             | DeviceSetting::ReportRate(_)
+            | DeviceSetting::KeyDisplayBrightness(_)
             | DeviceSetting::DisabledKeys(_)
             | DeviceSetting::Light(_) => false,
         };
@@ -200,6 +206,9 @@ impl DeviceEdit {
             DeviceSetting::FnLock(fn_lock) => config.set_fn_lock(key, fn_lock),
             DeviceSetting::KeepOsLayout(keep) => config.set_keep_os_layout(key, keep),
             DeviceSetting::ReportRate(rate) => config.set_report_rate(key, rate),
+            DeviceSetting::KeyDisplayBrightness(brightness) => {
+                config.set_key_display_brightness(key, Some(brightness));
+            }
             DeviceSetting::DisabledKeys(mask) => {
                 config.set_disabled_keys(key, DisableKey::disabled_in(mask));
             }

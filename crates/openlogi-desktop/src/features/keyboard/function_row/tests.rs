@@ -1,5 +1,5 @@
 use super::callout_layout::{CalloutLayout, CardRect, callout_layout};
-use super::key_points::{KeyPoint, key_slots, photo_key_shape};
+use super::key_points::{KeyPoint, key_slots, photo_keypad_render};
 use super::*;
 use crate::ui::callouts::routes_cross;
 use openlogi_assets::{Assignment, Direction, ImageEntry, Metadata, Origin, Point};
@@ -9,7 +9,12 @@ use openlogi_core::device::DeviceKind;
 use openlogi_core::hid::{DeviceRoute, KeypadDescriptor};
 use std::path::PathBuf;
 
+mod dialpad;
 mod gaming;
+mod key_colors;
+mod key_face;
+mod key_shortcut;
+mod key_symbol;
 mod native_function;
 /// The MX Creative Keypad, as its wired route names it.
 fn mx_keypad() -> Option<&'static KeypadDescriptor> {
@@ -52,11 +57,16 @@ fn picking_an_action_sets_or_replaces_the_binding() {
 }
 
 #[test]
-fn hover_or_selection_highlights_a_key() {
-    assert!(key_is_highlighted(2, Some(2), None));
-    assert!(key_is_highlighted(2, None, Some(2)));
-    assert!(key_is_highlighted(2, Some(2), Some(7)));
-    assert!(!key_is_highlighted(2, Some(1), Some(7)));
+fn the_selected_key_stands_apart_from_the_hovered_one() {
+    assert_eq!(KeyState::of(2, Some(2), None), KeyState::Selected);
+    assert_eq!(KeyState::of(2, None, Some(2)), KeyState::Hovered);
+    // Selection wins over hover on the same key, so the key being configured
+    // keeps its selected look while the pointer rests on it.
+    assert_eq!(KeyState::of(2, Some(2), Some(2)), KeyState::Selected);
+    assert_eq!(KeyState::of(2, Some(1), Some(7)), KeyState::Rest);
+    assert!(KeyState::Selected.is_highlighted());
+    assert!(KeyState::Hovered.is_highlighted());
+    assert!(!KeyState::Rest.is_highlighted());
 }
 
 #[test]
@@ -168,9 +178,12 @@ fn the_stock_keypad_render_puts_every_key_on_the_photo() {
     let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
     rust_i18n::set_locale("en");
 
-    let KeySurface::Photo(stock) =
-        key_surface(Some(&stock_keypad_asset((935, 1105))), mx_keypad(), None)
-    else {
+    let KeySurface::Photo(stock) = key_surface(
+        Some(&stock_keypad_asset((935, 1105))),
+        mx_keypad(),
+        None,
+        None,
+    ) else {
         panic!("the stock render maps the keys onto the photo");
     };
 
@@ -202,7 +215,12 @@ fn a_restaged_keypad_render_falls_back_to_the_keycap_map() {
     let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
     rust_i18n::set_locale("en");
 
-    let surface = key_surface(Some(&stock_keypad_asset((1057, 1227))), mx_keypad(), None);
+    let surface = key_surface(
+        Some(&stock_keypad_asset((1200, 1400))),
+        mx_keypad(),
+        None,
+        None,
+    );
 
     assert!(matches!(surface, KeySurface::Keypad(_)));
 }
@@ -263,8 +281,8 @@ fn photo_keys_keep_the_render_gaps_between_them() {
 
     for (a, b) in slots.iter().zip(&slots[1..]) {
         let (one, two) = (
-            photo_key_shape(&a.target, render.0),
-            photo_key_shape(&b.target, render.0),
+            photo_keypad_render(None).key_shape(&a.target, render.0),
+            photo_keypad_render(None).key_shape(&b.target, render.0),
         );
         let (w1, h1, w2, h2) = (one.w, one.h, two.w, two.h);
         let dx = (b.point.x_frac - a.point.x_frac).abs() * render.0;
@@ -892,6 +910,34 @@ fn the_key_panel_list_scrolls_under_a_scrollbar(cx: &mut gpui::TestAppContext) {
     );
 }
 
+/// In a window too short for the panel's header, shortcut section and the
+/// list's full cap, the list gives up height and scrolls inside the panel.
+/// Capped only at its own height, it ran past the panel's bottom edge and
+/// drew its rows over the page: a keypad key's tab strip was enough.
+#[gpui::test]
+fn the_key_panel_list_stays_inside_its_panel_in_a_short_window(cx: &mut gpui::TestAppContext) {
+    use crate::features::binding_editor::EDITOR_LIST_MAX_H;
+
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+    let (view, cx) = keys_tab(cx);
+    view.update(cx, |view, cx| view.select_key(Some(1), cx));
+    cx.simulate_resize(gpui::size(px(1280.), px(520.)));
+    settle(cx);
+
+    let panel = cx.debug_bounds("key-panel").expect("the key panel shows");
+    let viewport = cx
+        .debug_bounds("scrollbar-overlay")
+        .expect("the key panel list has a scrollbar");
+    assert!(
+        viewport.bottom() <= panel.bottom(),
+        "the list ends inside the panel: {viewport:?} in {panel:?}"
+    );
+    assert!(
+        viewport.size.height < px(EDITOR_LIST_MAX_H),
+        "the list shrank below its cap: {viewport:?}"
+    );
+}
+
 /// The key overview lists every key in the same column. In a window too
 /// short for the column to grow to all of them, the list needs the same
 /// scrollbar. The scroll viewport must keep the rows' height: collapsed, it
@@ -1025,7 +1071,7 @@ fn every_key_name_shows_whole_in_the_longest_translation(cx: &mut gpui::TestAppC
         .map(|(&cid, column)| (cid, 4. + 5. * column, 10.))
         .collect();
     let slots = key_slots_from_layouts(
-        key_surface(Some(&asset_with_controls(&markers)), None, None).slots(),
+        key_surface(Some(&asset_with_controls(&markers)), None, None, None).slots(),
         None,
         KeyEditScope {
             page: KeypadPage::FIRST,
@@ -1186,7 +1232,7 @@ fn only_grid_targets_move_to_the_edited_page() {
     let paging = KeyTarget::Control(ButtonId::Control(Cid::RIGHT_PAGING));
     assert_eq!(paging.clone().on_page(second), paging);
     // Every keypad layout slot starts on page 1, whatever page is edited.
-    let keypad = key_surface(None, mx_keypad(), None).slots();
+    let keypad = key_surface(None, mx_keypad(), None, None).slots();
     assert!(
         keypad
             .iter()
@@ -1276,4 +1322,83 @@ fn switching_the_app_profile_drops_a_draft_for_the_old_one(cx: &mut gpui::TestAp
             assert_eq!(view.selected_key, Some(0));
         });
     });
+}
+
+/// The coloured configuration render the tab shows is measured too: every
+/// key lands on the photo at the centre measured off that render, in the
+/// schematic's order.
+#[test]
+fn the_config_keypad_render_puts_every_key_on_the_photo() {
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+
+    let KeySurface::Photo(config) = key_surface(
+        Some(&stock_keypad_asset((1057, 1227))),
+        mx_keypad(),
+        None,
+        None,
+    ) else {
+        panic!("the config render maps the keys onto the photo");
+    };
+
+    let schematic = key_slots(None, mx_keypad());
+    assert_eq!(
+        config.iter().map(|slot| &slot.target).collect::<Vec<_>>(),
+        schematic
+            .iter()
+            .map(|slot| &slot.target)
+            .collect::<Vec<_>>(),
+    );
+    let at = |slot: &super::key_points::KeySlotLayout| {
+        (slot.point.x_frac * 1057., slot.point.y_frac * 1227.)
+    };
+    let (x, y) = at(&config[0]);
+    assert!(
+        (x - 263.).abs() < 0.01 && (y - 260.).abs() < 0.01,
+        "{x},{y}"
+    );
+    let (x, y) = at(&config[8]);
+    assert!(
+        (x - 740.).abs() < 0.01 && (y - 736.).abs() < 0.01,
+        "{x},{y}"
+    );
+    let (x, y) = at(&config[10]);
+    assert!(
+        (x - 502.).abs() < 0.01 && (y - 937.).abs() < 0.01,
+        "{x},{y}"
+    );
+}
+
+/// Each measured keypad render outlines its keys with its own key size, not
+/// one scaled off another render: drawn at its own width, a grid key is the
+/// size measured on it, and no two keys overlap.
+#[test]
+fn each_keypad_render_outlines_its_keys_without_overlap() {
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    for (size, grid_key) in [((935_u32, 1105_u32), 200.), ((1057, 1227), 208.)] {
+        let asset = stock_keypad_asset(size);
+        let render = super::key_points::keypad_render(&asset).expect("a measured render");
+        #[expect(clippy::cast_precision_loss, reason = "test render sizes are small")]
+        let (w, h) = (size.0 as f32, size.1 as f32);
+        let slots = key_slots(Some(&asset), mx_keypad());
+        assert_eq!(slots.len(), 11);
+        assert_approx_eq(render.key_shape(&slots[4].target, w).w, grid_key);
+        for (i, a) in slots.iter().enumerate() {
+            for b in &slots[i + 1..] {
+                let (one, two) = (
+                    render.key_shape(&a.target, w),
+                    render.key_shape(&b.target, w),
+                );
+                let dx = (b.point.x_frac - a.point.x_frac).abs() * w;
+                let dy = (b.point.y_frac - a.point.y_frac).abs() * h;
+                assert!(
+                    2. * dx >= one.w + two.w || 2. * dy >= one.h + two.h,
+                    "{size:?}: {} and {} overlap",
+                    a.legend,
+                    b.legend
+                );
+            }
+        }
+    }
 }

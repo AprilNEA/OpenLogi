@@ -60,16 +60,19 @@ pub enum DeviceKind {
     /// This is an identity hint only. UI controls are gated by the dedicated
     /// light capability descriptor, never by this variant alone.
     Light,
+    /// Dialpads: a rotary dial and roller plus a few keys (the MX Creative
+    /// Dialpad). Appended last — the wire encodes this enum by index.
+    Dialpad,
 }
 
 impl DeviceKind {
-    /// Whether this kind binds keys, not pointer buttons: keyboards and
-    /// standalone numpads. Such a device gets the Keys panel, its bindings
-    /// resolve against the foreground app rather than the app under the
-    /// pointer, and the agent captures it on the keyboard input plane.
+    /// Whether this kind binds keys, not pointer buttons: keyboards,
+    /// standalone numpads and dialpads. Such a device gets the Keys panel, its
+    /// bindings resolve against the foreground app rather than the app under
+    /// the pointer, and the agent captures it on the keyboard input plane.
     #[must_use]
     pub const fn is_keyboard_family(self) -> bool {
-        matches!(self, Self::Keyboard | Self::Numpad)
+        matches!(self, Self::Keyboard | Self::Numpad | Self::Dialpad)
     }
 
     /// Parse the OpenLogi asset registry's `type` string into a [`DeviceKind`].
@@ -118,6 +121,7 @@ impl DeviceKind {
             Self::Camera => "camera.camera",
             Self::Unknown => "device.device",
             Self::Light => "device.lighting",
+            Self::Dialpad => "device.dialpad",
         }
     }
 }
@@ -247,6 +251,11 @@ pub struct Capabilities {
     /// identity.
     #[serde(default)]
     pub change_host: bool,
+    /// The brightness of the device's display keys can be set — HID++
+    /// `0x8040 BrightnessControl`, as on the MX Creative Keypad. Appended:
+    /// crosses the IPC and the persisted identity.
+    #[serde(default)]
+    pub key_brightness: bool,
 }
 
 impl Capabilities {
@@ -307,6 +316,7 @@ impl Capabilities {
             m_keys: ids.contains(&0x8020),
             macro_record: ids.contains(&0x8030),
             change_host: ids.contains(&0x1814),
+            key_brightness: ids.contains(&0x8040),
         }
     }
 
@@ -329,7 +339,9 @@ impl Capabilities {
             },
             // A numpad's controls are HID++ buttons (page buttons / grid keys)
             // — keep its Keys panel configurable before the first probe.
-            DeviceKind::Numpad => Self {
+            // A dialpad's keys, dial and roller are bindable controls too, so
+            // a dialpad never seen online keeps its Keys panel the same way.
+            DeviceKind::Numpad | DeviceKind::Dialpad => Self {
                 buttons: true,
                 ..Self::default()
             },
@@ -937,6 +949,7 @@ mod tests {
                     m_keys: false,
                     macro_record: false,
                     change_host: false,
+                    key_brightness: false,
                 }),
                 settings_revision: 0,
                 hidpp10: false,
@@ -1066,6 +1079,7 @@ mod tests {
                 m_keys: false,
                 macro_record: false,
                 change_host: false,
+                key_brightness: false,
             }
         );
         assert!(!Capabilities::from_feature_ids(&[0x0003, 0x1b04]).thumbwheel);
@@ -1099,6 +1113,7 @@ mod tests {
                 m_keys: false,
                 macro_record: false,
                 change_host: false,
+                key_brightness: false,
             }
         );
         // A G713: the gaming-key features and onboard profiles, no

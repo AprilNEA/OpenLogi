@@ -42,6 +42,11 @@ pub fn bindings_for(
 /// gesture identity while retaining the same plain-click fallback. Unset
 /// buttons fall back to [`default_binding_on`] with `layout`, as in
 /// [`bindings_for`].
+///
+/// A keypad grid slot that shows a live value
+/// ([`DeviceConfig::live_keys`](crate::config::DeviceConfig::live_keys))
+/// runs [`Action::ActivateLiveKey`] whatever it stores, and the keypad's
+/// paging buttons are seeded so they can adjust an active live key.
 #[must_use]
 pub fn button_bindings_for(
     config: &Config,
@@ -58,7 +63,12 @@ pub fn button_bindings_for(
         .copied()
         .map(|button| (button, Binding::Single(default_binding_on(layout, button))))
         .collect();
-    if config_key.is_some_and(|key| config.keypad_pages(key) > KeypadPage::FIRST) {
+    let live_slots: Vec<ButtonId> = config_key
+        .map(|key| config.live_key_slots(key).collect())
+        .unwrap_or_default();
+    if config_key.is_some_and(|key| config.keypad_pages(key) > KeypadPage::FIRST)
+        || !live_slots.is_empty()
+    {
         bindings.extend(keypad_paging_defaults());
     }
     for (button, mut binding) in stored {
@@ -68,16 +78,20 @@ pub fn button_bindings_for(
         }
         bindings.insert(button, binding);
     }
+    for slot in live_slots {
+        bindings.insert(slot, Binding::Single(Action::ActivateLiveKey(slot)));
+    }
     bindings
 }
 
 /// The page actions a multi-page keypad's paging buttons start out bound to.
 ///
-/// Seeded only once a device has more than one page — the page count is a
-/// per-device config fact, so no device kind or model stands in for it. With
-/// one page there is nothing to page through and the buttons stay native;
-/// seeding them for every device would make every keyboard look bound and
-/// start a capture session for it.
+/// Seeded only once a device has more than one page, or a live key whose
+/// value the paging buttons adjust while it is active — both per-device
+/// config facts, so no device kind or model stands in for them. Otherwise
+/// there is nothing to page through and the buttons stay native; seeding them
+/// for every device would make every keyboard look bound and start a capture
+/// session for it.
 fn keypad_paging_defaults() -> [(ButtonId, Binding); 2] {
     let [left, right] = Cid::PAGING;
     [
@@ -617,8 +631,8 @@ mod tests {
         let page = |number| KeypadPage::new(number).unwrap();
         let mut cfg = Config::default();
         cfg.set_keypad_pages("keypad", page(3));
-        assert!(!cfg.keypad_page_binds("keypad", page(2)));
-        assert!(!cfg.keypad_page_binds("unknown", page(1)));
+        assert!(!cfg.keypad_page_has_settings("keypad", page(2)));
+        assert!(!cfg.keypad_page_has_settings("unknown", page(1)));
 
         cfg.set_binding(
             "keypad",
@@ -632,9 +646,117 @@ mod tests {
             Some(Action::Cut),
         );
 
-        assert!(cfg.keypad_page_binds("keypad", page(2)));
-        assert!(cfg.keypad_page_binds("keypad", page(3)));
-        assert!(!cfg.keypad_page_binds("keypad", page(1)));
+        assert!(cfg.keypad_page_has_settings("keypad", page(2)));
+        assert!(cfg.keypad_page_has_settings("keypad", page(3)));
+        assert!(!cfg.keypad_page_has_settings("keypad", page(1)));
+    }
+
+    /// A page with no binding but a styled face or a live key still holds
+    /// what the user set: removing it drops them, so it asks first.
+    #[test]
+    fn removing_live_or_styled_page_requires_confirmation() {
+        use crate::binding::{GridKey, GridSlot};
+        use crate::config::{KeyFaceStyle, LiveKey, LiveSource};
+        let page = |number| KeypadPage::new(number).unwrap();
+        let mut cfg = Config::default();
+        cfg.set_keypad_pages("keypad", page(3));
+        cfg.set_key_face_style(
+            "keypad",
+            slot(2, GridKey::Middle),
+            Some(KeyFaceStyle {
+                label: Some("Build".into()),
+                ..KeyFaceStyle::default()
+            }),
+        );
+        cfg.devices
+            .get_mut("keypad")
+            .expect("the keypad has settings")
+            .live_keys
+            .insert(
+                ButtonId::Grid(GridSlot {
+                    page: page(3),
+                    key: GridKey::TopLeft,
+                }),
+                LiveKey::new(LiveSource::Clock),
+            );
+
+        assert!(
+            cfg.keypad_page_has_settings("keypad", page(2)),
+            "a styled face"
+        );
+        assert!(
+            cfg.keypad_page_has_settings("keypad", page(3)),
+            "a live key"
+        );
+        assert!(!cfg.keypad_page_has_settings("keypad", page(1)));
+    }
+
+    /// A live key's slot runs its activation whatever it stores, the paging
+    /// buttons are seeded so they can adjust it, and a `live_keys` entry
+    /// under a button that is not an LCD key is ignored.
+    #[test]
+    fn a_live_key_runs_its_activation_and_seeds_the_paging_buttons() {
+        use crate::binding::{Cid, GridKey};
+        use crate::config::{LiveKey, LiveSource};
+        let mut cfg = Config::default();
+        let middle = slot(1, GridKey::Middle);
+        cfg.set_binding("keypad", middle, Binding::Single(Action::Copy));
+        let device = cfg.devices.entry("keypad".into()).or_default();
+        device
+            .live_keys
+            .insert(middle, LiveKey::new(LiveSource::Clock));
+        device
+            .live_keys
+            .insert(ButtonId::Back, LiveKey::new(LiveSource::Clock));
+
+        let bindings = button_bindings_for(&cfg, Some("keypad"), None, None);
+
+        assert_eq!(
+            bindings[&middle],
+            Binding::Single(Action::ActivateLiveKey(middle))
+        );
+        assert_ne!(
+            bindings[&ButtonId::Back],
+            Binding::Single(Action::ActivateLiveKey(ButtonId::Back))
+        );
+        let [left, right] = Cid::PAGING;
+        assert_eq!(
+            bindings[&ButtonId::Control(left)],
+            Binding::Single(Action::PreviousKeypadPage)
+        );
+        assert_eq!(
+            bindings[&ButtonId::Control(right)],
+            Binding::Single(Action::NextKeypadPage)
+        );
+    }
+
+    /// Removing a page drops the key faces styled on it with its bindings.
+    #[test]
+    fn shrinking_the_pages_drops_their_key_faces() {
+        use crate::binding::GridKey;
+        use crate::config::KeyFaceStyle;
+        let page = |number| KeypadPage::new(number).unwrap();
+        let mut cfg = Config::default();
+        cfg.set_keypad_pages("keypad", page(3));
+        let labelled = |label: &str| {
+            Some(KeyFaceStyle {
+                label: Some(label.into()),
+                ..KeyFaceStyle::default()
+            })
+        };
+        cfg.set_key_face_style("keypad", slot(1, GridKey::TopLeft), labelled("kept"));
+        cfg.set_key_face_style("keypad", slot(3, GridKey::TopLeft), labelled("dropped"));
+
+        cfg.set_keypad_pages("keypad", page(2));
+
+        assert!(
+            cfg.key_face_style("keypad", slot(1, GridKey::TopLeft))
+                .is_some()
+        );
+        assert!(
+            cfg.key_face_style("keypad", slot(3, GridKey::TopLeft))
+                .is_none()
+        );
     }
 
     #[test]

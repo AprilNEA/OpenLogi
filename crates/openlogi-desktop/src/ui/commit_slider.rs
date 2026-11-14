@@ -12,7 +12,9 @@ use std::rc::Rc;
 
 use gpui::{App, AppContext as _, Context, Entity, Subscription, Window};
 use gpui_kit::component::slider::{SliderEvent, SliderState};
-use openlogi_core::config::{ThumbwheelSensitivity, VerticalScrollSensitivity};
+use openlogi_core::config::{
+    KeyDisplayBrightness, ThumbwheelSensitivity, VerticalScrollSensitivity,
+};
 use openlogi_core::hid::{Dpi, PointerSpeed, SidetoneLevel, SmartShiftThreshold, TunableTorque};
 
 /// A value a slider thumb can rest on.
@@ -92,6 +94,17 @@ impl SliderUnit for SidetoneLevel {
 
     fn from_slider(raw: f32) -> Self {
         Self::clamped(u8::from_slider(raw))
+    }
+}
+
+/// A keypad's LCD brightness rests on its percentage.
+impl SliderUnit for KeyDisplayBrightness {
+    fn to_slider(self) -> f32 {
+        f32::from(self.into_inner())
+    }
+
+    fn from_slider(raw: f32) -> Self {
+        Self::from_rounded(raw)
     }
 }
 

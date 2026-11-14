@@ -24,13 +24,14 @@
 //! keys sit is the product's identity fact, owned by
 //! [`openlogi_device_registry::keypad`].
 
-use std::sync::{Mutex, PoisonError};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use openlogi_core::binding::GridKey;
 pub use openlogi_device_registry::keypad::KeyDisplay;
 use openlogi_device_registry::keypad::PanelPoint;
-use tokio::sync::oneshot;
+use tokio::sync::{Notify, oneshot};
 use tracing::debug;
 
 use super::{HidppOperation, WriteError, write_whole_raw_report};
@@ -42,6 +43,12 @@ const IMAGE_HEADER: [u8; 4] = output_header(VendorFunction::Image);
 /// Every image packet is a full-width report.
 const PACKET_LEN: usize = 4095;
 const FIRST_HEADER_LEN: usize = 20;
+
+/// The largest JPEG a single image packet carries. Only single-packet writes
+/// are hardware-verified (every icon tile fits one); a renderer keeps its
+/// tiles within this so a write never depends on the unverified multi-packet
+/// path.
+pub const KEY_IMAGE_SINGLE_PACKET_MAX: usize = PACKET_LEN - FIRST_HEADER_LEN;
 const NEXT_HEADER_LEN: usize = 5;
 /// Marks every part byte; the acknowledgement echoes the part without it.
 const PART_MARKER: u8 = 0x20;
@@ -51,6 +58,58 @@ const ACK_ACCEPTED: [u8; 2] = [0x00, 0x01];
 /// How long the device may take to acknowledge an image after its last
 /// packet. Acknowledgements arrive within milliseconds on hardware.
 const ACK_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// How long an image waits for the HID++ requests already in flight: the
+/// default request timeout, after which an unanswered request has given up.
+const PAUSE_TIMEOUT: Duration = hidpp::channel::SEND_RESPONSE_TIMEOUT;
+
+/// The key-image writes started for one owner that are still running.
+///
+/// Once its first packet is out, an image runs to the device's
+/// acknowledgement or its deadline with the channel's request pause held,
+/// even after its caller gave up ([`write_key_image_on`]) — on a task of the
+/// caller's runtime. An owner about to let that runtime go waits for
+/// [`Self::settled`] first: dropping the runtime would cancel the image
+/// mid-write and release the pause while the keypad is still taking it.
+#[derive(Clone, Debug, Default)]
+pub struct KeyImageWrites(Arc<RunningWrites>);
+
+#[derive(Debug, Default)]
+struct RunningWrites {
+    running: AtomicUsize,
+    settled: Notify,
+}
+
+/// One running image write, counted until it ends — or is cancelled.
+struct RunningWrite(Arc<RunningWrites>);
+
+impl KeyImageWrites {
+    fn start(&self) -> RunningWrite {
+        self.0.running.fetch_add(1, Ordering::SeqCst);
+        RunningWrite(Arc::clone(&self.0))
+    }
+
+    /// Wait until every image write started through these handles has
+    /// ended — acknowledged, refused, or past its deadline. Each one is
+    /// bounded by its own deadlines, so this is too.
+    pub async fn settled(&self) {
+        loop {
+            let settled = self.0.settled.notified();
+            if self.0.running.load(Ordering::SeqCst) == 0 {
+                return;
+            }
+            settled.await;
+        }
+    }
+}
+
+impl Drop for RunningWrite {
+    fn drop(&mut self) {
+        if self.0.running.fetch_sub(1, Ordering::SeqCst) == 1 {
+            self.0.settled.notify_waiters();
+        }
+    }
+}
 
 /// The LCD key panel of the device at `route`, or `None` when its keys are not
 /// displays: only a keypad the route reaches ([`DeviceRoute::keypad`]) has
@@ -95,11 +154,17 @@ impl KeyImageJpeg {
 /// `image` must already be encoded at `display.key_size` square; the device
 /// places it, it does not scale it. A key off `display`'s grid is
 /// [`WriteError::Hidpp`], since the caller derived both from one device.
+///
+/// HID++ requests on the channel wait while the image is written (see
+/// [`hidpp::channel::HidppChannel::pause_requests`]). Once its first packet
+/// is out, the image runs to the device's acknowledgement or its timeout
+/// even if this future is dropped, counted in `writes` until it ends.
 pub async fn write_key_image_on(
     shared: &SharedChannel,
     display: KeyDisplay,
     key: GridKey,
     image: &KeyImageJpeg,
+    writes: &KeyImageWrites,
 ) -> Result<(), WriteError> {
     let origin = display
         .key_origin(key.position())
@@ -109,10 +174,18 @@ pub async fn write_key_image_on(
     // last one's part.
     let ack_part = packets[packets.len() - 1][4] & !PART_MARKER;
 
-    let channel = shared.channel();
+    let channel = Arc::clone(shared.channel());
+    // The keypad drops a HID++ request that is in flight when an image
+    // arrives, and can restart a few seconds later (#2281). No request that
+    // awaits a reply goes out from here until the image is acknowledged.
+    let pause = tokio::time::timeout(PAUSE_TIMEOUT, channel.pause_requests())
+        .await
+        .map_err(|_| WriteError::RequestTimedOut {
+            operation: HidppOperation::WriteKeyImage,
+        })?;
     let (ack_tx, ack_rx) = oneshot::channel();
     let ack_tx = Mutex::new(Some(ack_tx));
-    let _ack_listener = channel.add_raw_report_listener_guarded(move |report| {
+    let ack_listener = channel.add_raw_report_listener_guarded(move |report| {
         if let Some(ack) = image_ack(report, ack_part)
             && let Some(tx) = ack_tx.lock().unwrap_or_else(PoisonError::into_inner).take()
         {
@@ -120,25 +193,38 @@ pub async fn write_key_image_on(
         }
     });
 
-    for packet in &packets {
-        write_whole_raw_report(channel, packet, HidppOperation::WriteKeyImage).await?;
-    }
-    tokio::time::timeout(ACK_TIMEOUT, ack_rx)
+    let packet_count = packets.len();
+    // Once the first packet goes out, the image runs to its ack or its
+    // timeout with the pause held, even when the caller gives up meanwhile:
+    // a request must not reach the keypad while it is still taking the image.
+    let running = writes.start();
+    let transaction = tokio::spawn(async move {
+        let _running = running;
+        let _pause = pause;
+        let _ack_listener = ack_listener;
+        for packet in &packets {
+            write_whole_raw_report(&channel, packet, HidppOperation::WriteKeyImage).await?;
+        }
+        tokio::time::timeout(ACK_TIMEOUT, ack_rx)
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .ok_or(WriteError::RequestTimedOut {
+                operation: HidppOperation::WriteKeyImage,
+            })?
+            .map_err(|[high, low]| {
+                WriteError::Hidpp(format!(
+                    "keypad refused the key image: status {high:02x} {low:02x}"
+                ))
+            })
+    });
+    transaction
         .await
-        .ok()
-        .and_then(Result::ok)
-        .ok_or(WriteError::RequestTimedOut {
-            operation: HidppOperation::WriteKeyImage,
-        })?
-        .map_err(|[high, low]| {
-            WriteError::Hidpp(format!(
-                "keypad refused the key image: status {high:02x} {low:02x}"
-            ))
-        })?;
+        .map_err(|error| WriteError::Hidpp(format!("key image write stopped: {error}")))??;
     debug!(
         ?key,
         bytes = image.as_bytes().len(),
-        packets = packets.len(),
+        packets = packet_count,
         "key image written"
     );
     Ok(())

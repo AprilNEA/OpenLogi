@@ -49,6 +49,7 @@ pub use message::{
     is_hidpp_report_id,
 };
 pub use observation::{ChannelObservation, ChannelObserver, ObservedReport, RequestOutcome};
+pub use pending::RequestPause;
 pub use raw::RawHidChannel;
 
 use observation::{RequestObservation, emit_report};
@@ -692,6 +693,21 @@ impl HidppChannel {
             .await
             .map(|_| ())
             .map_err(ChannelError::Implementation)
+    }
+
+    /// Keep every request that awaits a reply off the wire until the returned
+    /// guard drops. The guard is handed out once the requests already in
+    /// flight have been answered or abandoned.
+    ///
+    /// This is for a raw transaction that a device cannot take while it is
+    /// still answering HID++. The MX Creative Keypad drops a request that is
+    /// in flight when an image report arrives, and can restart seconds later.
+    ///
+    /// A request parked by the pause still counts against its own timeout.
+    /// The holder must not send a request on this channel itself: it would
+    /// wait for its own guard. [`Self::send_and_forget`] is not held back.
+    pub async fn pause_requests(&self) -> RequestPause {
+        RequestPause::acquire(Arc::clone(&self.pending_messages)).await
     }
 
     /// Write one raw HID report through this channel's already-owned transport.

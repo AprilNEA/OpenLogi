@@ -1,5 +1,6 @@
 //! SWR-backed device-setting reads (DPI, SmartShift, Fn lock, report rate,
-//! pointer speed, sidetone, press force, backlight, Easy-Switch hosts) keyed by device
+//! pointer speed, sidetone, press force, display-key brightness, backlight,
+//! Easy-Switch hosts) keyed by device
 //! identity.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -7,6 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{Context, Subscription};
+use openlogi_core::config::KeyDisplayBrightness;
 use openlogi_core::hid::{
     BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
     ForceSensingInfo, OnboardState, PointerSpeed, ReportRateInfo, SidetoneLevel, SmartShiftStatus,
@@ -21,12 +23,12 @@ use tokio::sync::mpsc;
 
 use super::ipc::{
     Command, ReadBacklight, ReadDpi, ReadEasySwitchHosts, ReadFnLock, ReadForceSensing,
-    ReadOnboard, ReadPointerSpeed, ReadReportRate, ReadSidetone, ReadSmartShift,
+    ReadKeyBrightness, ReadOnboard, ReadPointerSpeed, ReadReportRate, ReadSidetone, ReadSmartShift,
 };
 use crate::state::{
     AppState, BacklightLoad, DeviceKey, DpiLoad, EasySwitchLoad, FnLockLoad, ForceSensingLoad,
-    HostRenameRefusal, Load, OnboardLoad, PointerSpeedLoad, ReportRateLoad, SidetoneLoad,
-    SmartShiftLoad, StateEvent,
+    HostRenameRefusal, KeyBrightnessLoad, Load, OnboardLoad, PointerSpeedLoad, ReportRateLoad,
+    SidetoneLoad, SmartShiftLoad, StateEvent,
 };
 
 const ROOT: &str = "device-read";
@@ -37,6 +39,7 @@ const REPORT_RATE: &str = "report-rate";
 const POINTER_SPEED: &str = "pointer-speed";
 const SIDETONE: &str = "sidetone";
 const FORCE_SENSING: &str = "force-sensing";
+const KEY_BRIGHTNESS: &str = "key-brightness";
 const BACKLIGHT: &str = "backlight";
 const EASY_SWITCH: &str = "easy-switch";
 const ONBOARD: &str = "onboard";
@@ -78,6 +81,7 @@ pub(crate) struct DeviceReads {
     pointer_speed: BTreeMap<DeviceKey, DeviceRead<PointerSpeed>>,
     sidetone: BTreeMap<DeviceKey, DeviceRead<SidetoneLevel>>,
     force_sensing: BTreeMap<DeviceKey, DeviceRead<ForceSensingInfo>>,
+    key_brightness: BTreeMap<DeviceKey, DeviceRead<KeyDisplayBrightness>>,
     backlight: BTreeMap<DeviceKey, DeviceRead<BacklightState>>,
     /// The backlight changes sent per keyboard, for the read on the route
     /// they went out on; cleared with that read.
@@ -950,6 +954,110 @@ impl DeviceReads {
         self.force_sensing.get(key).map(|read| &read.load)
     }
 
+    /// Start the display-key brightness query unless the same device route is already
+    /// subscribed. A write answers through [`Self::set_key_brightness_ready`],
+    /// or [`Self::refresh_key_brightness`] when the device refused it.
+    pub(crate) fn ensure_key_brightness(
+        &mut self,
+        key: DeviceKey,
+        route: DeviceRoute,
+        commands: mpsc::UnboundedSender<Command>,
+        cx: &mut Context<AppState>,
+    ) {
+        if self
+            .key_brightness
+            .get(&key)
+            .is_some_and(|read| read.route == route)
+        {
+            return;
+        }
+        self.remove_key_brightness(&key);
+        let Some((client, runtime)) = self.cache() else {
+            return;
+        };
+        let flight = self.take_flight();
+        let fetch_route = route.clone();
+        let fetcher = Retry::new(
+            runtime,
+            move |_| {
+                let commands = commands.clone();
+                let route = fetch_route.clone();
+                read_ipc(
+                    move |reply| ReadKeyBrightness { route, reply }.into(),
+                    commands,
+                )
+            },
+            READ_RETRY_POLICY,
+        )
+        .retry_if(|error| !unsupported_error_is_permanent(error));
+        let handle = client.subscribe(
+            query_key(KEY_BRIGHTNESS, &key),
+            fetcher,
+            QueryOptions::immutable(),
+        );
+        read_through(&client, KEY_BRIGHTNESS, &key, &handle);
+        let query = Query::new(&client, handle, cx);
+        let load = project_load(query.read(cx), unsupported_error_is_permanent);
+        let observed_key = key.clone();
+        let observer = cx.observe(query.state(), move |state, query_state, cx| {
+            let load = project_load(query_state.read(cx), unsupported_error_is_permanent);
+            if state
+                .device_reads_mut()
+                .update_key_brightness(&observed_key, flight, load)
+            {
+                cx.emit(StateEvent::KeyBrightnessChanged(observed_key.clone()));
+            }
+        });
+        self.key_brightness.insert(
+            key,
+            DeviceRead {
+                route,
+                flight,
+                load,
+                query,
+                _observer: observer,
+            },
+        );
+    }
+
+    /// Show `brightness` as `key`'s display-key brightness reading now: the brightness the GUI
+    /// just asked for, then what the device read back. Like
+    /// [`Self::set_pointer_speed_ready`], a local write supersedes a fetch
+    /// still in flight, and an answer from a route the device has since left
+    /// still holds: the brightness belongs to the device, not to the connection.
+    pub(crate) fn set_key_brightness_ready(
+        &mut self,
+        key: &DeviceKey,
+        brightness: KeyDisplayBrightness,
+    ) {
+        let value = Arc::new(brightness);
+        if let Some(client) = &self.client {
+            client.set::<_, Cached<KeyDisplayBrightness>, WriteError>(
+                query_key(KEY_BRIGHTNESS, key),
+                Some(value.clone()),
+            );
+        }
+        if let Some(read) = self.key_brightness.get_mut(key) {
+            read.load = Load::Ready(value);
+        }
+    }
+
+    /// Re-read `key`'s display-key brightness from the device, keeping the last value
+    /// on screen while it answers. The fallback after a write the device
+    /// refused, when the shown value is no longer known to be its own.
+    pub(crate) fn refresh_key_brightness(&mut self, key: &DeviceKey) {
+        if let Some(read) = self.key_brightness.get_mut(key) {
+            read.query.revalidate();
+        }
+    }
+
+    /// `key`'s display-key brightness load, or `None` while nothing has subscribed to
+    /// it.
+    #[must_use]
+    pub(crate) fn key_brightness_load(&self, key: &DeviceKey) -> Option<&KeyBrightnessLoad> {
+        self.key_brightness.get(key).map(|read| &read.load)
+    }
+
     /// Start the backlight query unless the same keyboard route is already
     /// subscribed. A change goes out through [`Self::begin_backlight_write`]
     /// and is answered through [`Self::finish_backlight_write`].
@@ -1440,6 +1548,7 @@ impl DeviceReads {
         self.remove_pointer_speed(key);
         self.remove_sidetone(key);
         self.remove_force_sensing(key);
+        self.remove_key_brightness(key);
         self.remove_backlight(key);
         self.remove_easy_switch(key);
         self.remove_onboard(key);
@@ -1501,6 +1610,13 @@ impl DeviceReads {
         }
     }
 
+    fn remove_key_brightness(&mut self, key: &DeviceKey) {
+        if let Some(read) = self.key_brightness.remove(key) {
+            drop(read);
+            self.clear::<KeyDisplayBrightness>(KEY_BRIGHTNESS, key);
+        }
+    }
+
     fn remove_backlight(&mut self, key: &DeviceKey) {
         self.backlight_writes.remove(key);
         if let Some(read) = self.backlight.remove(key) {
@@ -1528,6 +1644,7 @@ impl DeviceReads {
             .chain(self.pointer_speed.keys())
             .chain(self.sidetone.keys())
             .chain(self.force_sensing.keys())
+            .chain(self.key_brightness.keys())
             .chain(self.backlight.keys())
             .chain(self.easy_switch.keys())
             .chain(self.onboard.keys())
@@ -1651,6 +1768,26 @@ impl DeviceReads {
     ) -> bool {
         let Some(read) = self
             .force_sensing
+            .get_mut(key)
+            .filter(|read| read.flight == flight)
+        else {
+            return false;
+        };
+        if read.load == load {
+            return false;
+        }
+        read.load = load;
+        true
+    }
+
+    fn update_key_brightness(
+        &mut self,
+        key: &DeviceKey,
+        flight: u64,
+        load: KeyBrightnessLoad,
+    ) -> bool {
+        let Some(read) = self
+            .key_brightness
             .get_mut(key)
             .filter(|read| read.flight == flight)
         else {

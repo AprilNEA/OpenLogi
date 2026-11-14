@@ -27,6 +27,8 @@ SWCustomHighligt2 = "SWCustomHighligt2"
 udid = "udid"
 
 [default.extend-words]
+# Lucide's icon name (`assets/lucide/astroid.svg`), not a misspelling.
+astroid = "astroid"
 # Technical terms and prefixes accepted in prose and compound identifiers.
 lod = "lod"
 mis = "mis"

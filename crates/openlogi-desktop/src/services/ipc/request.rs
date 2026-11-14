@@ -16,7 +16,7 @@
 
 use std::future::Future;
 
-use openlogi_core::config::{ConfigRevision, Lighting};
+use openlogi_core::config::{ConfigRevision, KeyDisplayBrightness, Lighting};
 use openlogi_core::hid::{
     BacklightChange, BacklightState, DeviceRoute, DisableKeysMask, DisableKeysState, Dpi, DpiInfo,
     EasySwitchHosts, FnLockState, ForceSensingInfo, LightCommand, OnboardState, PointerSpeed,
@@ -284,6 +284,36 @@ impl Request for SetForceSensing {
             key: self.key,
             write: self.write,
             force: self.force,
+            result: or_unavailable(outcome),
+        });
+    }
+}
+
+/// Write the brightness of a keypad's display keys now, answered as
+/// [`GuiUpdate::KeyBrightnessWritten`] with what the keypad reads back.
+pub struct SetKeyBrightness {
+    pub route: DeviceRoute,
+    pub brightness: KeyDisplayBrightness,
+    pub key: DeviceKey,
+    /// The number the state gave this write, returned with the answer so it
+    /// is matched to the write it answers.
+    pub write: u64,
+}
+
+impl Request for SetKeyBrightness {
+    type Answer = Result<KeyDisplayBrightness, WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .set_key_brightness(context::current(), self.route.clone(), self.brightness)
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        let _ = updates.send(GuiUpdate::KeyBrightnessWritten {
+            key: self.key,
+            write: self.write,
+            brightness: self.brightness,
             result: or_unavailable(outcome),
         });
     }
@@ -603,6 +633,27 @@ impl Request for ReadForceSensing {
     async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
         client
             .read_force_sensing(context::current(), self.route.clone())
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, _: &UpdateSender) {
+        let _ = self.reply.send(or_unavailable(outcome));
+    }
+}
+
+/// Read the brightness of a keypad's display keys; the answer goes back
+/// over `reply`.
+pub struct ReadKeyBrightness {
+    pub route: DeviceRoute,
+    pub reply: oneshot::Sender<Result<KeyDisplayBrightness, WriteError>>,
+}
+
+impl Request for ReadKeyBrightness {
+    type Answer = Result<KeyDisplayBrightness, WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .read_key_brightness(context::current(), self.route.clone())
             .await
     }
 
@@ -1151,6 +1202,7 @@ commands! {
     SetPointerSpeed,
     SetSidetone,
     SetForceSensing,
+    SetKeyBrightness,
     SetBacklight,
     RenameEasySwitchHost,
     ReadDpi,
@@ -1160,6 +1212,7 @@ commands! {
     ReadPointerSpeed,
     ReadSidetone,
     ReadForceSensing,
+    ReadKeyBrightness,
     ReadBacklight,
     ReadEasySwitchHosts,
     LoadConfig,

@@ -16,6 +16,7 @@ use hidpp::register::battery::{
     StatusReading,
 };
 use openlogi_core::device::{BatteryInfo, BatteryLevel, BatteryStatus, DeviceKind};
+use openlogi_device_registry::dialpad::find_dialpad;
 use openlogi_device_registry::keypad::find_keypad;
 
 /// Trim NUL padding and whitespace from a `DeviceInformation` serial; an
@@ -109,6 +110,9 @@ pub(crate) fn resolve_device_kind(probed: Option<DeviceKind>, register: DeviceKi
 pub(crate) fn direct_identity_kind(vendor_id: u16, product_id: u16) -> DeviceKind {
     if find_keypad(vendor_id, product_id).is_some() {
         DeviceKind::Numpad
+    } else if find_dialpad(vendor_id, product_id).is_some() {
+        // The MX Creative Dialpad names no modelled `DeviceType` either.
+        DeviceKind::Dialpad
     } else {
         DeviceKind::Unknown
     }

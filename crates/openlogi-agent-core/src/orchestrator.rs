@@ -10,18 +10,20 @@
 //! [`DpiCycleState::capabilities`] stays `None` and presets cycle at their raw
 //! (still valid) values — exactly the GUI's "window never opened" behaviour.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{
-    ActionRingIcon, Binding, ButtonId, GamingButtons, GamingLayout, GridKey, KeypadPage, ModeKey,
+    Action, ActionRingIcon, Binding, ButtonId, GamingButtons, GamingLayout, GridKey, GridSlot,
+    KeypadPage, ModeKey, Rotary,
 };
 use openlogi_core::bindings::{bindings_on_page, button_bindings_for, oshook_gestures_for};
+use openlogi_core::color::Rgb;
 use openlogi_core::config::{
-    AppSettings, Config, ConfigRevision, GKeyOwner, GamingKeyMode, LightSettings,
-    MouseProfileTarget, canonical_device_key,
+    AppSettings, Config, ConfigRevision, GKeyOwner, GamingKeyMode, KeyFaceStyle, KeySymbol,
+    LightSettings, LiveKey, LiveSource, MouseProfileTarget, canonical_device_key,
 };
 use openlogi_core::device::{
     BatteryInfo, Capabilities, ChangedOnLight, DeviceInventory, DeviceKind, LightCapabilities,
@@ -60,10 +62,13 @@ use crate::runtime::scroll::ScrollPreferences;
 use crate::runtime::{PageTurn, PointerSelection};
 use crate::watchers::host_switch::{HostSwitchLink, HostSwitchLinks, LinkedHostSwitch};
 use crate::watchers::inventory::InventoryRefresh;
-use crate::watchers::key_display::{KeyDisplaySpec, KeyFace, SharedKeyDisplaySpecs};
+use crate::watchers::key_display::{
+    KeyDisplaySpec, KeyFace, KeyPicture, SharedKeyDisplaySpecs, StyledFace,
+};
 use crate::watchers::keyboard::{KeyboardSpec, SharedKeyboardSpecs};
 use crate::watchers::light::{WatchedLight, WatchedLights};
 use crate::{DpiCycleState, DpiCycles, PointerSpeeds};
+use openlogi_core::config::PictureRevisions;
 
 mod devices;
 mod lights;
@@ -79,11 +84,12 @@ use devices::{
     FollowerCookieState, FollowerCookieWrite, RECONNECT_REAPPLY_CONFIRM_RETRIES,
     VOLATILE_REAPPLY_CONFIRM_RETRIES, assignments_changed, build_devices, bump_settings_epoch,
     carry_lifecycle_budgets, changed_follower_cookies, changed_force_sensing,
-    config_keeps_os_layout, configured_dpi, configured_force_sensing, configured_report_rate,
-    configured_wheel_mode, host_switch_links, is_hidpp_device, keeps_os_layout, main_wheel_divert,
-    newly_kept_os_layouts, os_layout_appeared, pick_current, plan_disabled_keys_recovery,
-    plan_reapply, published_inventories, reconnect_follower_cookies, same_device_lifecycle,
-    saved_speed, settings_moved, stable_id, wheel_inverted,
+    changed_key_brightness, config_keeps_os_layout, configured_dpi, configured_force_sensing,
+    configured_key_brightness, configured_report_rate, configured_wheel_mode, host_switch_links,
+    is_hidpp_device, keeps_os_layout, main_wheel_divert, newly_kept_os_layouts, os_layout_appeared,
+    pick_current, plan_disabled_keys_recovery, plan_reapply, published_inventories,
+    reconnect_follower_cookies, same_device_lifecycle, saved_speed, settings_moved, stable_id,
+    wheel_inverted,
 };
 
 /// The minimal per-device facts the agent needs: the config key (binding /
@@ -202,6 +208,8 @@ pub struct SharedHandles {
     sidetone_order: WriteOrder,
     /// Orders the GUI's backlight writes per keyboard.
     backlight_order: WriteOrder,
+    /// Orders every path's LCD brightness writes per keypad.
+    key_brightness_order: WriteOrder,
     /// Orders host renames per device.
     host_name_order: WriteOrder,
     /// Orders the Easy-Switch actions' channel switches per device, so a
@@ -449,6 +457,34 @@ impl SharedHandles {
             .await
     }
 
+    /// Write `brightness` to the display keys of the device at `route` and
+    /// return the brightness it reads back. Ordered with the config-reload
+    /// and reconnect writes of the same keypad: when a newer brightness write
+    /// for the device is requested before this one gets its turn, this one
+    /// writes nothing and answers [`WriteError::WriteSuperseded`], so its
+    /// caller saves nothing — even a reading that happens to match — and the
+    /// newer write decides the level. Waiting for the turn does not count
+    /// against the write's deadline.
+    pub async fn set_key_brightness(
+        &self,
+        route: &DeviceRoute,
+        brightness: openlogi_core::config::KeyDisplayBrightness,
+    ) -> Result<openlogi_core::config::KeyDisplayBrightness, WriteError> {
+        let ticket = self.key_brightness_order.request(route);
+        self.device(route)
+            .run_in_turn(
+                HidppOperation::WriteKeyBrightness,
+                &ticket,
+                |c| async move { openlogi_hid::set_key_display_brightness_on(&c, brightness).await },
+                |_| async {
+                    Err(WriteError::WriteSuperseded {
+                        operation: HidppOperation::WriteKeyBrightness,
+                    })
+                },
+            )
+            .await
+    }
+
     /// Write `level` to the headset at `route` and return the level it
     /// confirms. When a newer sidetone write for the headset is requested
     /// before this one gets its turn, this one reads the headset instead of
@@ -653,6 +689,22 @@ impl SharedHandles {
         );
     }
 
+    /// Write a keypad's LCD brightness without waiting, for the config-reload
+    /// and reconnect paths. The ticket is taken here, when the change is
+    /// accepted, so of two saves in quick succession the newer one is the
+    /// level the keypad keeps.
+    fn write_key_brightness_in_background(
+        &self,
+        route: &DeviceRoute,
+        brightness: openlogi_core::config::KeyDisplayBrightness,
+    ) {
+        crate::hardware::write_key_brightness_in_background(
+            self.device(route),
+            self.key_brightness_order.request(route),
+            brightness,
+        );
+    }
+
     /// [`Self::set_force_sensing`] without waiting, for the config-reload and
     /// reconnect paths; the outcome is logged.
     fn write_force_sensing_in_background(&self, route: &DeviceRoute, force: u16) {
@@ -758,6 +810,11 @@ pub struct Orchestrator {
     observable: Arc<ObservableState>,
     /// Which devices' low batteries have been announced.
     low_battery: LowBatteryWatch,
+    /// The live keypad keys' values and the active one.
+    live: crate::live_keys::LiveKeys,
+    /// The versions of the key pictures, read by the live-key watcher off
+    /// this lock ([`Self::set_picture_revisions`]).
+    picture_revisions: PictureRevisions,
 }
 
 /// See [`Orchestrator::inventory`] (the field) — the agent-side superset of
@@ -923,6 +980,7 @@ impl Orchestrator {
             force_sensing_order: WriteOrder::default(),
             sidetone_order: WriteOrder::default(),
             backlight_order: WriteOrder::default(),
+            key_brightness_order: WriteOrder::default(),
             host_name_order: WriteOrder::default(),
             host_switch_order: WriteOrder::default(),
             follower_cookie_order: WriteOrder::default(),
@@ -965,6 +1023,8 @@ impl Orchestrator {
             shared,
             observable,
             low_battery: LowBatteryWatch::default(),
+            live: crate::live_keys::LiveKeys::default(),
+            picture_revisions: PictureRevisions::default(),
         };
         orch.rebuild();
         orch.observable
@@ -1205,6 +1265,8 @@ impl Orchestrator {
                 grid: chosen.divert.grid,
                 gaming: chosen.gaming,
                 gaming_mode: self.config.gaming_key_mode(&chosen.dev.config_key),
+                rotary: chosen.divert.rotary,
+                rotary_sensitivity: self.config.thumbwheel_sensitivity(&chosen.dev.config_key),
                 bindings: chosen.bindings,
             });
         }
@@ -1220,6 +1282,113 @@ impl Orchestrator {
             self.current_app.as_deref(),
             None,
         )
+    }
+
+    /// The live keys of the online, enabled devices with a key display.
+    fn configured_live_keys(&self) -> Vec<(crate::live_keys::LiveKeyId, LiveKey)> {
+        self.devices
+            .iter()
+            .filter(|dev| dev.online && self.config.device_enabled(&dev.config_key))
+            .filter(|dev| {
+                dev.route
+                    .as_ref()
+                    .is_some_and(|route| key_display_for(route).is_some())
+            })
+            .filter_map(|dev| {
+                self.config
+                    .devices
+                    .get(dev.config_key.as_str())
+                    .map(|config| (dev, config))
+            })
+            .flat_map(|(dev, config)| {
+                config
+                    .live_keys
+                    .iter()
+                    .filter(|(slot, _)| slot.grid_slot().is_some())
+                    .map(|(slot, key)| ((dev.config_key.clone(), *slot), key.clone()))
+            })
+            .collect()
+    }
+
+    /// The live-key sources due for a read at `now`, with what each needs.
+    pub fn live_key_reads(&mut self, now: std::time::Instant) -> Vec<crate::live_keys::LiveRead> {
+        let keys = self.configured_live_keys();
+        let due = self
+            .live
+            .due(keys.iter().map(|(id, key)| (id.clone(), key)), now);
+        due.into_iter()
+            .map(|(id, source, ticket)| {
+                let battery = match &source {
+                    LiveSource::Battery(device) => live_battery(&self.devices, device),
+                    _ => None,
+                };
+                crate::live_keys::LiveRead {
+                    id,
+                    ticket,
+                    source,
+                    battery,
+                }
+            })
+            .collect()
+    }
+
+    /// Take in one finished live-key read and repaint when what it shows
+    /// changed. A read the key's configuration has moved past is dropped.
+    pub fn set_live_value(&mut self, done: crate::live_keys::LiveReadDone) {
+        if self.live.set_value(done) {
+            self.publish_device_runtime();
+        }
+    }
+
+    /// End an active live key whose time is up at `now`, and repaint it
+    /// without its frame. Runs on every watcher tick, whatever reads are in
+    /// flight.
+    pub fn expire_live_keys(&mut self, now: std::time::Instant) {
+        if self.live.expire(now) {
+            self.publish_device_runtime();
+        }
+    }
+
+    /// Every picture a key face is configured with, for the live-key watcher
+    /// to read the versions of ([`PictureRevisions::read`]) outside this
+    /// orchestrator's lock. Touches no file.
+    #[must_use]
+    pub fn key_picture_paths(&self) -> BTreeSet<std::path::PathBuf> {
+        self.config.key_picture_paths()
+    }
+
+    /// Take in freshly read picture versions and repaint the keys whose
+    /// picture changed on disk. A face carries its picture's version
+    /// ([`KeyPicture`]), so a
+    /// file replaced at the same path — which saves
+    /// no config — is drawn again within a watcher tick. Publishes nothing
+    /// when every face is unchanged.
+    pub fn set_picture_revisions(&mut self, revisions: PictureRevisions) {
+        if self.picture_revisions != revisions {
+            self.picture_revisions = revisions;
+            publish_arc_if_changed(&self.key_display_specs_tx, self.key_display_specs_for());
+        }
+    }
+
+    /// A press of the live key `slot` on `device_key`: activate or end it.
+    /// Answers the action to run.
+    pub fn press_live_key(
+        &mut self,
+        device_key: Option<&str>,
+        slot: ButtonId,
+        now: std::time::Instant,
+    ) -> Option<Action> {
+        let key = device_key?.to_owned();
+        let live = self
+            .config
+            .devices
+            .get(key.as_str())?
+            .live_keys
+            .get(&slot)?
+            .clone();
+        let action = self.live.press((key, slot), &live, now);
+        self.publish_device_runtime();
+        action
     }
 
     /// The part of `stored` that `config_key`'s keys act on now: its current
@@ -1245,11 +1414,39 @@ impl Orchestrator {
     /// Move `device_key`'s keypad one page in `turn`'s direction, wrapping
     /// within its configured pages, and republish what its keys dispatch and
     /// show. A device with a single page (or no key) has nothing to turn.
-    pub fn turn_keypad_page(&mut self, device_key: Option<&str>, turn: PageTurn) {
+    ///
+    /// While one of the keypad's live keys is active, the page keys adjust it
+    /// instead: the answer is the action to run then.
+    pub fn turn_keypad_page(&mut self, device_key: Option<&str>, turn: PageTurn) -> Option<Action> {
         let Some(key) = device_key else {
             debug!("keypad page turn without a device — ignored");
-            return;
+            return None;
         };
+        let live_keys = self
+            .config
+            .devices
+            .get(key)
+            .map(|device| device.live_keys.clone())
+            .unwrap_or_default();
+        let now = std::time::Instant::now();
+        // A key whose time is up loses its frame here, not only on the next
+        // watcher tick, and no longer takes the paging keys.
+        if self.live.expire(now) {
+            self.publish_device_runtime();
+        }
+        if let crate::live_keys::Paging::Adjust(action) = self.live.paging(
+            key,
+            turn == PageTurn::Next,
+            |slot| live_keys.get(slot).cloned(),
+            now,
+        ) {
+            return action;
+        }
+        self.turn_page(key, turn);
+        None
+    }
+
+    fn turn_page(&mut self, key: &str, turn: PageTurn) {
         let last = self.config.keypad_pages(key);
         if last == KeypadPage::FIRST {
             debug!(key, "keypad page turn on a single-page device — ignored");
@@ -1385,9 +1582,29 @@ impl Orchestrator {
                     &dev.config_key,
                     &self.foreground_key_bindings(&dev.config_key),
                 );
+                let page = self.keypad_page(&dev.config_key);
                 let faces = GridKey::ALL
                     .into_iter()
-                    .map(|key| (key, key_face(bindings.get(&ButtonId::grid(key)))))
+                    .map(|key| {
+                        let slot = ButtonId::Grid(GridSlot { page, key });
+                        let style = self.config.key_face_style(&dev.config_key, slot);
+                        let live = self
+                            .config
+                            .devices
+                            .get(dev.config_key.as_str())
+                            .is_some_and(|device| device.live_keys.contains_key(&slot));
+                        let face = if live {
+                            let id = (dev.config_key.clone(), slot);
+                            live_face(style, self.live.value(&id), self.live.is_active(&id))
+                        } else {
+                            key_face(
+                                bindings.get(&ButtonId::grid(key)),
+                                style,
+                                &self.picture_revisions,
+                            )
+                        };
+                        (key, face)
+                    })
                     .collect();
                 let generation = self.panel_generations.get(&route).copied().unwrap_or(0);
                 Some(KeyDisplaySpec {
@@ -1975,6 +2192,12 @@ impl Orchestrator {
         if let Some(fn_lock) = self.config.fn_lock(key) {
             self.shared.write_fn_lock_in_background(&route, fn_lock);
         }
+        // A keypad's panel comes back at its firmware brightness after a
+        // power cycle, so the saved level is written on every reconnect.
+        if let Some(brightness) = configured_key_brightness(&self.config, dev) {
+            self.shared
+                .write_key_brightness_in_background(&route, brightness);
+        }
         if let Some(force) = configured_force_sensing(&self.config, dev) {
             self.shared.write_force_sensing_in_background(&route, force);
         }
@@ -2404,6 +2627,7 @@ impl Orchestrator {
         self.rebuild();
         self.apply_native_wheel_modes();
         self.apply_changed_fn_locks(&previous);
+        self.apply_changed_key_brightness(&previous);
         self.apply_changed_force_sensing(&previous);
         for dev in &self.devices {
             let was_enabled = dev
@@ -2480,6 +2704,17 @@ impl Orchestrator {
             if let Some(fn_lock) = fn_lock {
                 self.shared.write_fn_lock_in_background(&route, fn_lock);
             }
+        }
+    }
+
+    /// Push a changed display-key brightness to the online, enabled device
+    /// that measured `0x8040` — [`changed_key_brightness`] picks the writes.
+    /// An unrelated save writes nothing, as for
+    /// [`Self::apply_changed_fn_locks`].
+    fn apply_changed_key_brightness(&self, previous: &Config) {
+        for (route, brightness) in changed_key_brightness(previous, &self.config, &self.devices) {
+            self.shared
+                .write_key_brightness_in_background(&route, brightness);
         }
     }
 
@@ -2622,6 +2857,18 @@ fn write_value<T>(lock: &RwLock<T>, value: T, name: &str) {
     }
 }
 
+/// The battery a live key showing `config_key`'s battery reads. One device
+/// can have several records — a sleeping receiver slot and the cable it is
+/// on now — so the online, addressable record wins; the first record of the
+/// device is the fallback while none is.
+fn live_battery(devices: &[AgentDevice], config_key: &str) -> Option<BatteryInfo> {
+    devices
+        .iter()
+        .filter(|dev| dev.config_key == config_key)
+        .min_by_key(|dev| !(dev.online && dev.route.is_some()))
+        .and_then(|dev| dev.battery.clone())
+}
+
 /// Publish a fresh immutable snapshot only when its projected value changed.
 /// A keyboard that could hold the key-capture session: it is enabled, has a
 /// route, and at least one of its keys is bound in some profile. `divert` is
@@ -2641,12 +2888,14 @@ struct KeyboardDivertSet {
     wanted: BTreeMap<u16, ButtonId>,
     reserved: Vec<u16>,
     grid: BTreeMap<u8, ButtonId>,
+    /// A dialpad's rotary controls with a stored direction binding.
+    rotary: BTreeSet<Rotary>,
 }
 
 impl KeyboardDivertSet {
     /// Whether the session would capture no key at all.
     fn captures_nothing(&self) -> bool {
-        self.wanted.is_empty() && self.grid.is_empty()
+        self.wanted.is_empty() && self.grid.is_empty() && self.rotary.is_empty()
     }
 }
 
@@ -2659,18 +2908,69 @@ fn is_bound_key(binding: &Binding) -> bool {
 
 /// What a keypad grid key shows for `binding`: blank exactly when the key does
 /// nothing, else the glyph of [`Binding::key_action`].
-fn key_face(binding: Option<&Binding>) -> KeyFace {
-    binding
+///
+/// A key the user styled ([`KeyFaceStyle`]) draws that style instead, with
+/// the action's icon only when the style asks for it.
+fn key_face(
+    binding: Option<&Binding>,
+    style: Option<&KeyFaceStyle>,
+    pictures: &PictureRevisions,
+) -> KeyFace {
+    let icon = binding
         .and_then(Binding::key_action)
-        .map_or(KeyFace::Blank, |action| {
-            KeyFace::Icon(ActionRingIcon::for_action(&action))
-        })
+        .map(|action| ActionRingIcon::for_action(&action));
+    let Some(style) = style.filter(|style| !style.is_default()) else {
+        return icon.map_or(KeyFace::Blank, KeyFace::Icon);
+    };
+    KeyFace::Styled(Arc::new(StyledFace {
+        icon: icon.filter(|_| style.icon),
+        label: style.trimmed_label().map(str::to_owned),
+        background: style.background.unwrap_or(Rgb::new(0, 0, 0)),
+        foreground: style.color.unwrap_or(Rgb::WHITE),
+        icon_color: style.icon_color.or(style.color).unwrap_or(Rgb::WHITE),
+        gradient: style.gradient,
+        image: style
+            .image
+            .as_deref()
+            .map(|path| KeyPicture::of(path, pictures)),
+        symbol: style.symbol.as_ref().and_then(KeySymbol::normalized),
+        progress: None,
+        highlight: false,
+    }))
+}
+
+/// A live key's face: its value over the user's colours and symbol, a bar for
+/// a percentage, and a frame while it is the active key.
+fn live_face(
+    style: Option<&KeyFaceStyle>,
+    value: Option<&crate::live_keys::LiveValue>,
+    active: bool,
+) -> KeyFace {
+    let accent = Rgb::new(0x6d, 0x5d, 0xfc);
+    KeyFace::Styled(Arc::new(StyledFace {
+        icon: None,
+        label: Some(value.map_or_else(|| "…".to_owned(), |value| value.label.clone())),
+        background: style
+            .and_then(|style| style.background)
+            .unwrap_or(Rgb::new(0x18, 0x1a, 0x22)),
+        foreground: style.and_then(|style| style.color).unwrap_or(Rgb::WHITE),
+        icon_color: style
+            .and_then(|style| style.icon_color.or(style.color))
+            .unwrap_or(accent),
+        gradient: style.and_then(|style| style.gradient),
+        image: None,
+        symbol: style
+            .and_then(|style| style.symbol.as_ref())
+            .and_then(KeySymbol::normalized),
+        progress: value.and_then(|value| value.progress),
+        highlight: active,
+    }))
 }
 
 /// Which of `bindings` the keyboard capture session takes over.
 ///
 /// A control is diverted whenever it is stored at all, even as
-/// [`Action::None`](openlogi_core::binding::Action::None) (which means
+/// [`Action::None`] (which means
 /// "suppress this key," not "leave native"):
 /// `button_bindings_for` seeds no default for a [`ButtonId::Control`], so
 /// presence here is always an explicit user choice (#1747). A keypad grid key
@@ -2689,6 +2989,12 @@ fn keyboard_divert_set(bindings: &BTreeMap<ButtonId, Binding>) -> KeyboardDivert
             if is_bound_key(binding) {
                 set.grid.insert(slot.key.index(), ButtonId::grid(slot.key));
             }
+            continue;
+        }
+        // A dialpad rotation direction diverts its whole roller; presence is
+        // an explicit choice, as for a control (no default is seeded).
+        if let Some(rotary) = Rotary::of(*button) {
+            set.rotary.insert(rotary);
             continue;
         }
         let Some(cid) = button.cid().map(openlogi_core::binding::Cid::raw) else {

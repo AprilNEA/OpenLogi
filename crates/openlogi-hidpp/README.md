@@ -33,7 +33,7 @@ features. Each is registered in [`feature::registry`] and obtained via
   RgbEffects, PerKeyLighting.
 - **Audio** — Sidetone, Equalizer.
 - **Report rate** — AdjustableReportRate, ExtendedAdjustableReportRate.
-- **Touch, crown & misc** — Crown, TouchpadRawXy, TouchMouseRaw,
+- **Touch, crown & misc** — Crown, MultiRoller (`0x4610`), TouchpadRawXy, TouchMouseRaw,
   SolarKeyboardDashboard.
 
 Each wrapper encodes/decodes the official wire format, models domain values with

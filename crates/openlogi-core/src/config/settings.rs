@@ -394,6 +394,87 @@ impl From<VerticalScrollSensitivity> for f32 {
     }
 }
 
+/// Brightness of a keypad's LCD keys, in percent of the panel's range.
+///
+/// `0` is excluded on purpose: the MX Creative Keypad's `0x8040` advertises a
+/// minimum of `0`, but a reference driver reports that writing it resets the
+/// device, so a fully dark panel is not offered (see
+/// `docs/hardware/mx-creative-console.md`).
+#[nutype(
+    const_fn,
+    validate(greater_or_equal = 1, less_or_equal = 100),
+    derive(
+        Debug,
+        Clone,
+        Copy,
+        PartialEq,
+        Eq,
+        PartialOrd,
+        Ord,
+        TryFrom,
+        Into,
+        Display,
+        Serialize,
+        Deserialize
+    )
+)]
+pub struct KeyDisplayBrightness(u8);
+
+impl KeyDisplayBrightness {
+    /// Dimmest selectable brightness.
+    pub const MIN: Self = match Self::try_new(1) {
+        Ok(value) => value,
+        Err(_) => panic!("valid minimum key brightness"),
+    };
+    /// Brightest selectable brightness.
+    pub const MAX: Self = match Self::try_new(100) {
+        Ok(value) => value,
+        Err(_) => panic!("valid maximum key brightness"),
+    };
+
+    /// Round and clamp a floating-point slider value into the valid range.
+    #[must_use]
+    pub fn from_rounded(value: f32) -> Self {
+        let clamped = value.round().clamp(1.0, 100.0);
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "clamped to 1..=100 just above"
+        )]
+        let raw = clamped as u8;
+        Self::try_new(raw).unwrap_or(Self::MAX)
+    }
+
+    /// The percentage a device reading `level` on its range `min..=max`
+    /// shows: the inverse of [`Self::scale`], rounded to the nearest percent
+    /// and kept within `1..=100` — a panel at its bottom value reads as the
+    /// dimmest selectable level, since `0` is not one.
+    #[must_use]
+    pub fn from_level(level: u16, min: u16, max: u16) -> Self {
+        let span = u32::from(max.saturating_sub(min));
+        if span == 0 {
+            return Self::MAX;
+        }
+        let above = u32::from(level.clamp(min, max) - min);
+        let percent = (above * 100 + span / 2) / span;
+        u8::try_from(percent)
+            .ok()
+            .and_then(|percent| Self::try_new(percent.max(1)).ok())
+            .unwrap_or(Self::MAX)
+    }
+
+    /// This percentage on a device range `min..=max`, never below `min + 1`
+    /// so the excluded "fully dark" value is never written.
+    #[must_use]
+    pub fn scale(self, min: u16, max: u16) -> u16 {
+        let span = u32::from(max.saturating_sub(min));
+        let scaled = u32::from(min) + span * u32::from(self.into_inner()) / 100;
+        u16::try_from(scaled)
+            .unwrap_or(max)
+            .clamp(min.saturating_add(1).min(max), max)
+    }
+}
+
 /// Thumb-wheel responsiveness on OpenLogi's `1..=100` scale.
 #[nutype(
     const_fn,
@@ -1098,6 +1179,39 @@ mod tests {
                 .expect("zero torque represents unsupported hardware")
                 .tunable_torque,
             None
+        );
+    }
+
+    #[test]
+    fn key_brightness_scales_onto_the_device_range_and_never_reaches_the_bottom() {
+        let at = |percent: u8| KeyDisplayBrightness::try_new(percent).unwrap();
+        // The MX Creative Keypad's 0x8040 range.
+        assert_eq!(at(70).scale(0, 100), 70);
+        assert_eq!(at(100).scale(0, 100), 100);
+        assert_eq!(at(1).scale(0, 100), 1);
+        // A coarse range still never maps to its excluded bottom value.
+        assert_eq!(at(1).scale(0, 4), 1);
+        assert_eq!(at(50).scale(10, 20), 15);
+        // Reading a level back is the inverse on the keypad's range, and a
+        // coarse range rounds to its nearest percent.
+        for percent in 1..=100 {
+            assert_eq!(
+                KeyDisplayBrightness::from_level(at(percent).scale(0, 100), 0, 100),
+                at(percent)
+            );
+        }
+        assert_eq!(KeyDisplayBrightness::from_level(0, 0, 100), at(1));
+        assert_eq!(KeyDisplayBrightness::from_level(15, 10, 20), at(50));
+        assert_eq!(KeyDisplayBrightness::from_level(1, 0, 4), at(25));
+        assert_eq!(KeyDisplayBrightness::from_level(9, 10, 20), at(1));
+        assert_eq!(KeyDisplayBrightness::from_level(7, 7, 7), at(100));
+        assert_eq!(
+            KeyDisplayBrightness::from_rounded(0.2),
+            KeyDisplayBrightness::MIN
+        );
+        assert_eq!(
+            KeyDisplayBrightness::from_rounded(250.0),
+            KeyDisplayBrightness::MAX
         );
     }
 

@@ -509,9 +509,14 @@ pub(super) fn run_apple_script(_src: &str) {
 }
 
 pub(super) fn run_shell_command(cmd: &str) {
+    super::run_to_end(shell_command(cmd), "shell command");
+}
+
+/// The process that runs `cmd` through the platform shell.
+pub(super) fn shell_command(cmd: &str) -> std::process::Command {
     let mut command = std::process::Command::new("/bin/sh");
     command.args(["-c", cmd]);
-    super::run_to_end(command, "shell command");
+    command
 }
 
 /// Settle time after creating the uinput device, before its first emit.

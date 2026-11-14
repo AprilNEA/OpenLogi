@@ -14,7 +14,9 @@ use std::time::Duration;
 
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{ActionRingIcon, ActionRingSize, ActionRingSlot};
-use openlogi_core::config::{ConfigRevision, FlowPeerName, FlowPublicKey, Lighting};
+use openlogi_core::config::{
+    ConfigRevision, FlowPeerName, FlowPublicKey, KeyDisplayBrightness, Lighting,
+};
 use openlogi_core::device::{
     BatteryInfo, ChangedOnLight, DeviceInventory, DeviceKind, LightState, LockKey, StandaloneDevice,
 };
@@ -194,7 +196,15 @@ pub use succession::Identity;
 ///      and `ActionRingIcon::{Channel1, Channel2, Channel3}` appended after
 ///      them — a device's move to another Easy-Switch channel, bound to a
 ///      button or an Actions Ring slot.
-pub const PROTOCOL_VERSION: u32 = 46;
+/// v47: `DeviceKind::Dialpad` appended, and `ButtonId` gains the
+///      `DialLeft`/`DialRight`/`RollerUp`/`RollerDown` names — the MX
+///      Creative Dialpad's dial and roller. `HidppOperation::WriteKeyBrightness`
+///      appended — the MX Creative Keypad's LCD brightness.
+///      `Action::ActivateLiveKey` appended — a keypad key that shows a live
+///      value. `Capabilities::key_brightness` appended — measured `0x8040`
+///      display-key brightness — with `HidppOperation::ReadKeyBrightness`
+///      and the `read_key_brightness`/`set_key_brightness` calls.
+pub const PROTOCOL_VERSION: u32 = 47;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -1263,4 +1273,16 @@ pub trait Agent {
     /// held trigger cancels instead of choosing the slot last reported by
     /// [`Agent::action_ring_hover`].
     async fn action_ring_unhover(session_id: u64) -> Result<(), ActionRingCommandError>;
+    /// Read the brightness of the display keys on `route` (HID++ `0x8040`),
+    /// as a percentage of the range the device reports.
+    async fn read_key_brightness(route: DeviceRoute) -> Result<KeyDisplayBrightness, WriteError>;
+    /// Write the brightness of the display keys on `route` now and answer
+    /// with what the device reads back. A newer write requested before this
+    /// one's turn — the agent's own reconnect or config-reload write
+    /// included — makes it write nothing and answer
+    /// [`WriteError::WriteSuperseded`].
+    async fn set_key_brightness(
+        route: DeviceRoute,
+        brightness: KeyDisplayBrightness,
+    ) -> Result<KeyDisplayBrightness, WriteError>;
 }

@@ -12,6 +12,47 @@ fn dpi_roundtrips_per_device() {
     assert_eq!(restored.dpi("absent"), None);
 }
 
+/// A keypad's LCD brightness is saved per device, stays out of
+/// `config.toml` until set, and is saved through [`DeviceEdit`] like the
+/// other agent settings `openlogi api --save` writes.
+#[test]
+fn key_display_brightness_roundtrips_and_saves_through_a_device_edit() {
+    use crate::device_order::{DeviceIdentity, DeviceStableId};
+
+    let mut cfg = Config::default();
+    assert_eq!(cfg.key_display_brightness("keypad"), None);
+    assert!(
+        !toml::to_string(&cfg)
+            .expect("serialize")
+            .contains("key_display_brightness")
+    );
+    let level = KeyDisplayBrightness::try_new(60).expect("in range");
+    cfg.set_key_display_brightness("keypad", Some(level));
+    assert_eq!(
+        write_and_read(&cfg).key_display_brightness("keypad"),
+        Some(level)
+    );
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    Config::default().save_to_path(&path).expect("save");
+    let identity = DeviceIdentity::Unit([0x01, 0x02, 0x03, 0x04]);
+    let stable = DeviceStableId::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xc354,
+        identity: identity.clone(),
+    };
+    let mut edit = DeviceEdit::load(&path, &stable, Some(&identity)).expect("load");
+    edit.set(DeviceSetting::KeyDisplayBrightness(level))
+        .expect("set");
+    edit.commit().expect("commit");
+    let saved = Config::load_from_path(&path).expect("reload");
+    assert_eq!(
+        saved.devices["unit:01020304"].key_display_brightness,
+        Some(level)
+    );
+}
+
 #[test]
 fn disabled_keys_roundtrip_and_clear_per_device() {
     let mut cfg = Config::default();

@@ -5994,6 +5994,7 @@ version = "0.9.0"
 dependencies = [
  "axwatch",
  "backon",
+ "chrono",
  "futures-lite",
  "gethostname",
  "image",
@@ -6008,6 +6009,7 @@ dependencies = [
  "openlogi-ipc",
  "openlogi-ui",
  "resvg 0.46.0",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -6309,6 +6311,7 @@ dependencies = [
  "core-graphics 0.25.0",
  "dispatch2",
  "evdev",
+ "libc",
  "mach2 0.5.0",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
@@ -6387,6 +6390,7 @@ version = "0.9.0"
 dependencies = [
  "gpui-pre",
  "openlogi-core",
+ "rust-embed",
 ]
 
 [[package]]

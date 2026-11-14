@@ -26,6 +26,9 @@ pub use macos::{VirtualKeyboard, is_virtual_keyboard_product};
 #[cfg(any(target_os = "macos", test))]
 mod space_switch;
 
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+mod shell_tree;
+
 #[cfg(target_os = "linux")]
 mod linux;
 
@@ -368,6 +371,80 @@ fn run_to_end(mut command: std::process::Command, kind: &'static str) {
         Ok(status) => tracing::warn!(kind, %status, "script exited with an error"),
         Err(error) => tracing::warn!(kind, %error, "script could not start"),
     }
+}
+
+/// Run `cmd` through the platform shell — the same process
+/// [`Action::RunShellCommand`] starts — and answer its standard output, at
+/// most `max_bytes` of it decoded lossily. `None` when it could not start, or
+/// when it or its output ran past `timeout`; the shell is then killed.
+///
+/// Blocking: call it off the async threads. Every process the command starts
+/// ends with it (its process group or job object): a pipeline stage or a
+/// background child cannot outlive the answer or keep its reader waiting.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[must_use]
+pub fn shell_output(cmd: &str, timeout: std::time::Duration, max_bytes: usize) -> Option<String> {
+    use std::io::Read as _;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    let deadline = Instant::now() + timeout;
+    let mut command = platform::shell_command(cmd);
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let (mut child, tree) = shell_tree::ProcessTree::spawn(&mut command)
+        .inspect_err(|error| tracing::warn!(%error, "shell command not started"))
+        .ok()?;
+    let Some(stdout) = child.stdout.take() else {
+        drop(tree);
+        let _ = child.kill();
+        let _ = child.wait();
+        return None;
+    };
+    // Read on its own thread, so a command that writes more than the pipe
+    // holds is not stalled by a wait that never drains it.
+    let (sender, output) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let read = stdout
+            .take(u64::try_from(max_bytes).unwrap_or(u64::MAX))
+            .read_to_end(&mut bytes);
+        let _ = sender.send(read.map(|_| bytes));
+    });
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            _ => {
+                drop(tree);
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+    // What the shell left running ends now, so its output pipe closes.
+    drop(tree);
+    let bytes = output
+        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        .ok()?
+        .ok()?;
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// No platform shell: nothing runs.
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+#[must_use]
+pub fn shell_output(
+    _cmd: &str,
+    _timeout: std::time::Duration,
+    _max_bytes: usize,
+) -> Option<String> {
+    None
 }
 
 /// Wait for `command`'s process with no pipes: its stdin and stdout are
@@ -939,6 +1016,117 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     use super::{HeldChordKind, HeldKey, HeldOutput, HoldTransition};
     use super::{QuantizedScroll, ScrollQuantizer};
+
+    /// A command's output comes back with its quotes as the shell got them:
+    /// on Windows `cmd.exe` keeps the inner quotes of a JSON value.
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn shell_output_answers_what_the_command_printed() {
+        use std::time::Duration;
+        #[cfg(windows)]
+        let cmd = r#"echo {"label":"OK","progress":42}"#;
+        #[cfg(not(windows))]
+        let cmd = r#"echo '{"label":"OK","progress":42}'"#;
+        let out = super::shell_output(cmd, Duration::from_secs(10), 4096).expect("the shell runs");
+        assert_eq!(out.trim(), r#"{"label":"OK","progress":42}"#);
+        let capped =
+            super::shell_output("echo 0123456789", Duration::from_secs(10), 4).expect("runs");
+        assert_eq!(capped, "0123");
+    }
+
+    /// The command the app suggests for a live key runs in this shell and
+    /// prints the time: on Windows `cmd.exe` runs it, whose `date` would try to
+    /// set the date instead of printing one.
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn the_suggested_live_key_command_prints_the_time() {
+        use std::time::Duration;
+        let command = openlogi_core::config::LiveSource::example_command();
+        let out =
+            super::shell_output(command, Duration::from_secs(10), 4096).expect("the shell runs");
+        let line = out.lines().next().unwrap_or_default();
+        assert!(
+            shows_a_time(line),
+            "`{command}` printed {out:?}, not a time"
+        );
+    }
+
+    /// Whether `line` shows a time of day in some locale's short format: a
+    /// word of one or two digits, `:` or `.`, and two digits, with whatever
+    /// day-period marker the locale puts around it.
+    fn shows_a_time(line: &str) -> bool {
+        let digits = |text: &str| text.chars().all(|c| c.is_ascii_digit());
+        line.split_whitespace().any(|word| {
+            word.split_once([':', '.']).is_some_and(|(hours, minutes)| {
+                (1..=2).contains(&hours.len())
+                    && minutes.len() == 2
+                    && digits(hours)
+                    && digits(minutes)
+            })
+        })
+    }
+
+    /// `time /t` prints the locale's short time: a 24-hour or a 12-hour clock,
+    /// a day-period marker before or after it, `:` or `.` between hours and
+    /// minutes. Each is a time; `cmd.exe`'s refusal to set a date is not.
+    #[test]
+    fn a_time_in_any_short_format_counts() {
+        for time in [
+            "14:23",
+            "9:05",
+            "02:23 PM",
+            "2:23 PM",
+            "14.23",
+            "오후 2:23",
+            "14:23\r",
+        ] {
+            assert!(shows_a_time(time), "{time:?} is a time");
+        }
+        for other in [
+            "",
+            "Eingegebenes Datum kann nicht übernommen werden.",
+            "The system cannot accept the date entered.",
+            "1:2",
+            "123:45",
+            "14:2x",
+        ] {
+            assert!(!shows_a_time(other), "{other:?} is not a time");
+        }
+    }
+
+    /// A command that leaves a child running in the background with its
+    /// output still open answers at once: the child ends with the shell.
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn shell_output_ends_what_the_command_left_running() {
+        use std::time::{Duration, Instant};
+        #[cfg(windows)]
+        let cmd = "start /b ping -n 30 127.0.0.1 & echo done";
+        #[cfg(not(windows))]
+        let cmd = "sleep 30 & echo done";
+        let started = Instant::now();
+        let out = super::shell_output(cmd, Duration::from_secs(20), 4096)
+            .expect("the shell finishes before its timeout");
+        assert!(out.contains("done"), "{out}");
+        assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    /// A command that outlives its timeout is killed and answers nothing.
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn shell_output_gives_up_on_a_command_past_its_timeout() {
+        use std::time::{Duration, Instant};
+        #[cfg(windows)]
+        let cmd = "ping -n 30 127.0.0.1 >nul";
+        #[cfg(not(windows))]
+        let cmd = "sleep 30";
+        let started = Instant::now();
+        assert_eq!(
+            super::shell_output(cmd, Duration::from_millis(300), 4096),
+            None
+        );
+        assert!(started.elapsed() < Duration::from_secs(10));
+    }
 
     /// Synthetic high-resolution input: eight eighth-ticks must total exactly
     /// one Windows/Linux wheel detent (120 raw units). This is deterministic

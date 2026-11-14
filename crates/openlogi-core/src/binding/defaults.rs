@@ -91,9 +91,16 @@ pub fn default_binding(button: ButtonId) -> Action {
         // and seed the same inert default.
         // A G-series keyboard's gaming keys run nothing until bound: the
         // whole cluster is taken only on the user's explicit opt-in.
-        ButtonId::Control(_) | ButtonId::Grid(_) | ButtonId::GKey(_) | ButtonId::ModeKey(_) => {
-            Action::None
-        }
+        // A dialpad's dial and roller stay native the same way: only a bound
+        // direction diverts its `0x4610` roller.
+        ButtonId::Control(_)
+        | ButtonId::Grid(_)
+        | ButtonId::GKey(_)
+        | ButtonId::ModeKey(_)
+        | ButtonId::DialLeft
+        | ButtonId::DialRight
+        | ButtonId::RollerUp
+        | ButtonId::RollerDown => Action::None,
     }
 }
 

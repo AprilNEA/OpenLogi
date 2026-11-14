@@ -123,8 +123,13 @@ fn reviewed_detail_tabs(id: &str) -> Vec<DetailTab> {
         // disabled-key settings are cards on the Device tab, not extra tabs.
         // The keypad (kind Numpad, a measured 0x1b04 table, no pointer
         // sensor) is configured on Keys too, and a key can open the Actions
-        // Ring, so the ring editor follows it.
-        "mx-mechanical-mini-mac-001" | "mx-keys-s-001" | "mx-creative-keypad-001" => {
+        // Ring, so the ring editor follows it. The dialpad (kind Dialpad, its
+        // four keys in 0x1b04, its dial and roller on 0x4610) is keyboard-like
+        // the same way.
+        "mx-mechanical-mini-mac-001"
+        | "mx-keys-s-001"
+        | "mx-creative-keypad-001"
+        | "mx-creative-dialpad-001" => {
             vec![DetailTab::Keys, DetailTab::ActionsRing, DetailTab::Device]
         }
         // The G915 and G512 are the same kind of keyboard. The G915's RGB

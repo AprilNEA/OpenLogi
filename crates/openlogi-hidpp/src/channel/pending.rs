@@ -45,10 +45,31 @@ pub(super) struct PendingQueue {
     /// once: entering a state goes through [`PendingQueue::hold`].
     keys: VecDeque<HeldKey>,
 
-    /// Woken whenever a key leaves the in-flight state or its last owed reply
-    /// is discarded, so a parked request can re-check whether its key is
-    /// free.
+    /// Woken whenever a key leaves the in-flight state, its last owed reply
+    /// is discarded, or a [`RequestPause`] drops, so a parked request can
+    /// re-check whether its key is free.
     key_waiters: Vec<oneshot::Sender<()>>,
+
+    /// Raw transactions that keep requests off the wire: see
+    /// [`RequestPause`].
+    pauses: Pauses,
+}
+
+/// The [`RequestPause`]s on a channel.
+#[derive(Default)]
+struct Pauses {
+    /// A pause holds the channel: no request registers until it drops.
+    held: bool,
+    /// Pauses waiting for the requests in flight to be answered. New
+    /// requests park behind them too, so a steady stream of requests
+    /// cannot starve a pause.
+    waiting: usize,
+}
+
+impl Pauses {
+    fn hold_requests(&self) -> bool {
+        self.held || self.waiting > 0
+    }
 }
 
 /// A key the queue holds: the request it was taken for, and where in its
@@ -146,6 +167,8 @@ enum Wait {
     /// An abandoned request's replies with this key are still outstanding;
     /// until they are discarded, or the given instant at the latest.
     Stale(Instant),
+    /// A [`RequestPause`] holds the channel or waits for it; until it drops.
+    Paused,
 }
 
 /// What an incoming report was to the pending requests.
@@ -171,12 +194,18 @@ impl PendingQueue {
     /// is byte-identical registers at once and adopts them — it is answered
     /// by whichever reply comes first, and the rest stay owed (see
     /// [`InFlight::extra_replies`]).
+    ///
+    /// While a [`RequestPause`] holds the channel or waits for it, no request
+    /// registers, whatever its key.
     fn try_register(
         &mut self,
         registration: Registration,
         now: Instant,
     ) -> Result<(), (Registration, Wait)> {
         self.keys.retain(|held| !held.state.expired(now));
+        if self.pauses.hold_requests() {
+            return Err((registration, Wait::Paused));
+        }
         let key = registration.correlation.key;
         let adopted = match self
             .keys
@@ -440,26 +469,22 @@ impl PendingRequest {
         };
         loop {
             let now = Instant::now();
-            let (parked, stale_until) = {
+            let (parked, wait) = {
                 let mut queue = lock(&pending_messages);
-                let stale_until = match queue.try_register(registration, now) {
+                let wait = match queue.try_register(registration, now) {
                     Ok(()) => break,
-                    Err((returned, Wait::InFlight)) => {
+                    Err((returned, wait)) => {
                         registration = returned;
-                        None
-                    }
-                    Err((returned, Wait::Stale(expires))) => {
-                        registration = returned;
-                        Some(expires)
+                        wait
                     }
                 };
                 let (wake, parked) = oneshot::channel();
                 queue.key_waiters.push(wake);
-                (parked, stale_until)
+                (parked, wait)
             };
             let (dev, feat, func) = key;
-            match stale_until {
-                None => {
+            match wait {
+                Wait::InFlight => {
                     trace!(
                         dev,
                         feat, func, "hidpp request parked — same header in flight"
@@ -468,7 +493,14 @@ impl PendingRequest {
                     // either way.
                     let _ = parked.await;
                 }
-                Some(expires) => {
+                Wait::Paused => {
+                    trace!(
+                        dev,
+                        feat, func, "hidpp request parked — a raw transaction holds the channel"
+                    );
+                    let _ = parked.await;
+                }
+                Wait::Stale(expires) => {
                     trace!(
                         dev,
                         feat,
@@ -500,6 +532,63 @@ impl PendingRequest {
 impl Drop for PendingRequest {
     fn drop(&mut self) {
         lock(&self.pending_messages).abandon(self.id, Instant::now());
+    }
+}
+
+/// A raw transaction's hold on the channel, from
+/// [`HidppChannel::pause_requests`]: while it lives, no request that awaits a
+/// reply goes out.
+///
+/// It is taken once every request in flight has been answered or abandoned.
+/// Abandoned requests whose replies may still land do not delay it. Dropping
+/// the guard, or the future still waiting for it, lets parked requests go.
+///
+/// [`HidppChannel::pause_requests`]: super::HidppChannel::pause_requests
+#[must_use = "requests resume as soon as the pause is dropped"]
+pub struct RequestPause {
+    pending_messages: Arc<Mutex<PendingQueue>>,
+    held: bool,
+}
+
+impl RequestPause {
+    pub(super) async fn acquire(pending_messages: Arc<Mutex<PendingQueue>>) -> Self {
+        lock(&pending_messages).pauses.waiting += 1;
+        // From here on, `Drop` undoes the wait even if this future is dropped.
+        let mut pause = Self {
+            pending_messages,
+            held: false,
+        };
+        loop {
+            let parked = {
+                let mut queue = lock(&pause.pending_messages);
+                if !queue.pauses.held && queue.in_flight_count() == 0 {
+                    queue.pauses.waiting -= 1;
+                    queue.pauses.held = true;
+                    pause.held = true;
+                    break;
+                }
+                let (wake, parked) = oneshot::channel();
+                queue.key_waiters.push(wake);
+                parked
+            };
+            trace!("request pause waiting for requests in flight");
+            // A dropped waker only means the queue changed; re-check either
+            // way.
+            let _ = parked.await;
+        }
+        pause
+    }
+}
+
+impl Drop for RequestPause {
+    fn drop(&mut self) {
+        let mut queue = lock(&self.pending_messages);
+        if self.held {
+            queue.pauses.held = false;
+        } else {
+            queue.pauses.waiting -= 1;
+        }
+        queue.wake_key_waiters();
     }
 }
 

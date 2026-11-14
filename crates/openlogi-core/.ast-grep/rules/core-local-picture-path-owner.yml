@@ -1,0 +1,22 @@
+# Owner: openlogi_core::config::is_local_picture_path — which key picture
+# paths may be touched at all.
+id: core-local-picture-path-owner
+language: rust
+severity: error
+message: is_local_picture_path (openlogi-core config/key_face.rs) decides which key picture paths may be touched; call it instead of matching network or device path prefixes here.
+note: |
+  The agent's picture read, its version read and the settings app's render
+  and chooser each decided "is this a network or device path" on their own;
+  the render's copy checked nothing and stat'ed the file on every repaint.
+  One owner keeps them agreeing. See "Single source of truth" in AGENTS.md.
+files:
+  - crates/**/*.rs
+  - xtask/**/*.rs
+ignores:
+  - crates/openlogi-core/src/config/key_face.rs
+# The `Prefix` variants that name a share or a device. Matched as bare
+# identifiers so a copy inside `matches!` — a token tree, not a parsed path —
+# is caught too.
+rule:
+  kind: identifier
+  regex: '^(UNC|VerbatimUNC|DeviceNS)$'
