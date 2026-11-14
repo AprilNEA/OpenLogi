@@ -264,12 +264,12 @@ fn an_app_profile_binds_keypad_keys_over_default() {
 fn a_page_bound_only_in_an_app_profile_still_counts_as_bound() {
     let (mut state, _receiver) = keypad_state();
     let _ = state.commit_keypad_pages(page(2));
-    assert!(!state.current_keypad_page_binds(page(2)));
+    assert!(!state.current_keypad_page_has_settings(page(2)));
 
     let _ = state.set_editing_app(Some("com.adobe.Photoshop".into()));
     let _ = state.commit_binding(slot(2, GridKey::TopLeft), Action::Cut);
     let _ = state.set_editing_app(None);
 
     // Default binds nothing there, yet removing page 2 would drop the app's key.
-    assert!(state.current_keypad_page_binds(page(2)));
+    assert!(state.current_keypad_page_has_settings(page(2)));
 }

@@ -631,8 +631,8 @@ mod tests {
         let page = |number| KeypadPage::new(number).unwrap();
         let mut cfg = Config::default();
         cfg.set_keypad_pages("keypad", page(3));
-        assert!(!cfg.keypad_page_binds("keypad", page(2)));
-        assert!(!cfg.keypad_page_binds("unknown", page(1)));
+        assert!(!cfg.keypad_page_has_settings("keypad", page(2)));
+        assert!(!cfg.keypad_page_has_settings("unknown", page(1)));
 
         cfg.set_binding(
             "keypad",
@@ -646,9 +646,49 @@ mod tests {
             Some(Action::Cut),
         );
 
-        assert!(cfg.keypad_page_binds("keypad", page(2)));
-        assert!(cfg.keypad_page_binds("keypad", page(3)));
-        assert!(!cfg.keypad_page_binds("keypad", page(1)));
+        assert!(cfg.keypad_page_has_settings("keypad", page(2)));
+        assert!(cfg.keypad_page_has_settings("keypad", page(3)));
+        assert!(!cfg.keypad_page_has_settings("keypad", page(1)));
+    }
+
+    /// A page with no binding but a styled face or a live key still holds
+    /// what the user set: removing it drops them, so it asks first.
+    #[test]
+    fn removing_live_or_styled_page_requires_confirmation() {
+        use crate::binding::{GridKey, GridSlot};
+        use crate::config::{KeyFaceStyle, LiveKey, LiveSource};
+        let page = |number| KeypadPage::new(number).unwrap();
+        let mut cfg = Config::default();
+        cfg.set_keypad_pages("keypad", page(3));
+        cfg.set_key_face_style(
+            "keypad",
+            slot(2, GridKey::Middle),
+            Some(KeyFaceStyle {
+                label: Some("Build".into()),
+                ..KeyFaceStyle::default()
+            }),
+        );
+        cfg.devices
+            .get_mut("keypad")
+            .expect("the keypad has settings")
+            .live_keys
+            .insert(
+                ButtonId::Grid(GridSlot {
+                    page: page(3),
+                    key: GridKey::TopLeft,
+                }),
+                LiveKey::new(LiveSource::Clock),
+            );
+
+        assert!(
+            cfg.keypad_page_has_settings("keypad", page(2)),
+            "a styled face"
+        );
+        assert!(
+            cfg.keypad_page_has_settings("keypad", page(3)),
+            "a live key"
+        );
+        assert!(!cfg.keypad_page_has_settings("keypad", page(1)));
     }
 
     /// A live key's slot runs its activation whatever it stores, the paging

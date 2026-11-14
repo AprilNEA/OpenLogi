@@ -503,8 +503,9 @@ impl FunctionRowView {
         }
         let last = state.map_or(KeypadPage::FIRST, AppState::current_keypad_pages);
         self.move_keypad_page(self.keypad_page.min(last));
-        // Every profile's keys, not just the open one's: removal drops them all.
-        let binds_keys = state.is_some_and(|state| state.current_keypad_page_binds(last));
+        // Every profile's keys, faces and live keys, not just the open
+        // profile's: removal drops them all.
+        let binds_keys = state.is_some_and(|state| state.current_keypad_page_has_settings(last));
         LastPage {
             page: last,
             binds_keys,

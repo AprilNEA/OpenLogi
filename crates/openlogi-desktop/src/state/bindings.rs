@@ -322,13 +322,14 @@ impl AppState {
             .collect()
     }
 
-    /// Whether the selected keypad binds any key on `page` in any profile —
-    /// what removing that page would drop.
+    /// Whether the selected keypad holds anything the user set on `page` —
+    /// a binding in any profile, a styled face, a live key — i.e. whether
+    /// removing that page drops something and should ask first.
     #[must_use]
-    pub fn current_keypad_page_binds(&self, page: KeypadPage) -> bool {
+    pub fn current_keypad_page_has_settings(&self, page: KeypadPage) -> bool {
         self.current_record()
             .and_then(DeviceRecord::persistent_config_key)
-            .is_some_and(|key| self.config.keypad_page_binds(key, page))
+            .is_some_and(|key| self.config.keypad_page_has_settings(key, page))
     }
 
     /// Give the selected keypad pages `1..=last`, persist it, and have the

@@ -681,11 +681,12 @@ impl Config {
         }
     }
 
-    /// Whether any grid key on `page` of `device_key` is bound — device-wide
-    /// or in any per-app overlay — i.e. whether shrinking past `page`
-    /// ([`Self::set_keypad_pages`]) would drop a binding.
+    /// Whether shrinking past `page` of `device_key`
+    /// ([`Self::set_keypad_pages`]) would drop anything the user set there: a
+    /// grid key bound device-wide or in any per-app overlay, a styled face,
+    /// or a live key. Removing such a page asks first.
     #[must_use]
-    pub fn keypad_page_binds(&self, device_key: &str, page: KeypadPage) -> bool {
+    pub fn keypad_page_has_settings(&self, device_key: &str, page: KeypadPage) -> bool {
         let Some(device) = self.devices.get(device_key) else {
             return false;
         };
@@ -699,6 +700,8 @@ impl Config {
                 .values()
                 .flatten()
                 .any(|(button, action)| on_page(button) && *action != Action::None)
+            || device.key_faces.keys().any(on_page)
+            || device.live_keys.keys().any(on_page)
     }
 
     /// The keypad grid slots of `device_key` that show a live value. A
