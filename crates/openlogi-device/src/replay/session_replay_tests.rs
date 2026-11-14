@@ -292,13 +292,22 @@ async fn roller_restore_waits_for_stalled_take() {
         )
         .await;
     };
-    tokio::select! {
-        outcome = &mut capture => panic!(
-            "the session ended while its diversion was still on the wire: {:?}",
-            outcome.map(|_| ()).map_err(|_| "arming failed")
-        ),
-        () = stall => {}
-    }
+    // Bounded too: a session that neither writes the diversion nor ends
+    // must fail here, not hang.
+    tokio::time::timeout(
+        hidpp::channel::SEND_RESPONSE_TIMEOUT + DIALPAD_DEADLINE,
+        async {
+            tokio::select! {
+                outcome = &mut capture => panic!(
+                    "the session ended while its diversion was still on the wire: {:?}",
+                    outcome.map(|_| ()).map_err(|_| "arming failed")
+                ),
+                () = stall => {}
+            }
+        },
+    )
+    .await
+    .expect("the session never wrote the dial's diversion");
     stalled.release();
     let (outcome, ()) = tokio::time::timeout(DIALPAD_DEADLINE, async {
         tokio::join!(capture, replay.stop_after_arm(shutdown))
