@@ -130,8 +130,8 @@ pub const G604_LIGHTSPEED: GamingLayout = GamingLayout {
         Slot::stock(ButtonId::G7, stock_number_key(0x20)), // 3
         Slot::stock(ButtonId::G8, stock_number_key(0x1f)), // 2
         Slot::stock(ButtonId::G9, stock_number_key(0x1e)), // 1
-        Slot::stock(ButtonId::G10, Action::PreviousDpiPreset),
-        Slot::stock(ButtonId::G11, Action::NextDpiPreset),
+        Slot::silent(ButtonId::DpiDown),
+        Slot::silent(ButtonId::DpiUp),
         Slot::silent(ButtonId::WheelTiltLeft),
         Slot::silent(ButtonId::WheelTiltRight),
     ],
@@ -389,8 +389,8 @@ mod tests {
                 G7,
                 G8,
                 G9,
-                G10,
-                G11,
+                DpiDown,
+                DpiUp,
                 WheelTiltLeft,
                 WheelTiltRight,
             ]
@@ -412,6 +412,23 @@ mod tests {
                 Some(Action::HoldShortcut(combo))
             );
         }
+    }
+
+    #[test]
+    fn g604_dpi_buttons_use_their_physical_names_and_actions() {
+        use super::super::defaults::default_binding_on;
+
+        let layout = GamingLayout::for_model_key("0b024").unwrap();
+        assert_eq!(layout.slot_of(ButtonId::DpiDown), Some(9));
+        assert_eq!(layout.slot_of(ButtonId::DpiUp), Some(10));
+        assert_eq!(
+            default_binding_on(Some(layout), ButtonId::DpiDown),
+            Action::PreviousDpiPreset
+        );
+        assert_eq!(
+            default_binding_on(Some(layout), ButtonId::DpiUp),
+            Action::NextDpiPreset
+        );
     }
 
     #[test]

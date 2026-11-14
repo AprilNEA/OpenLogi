@@ -78,8 +78,8 @@ pub(super) fn gaming_fallback_hotspot(button: ButtonId) -> Option<Hotspot> {
         ButtonId::G7 => (100., 60., 50., 50.),
         ButtonId::G8 => (100., 120., 50., 50.),
         ButtonId::G9 => (185., 215., 50., 40.),
-        ButtonId::G10 => (42., 120., 50., 50.),
-        ButtonId::G11 => (42., 60., 50., 50.),
+        ButtonId::DpiDown => (42., 120., 50., 50.),
+        ButtonId::DpiUp => (42., 60., 50., 50.),
         _ => return None,
     };
     Some(Hotspot {

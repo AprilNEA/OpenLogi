@@ -118,10 +118,10 @@ pub enum ButtonId {
     ModeKey(ModeKey),
     /// G-series button G4 when it is a dedicated control.
     G4,
-    /// G-series button G10.
-    G10,
-    /// G-series button G11.
-    G11,
+    /// A dedicated DPI-down button.
+    DpiDown,
+    /// A dedicated DPI-up button.
+    DpiUp,
 }
 
 impl ButtonId {
@@ -146,15 +146,7 @@ impl ButtonId {
     ];
 
     /// G-series buttons, kept out of [`Self::ALL`].
-    pub const G_BUTTONS: [ButtonId; 7] = [
-        Self::G4,
-        Self::G6,
-        Self::G7,
-        Self::G8,
-        Self::G9,
-        Self::G10,
-        Self::G11,
-    ];
+    pub const G_BUTTONS: [ButtonId; 5] = [Self::G4, Self::G6, Self::G7, Self::G8, Self::G9];
 
     /// The keyboard key bound to `0x1b04` control `cid`.
     #[must_use]
@@ -290,8 +282,8 @@ impl ButtonId {
         (ButtonId::G8, "G8"),
         (ButtonId::G9, "G9"),
         (ButtonId::G4, "G4"),
-        (ButtonId::G10, "G10"),
-        (ButtonId::G11, "G11"),
+        (ButtonId::DpiDown, "DpiDown"),
+        (ButtonId::DpiUp, "DpiUp"),
     ];
 
     /// The name a mouse button is persisted under. Keyboard controls have no
@@ -316,8 +308,8 @@ impl ButtonId {
             ButtonId::G8 => Self::UNIT_NAMES[15].1,
             ButtonId::G9 => Self::UNIT_NAMES[16].1,
             ButtonId::G4 => Self::UNIT_NAMES[17].1,
-            ButtonId::G10 => Self::UNIT_NAMES[18].1,
-            ButtonId::G11 => Self::UNIT_NAMES[19].1,
+            ButtonId::DpiDown => Self::UNIT_NAMES[18].1,
+            ButtonId::DpiUp => Self::UNIT_NAMES[19].1,
             // Grid keys, keyboard controls and gaming keys have no fixed name
             // in this table; see [`GridKey::config_name`],
             // [`Cid::config_name`], [`GKeySlot::config_name`] and
@@ -362,8 +354,8 @@ impl ButtonId {
             ButtonId::G8 => "G8",
             ButtonId::G9 => "G9",
             ButtonId::G4 => "G4",
-            ButtonId::G10 => "G10",
-            ButtonId::G11 => "G11",
+            ButtonId::DpiDown => "DPI Down",
+            ButtonId::DpiUp => "DPI Up",
             ButtonId::Grid(slot) => return slot.label(),
             ButtonId::Control(cid) => return cid.label(),
             ButtonId::GKey(slot) => return slot.label(),
@@ -393,8 +385,8 @@ impl ButtonId {
             ButtonId::G8 => "actions.g8",
             ButtonId::G9 => "actions.g9",
             ButtonId::G4 => "actions.g4",
-            ButtonId::G10 => "actions.g10",
-            ButtonId::G11 => "actions.g11",
+            ButtonId::DpiDown => "actions.dpi_down",
+            ButtonId::DpiUp => "actions.dpi_up",
             // The page is context the caller shows beside the key, not part
             // of the key's name.
             ButtonId::Grid(slot) => slot.key.translation_key(),

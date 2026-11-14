@@ -59,6 +59,8 @@ pub fn default_binding(button: ButtonId) -> Action {
         ButtonId::Back => Action::MouseBack,
         ButtonId::Forward => Action::MouseForward,
         ButtonId::DpiToggle => Action::CycleDpiPresets,
+        ButtonId::DpiDown => Action::PreviousDpiPreset,
+        ButtonId::DpiUp => Action::NextDpiPreset,
         #[expect(
             clippy::match_same_arms,
             reason = "the tap is inert because its captured events are noise (see above), \
@@ -82,13 +84,7 @@ pub fn default_binding(button: ButtonId) -> Action {
             clippy::match_same_arms,
             reason = "the layout owns a G button's default; unrelated to the keyboard arm"
         )]
-        ButtonId::G4
-        | ButtonId::G6
-        | ButtonId::G7
-        | ButtonId::G8
-        | ButtonId::G9
-        | ButtonId::G10
-        | ButtonId::G11 => Action::None,
+        ButtonId::G4 | ButtonId::G6 | ButtonId::G7 | ButtonId::G8 | ButtonId::G9 => Action::None,
         // Keyboard keys stay on their native firmware function until the user
         // explicitly binds them; an unbound key is never diverted, so a
         // `None` default keeps the projection total without capturing anything.
