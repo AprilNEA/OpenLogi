@@ -566,6 +566,67 @@ mod tests {
         }
     }
 
+    /// The original Superlight has five native buttons, but still needs a
+    /// measured layout to hand its report rate from onboard memory to the host.
+    #[test]
+    fn superlight_host_mode_applies_report_rate_without_silencing_native_buttons() {
+        use openlogi_core::hid::ReportRate;
+
+        let key = "24093";
+        let layout = GamingLayout::for_model_key(key);
+        let mut config = Config::default();
+        config.set_onboard_memory(key, Some(OnboardMemory::Off));
+        config.set_report_rate(key, ReportRate::new(500));
+        let plan = super::plan_for_device(
+            &config,
+            super::PlanDevice {
+                physical_key: PhysicalDeviceKey::parse("receiver:cafe:slot:1").unwrap(),
+                config_key: key,
+                route: route(),
+                layout,
+            },
+            None,
+            0,
+            true,
+        )
+        .with_onboard(&config, layout);
+
+        assert_eq!(
+            plan.target.spec.onboard,
+            Some(OnboardTarget::Host(HostMode {
+                slots: vec![
+                    (ButtonId::LeftClick, SlotRoute::Native),
+                    (ButtonId::RightClick, SlotRoute::Native),
+                    (ButtonId::MiddleClick, SlotRoute::Native),
+                    (ButtonId::Back, SlotRoute::Native),
+                    (ButtonId::Forward, SlotRoute::Native),
+                ],
+                report_rate: Some(ReportRate::new(500)),
+            }))
+        );
+    }
+
+    #[test]
+    fn unconfigured_superlight_keeps_its_onboard_profile() {
+        let config = Config::default();
+        let layout = GamingLayout::for_model_key("24093");
+        let plan = super::plan_for_device(
+            &config,
+            super::PlanDevice {
+                physical_key: PhysicalDeviceKey::parse("receiver:cafe:slot:1").unwrap(),
+                config_key: "24093",
+                route: route(),
+                layout,
+            },
+            None,
+            0,
+            true,
+        )
+        .with_onboard(&config, layout);
+
+        assert_eq!(plan.target.spec.onboard, None);
+    }
+
     #[test]
     fn g502_stays_onboard_until_a_host_only_button_is_rebound() {
         let mut cfg = Config::default();
