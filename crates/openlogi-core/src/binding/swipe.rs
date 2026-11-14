@@ -6,6 +6,7 @@
 use std::time::Instant;
 
 use super::GestureDirection;
+use crate::config::GestureRepeatDistance;
 
 /// Minimum dominant-axis travel (raw-XY units) before a held gesture commits to
 /// a direction. Tuned to match Logitech Options+'s responsiveness.
@@ -13,7 +14,7 @@ pub const GESTURE_SWIPE_THRESHOLD: i32 = 50;
 /// Maximum cross-axis travel allowed at the threshold, so only a reasonably
 /// straight swipe commits. Grows with the dominant axis (`max(deadzone, 35%)`).
 pub const GESTURE_SWIPE_DEADZONE: i32 = 40;
-/// Net travel that keeps going the committed direction before that direction
+/// Default travel continuing the committed direction before that direction
 /// fires again, so one continuous motion steps through several desktops like
 /// Options+. Larger than [`GESTURE_SWIPE_THRESHOLD`] so the overshoot of a
 /// single swipe doesn't double-fire; backtracking subtracts from it, so a
@@ -23,8 +24,7 @@ pub const GESTURE_SWIPE_DEADZONE: i32 = 40;
 /// raw-XY units. At 150 (3x the threshold) such a sweep repeated every
 /// 30-40 ms and ran past four desktops; 600 gives about three repeats per hand
 /// width (#1652).
-// ponytail: fixed constant, make it a user setting if people want to tune it.
-pub const GESTURE_REPEAT_DISTANCE: i32 = 12 * GESTURE_SWIPE_THRESHOLD;
+pub const GESTURE_REPEAT_DISTANCE: i32 = GestureRepeatDistance::DEFAULT.into_inner();
 /// How long the pointer must rest mid-hold to end a stroke: the next swipe then
 /// starts fresh and may repeat the last direction at the normal threshold.
 pub const GESTURE_REARM_PAUSE: std::time::Duration = std::time::Duration::from_millis(250);
@@ -48,6 +48,11 @@ pub const GESTURE_HOLD_FOR_SWIPE: std::time::Duration = std::time::Duration::fro
 /// down), so an upward swipe (negative `dy`) maps to [`GestureDirection::Up`].
 #[must_use]
 pub fn detect_swipe(dx: i32, dy: i32) -> Option<GestureDirection> {
+    detect_swipe_at_distance(dx, dy, GESTURE_SWIPE_THRESHOLD)
+}
+
+/// Classify travel using the same cone for initial and repeated actions.
+fn detect_swipe_at_distance(dx: i32, dy: i32, distance: i32) -> Option<GestureDirection> {
     // Saturating throughout: a [`SwipeAccumulator`] hold that never commits (a
     // sustained diagonal) keeps summing travel, so `dx`/`dy` can reach the i32
     // bounds. `i32::MIN.abs()` would panic and a plain `dominant * 35` would
@@ -55,7 +60,7 @@ pub fn detect_swipe(dx: i32, dy: i32) -> Option<GestureDirection> {
     // hazard we must never hit. The clamp is inert in the normal range.
     let (abs_x, abs_y) = (dx.saturating_abs(), dy.saturating_abs());
     let dominant = abs_x.max(abs_y);
-    if dominant < GESTURE_SWIPE_THRESHOLD {
+    if dominant < distance {
         return None;
     }
     let cross_limit = GESTURE_SWIPE_DEADZONE.max(dominant.saturating_mul(35) / 100);
@@ -111,16 +116,27 @@ pub struct SwipeAccumulator {
     /// left...) the way Options+ does.
     last: Option<GestureDirection>,
     /// Net travel continuing `last` since it committed; fires `last` again at
-    /// [`GESTURE_REPEAT_DISTANCE`].
+    /// the configured repeat distance.
     repeat: i32,
     /// Signed sideways drift accompanying `repeat`, held to the same
     /// straightness rule as a fresh swipe so a diagonal can't repeat.
     repeat_cross: i32,
     /// When the last motion arrived, to detect the pause that ends a stroke.
     moved_at: Option<Instant>,
+    /// Repeat spacing snapshotted for the lifetime of this accumulator.
+    repeat_distance: GestureRepeatDistance,
 }
 
 impl SwipeAccumulator {
+    /// Create an accumulator whose holds use this repeat spacing.
+    #[must_use]
+    pub fn with_repeat_distance(repeat_distance: GestureRepeatDistance) -> Self {
+        Self {
+            repeat_distance,
+            ..Self::default()
+        }
+    }
+
     /// Begin a fresh hold, resetting the travel accumulator and commit state.
     pub fn begin(&mut self) {
         self.held_since = Some(Instant::now());
@@ -165,8 +181,8 @@ impl SwipeAccumulator {
         }
         self.moved_at = Some(now);
         if let Some(dir) = self.last {
-            // Net travel continuing the committed way fires it again every
-            // GESTURE_REPEAT_DISTANCE, so a continuous motion keeps stepping.
+            // Net travel continuing the committed way fires it again at the
+            // configured repeat distance, so a continuous motion keeps stepping.
             // Backtracking takes back that progress and its drift alike, so a
             // wobble never repeats and a corrected stroke isn't held to drift
             // it has undone.
@@ -184,14 +200,17 @@ impl SwipeAccumulator {
             if continues(dir, dx, dy) {
                 // The same straightness rule as a fresh swipe, seen in the
                 // committed direction's frame (`Right` = along it).
-                let straight =
-                    detect_swipe(self.repeat, self.repeat_cross) == Some(GestureDirection::Right);
-                if self.repeat >= GESTURE_REPEAT_DISTANCE && straight {
+                let straight = detect_swipe_at_distance(
+                    self.repeat,
+                    self.repeat_cross,
+                    self.repeat_distance.into_inner(),
+                ) == Some(GestureDirection::Right);
+                if self.repeat >= self.repeat_distance.into_inner() && straight {
                     // Carry the excess, so a report spanning two repeat
                     // distances fires again on the next report. The excess is
                     // the stroke's tail, so it keeps the tail's drift: this
                     // report's share first, then earlier travel's.
-                    let excess = self.repeat - GESTURE_REPEAT_DISTANCE;
+                    let excess = self.repeat - self.repeat_distance.into_inner();
                     let tail = excess.min(a);
                     let mut carried = i64::from(c) * i64::from(tail) / i64::from(a);
                     if excess > a && earlier > 0 {
@@ -377,6 +396,65 @@ mod tests {
         assert_eq!(detect_swipe(0, i32::MIN), Some(GestureDirection::Up));
         // A diagonal at the extremes is still rejected, without panicking.
         assert_eq!(detect_swipe(i32::MIN, i32::MIN), None);
+    }
+
+    #[test]
+    fn configured_repeat_distance_is_independent_of_the_initial_threshold() {
+        for distance in [1, 20, GESTURE_REPEAT_DISTANCE, 1000] {
+            let mut acc = SwipeAccumulator::with_repeat_distance(
+                GestureRepeatDistance::try_new(distance).unwrap(),
+            );
+            acc.begin();
+            acc.backdate_hold_for_test();
+            assert_eq!(acc.accumulate(GESTURE_SWIPE_THRESHOLD - 1, 0), None);
+            assert_eq!(acc.accumulate(1, 0), Some(GestureDirection::Right));
+            for _ in 0..100 {
+                assert_eq!(acc.accumulate(distance - 1, 0), None);
+                assert_eq!(acc.accumulate(1, 0), Some(GestureDirection::Right));
+            }
+            assert!(!acc.end(), "repeated gestures must not also click");
+            acc.begin();
+            acc.backdate_hold_for_test();
+            assert_eq!(
+                acc.accumulate(GESTURE_SWIPE_THRESHOLD, 0),
+                Some(GestureDirection::Right)
+            );
+            assert_eq!(
+                acc.accumulate(distance, 0),
+                Some(GestureDirection::Right),
+                "new holds retain their repeat configuration"
+            );
+        }
+    }
+
+    #[test]
+    fn short_repeats_preserve_diagonal_filtering_and_report_carry() {
+        let mut acc =
+            SwipeAccumulator::with_repeat_distance(GestureRepeatDistance::try_new(20).unwrap());
+        acc.begin();
+        acc.backdate_hold_for_test();
+        assert_eq!(
+            acc.accumulate(GESTURE_SWIPE_THRESHOLD, 0),
+            Some(GestureDirection::Right)
+        );
+        assert_eq!(
+            acc.accumulate(20, 20),
+            None,
+            "diagonal travel must not repeat"
+        );
+        assert_eq!(
+            acc.accumulate(-20, -20),
+            None,
+            "undoing the drift must not repeat"
+        );
+        assert_eq!(acc.accumulate(45, 0), Some(GestureDirection::Right));
+        assert_eq!(
+            acc.accumulate(1, 0),
+            Some(GestureDirection::Right),
+            "overshoot carries to the next report"
+        );
+        assert_eq!(acc.accumulate(13, 0), None);
+        assert_eq!(acc.accumulate(1, 0), Some(GestureDirection::Right));
     }
 
     // ── SwipeAccumulator (the shared mid-swipe state machine) ─────────────────

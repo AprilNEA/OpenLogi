@@ -962,3 +962,35 @@ fn two_mouse_hidpp_plans_are_device_scoped_while_hook_fallback_is_selected_devic
         "the passive Windows fallback is one selected-device map, not a per-source map"
     );
 }
+
+#[test]
+fn repeat_distance_reload_updates_both_capture_paths() {
+    let mut orch = orchestrator(Config::default());
+    orch.devices = vec![dev("a", 1, true)];
+    orch.rebuild();
+    let before = orch.shared.capture_plans.borrow().plans()[0].target.clone();
+    let mut config = Config::default();
+    config
+        .devices
+        .entry("a".into())
+        .or_default()
+        .gesture_repeat_distance =
+        Some(openlogi_core::config::GestureRepeatDistance::try_new(20).unwrap());
+    orch.reload_config(config);
+    let plans = orch.shared.capture_plans.borrow();
+    let after = &plans.plans()[0].target;
+    assert_ne!(
+        &before, after,
+        "changing repeat spacing must retire the old capture"
+    );
+    assert_eq!(after.spec.gesture_repeat_distance.into_inner(), 20);
+    assert_eq!(
+        orch.shared
+            .hook_maps
+            .read()
+            .unwrap()
+            .gesture_repeat_distance
+            .into_inner(),
+        20
+    );
+}

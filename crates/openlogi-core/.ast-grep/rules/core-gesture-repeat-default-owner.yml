@@ -1,0 +1,15 @@
+# Owner: config::GestureRepeatDistance::DEFAULT. Runtime consumers use the configured value.
+id: core-gesture-repeat-default-owner
+language: rust
+severity: error
+message: Derive the default from GestureRepeatDistance::DEFAULT; use the configured repeat distance at runtime.
+files:
+  - crates/**/swipe.rs
+rule:
+  any:
+    - pattern: 12 * GESTURE_SWIPE_THRESHOLD
+    - kind: integer_literal
+      regex: '^600$'
+      inside:
+        kind: const_item
+        stopBy: end

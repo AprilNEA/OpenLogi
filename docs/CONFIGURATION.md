@@ -57,7 +57,7 @@ parsing its fields. A v10 file without the section loads with Flow disabled.
 
 ## Shape
 
-`schema_version` is required and currently `11`. `selected_device` is an
+`schema_version` is required and currently `12`. `selected_device` is an
 optional physical device key.
 
 `[app_settings]` contains application-wide preferences:
@@ -153,6 +153,13 @@ remain distinguishable; moving it to another USB port may require naming it
 again.
 
 Common device fields are:
+
+- `gesture_repeat_distance`: positive raw movement units between repeated actions
+  during one held gesture. Absent uses the existing 600-unit spacing. For example,
+  `gesture_repeat_distance = 20` repeats every 20 units after the first swipe.
+  This affects both HID++ gesture buttons and OS-hook gestures. It changes neither
+  the initial swipe threshold nor the hold delay; smaller values can repeat rapidly.
+  Capture is re-armed on configuration reload and retains the setting after reconnect.
 
 - `custom_name`, `enabled`, `dpi`, `dpi_presets`, thumb-wheel sensitivity,
   scroll inversion, and scroll resolution

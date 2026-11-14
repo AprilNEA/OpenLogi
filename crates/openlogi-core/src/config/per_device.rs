@@ -10,8 +10,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
     CameraControls, CameraStreamMode, Config, DeviceIdentity, DisableKey, GKeyOwner, GamingKeyMode,
-    LightSettings, Lighting, MomentumScrolling, OnboardMemory, ScrollResolution, SmartShift,
-    ThumbwheelSensitivity,
+    GestureRepeatDistance, LightSettings, Lighting, MomentumScrolling, OnboardMemory,
+    ScrollResolution, SmartShift, ThumbwheelSensitivity,
 };
 use crate::binding::{
     Action, ActionRingConfig, ActionRingIcon, ActionRingSize, ActionRingSlot, Binding, ButtonId,
@@ -20,6 +20,15 @@ use crate::binding::{
 use crate::hid::{Dpi, PointerSpeed, ReportRate};
 
 impl Config {
+    /// Effective repeat spacing for this device, or the existing 600-unit default.
+    #[must_use]
+    pub fn gesture_repeat_distance(&self, device_key: &str) -> GestureRepeatDistance {
+        self.devices
+            .get(device_key)
+            .and_then(|device| device.gesture_repeat_distance)
+            .unwrap_or_default()
+    }
+
     /// The bindings stored for `device_key` as they were committed, or an
     /// empty map when the device has none yet. The effective per-button map,
     /// with defaults and the per-app overlay applied, is
