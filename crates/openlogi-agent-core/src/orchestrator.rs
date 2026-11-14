@@ -1359,7 +1359,7 @@ impl Orchestrator {
 
     /// Take in freshly read picture versions and repaint the keys whose
     /// picture changed on disk. A face carries its picture's version
-    /// ([`KeyPicture`](crate::watchers::key_display::KeyPicture)), so a
+    /// ([`KeyPicture`]), so a
     /// file replaced at the same path — which saves
     /// no config — is drawn again within a watcher tick. Publishes nothing
     /// when every face is unchanged.
