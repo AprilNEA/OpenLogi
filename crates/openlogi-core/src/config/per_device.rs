@@ -10,8 +10,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
     CameraControls, CameraStreamMode, Config, DeviceIdentity, DisableKey, GKeyOwner, GamingKeyMode,
-    LightSettings, Lighting, MomentumScrolling, OnboardMemory, ScrollResolution, SmartShift,
-    ThumbwheelSensitivity,
+    KeyDisplayBrightness, KeyFaceStyle, LightSettings, Lighting, MomentumScrolling, OnboardMemory,
+    ScrollResolution, SmartShift, ThumbwheelSensitivity,
 };
 use crate::binding::{
     Action, ActionRingConfig, ActionRingIcon, ActionRingSize, ActionRingSlot, Binding, ButtonId,
@@ -674,16 +674,19 @@ impl Config {
         let kept = |button: &ButtonId| button.grid_slot().is_none_or(|slot| slot.page <= last);
         device.bindings.retain(|button, _| kept(button));
         device.disabled_gestures.retain(|button, _| kept(button));
+        device.key_faces.retain(|button, _| kept(button));
+        device.live_keys.retain(|button, _| kept(button));
         for overlay in device.per_app_bindings.values_mut() {
             overlay.retain(|button, _| kept(button));
         }
     }
 
-    /// Whether any grid key on `page` of `device_key` is bound — device-wide
-    /// or in any per-app overlay — i.e. whether shrinking past `page`
-    /// ([`Self::set_keypad_pages`]) would drop a binding.
+    /// Whether shrinking past `page` of `device_key`
+    /// ([`Self::set_keypad_pages`]) would drop anything the user set there: a
+    /// grid key bound device-wide or in any per-app overlay, a styled face,
+    /// or a live key. Removing such a page asks first.
     #[must_use]
-    pub fn keypad_page_binds(&self, device_key: &str, page: KeypadPage) -> bool {
+    pub fn keypad_page_has_settings(&self, device_key: &str, page: KeypadPage) -> bool {
         let Some(device) = self.devices.get(device_key) else {
             return false;
         };
@@ -697,6 +700,83 @@ impl Config {
                 .values()
                 .flatten()
                 .any(|(button, action)| on_page(button) && *action != Action::None)
+            || device.key_faces.keys().any(on_page)
+            || device.live_keys.keys().any(on_page)
+    }
+
+    /// The keypad grid slots of `device_key` that show a live value. A
+    /// `live_keys` entry under any other button is ignored: only an LCD key
+    /// can show one.
+    pub fn live_key_slots(&self, device_key: &str) -> impl Iterator<Item = ButtonId> + '_ {
+        self.devices
+            .get(device_key)
+            .into_iter()
+            .flat_map(|device| device.live_keys.keys())
+            .copied()
+            .filter(|button| button.grid_slot().is_some())
+    }
+
+    /// Every picture file a key face of any device shows: the files whose
+    /// versions ([`PictureRevisions`](super::PictureRevisions)) are watched,
+    /// so a picture replaced on disk is drawn again.
+    #[must_use]
+    pub fn key_picture_paths(&self) -> std::collections::BTreeSet<std::path::PathBuf> {
+        self.devices
+            .values()
+            .flat_map(|device| device.key_faces.values())
+            .filter_map(|style| style.image.clone())
+            .collect()
+    }
+
+    /// How `device_key` styles the LCD key at grid `slot`, if at all.
+    #[must_use]
+    pub fn key_face_style(&self, device_key: &str, slot: ButtonId) -> Option<&KeyFaceStyle> {
+        self.devices
+            .get(device_key)
+            .and_then(|d| d.key_faces.get(&slot))
+    }
+
+    /// Store `style` for the LCD key at grid `slot`; `None`, or a style that
+    /// changes nothing, removes the entry.
+    pub fn set_key_face_style(
+        &mut self,
+        device_key: &str,
+        slot: ButtonId,
+        style: Option<KeyFaceStyle>,
+    ) {
+        let faces = &mut self
+            .devices
+            .entry(device_key.to_owned())
+            .or_default()
+            .key_faces;
+        match style.filter(|style| !style.is_default()) {
+            Some(style) => {
+                faces.insert(slot, style);
+            }
+            None => {
+                faces.remove(&slot);
+            }
+        }
+    }
+
+    /// `device_key`'s keypad LCD brightness, when the user set one.
+    #[must_use]
+    pub fn key_display_brightness(&self, device_key: &str) -> Option<KeyDisplayBrightness> {
+        self.devices
+            .get(device_key)
+            .and_then(|d| d.key_display_brightness)
+    }
+
+    /// Store `device_key`'s keypad LCD brightness; `None` stops managing it.
+    pub fn set_key_display_brightness(
+        &mut self,
+        device_key: &str,
+        brightness: Option<KeyDisplayBrightness>,
+    ) {
+        self.devices
+            .entry(device_key.to_owned())
+            .or_default()
+            .key_display_brightness = brightness;
     }
 
     /// The effective thumb-wheel sensitivity for `device_key`: the device's

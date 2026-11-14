@@ -7,8 +7,8 @@
 //! draw the keypad and report clicks and hovers back to it.
 
 use gpui::{
-    App, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement, RenderOnce,
-    SharedString, StatefulInteractiveElement as _, Styled, Window, div, hsla,
+    App, Entity, FontWeight, InteractiveElement, IntoElement, ObjectFit, ParentElement, RenderOnce,
+    SharedString, StatefulInteractiveElement as _, Styled, StyledImage as _, Window, div, img,
     prelude::FluentBuilder as _, px, rgb, svg,
 };
 use gpui_kit::component::button::{Button, ButtonGroup, ButtonVariant, ButtonVariants as _};
@@ -18,14 +18,18 @@ use gpui_kit::component::{
     Disableable as _, Icon, IconName, Selectable as _, Sizable as _, WindowExt as _, h_flex, v_flex,
 };
 use openlogi_core::binding::{Cid, GridKey, KeypadPage};
+use openlogi_core::config::{KeyFaceStyle, KeySymbol, PictureRevisions, is_local_picture_path};
+use openlogi_ui::lucide;
 
+use super::key_colors::{DEFAULT_COLOR, gradient_fill, icon_color};
 use super::key_points::{
-    KEYCAP_H, KEYCAP_PAGING_H, KEYCAP_W, KeyShape, KeyTarget, is_paging_cid, keypad_canvas,
-    photo_key_shape,
+    KEYCAP_H, KEYCAP_PAGING_H, KEYCAP_W, KeyShape, KeyTarget, KeypadRender, is_paging_cid,
+    keypad_canvas,
 };
 use super::{
     FALLBACK_KEYBOARD_SIZE, FunctionRowView, KEYBOARD_MIN_IMG_H, KEYBOARD_W, KEYS_VERTICAL_RESERVE,
-    KeySlot, binding_line, image_or_fallback, key_is_highlighted,
+    KeySlot, KeyState, KeySurfaceStyle as _, binding_line, device_highlight, device_scrim,
+    image_or_fallback,
 };
 use crate::features::mouse::geometry::asset_dimensions_for_png;
 use crate::services::assets::ResolvedAsset;
@@ -191,15 +195,12 @@ impl RenderOnce for KeypadPane {
                 .relative()
                 .w(px(canvas.0))
                 .h(px(canvas.1))
-                .children(self.slots.into_iter().map(move |slot| {
-                    let highlighted = key_is_highlighted(slot.idx, selected, hovered);
-                    KeyCap {
-                        cap: (KEYCAP_W, keycap_height(&slot.target)),
-                        slot,
-                        highlighted,
-                        canvas,
-                        view: view.clone(),
-                    }
+                .children(self.slots.into_iter().map(move |slot| KeyCap {
+                    cap: (KEYCAP_W, keycap_height(&slot.target)),
+                    state: KeyState::of(slot.idx, selected, hovered),
+                    slot,
+                    canvas,
+                    view: view.clone(),
                 }));
         // The render keeps the device's identity; the keycaps, sized to the
         // same height, form the aligned pair that replaces photo-plus-band.
@@ -224,6 +225,8 @@ impl RenderOnce for KeypadPane {
 #[derive(IntoElement)]
 pub(super) struct KeypadPhotoPane {
     slots: Vec<KeySlot>,
+    /// The measured render the keys are outlined against.
+    render: &'static KeypadRender,
     image: Option<std::path::PathBuf>,
     render_size: (f32, f32),
     selected: Option<usize>,
@@ -234,12 +237,14 @@ pub(super) struct KeypadPhotoPane {
 impl KeypadPhotoPane {
     pub(super) fn new(
         slots: Vec<KeySlot>,
+        render: &'static KeypadRender,
         image: Option<std::path::PathBuf>,
         render_size: (f32, f32),
         view: Entity<FunctionRowView>,
     ) -> Self {
         Self {
             slots,
+            render,
             image,
             render_size,
             selected: None,
@@ -266,6 +271,7 @@ impl RenderOnce for KeypadPhotoPane {
         let (img_w, img_h) = self.render_size;
         let (selected, hovered) = (self.selected, self.hovered);
         let view = self.view;
+        let render = self.render;
         let pal = theme::palette(cx);
 
         div()
@@ -275,7 +281,7 @@ impl RenderOnce for KeypadPhotoPane {
             .child(image_or_fallback(self.image, img_w, img_h, &pal))
             .children(self.slots.into_iter().map(move |slot| PhotoKey {
                 state: KeyState::of(slot.idx, selected, hovered),
-                shape: photo_key_shape(&slot.target, img_w),
+                shape: render.key_shape(&slot.target, img_w),
                 render: (img_w, img_h),
                 slot,
                 view: view.clone(),
@@ -288,26 +294,8 @@ const LCD_GLYPH_FRAC: f32 = 0.38;
 /// Gap between a key's edge and its selection ring, in px.
 const PHOTO_RING_GAP: f32 = 3.;
 const PHOTO_RING_W: f32 = 2.;
-
-/// How a key on the render is drawn right now.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum KeyState {
-    Rest,
-    Hovered,
-    Selected,
-}
-
-impl KeyState {
-    fn of(idx: usize, selected: Option<usize>, hovered: Option<usize>) -> Self {
-        if selected == Some(idx) {
-            Self::Selected
-        } else if hovered == Some(idx) {
-            Self::Hovered
-        } else {
-            Self::Rest
-        }
-    }
-}
+/// The selected key's heavier ring on the photo, in px.
+const PHOTO_SELECTED_RING_W: f32 = 3.;
 
 /// One key mapped onto the keypad render: a selection ring around the
 /// physical key and, for an LCD grid key, the face the device shows.
@@ -333,13 +321,21 @@ impl RenderOnce for PhotoKey {
         let tooltip = self.slot.summary();
         let ring = match state {
             KeyState::Selected => rgb(ACCENT_BLUE).into(),
-            KeyState::Hovered => hsla(0., 0., 1., 0.55),
-            KeyState::Rest => hsla(0., 0., 0., 0.),
+            KeyState::Hovered => device_highlight(0.55),
+            KeyState::Rest => device_scrim(0.),
         };
-        let face = matches!(self.slot.target, KeyTarget::Grid(_))
-            .then(|| lcd_face(self.slot.lcd_icon, self.slot.binding.clone(), shape, state));
+        let face = matches!(self.slot.target, KeyTarget::Grid(_)).then(|| {
+            lcd_face(
+                self.slot.lcd_icon,
+                self.slot.binding.clone(),
+                self.slot.face.as_ref(),
+                shape,
+                state,
+            )
+        });
         // The ring follows the key's own curve, one gap further out.
-        let [tl, tr, br, bl] = shape.radii.map(|r| px(r + outer));
+        let ring_radii = shape.radii.map(|r| r + outer);
+        let [tl, tr, br, bl] = ring_radii.map(px);
         let view_hover = self.view.clone();
         let view_click = self.view;
 
@@ -358,6 +354,11 @@ impl RenderOnce for PhotoKey {
             .rounded_bl(bl)
             .border(px(PHOTO_RING_W))
             .border_color(ring)
+            // The key being configured carries a heavier ring and a halo.
+            .when(state == KeyState::Selected, |key| {
+                key.border(px(PHOTO_SELECTED_RING_W))
+                    .child(super::selected_picture_halo(ring_radii, PHOTO_SELECTED_RING_W))
+            })
             .cursor_pointer()
             .children(face)
             .on_hover(move |hovered, _window, cx| {
@@ -370,20 +371,101 @@ impl RenderOnce for PhotoKey {
     }
 }
 
+/// Have the faces draw again every picture whose file changed between `old`
+/// and `new`: GPUI keeps a picture it loaded by its path alone, so a file
+/// replaced at the same path would show its old content until the app
+/// restarts. Dropping the cached entry makes the next draw load the file
+/// again. Answers whether any picture changed.
+pub(super) fn reload_replaced_pictures(
+    old: &PictureRevisions,
+    new: &PictureRevisions,
+    cx: &mut App,
+) -> bool {
+    let mut changed = false;
+    for path in old.changed(new) {
+        gpui::ImageSource::from(path.to_path_buf()).remove_asset(cx);
+        changed = true;
+    }
+    changed
+}
+
+/// A face's picture, cropped to fill the key and rounded like the key: the
+/// face clips its children only to a rectangle, so the picture carries the
+/// key's corners itself instead of squaring them off.
+fn face_picture(path: std::path::PathBuf, key: KeyShape) -> gpui::Img {
+    let [tl, tr, br, bl] = key.radii.map(px);
+    img(path)
+        .debug_selector(|| "key-face-picture".into())
+        .absolute()
+        .inset_0()
+        .size_full()
+        .object_fit(ObjectFit::Cover)
+        .rounded_tl(tl)
+        .rounded_tr(tr)
+        .rounded_br(br)
+        .rounded_bl(bl)
+}
+
 /// An LCD grid key's face as the device shows it: the key's whole top in
 /// black, carrying the bound action's glyph in white (the same icon the agent
 /// writes to the key) with the action's name beneath, or blank when the key
 /// does nothing — a blank key offers a faint plus while it is hovered or
-/// selected.
+/// selected. A styled face recolours the key, lays its picture under the
+/// glyph, drops the glyph when it is turned off, and shows its label in
+/// place of the action's name.
 fn lcd_face(
     icon: Option<&'static str>,
     binding: SharedString,
+    style: Option<&KeyFaceStyle>,
     key: KeyShape,
     state: KeyState,
 ) -> gpui::Div {
     let glyph = key.w * LCD_GLYPH_FRAC;
     let [tl, tr, br, bl] = key.radii.map(px);
+    // A gradient replaces the flat background.
+    let background: gpui::Background = match style {
+        Some(KeyFaceStyle {
+            gradient: Some(gradient),
+            ..
+        }) => gradient_fill(*gradient),
+        _ => style
+            .and_then(|style| style.background)
+            .map_or_else(|| device_scrim(1.), |color| rgb(color.packed()).into())
+            .into(),
+    };
+    let foreground: gpui::Hsla = style
+        .and_then(|style| style.color)
+        .map_or_else(|| device_highlight(1.), |color| rgb(color.packed()).into());
+    // The icon or Lucide symbol has its own colour, else the text's.
+    let icon_foreground: gpui::Hsla = rgb(style.map_or(DEFAULT_COLOR, icon_color).packed()).into();
+    // A chosen symbol takes the action icon's place, whatever `icon` says.
+    let glyph_face = match style.and_then(|style| style.symbol.as_ref()) {
+        Some(KeySymbol::Lucide(name)) => Some(FaceGlyph::Svg(lucide::asset_path(name).into())),
+        Some(KeySymbol::Emoji(text)) => Some(FaceGlyph::Emoji(text.clone().into())),
+        None => icon
+            .filter(|_| style.is_none_or(|style| style.icon))
+            .map(|icon| FaceGlyph::Svg(icon.into())),
+    };
+    let label = style
+        .and_then(KeyFaceStyle::trimmed_label)
+        .map(|label| SharedString::from(label.to_owned()));
+    // Decided from the path alone: a render never touches the file. A file
+    // that is missing or unreadable just loads to nothing, in the background.
+    let picture = style
+        .and_then(|style| style.image.clone())
+        .filter(|path| is_local_picture_path(path));
+    let caption = |text: SharedString, alpha: f32| {
+        div()
+            .max_w(px(key.w - 16.))
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_ellipsis()
+            .text_caption()
+            .text_color(foreground.opacity(alpha))
+            .child(text)
+    };
     let face = v_flex()
+        .relative()
         .size_full()
         .items_center()
         .justify_center()
@@ -392,35 +474,50 @@ fn lcd_face(
         .rounded_tr(tr)
         .rounded_br(br)
         .rounded_bl(bl)
-        .bg(hsla(0., 0., 0., 1.))
-        .overflow_hidden();
-    match icon {
-        Some(icon) => face
-            .child(
-                svg()
-                    .path(icon)
-                    .size(px(glyph))
-                    .flex_none()
-                    .text_color(hsla(0., 0., 1., 1.)),
-            )
-            .child(
-                div()
-                    .max_w(px(key.w - 16.))
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .text_caption()
-                    .text_color(hsla(0., 0., 1., 0.72))
-                    .child(binding),
-            ),
-        None => face.when(state != KeyState::Rest, |face| {
-            face.child(
-                Icon::new(IconName::Plus)
-                    .size(px(glyph * 0.6))
-                    .text_color(hsla(0., 0., 1., 0.45)),
-            )
-        }),
-    }
+        .bg(background)
+        .overflow_hidden()
+        .when_some(picture, |face, path| face.child(face_picture(path, key)));
+    let empty = glyph_face.is_none() && label.is_none();
+    let drawn = glyph_face.is_some();
+    face.when_some(glyph_face, |face, glyph_face| {
+        face.child(match glyph_face {
+            FaceGlyph::Svg(path) => svg()
+                .path(path)
+                .size(px(glyph))
+                .flex_none()
+                .text_color(icon_foreground)
+                .into_any_element(),
+            // An emoji keeps its own colours.
+            FaceGlyph::Emoji(text) => div()
+                .text_size(px(glyph * 0.85))
+                .line_height(px(glyph))
+                .child(text)
+                .into_any_element(),
+        })
+    })
+    .map(|face| match label {
+        Some(label) => face.children(
+            label
+                .split('\n')
+                .map(|line| caption(SharedString::from(line.to_owned()), 1.)),
+        ),
+        None if drawn => face.child(caption(binding, 0.72)),
+        None => face,
+    })
+    .when(empty && state != KeyState::Rest, |face| {
+        face.child(
+            Icon::new(IconName::Plus)
+                .size(px(glyph * 0.6))
+                .text_color(foreground.opacity(0.45)),
+        )
+    })
+}
+
+/// What an LCD face draws above its label: an SVG (the action's icon or a
+/// Lucide symbol, tinted with the face's colour) or an emoji.
+enum FaceGlyph {
+    Svg(SharedString),
+    Emoji(SharedString),
 }
 
 /// The overlay render size: the portrait keypad render as tall as the
@@ -445,7 +542,7 @@ pub(super) fn keypad_photo_render_size(
 #[derive(IntoElement)]
 struct KeyCap {
     slot: KeySlot,
-    highlighted: bool,
+    state: KeyState,
     canvas: (f32, f32),
     cap: (f32, f32),
     view: Entity<FunctionRowView>,
@@ -458,7 +555,8 @@ impl RenderOnce for KeyCap {
         let pal = theme::palette(cx);
         let idx = self.slot.idx;
         let glyph = keycap_glyph(&self.slot.target);
-        let highlighted = self.highlighted;
+        let state = self.state;
+        let highlighted = state.is_highlighted();
         let tooltip = self.slot.label.clone();
         let legend = self.slot.label;
         let binding = self.slot.binding;
@@ -482,17 +580,7 @@ impl RenderOnce for KeyCap {
             .justify_center()
             .gap(px(1.))
             .rounded_md()
-            .border_1()
-            .border_color(if highlighted {
-                rgb(ACCENT_BLUE).into()
-            } else {
-                pal.border
-            })
-            .bg(if highlighted {
-                theme::accent_tint()
-            } else {
-                pal.control
-            })
+            .key_state_surface(state, &pal)
             .cursor_pointer()
             .pressable_fill(highlighted, pal)
             .child(
@@ -576,5 +664,147 @@ fn paging_glyph(cid: Cid) -> Option<&'static str> {
         cid if cid == Cid::new(0x01a1) => Some("‹"),
         cid if cid == Cid::new(0x01a2) => Some("›"),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use gpui::{Context, IntoElement, Render, Window, div};
+
+    use super::*;
+
+    /// One LCD face, drawn on its own.
+    struct Face(KeyFaceStyle);
+
+    impl Render for Face {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let shape = KeyShape {
+                w: 96.,
+                h: 96.,
+                radii: [8.; 4],
+            };
+            div().size_full().child(lcd_face(
+                None,
+                "Key".into(),
+                Some(&self.0),
+                shape,
+                KeyState::Rest,
+            ))
+        }
+    }
+
+    /// Drawing a face decides from the path alone whether its picture is
+    /// shown: no file check runs on the render thread — a missing file just
+    /// loads to nothing in the background — so a picture on a stalled share
+    /// cannot freeze the window.
+    #[gpui::test]
+    fn key_picture_checks_do_not_block_render(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        let missing = PathBuf::from("/nonexistent/openlogi/key.png");
+        let style = KeyFaceStyle {
+            image: Some(missing),
+            ..KeyFaceStyle::default()
+        };
+        let (_view, cx) = cx.add_window_view(|_, _| Face(style));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        assert!(
+            cx.debug_bounds("key-face-picture").is_some(),
+            "the picture is placed without checking the file"
+        );
+    }
+
+    /// A picture takes its key's corners: the face clips its children only
+    /// to a rectangle, so a picture without them squares off the rounded key.
+    #[test]
+    fn a_picture_is_rounded_like_its_key() {
+        use gpui::Styled as _;
+        let key = KeyShape {
+            w: 96.,
+            h: 96.,
+            radii: [20., 8., 6., 4.],
+        };
+        let mut picture = face_picture(PathBuf::from("key.png"), key);
+        let corners = &picture.style().corner_radii;
+        assert_eq!(
+            [
+                corners.top_left,
+                corners.top_right,
+                corners.bottom_right,
+                corners.bottom_left
+            ],
+            key.radii.map(|radius| Some(px(radius).into())),
+        );
+    }
+
+    /// A picture replaced on disk at the same path is loaded again: its new
+    /// version drops what GPUI kept for the path, so the next draw reads the
+    /// new file. An unchanged picture keeps its loaded image.
+    #[gpui::test]
+    fn a_picture_replaced_on_disk_is_loaded_again(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("key.png");
+        std::fs::write(&path, b"first").expect("picture written");
+        let style = KeyFaceStyle {
+            image: Some(path.clone()),
+            ..KeyFaceStyle::default()
+        };
+        let (_view, cx) = cx.add_window_view(|_, _| Face(style));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.run_until_parked();
+        let source = gpui::ImageSource::from(path.clone());
+        assert!(cx.update(|_, cx| source.is_asset_cached(cx)), "drawn once");
+
+        let first = PictureRevisions::read([path.clone()]);
+        assert!(!cx.update(|_, cx| reload_replaced_pictures(&first, &first, cx)));
+        assert!(
+            cx.update(|_, cx| source.is_asset_cached(cx)),
+            "an unchanged picture stays loaded"
+        );
+
+        std::fs::write(&path, b"replaced, and longer").expect("picture replaced");
+        let second = PictureRevisions::read([path.clone()]);
+        assert!(cx.update(|_, cx| reload_replaced_pictures(&first, &second, cx)));
+        assert!(
+            !cx.update(|_, cx| source.is_asset_cached(cx)),
+            "the replaced picture is loaded again on the next draw"
+        );
+    }
+
+    /// A picture drawn before the first poll read its version, then replaced
+    /// before that poll, is loaded again: the first version the poll reads is
+    /// not known to be the one drawn.
+    #[gpui::test]
+    fn picture_replaced_before_first_poll_reloads_preview(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("key.png");
+        std::fs::write(&path, b"first").expect("picture written");
+        let style = KeyFaceStyle {
+            image: Some(path.clone()),
+            ..KeyFaceStyle::default()
+        };
+        let (_view, cx) = cx.add_window_view(|_, _| Face(style));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.run_until_parked();
+        let source = gpui::ImageSource::from(path.clone());
+        assert!(cx.update(|_, cx| source.is_asset_cached(cx)), "drawn once");
+
+        std::fs::write(&path, b"replaced before the first poll").expect("picture replaced");
+        let first_poll = PictureRevisions::read([path.clone()]);
+        assert!(cx.update(|_, cx| {
+            reload_replaced_pictures(&PictureRevisions::default(), &first_poll, cx)
+        }));
+        assert!(
+            !cx.update(|_, cx| source.is_asset_cached(cx)),
+            "the picture drawn before the first poll is loaded again"
+        );
+        assert!(
+            !cx.update(|_, cx| reload_replaced_pictures(&first_poll, &first_poll, cx)),
+            "a picture the poll already knows is not reloaded again"
+        );
     }
 }

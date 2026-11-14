@@ -13,12 +13,14 @@ use gpui_kit::component::{
 };
 use openlogi_core::binding::{Action, ApplicationTarget, Category, GestureDirection};
 
+pub(crate) use self::shortcut_mode::{ShortcutError, ShortcutMode};
 pub(crate) use self::shortcut_recorder::{Recording, RecordsShortcut, ShortcutRecorder};
 use crate::ui::action::localized_action_label;
 use crate::ui::components::{MenuRow, control_input};
 use crate::ui::section::section_label;
 use crate::ui::theme::{ACCENT_BLUE, Palette, Typography as _};
 
+mod shortcut_mode;
 mod shortcut_recorder;
 
 /// Height cap shared by compact inspector and editor lists.
@@ -87,7 +89,9 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
         Action::NextTab | Action::NextKeypadPage => "action-icons/chevron-right.svg",
         Action::PrevTab | Action::PreviousKeypadPage => "action-icons/chevron-left.svg",
         Action::ReloadPage => "action-icons/rotate-cw.svg",
-        Action::MissionControl | Action::ShowActionsRing => "action-icons/layout-grid.svg",
+        Action::MissionControl | Action::ShowActionsRing | Action::ActivateLiveKey(_) => {
+            "action-icons/layout-grid.svg"
+        }
         Action::AppExpose | Action::GShift => "action-icons/layers.svg",
         Action::PreviousDesktop => "action-icons/square-arrow-left.svg",
         Action::NextDesktop => "action-icons/square-arrow-right.svg",
@@ -258,16 +262,22 @@ pub(crate) fn divider(pal: Palette) -> impl IntoElement {
 /// [`ScrollableElement::overflow_y_scrollbar`] keeps that element as the
 /// scrolled content, so a `max_h` on it would clamp the content to the
 /// viewport and leave nothing to scroll.
+///
+/// The wrapper may also shrink below the cap (`min_h_0`): in a panel whose
+/// height is bounded, the rows above it take their room first and the list
+/// scrolls in what is left instead of running past the panel's edge.
 pub(crate) fn editor_scroll_list(
     id: &'static str,
     rows: impl IntoIterator<Item = impl IntoElement>,
 ) -> impl IntoElement {
-    v_flex().max_h(px(EDITOR_LIST_MAX_H)).child(div()
+    v_flex().min_h_0().max_h(px(EDITOR_LIST_MAX_H)).child(
+        div()
             .overflow_y_scrollbar()
             // Every list shares this call site, which is the default
             // scroll-state key; the caller's id keeps each list's position.
             .id(id)
-            .children(rows))
+            .children(rows),
+    )
 }
 
 /// A single-field "Open Application or Folder" editor, matching the Action

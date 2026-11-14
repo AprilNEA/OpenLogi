@@ -42,6 +42,7 @@
 
 use std::time::{Duration, Instant};
 
+use openlogi_core::config::KeyDisplayBrightness;
 use openlogi_core::hid::{
     BacklightState, DeviceRoute, DisableKeysState, Dpi, EasySwitchHosts, FnLockState,
     ForceSensingInfo, LightCommand, PointerSpeed, ReportRateInfo, SidetoneLevel, WriteError,
@@ -73,11 +74,11 @@ pub use request::PollEventMonitor;
 pub use request::{
     CancelFlowPairing, CancelPairing, Command, ConfirmFlowPairing, LoadConfig, PairDevice,
     PairFlowPeer, ReadBacklight, ReadDisableKeys, ReadDpi, ReadEasySwitchHosts, ReadFnLock,
-    ReadForceSensing, ReadOnboard, ReadPointerSpeed, ReadReportRate, ReadSidetone, ReadSmartShift,
-    ReloadConfig, RenameEasySwitchHost, RequestAccessibilityPrompt, RetryConnection, SetBacklight,
-    SetDisableKeys, SetDpi, SetFnLock, SetForceSensing, SetLight, SetLightManualPower, SetLighting,
-    SetPointerSpeed, SetReportRate, SetSidetone, SetSmartShift, StartFlowPairing, StartPairing,
-    StopFlowPairing, UnpairDevice,
+    ReadForceSensing, ReadKeyBrightness, ReadOnboard, ReadPointerSpeed, ReadReportRate,
+    ReadSidetone, ReadSmartShift, ReloadConfig, RenameEasySwitchHost, RequestAccessibilityPrompt,
+    RetryConnection, SetBacklight, SetDisableKeys, SetDpi, SetFnLock, SetForceSensing,
+    SetKeyBrightness, SetLight, SetLightManualPower, SetLighting, SetPointerSpeed, SetReportRate,
+    SetSidetone, SetSmartShift, StartFlowPairing, StartPairing, StopFlowPairing, UnpairDevice,
 };
 
 /// Complete identity of one Disable Keys write/reload transaction.
@@ -209,6 +210,20 @@ pub enum GuiUpdate {
         /// The read-back, or why the write did not land. A write the agent
         /// superseded before its turn answers with a plain read.
         result: Result<ForceSensingInfo, WriteError>,
+    },
+    /// What a keypad reports after a display-key brightness write the GUI
+    /// asked for: the brightness it reads back, or the typed refusal.
+    /// Answers [`SetKeyBrightness`].
+    KeyBrightnessWritten {
+        /// The keypad that was written.
+        key: DeviceKey,
+        /// Which write this answers: [`SetKeyBrightness::write`].
+        write: u64,
+        /// The brightness that was written: [`SetKeyBrightness::brightness`].
+        brightness: KeyDisplayBrightness,
+        /// The read-back, or why the write did not land. A write the agent
+        /// superseded before its turn answers with a plain read.
+        result: Result<KeyDisplayBrightness, WriteError>,
     },
     /// What a keyboard reports after a backlight change the GUI asked for:
     /// the backlight it reads back, or the typed refusal. Answers

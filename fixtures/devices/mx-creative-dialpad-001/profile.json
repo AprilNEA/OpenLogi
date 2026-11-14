@@ -1,0 +1,153 @@
+{
+  "schema_version": 1,
+  "id": "mx-creative-dialpad-001-profile",
+  "name": "MX Creative Dialpad",
+  "inventories": [
+    {
+      "receiver": {
+        "name": "MX Creative Dialpad",
+        "vendor_id": 1133,
+        "product_id": 48128,
+        "unique_id": null
+      },
+      "paired": [
+        {
+          "slot": 255,
+          "codename": "MX Creative Dialpad",
+          "wpid": null,
+          "kind": "dialpad",
+          "online": true,
+          "battery": {
+            "percentage": 100,
+            "level": "full",
+            "status": "discharging"
+          },
+          "model_info": {
+            "entity_count": 4,
+            "serial_number": "OL-SER-00001",
+            "unit_id": [
+              79,
+              76,
+              68,
+              1
+            ],
+            "transports": {
+              "usb": false,
+              "equad": false,
+              "btle": true,
+              "bluetooth": false
+            },
+            "model_ids": [
+              48128,
+              0,
+              0
+            ],
+            "extended_model_id": 0
+          },
+          "capabilities": {
+            "buttons": true,
+            "pointer": false,
+            "lighting": false,
+            "scroll_inversion": false,
+            "hires_wheel": false,
+            "thumbwheel": false,
+            "haptic_feedback": false,
+            "haptic_panel": false,
+            "dpi_gestures": false,
+            "fn_lock": false,
+            "os_layout": false,
+            "report_rate": false,
+            "backlight": false,
+            "easy_switch": true,
+            "virtual_thumbwheel": false,
+            "pointer_scaling": false,
+            "force_sensing": false,
+            "disable_keys": false,
+            "onboard_profiles": false,
+            "button_spy": false
+          },
+          "settings_revision": 0,
+          "hidpp10": false
+        }
+      ]
+    }
+  ],
+  "standalone": [],
+  "settings": [
+    {
+      "route": {
+        "Direct": {
+          "vendor_id": 1133,
+          "product_id": 48128
+        }
+      },
+      "dpi": {
+        "support": "unsupported"
+      },
+      "smartshift": {
+        "support": "unsupported"
+      },
+      "wheel": {
+        "support": "unsupported"
+      },
+      "backlight": {
+        "support": "unsupported"
+      },
+      "fn_lock": {
+        "support": "unsupported"
+      },
+      "report_rate": {
+        "support": "unsupported"
+      },
+      "easy_switch": {
+        "support": "supported",
+        "value": {
+          "current": 0,
+          "slots": [
+            {
+              "index": 0,
+              "paired": true,
+              "connection": "Bluetooth",
+              "name": "Computer 1",
+              "name_max_len": 24,
+              "os": {
+                "kind": "Windows",
+                "major": 11,
+                "minor": 0,
+                "patch": 26200
+              }
+            },
+            {
+              "index": 1,
+              "paired": false,
+              "connection": "Unknown",
+              "name": null,
+              "name_max_len": 24,
+              "os": null
+            },
+            {
+              "index": 2,
+              "paired": false,
+              "connection": "Unknown",
+              "name": null,
+              "name_max_len": 24,
+              "os": null
+            }
+          ],
+          "can_rename": true
+        }
+      },
+      "pointer_speed": {
+        "support": "unsupported"
+      },
+      "force_sensing": {
+        "support": "unsupported"
+      },
+      "disable_keys": {
+        "support": "unsupported"
+      },
+      "lighting": "unsupported",
+      "light": "unsupported"
+    }
+  ]
+}

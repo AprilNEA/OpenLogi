@@ -18,10 +18,14 @@ openlogi-core = { path = "../openlogi-core" }
 # agent can read the embedded action icons (to draw keypad LCD keys) without
 # linking a UI toolkit; both GPUI frontends take the default.
 gpui = { workspace = true, optional = true }
+# The Lucide catalog for keypad key symbols (see `lucide`). Optional: the agent
+# and the settings app draw those symbols, the overlay never does.
+rust-embed = { version = "8.7.2", optional = true, features = ["include-exclude"] }
 
 [features]
 default = ["gpui"]
 gpui = ["dep:gpui"]
+lucide = ["dep:rust-embed"]
 
 [lints]
 workspace = true

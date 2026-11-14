@@ -362,9 +362,15 @@ pub enum HidppOperation {
     /// Read the `0x8300` sidetone level. Appended after `ChangeHost` —
     /// variant order is wire format.
     ReadSidetone,
-    /// Write the `0x8300` sidetone level. Appended last — variant order is
-    /// wire format.
+    /// Write the `0x8300` sidetone level. Appended after `ReadSidetone` —
+    /// variant order is wire format.
     WriteSidetone,
+    /// Write a keypad's LCD brightness over HID++ `0x8040`. Appended last —
+    /// variant order is wire format.
+    WriteKeyBrightness,
+    /// Read a keypad's LCD brightness over HID++ `0x8040`. Appended after
+    /// `WriteKeyBrightness` — variant order is wire format.
+    ReadKeyBrightness,
 }
 
 /// HID++ feature error kind in a serializable wire-safe form.

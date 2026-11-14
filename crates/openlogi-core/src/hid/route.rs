@@ -20,6 +20,8 @@
 use std::fmt;
 
 pub use openlogi_device_registry::LOGITECH_VENDOR_ID;
+use openlogi_device_registry::dialpad::find_dialpad;
+pub use openlogi_device_registry::dialpad::{DialpadDescriptor, DialpadKey, DialpadKeyPosition};
 pub use openlogi_device_registry::keypad::KeypadDescriptor;
 use openlogi_device_registry::keypad::find_keypad;
 pub use openlogi_device_registry::receiver::{
@@ -181,6 +183,24 @@ impl DeviceRoute {
             return None;
         };
         find_keypad(*vendor_id, *product_id)
+    }
+
+    /// The known dialpad this route reaches, or `None` for any other device.
+    ///
+    /// The dialpads the registry lists connect over Bluetooth, so only a
+    /// direct route carries their identity. Everything that needs "is this
+    /// that dialpad" — which roller is the dial, where its keys sit — asks
+    /// here rather than matching a route against the registry itself.
+    #[must_use]
+    pub fn dialpad(&self) -> Option<&'static DialpadDescriptor> {
+        let Self::Direct {
+            vendor_id,
+            product_id,
+        } = self
+        else {
+            return None;
+        };
+        find_dialpad(*vendor_id, *product_id)
     }
 
     /// Build the route that reaches a paired device from a receiver inventory.

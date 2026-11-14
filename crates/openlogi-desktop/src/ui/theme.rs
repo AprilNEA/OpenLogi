@@ -515,6 +515,14 @@ pub fn accent_tint_hover() -> Hsla {
     hsla(0.6, 0.9, 0.6, 0.18)
 }
 
+/// The resting fill of the one item being configured among selectable
+/// ones — a key on the Keys tab while the pointer previews others with
+/// [`accent_tint`]: the depth of [`accent_tint_hover`], held without hover.
+#[must_use]
+pub fn accent_tint_configured() -> Hsla {
+    accent_tint_hover()
+}
+
 /// [`accent_tint_hover`] deepened again while a selected row is held down.
 fn accent_tint_active() -> Hsla {
     hsla(0.6, 0.9, 0.6, 0.24)

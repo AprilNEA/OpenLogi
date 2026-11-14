@@ -326,7 +326,8 @@ pub(super) fn run_shell_command(cmd: &str) {
     super::run_to_end(shell_command(cmd), "shell command");
 }
 
-fn shell_command(cmd: &str) -> std::process::Command {
+/// The process that runs `cmd` through the platform shell.
+pub(super) fn shell_command(cmd: &str) -> std::process::Command {
     let mut command = std::process::Command::new("cmd");
     // `args` would escape each `"` as `\"`, which `cmd.exe` does not understand:
     // a quoted command silently does nothing and still exits 0. `cmd.exe` strips

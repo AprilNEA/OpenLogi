@@ -18,8 +18,8 @@ use super::features::{ProbedFeatures, ProbedProtocol};
 use super::ledger;
 use super::probe::{
     NodeProbe, PassContext, ProbeVerdict, assemble_bolt_probe, assemble_unifying_device,
-    parse_codename, preferred_direct_codename, probe_one, probe_unifying_slot,
-    retry_arrival_trigger, unifying_probe_budget,
+    direct_inventory_name, parse_codename, preferred_direct_codename, probe_one,
+    probe_unifying_slot, retry_arrival_trigger, unifying_probe_budget,
 };
 use super::{
     ChannelCache, Enumerator, ONESHOT_ATTEMPTS, OneShotScan, ProbeTimeouts, ScanPass,

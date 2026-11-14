@@ -46,7 +46,7 @@ fn first_key(spec: &KeyDisplaySpec) -> Paint<'_> {
     Paint {
         spec,
         key: *key,
-        face: *face,
+        face: face.clone(),
     }
 }
 
@@ -166,12 +166,12 @@ fn panels_are_tracked_independently() {
 fn identical_faces_render_once() {
     let mut tiles = Tiles::default();
     let face = KeyFace::Icon(ActionRingIcon::Copy);
-    let first = tiles.get(face, 118).unwrap();
-    let second = tiles.get(face, 118).unwrap();
+    let first = tiles.get(&face, 118).unwrap();
+    let second = tiles.get(&face, 118).unwrap();
     assert!(Arc::ptr_eq(&first, &second));
     assert!(!Arc::ptr_eq(
         &first,
-        &tiles.get(KeyFace::Blank, 118).unwrap()
+        &tiles.get(&KeyFace::Blank, 118).unwrap()
     ));
 }
 
@@ -314,4 +314,28 @@ fn a_key_whose_write_failed_is_repainted_even_when_its_old_face_returns() {
 
     assert!(painted.plan(&copy, now + RETRY_DELAY).is_empty());
     assert_eq!(painted.next_retry(), None);
+}
+/// Every new value of a live key is a new face; the tile cache stays bounded
+/// however many it has seen.
+#[test]
+fn the_tile_cache_stays_bounded_as_live_values_change() {
+    use super::render::StyledFace;
+    use openlogi_core::color::Rgb;
+    let mut tiles = Tiles::default();
+    for value in 0..(MAX_TILES + 40) {
+        let face = KeyFace::Styled(Arc::new(StyledFace {
+            icon: None,
+            label: Some(value.to_string()),
+            background: Rgb::new(0, 0, 0),
+            foreground: Rgb::WHITE,
+            icon_color: Rgb::WHITE,
+            gradient: None,
+            image: None,
+            symbol: None,
+            progress: None,
+            highlight: false,
+        }));
+        tiles.get(&face, 32).expect("a label renders");
+        assert!(tiles.rendered.len() <= MAX_TILES);
+    }
 }

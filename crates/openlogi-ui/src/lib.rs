@@ -9,7 +9,12 @@
 //! The agent links it too, with the default `gpui` feature off: it draws the
 //! same action icons onto a keypad's LCD keys, so it reads the embedded glyph
 //! bytes ([`action_icons::embedded_icon`]) without the GPUI asset source.
+//! With the `lucide` feature it also embeds the Lucide catalog a user picks a
+//! key's symbol from; the agent and the settings app enable it, the overlay
+//! does not.
 
 pub mod action_icons;
 #[cfg(feature = "gpui")]
 pub mod color;
+#[cfg(feature = "lucide")]
+pub mod lucide;

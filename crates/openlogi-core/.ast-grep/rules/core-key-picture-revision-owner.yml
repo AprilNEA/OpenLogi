@@ -1,0 +1,26 @@
+# Owner: openlogi_core::config::{PictureRevisions, Config::key_picture_paths}
+# — which files the key faces show, and which version of each was last read.
+id: core-key-picture-revision-owner
+language: rust
+severity: error
+message: PictureRevisions (openlogi-core config/key_face.rs) and Config::key_picture_paths (config/per_device.rs) decide which key pictures are watched and when one changed on disk; use them instead of collecting key-face pictures or versioning their files here.
+note: |
+  Only the agent versioned the pictures on keys, so a file replaced on disk
+  was redrawn on the keypad while the settings app kept showing the old
+  picture until it restarted. The agent and the app now read the same
+  versions of the same files. See "Single source of truth" in AGENTS.md.
+files:
+  - crates/**/*.rs
+  - xtask/**/*.rs
+ignores:
+  - crates/openlogi-core/src/config/key_face.rs
+  - crates/openlogi-core/src/config/per_device.rs
+rule:
+  any:
+    # A second file version for key pictures.
+    - kind: struct_item
+      has:
+        field: name
+        regex: '^(FileRevision|PictureRevisions)$'
+    # Gathering every face's picture by hand.
+    - pattern: $DEVICE.key_faces.values()

@@ -145,6 +145,15 @@ Per-application profiles switch with the focused app. An `[apps]` alias lets one
     </tr>
 </table>
 
+### MX Creative Console
+
+- **Keypad:** bind the nine LCD keys on up to 15 pages, and style each key's face — label, colours or a gradient, a Lucide icon or emoji, a picture
+- Live keys that show a refreshed value (clock, volume, a device's battery, or a command's output) and take over the paging keys to adjust it
+- The LCD keys' brightness
+- **Dialpad:** bind its keys, and each direction of the dial and the roller, or let them scroll
+
+See [MX Creative Console](docs/CONFIGURATION.md#mx-creative-console) in the configuration guide.
+
 ### Webcams
 
 - Any Logitech UVC webcam (Brio, StreamCam, the C920 series, …), plug and play
@@ -162,6 +171,7 @@ Feature coverage depends on what each device reports; the app shows only the con
 | --- | --- | --- | --- |
 | Mouse button remapping and gestures | ✓ | ✓ | ✓ |
 | Keyboard F-key remapping | ✓ | ✓ | — |
+| MX Creative Console (keypad LCD keys, dialpad dial and roller) | ✓ | ✓ (no live volume value) | ✓ |
 | Per-application profiles | ✓ | ✓ | X11, wlroots (sway, Hyprland), GNOME with the [companion extension](crates/openlogi-hook/gnome-shell-extension/README.md) |
 | Mouse profile follows the window under the pointer | ✓ | ✓ | X11 only |
 | Media keys | Native | Native | D-Bus MPRIS |

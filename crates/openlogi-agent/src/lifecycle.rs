@@ -356,11 +356,24 @@ impl Armed {
                     }
                     ActionRequest::ActionsRingTriggerReleased => running.release_action_ring(),
                     ActionRequest::TurnKeypadPage { device_key, turn } => {
-                        running
+                        let adjust = running
                             .orchestrator
                             .lock()
                             .await
                             .turn_keypad_page(device_key.as_deref(), turn);
+                        if let Some(action) = adjust {
+                            running.inputs.dispatcher.dispatch(&action, device_key.as_deref());
+                        }
+                    }
+                    ActionRequest::ActivateLiveKey { device_key, slot } => {
+                        let action = running.orchestrator.lock().await.press_live_key(
+                            device_key.as_deref(),
+                            slot,
+                            std::time::Instant::now(),
+                        );
+                        if let Some(action) = action {
+                            running.inputs.dispatcher.dispatch(&action, device_key.as_deref());
+                        }
                     }
                     ActionRequest::SwitchHost { device_key, slot } => {
                         running

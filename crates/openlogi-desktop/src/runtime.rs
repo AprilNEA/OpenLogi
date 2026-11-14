@@ -387,6 +387,18 @@ impl Runtime {
                     });
                 });
             }
+            ipc::GuiUpdate::KeyBrightnessWritten {
+                key,
+                write,
+                brightness,
+                result,
+            } => {
+                cx.update(|cx| {
+                    AppState::apply(cx, |state| {
+                        state.apply_key_brightness_written(&key, write, brightness, result)
+                    });
+                });
+            }
             ipc::GuiUpdate::BacklightWritten {
                 key,
                 route,

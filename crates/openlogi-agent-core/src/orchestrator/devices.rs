@@ -5,7 +5,7 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
-use openlogi_core::config::{Config, DeviceConfig, ScrollResolution};
+use openlogi_core::config::{Config, DeviceConfig, KeyDisplayBrightness, ScrollResolution};
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_core::device_order::{DeviceIdentity, DeviceStableId};
 use openlogi_hid::session::gesture::MainWheelDivert;
@@ -140,6 +140,40 @@ pub(super) fn changed_force_sensing(
             let force = configured_force_sensing(config, dev)?;
             (Some(force) != configured_force_sensing(previous, dev))
                 .then(|| Some((dev.route.clone()?, force)))
+                .flatten()
+        })
+        .collect()
+}
+
+/// The saved display-key brightness to push to `dev`: only when the user
+/// saved one and the probe measured `0x8040` on it. Being a keypad model is
+/// not enough — a device that never reported the feature is never written.
+pub(super) fn configured_key_brightness(
+    config: &Config,
+    dev: &AgentDevice,
+) -> Option<KeyDisplayBrightness> {
+    dev.capabilities
+        .is_some_and(|caps| caps.key_brightness)
+        .then(|| config.key_display_brightness(&dev.config_key))
+        .flatten()
+}
+
+/// The brightness writes a config reload owes: each online, enabled device
+/// whose saved brightness differs from `previous`'s, with the level to
+/// write. A removed level writes nothing — the panel keeps the level it
+/// shows — as [`changed_force_sensing`] does for a removed force.
+pub(super) fn changed_key_brightness(
+    previous: &Config,
+    config: &Config,
+    devices: &[AgentDevice],
+) -> Vec<(DeviceRoute, KeyDisplayBrightness)> {
+    devices
+        .iter()
+        .filter(|dev| dev.online && config.device_enabled(&dev.config_key))
+        .filter_map(|dev| {
+            let level = configured_key_brightness(config, dev)?;
+            (Some(level) != configured_key_brightness(previous, dev))
+                .then(|| Some((dev.route.clone()?, level)))
                 .flatten()
         })
         .collect()

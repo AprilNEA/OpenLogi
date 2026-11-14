@@ -32,7 +32,8 @@ impl Save {
                 device,
                 set: Some(_),
             }
-            | ApiCommand::OsLayout { device, .. } => device,
+            | ApiCommand::OsLayout { device, .. }
+            | ApiCommand::KeyBrightness { device, .. } => device,
             ApiCommand::Smartshift(args)
                 if args.mode.is_some() || args.auto_disengage.is_some() =>
             {
@@ -98,6 +99,15 @@ impl Save {
 
     pub(super) fn fn_lock(&mut self, value: bool) -> Result<(), ApiError> {
         self.0.set(DeviceSetting::FnLock(value)).map_err(refused)
+    }
+
+    pub(super) fn key_display_brightness(
+        &mut self,
+        brightness: openlogi_core::config::KeyDisplayBrightness,
+    ) -> Result<(), ApiError> {
+        self.0
+            .set(DeviceSetting::KeyDisplayBrightness(brightness))
+            .map_err(refused)
     }
 
     pub(super) fn keep_os_layout(&mut self, keep: bool) -> Result<(), ApiError> {

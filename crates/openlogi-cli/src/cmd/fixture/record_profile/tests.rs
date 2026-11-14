@@ -459,6 +459,23 @@ impl Agent for TestAgent {
         unreachable!("profile capture must not drive the Actions Ring")
     }
 
+    async fn read_key_brightness(
+        self,
+        _: TarpcContext,
+        _route: DeviceRoute,
+    ) -> Result<openlogi_core::config::KeyDisplayBrightness, WriteError> {
+        unreachable!("profile capture does not read display-key brightness")
+    }
+
+    async fn set_key_brightness(
+        self,
+        _: TarpcContext,
+        _route: DeviceRoute,
+        _brightness: openlogi_core::config::KeyDisplayBrightness,
+    ) -> Result<openlogi_core::config::KeyDisplayBrightness, WriteError> {
+        unreachable!("profile capture is read-only")
+    }
+
     async fn reload_saved_config(
         self,
         _: TarpcContext,

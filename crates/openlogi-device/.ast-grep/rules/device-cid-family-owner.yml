@@ -13,6 +13,10 @@ files:
   - crates/**/*.rs
 ignores:
   - crates/openlogi-device/src/reprog_controls.rs
+  # The MX Creative Dialpad's top keys report 0x0053 and 0x0056 as plain keys,
+  # not as Back/Forward; the registry records them as the hardware facts they
+  # are and cannot depend on openlogi-device.
+  - crates/openlogi-device-registry/src/dialpad.rs
   - crates/openlogi-hidpp/**
   - "**/tests.rs"
   - "**/tests/**"

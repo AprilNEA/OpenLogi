@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use futures_lite::Stream;
 use hidpp::{
+    channel::{MessageListenerGuard, RawReportListenerGuard},
     device::Device,
     feature::{
         CreatableFeature, EmittingFeature,
@@ -34,11 +35,13 @@ use liveness::{CaptureLiveness, ChannelActivity, LivenessDecision, PingOutcome};
 use redivert::ReportingChanges;
 
 use super::capture_restore::{
-    ArmedReporting, CaptureChannelSlot, CaptureError, CaptureSessionOutcome, CaptureSessionStop,
-    CaptureStop, PendingCaptureRestore, drop_listener_after, restore_after_stop,
-    stop_for_current_publication, stop_for_dead_channel, wait_for_channel_change,
+    ArmedReporting, CaptureChannelSlot, CaptureError, CaptureSessionFailure, CaptureSessionOutcome,
+    CaptureSessionStop, CaptureStop, PendingCaptureRestore, drop_listener_after,
+    restore_after_stop, stop_for_current_publication, stop_for_dead_channel,
+    wait_for_channel_change,
 };
 use super::gesture::CapturedInput;
+use super::restore::rollback_start;
 use crate::reprog_controls::{CidReportingChangeEcho, ReprogControlsV4};
 use crate::{ChannelRegistry, DeviceIoGate, DeviceRoute, SharedChannel};
 
@@ -212,16 +215,116 @@ pub(super) trait ArmedCapture {
 /// allowing the supervisor to retry without leaving capture unable to rearm.
 pub(super) async fn run_capture<A: ArmedCapture>(
     shared: SharedChannel,
+    armed: A,
+    host: CaptureHost<'_>,
+) -> CaptureSessionOutcome {
+    let listeners = CaptureListeners::install(&armed, &shared, &host.sink);
+    run_listening(shared, armed, listeners, host).await
+}
+
+/// The report listeners of one capture, installed on its channel.
+///
+/// A session whose arming writes can make the device report — a diverted
+/// control pressed, a diverted roller turned, before the diversion's reply
+/// arrives — installs these before its first such write
+/// ([`Self::install`]) and hands them to [`run_listening`]: a report that
+/// arrives while arming continues then reaches the sink instead of a channel
+/// with nobody listening. Dropped only after the capture's firmware state is
+/// restored ([`drop_listener_after`]).
+pub(super) struct CaptureListeners {
+    /// What the message listener records, on a [`Liveness::Watched`] session.
+    activity: Option<Arc<ChannelActivity>>,
+    message: MessageListenerGuard,
+    raw: RawReportListenerGuard,
+}
+
+impl CaptureListeners {
+    /// Listen on `shared`'s channel for `armed`'s reports, sending what they
+    /// decode to `sink`.
+    pub(super) fn install<A: ArmedCapture>(
+        armed: &A,
+        shared: &SharedChannel,
+        sink: &mpsc::UnboundedSender<CapturedInput>,
+    ) -> Self {
+        let chan = shared.channel();
+        let device_index = shared.device_index();
+        let activity = match A::LIVENESS {
+            Liveness::Watched => Some(Arc::new(ChannelActivity::default())),
+            Liveness::Unwatched => None,
+        };
+        let message = chan.add_msg_listener_guarded({
+            let activity = activity.clone();
+            let on_report = armed.report_handler(device_index, sink.clone());
+            move |raw, matched| {
+                // Every parsed inbound HID++ report proves this channel's
+                // read path is alive, including responses matched to another
+                // request.
+                if let Some(activity) = &activity {
+                    activity.record();
+                }
+                if matched {
+                    return;
+                }
+                on_report(&v20::Message::from(raw));
+            }
+        });
+        // The message listener only ever sees reports that parsed as HID++
+        // (and replies, which it filters). Vendor PDUs sharing the node are
+        // invisible to it, so a session that captures a vendor protocol
+        // registers a raw listener too; the default handler ignores what it
+        // is given.
+        let raw = chan
+            .add_raw_report_listener_guarded(armed.raw_report_handler(device_index, sink.clone()));
+        Self {
+            activity,
+            message,
+            raw,
+        }
+    }
+}
+
+/// Arm `armed` with its listeners already installed: install them, then
+/// apply the owner's first request ([`ArmedCapture::retarget`]), the change
+/// from no control captured to the wanted set. Every report the device sends
+/// while that runs reaches `sink`.
+///
+/// A failure hands back whatever arming may have written, listening until
+/// it has, as [`run_capture`]'s teardown does; an incomplete hand-back rides
+/// the returned failure for the manager to retry.
+pub(super) async fn arm_listening<A: ArmedCapture>(
     mut armed: A,
+    shared: &SharedChannel,
+    sink: &mpsc::UnboundedSender<CapturedInput>,
+    registry: &ChannelRegistry,
+) -> Result<(A, CaptureListeners), CaptureSessionFailure> {
+    let listeners = CaptureListeners::install(&armed, shared, sink);
+    if let Err(error) = armed.retarget().await {
+        let pending = armed.into_pending(shared);
+        return Err(drop_listener_after(listeners, rollback_start(error, pending, registry)).await);
+    }
+    Ok((armed, listeners))
+}
+
+/// [`run_capture`] for a capture whose listeners were installed before it
+/// armed (see [`CaptureListeners`]).
+pub(super) async fn run_listening<A: ArmedCapture>(
+    shared: SharedChannel,
+    mut armed: A,
+    listeners: CaptureListeners,
     host: CaptureHost<'_>,
 ) -> CaptureSessionOutcome {
     let CaptureHost {
-        sink,
+        sink: _,
         mut shutdown,
         channel_slot,
         registry,
         device_io,
     } = host;
+    let CaptureListeners {
+        activity,
+        message: listener,
+        raw: raw_listener,
+    } = listeners;
     let chan = Arc::clone(shared.channel());
     let device_index = shared.device_index();
 
@@ -232,32 +335,7 @@ pub(super) async fn run_capture<A: ArmedCapture>(
         *slot = Some(shared.clone());
     }
 
-    let activity = match A::LIVENESS {
-        Liveness::Watched => Some(Arc::new(ChannelActivity::default())),
-        Liveness::Unwatched => None,
-    };
-    let listener = chan.add_msg_listener_guarded({
-        let activity = activity.clone();
-        let on_report = armed.report_handler(device_index, sink.clone());
-        move |raw, matched| {
-            // Every parsed inbound HID++ report proves this channel's read
-            // path is alive, including responses matched to another request.
-            if let Some(activity) = &activity {
-                activity.record();
-            }
-            if matched {
-                return;
-            }
-            on_report(&v20::Message::from(raw));
-        }
-    });
     let changes = ReportingChanges::new(armed.take_reporting_changes());
-    // The message listener only ever sees reports that parsed as HID++ (and
-    // replies, which it filters). Vendor PDUs sharing the node are invisible
-    // to it, so a session that captures a vendor protocol registers a raw
-    // listener too; the default handler ignores what it is given.
-    let raw_listener =
-        chan.add_raw_report_listener_guarded(armed.raw_report_handler(device_index, sink.clone()));
 
     // Wireless devices drop their diverted-control state when they
     // power-cycle (idle sleep, power switch, Easy-Switch host change) — the

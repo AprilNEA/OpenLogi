@@ -30,7 +30,7 @@ fn run_by_openlogi(mode: GamingKeyMode) -> GamingKeys {
 
 fn targets(gaming: Option<GamingKeys>) -> Vec<KeyTarget> {
     let asset = g913_asset("g913", "G913");
-    key_surface(Some(&asset), None, gaming)
+    key_surface(Some(&asset), None, None, gaming)
         .slots()
         .into_iter()
         .map(|slot| slot.target)
@@ -88,7 +88,7 @@ fn only_the_g913_render_is_measured() {
     for (depot, name) in [("g915", "G915"), ("g915_lightspeed", "G915")] {
         let g915 = g913_asset(depot, name);
         assert!(
-            key_surface(Some(&g915), None, gaming)
+            key_surface(Some(&g915), None, None, gaming)
                 .slots()
                 .iter()
                 .any(|slot| matches!(slot.target, KeyTarget::GKey(_))),
@@ -98,7 +98,7 @@ fn only_the_g913_render_is_measured() {
     // The G915 X places its keys from its own depot.
     let g915_x = g913_asset("g915_x_ls", "G915 X LS");
     assert!(
-        !key_surface(Some(&g915_x), None, gaming)
+        !key_surface(Some(&g915_x), None, None, gaming)
             .slots()
             .iter()
             .any(|slot| matches!(slot.target, KeyTarget::GKey(_)))
@@ -110,6 +110,7 @@ fn g_key_cards_sit_beside_the_board_and_the_top_rows_above_it() {
     let asset = g913_asset("g913", "G913");
     let slots = key_surface(
         Some(&asset),
+        None,
         None,
         Some(run_by_openlogi(GamingKeyMode::NineButtons)),
     )
@@ -147,7 +148,7 @@ fn the_m_key_row_takes_a_lane_of_its_own_above_the_f_keys() {
 
 fn m_key_row_takes_a_lane_of_its_own(mode: GamingKeyMode) {
     let asset = g913_asset("g913", "G913");
-    let slots = key_surface(Some(&asset), None, Some(run_by_openlogi(mode))).slots();
+    let slots = key_surface(Some(&asset), None, None, Some(run_by_openlogi(mode))).slots();
     let markers: Vec<(f32, f32)> = slots
         .iter()
         .map(|slot| (slot.point.x_frac, slot.point.y_frac))
@@ -195,6 +196,7 @@ fn the_edited_profile_moves_the_g_keys_and_m_keys_switch_it() {
     let asset = g913_asset("g913", "G913");
     let layouts = key_surface(
         Some(&asset),
+        None,
         None,
         Some(run_by_openlogi(GamingKeyMode::Profiles)),
     )
@@ -244,6 +246,7 @@ fn nine_button_mode_edits_the_m1_g_keys_whatever_profile_was_last_edited() {
     let layouts = key_surface(
         Some(&asset),
         None,
+        None,
         Some(run_by_openlogi(GamingKeyMode::NineButtons)),
     )
     .slots();
@@ -273,7 +276,7 @@ fn the_profile_picker_wins_over_a_selected_m_key_card(cx: &mut gpui::TestAppCont
 
     let asset = g913_asset("g913", "G913");
     let gaming = Some(run_by_openlogi(GamingKeyMode::Profiles));
-    let layouts = || key_surface(Some(&asset), None, gaming).slots();
+    let layouts = || key_surface(Some(&asset), None, None, gaming).slots();
     let m2_card = layouts()
         .iter()
         .position(|slot| slot.target == KeyTarget::ModeKey(ModeKey::M2))
@@ -336,7 +339,7 @@ fn a_named_profile_labels_its_m_key_card_and_a_blank_name_clears_it() {
     let _ = state.commit_g_key_owner(openlogi_core::config::GKeyOwner::OpenLogi);
     let gaming = state.current_gaming_keys();
     let card = |state: &AppState| {
-        let layouts = key_surface(Some(&g913_asset("g915", "G915")), None, gaming).slots();
+        let layouts = key_surface(Some(&g913_asset("g915", "G915")), None, None, gaming).slots();
         key_slots_from_layouts(
             layouts,
             Some(state),
@@ -373,7 +376,7 @@ fn a_mode_change_drops_the_selection_and_its_draft(cx: &mut gpui::TestAppContext
     let asset = g913_asset("g913", "G913");
     let profiles = Some(run_by_openlogi(GamingKeyMode::Profiles));
     let nine = Some(run_by_openlogi(GamingKeyMode::NineButtons));
-    let g1 = key_surface(Some(&asset), None, profiles)
+    let g1 = key_surface(Some(&asset), None, None, profiles)
         .slots()
         .iter()
         .position(|slot| matches!(slot.target, KeyTarget::GKey(_)))
@@ -392,14 +395,18 @@ fn a_mode_change_drops_the_selection_and_its_draft(cx: &mut gpui::TestAppContext
         let view = cx.new(FunctionRowView::new);
         view.update(cx, |view, cx| {
             view.edited_slots(
-                key_surface(Some(&asset), None, profiles).slots(),
+                key_surface(Some(&asset), None, None, profiles).slots(),
                 None,
                 profiles,
             );
             view.select_key(Some(g1), cx);
             view.open_editor(PowerUserKind::TypeText, cx);
 
-            view.edited_slots(key_surface(Some(&asset), None, nine).slots(), None, nine);
+            view.edited_slots(
+                key_surface(Some(&asset), None, None, nine).slots(),
+                None,
+                nine,
+            );
             assert_eq!(view.selected_key, None, "the index no longer names G1");
             assert_eq!(view.active_editor, None, "the draft can't save to MR");
         });
