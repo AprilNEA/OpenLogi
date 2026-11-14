@@ -129,13 +129,15 @@ fn timeout_never_resends() {
 }
 
 #[test]
-fn preparation_race_or_pointer_move_prevents_injection() {
-    let mut backend = Fake::new([state(7), state(91)]);
+fn preparation_race_follows_the_newest_space_instead_of_abandoning() {
+    // A previous switch was still settling: its Space change must re-target this
+    // gesture, not cancel it.
+    let mut backend = Fake::new([state(7), state(91), state(7)]);
     assert_eq!(
         run(&mut backend, Direction::Next, PostGate::for_test()),
-        Err(Failure::ContextChanged)
+        Ok(Outcome::Reached(7))
     );
-    assert!(backend.posts.is_empty());
+    assert_eq!(backend.posts, [Direction::Next]);
     let mut backend = Fake::new([state(7), state(7)]);
     backend.post_result = Err(Failure::ContextChanged);
     assert_eq!(

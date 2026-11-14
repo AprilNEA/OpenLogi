@@ -89,6 +89,7 @@ use keycode::hid_usage_to_macos;
 pub(super) use keycode::pressed_usage;
 use menu_shortcut::{MenuPress, MenuShortcut};
 use scroll::dispatch_scroll;
+pub use scroll::zoom_gesture_engaged;
 pub(super) use scroll::{post_phased_scroll, post_scroll, post_smooth_scroll};
 pub(super) use spaces::{natural_scrolling, set_desktop_switch};
 use spaces::{next_desktop, previous_desktop};
