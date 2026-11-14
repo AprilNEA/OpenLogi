@@ -54,13 +54,13 @@ v10 adds the per-device `disabled_keys` policy. Older readers reject a v10
 header before parsing its fields. A v9 file without the policy still loads.
 v11 adds the `[flow]` section. Older readers reject a v11 header before
 parsing its fields. A v10 file without the section loads with Flow disabled.
-v12 adds the MX Creative Keypad's per-device `key_display_brightness`,
-`key_faces` and `live_keys`. Older readers reject a v12 header before parsing
-its fields. A v11 file without them loads unchanged.
+The MX Creative Keypad's per-device `key_display_brightness`, `key_faces` and
+`live_keys` are optional v11 fields: each is omitted while unset, so a file
+that never sets one stays readable by every v11 build.
 
 ## Shape
 
-`schema_version` is required and currently `12`. `selected_device` is an
+`schema_version` is required and currently `11`. `selected_device` is an
 optional physical device key.
 
 `[app_settings]` contains application-wide preferences:

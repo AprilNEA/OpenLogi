@@ -75,14 +75,14 @@ use crate::binding::{Binding, ButtonId, GestureDirection};
 /// persisted shape or enum vocabulary changes; readers inspect this value
 /// before consuming the rest of the file.
 ///
-/// v12 adds the MX Creative Keypad's per-device LCD settings:
-/// [`DeviceConfig::key_display_brightness`] and the styled faces of its LCD
-/// keys, [`DeviceConfig::key_faces`], and the keys that show a live value,
-/// [`DeviceConfig::live_keys`]. Nothing older needs migrating, and a file
-/// without them leaves the panel as the device holds it and draws each key's
-/// action icon. The bump
-/// makes a v11 build refuse a file that may hold them at the version check,
-/// instead of failing on the unknown field.
+/// The MX Creative Keypad's per-device LCD settings —
+/// [`DeviceConfig::key_display_brightness`], the styled faces of its LCD keys
+/// ([`DeviceConfig::key_faces`]) and the keys that show a live value
+/// ([`DeviceConfig::live_keys`]) — are optional and did not require a version
+/// bump: each is omitted while unset, and a file without them leaves the panel
+/// as the device holds it and draws each key's action icon. A file that never
+/// sets one stays readable by every v11 build; an older build that meets one
+/// fails on the unknown field rather than dropping it.
 ///
 /// v11 adds the `[flow]` section for cross-machine device handoff. Nothing
 /// older needs migrating, and a file without it loads as disabled Flow. The
@@ -147,7 +147,7 @@ use crate::binding::{Binding, ButtonId, GestureDirection};
 /// next save; [`Config::load_from_path`] accepts supported versions `1` through
 /// [`SCHEMA_VERSION`] so an invalid or forward file fails loudly instead of
 /// silently losing bindings.
-pub const SCHEMA_VERSION: u32 = 12;
+pub const SCHEMA_VERSION: u32 = 11;
 
 /// Top-level config document.
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -67,6 +67,52 @@ fn v9_without_disabled_keys_loads_and_a_save_stamps_the_current_schema() {
     assert_eq!(reloaded.disabled_keys("keyboard"), Some(&disabled_keys));
 }
 
+/// The keypad's LCD settings are optional additions: a file that never sets
+/// one must stay readable by the last released build, so saving it keeps the
+/// v11 header, and a v11 file that does set them still loads them. The header
+/// is spelled out rather than read from `SCHEMA_VERSION`, so a bump has to
+/// change this test on purpose.
+#[test]
+fn unused_console_settings_preserve_schema_compatibility() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    fs::write(
+        &path,
+        "schema_version = 11\n[devices.\"unit:01020304\".bindings]\ngridTopLeft = \"Copy\"\n",
+    )
+    .expect("write v11 keypad config");
+    let (config, mut file) = ConfigFile::load_from_path(&path).expect("load v11 keypad config");
+    file.save(&config).expect("save keypad config");
+    let saved = fs::read_to_string(&path).expect("read saved config");
+    assert!(
+        saved.starts_with("schema_version = 11\n"),
+        "an unused console setting raised the schema: {saved}"
+    );
+    for field in ["key_display_brightness", "key_faces", "live_keys"] {
+        assert!(!saved.contains(field), "unset `{field}` was saved: {saved}");
+    }
+
+    fs::write(
+        &path,
+        "schema_version = 11\n\
+         [devices.\"unit:01020304\"]\n\
+         key_display_brightness = 60\n\
+         [devices.\"unit:01020304\".key_faces.gridTopLeft]\n\
+         label = \"Build\"\n",
+    )
+    .expect("write v11 config with console settings");
+    let config = Config::load_from_path(&path).expect("a v11 file holds console settings");
+    assert_eq!(
+        config.key_display_brightness("unit:01020304"),
+        Some(crate::config::KeyDisplayBrightness::try_new(60).expect("valid brightness"))
+    );
+    let faces = &config.devices["unit:01020304"].key_faces;
+    assert_eq!(
+        faces.values().next().and_then(|face| face.label.as_deref()),
+        Some("Build")
+    );
+}
+
 #[test]
 fn schema_version_zero_is_rejected() {
     let temp = tempfile::tempdir().expect("tempdir");
