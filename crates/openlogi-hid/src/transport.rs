@@ -249,6 +249,9 @@ use windows::normalize_collection_path;
 /// - `0xFF43 / 0x0602` — wired G-series gaming keyboards (e.g. the G513): a
 ///   distinct vendor collection on the same `0xFF43` page. Carries both report
 ///   widths, so it is not long-only.
+/// - `0xFF43 / 0x0302` — wired G PRO 2 LIGHTSPEED mouse (USB `046d:c09a`). It
+///   exposes a short (`0x0301`, report `0x10`) and a long (`0x0302`, report
+///   `0x11`) collection; only the long one is listed so it enumerates once.
 ///
 /// `long_only` marks a transport that exposes *only* the long report — no
 /// short-report (`0x10`) collection — so short HID++ requests must be
@@ -262,10 +265,11 @@ use windows::normalize_collection_path;
 /// Filtering on these pairs gives us one HID node per physical HID++ device on
 /// every supported OS, without reading report descriptors (`async-hid 0.4`
 /// only exposes those on Linux).
-const HIDPP_LONG_COLLECTIONS: [(u16, u16, bool); 4] = [
+const HIDPP_LONG_COLLECTIONS: [(u16, u16, bool); 5] = [
     (0xff00, 0x0002, false),
     (0xff43, 0x0202, true),
     (0xff43, 0x0602, false),
+    (0xff43, 0x0302, false),
     // Wired MX Creative Keypad. Only this vendor pair is listed so the device
     // enumerates as one HID++ node. On macOS its five collections share one
     // registry entry and accept standard short/long framing on any handle
