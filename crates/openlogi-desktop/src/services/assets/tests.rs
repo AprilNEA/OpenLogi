@@ -94,6 +94,94 @@ fn codename_bridges_btle_3s_on_legacy_index() {
     assert_eq!(hit.map(|(depot, _)| depot), Some("mx_master_3s"));
 }
 
+fn catalog_entry(model_id: &str, display_name: &str, kind: &str) -> DeviceEntry {
+    DeviceEntry {
+        model_id: model_id.to_string(),
+        model_ids: Vec::new(),
+        display_name: display_name.to_string(),
+        kind: kind.to_string(),
+        asset_path: String::new(),
+        files: Vec::new(),
+    }
+}
+
+fn catalog_index<const N: usize>(entries: [(&str, DeviceEntry); N]) -> Index {
+    Index {
+        schema_version: 1,
+        devices: entries
+            .into_iter()
+            .map(|(depot, entry)| (depot.to_string(), entry))
+            .collect(),
+    }
+}
+
+/// Both G203 depots as the live catalog lists them: the LIGHTSYNC under
+/// `aafd`, the older Prodigy under `c084` with the G102's name.
+fn g203_index() -> Index {
+    catalog_index([
+        (
+            "g203_lightsync",
+            catalog_entry("aafd", "G203 Lightsync", "MOUSE"),
+        ),
+        ("g203", catalog_entry("c084", "G102", "MOUSE")),
+    ])
+}
+
+/// A wired G203 LIGHTSYNC as its live inventory reports it:
+/// `model_ids=[c092,0000,0000] ext=00 transports=usb`.
+fn g203_lightsync_model() -> DeviceModelInfo {
+    DeviceModelInfo {
+        transports: DeviceTransports {
+            usb: true,
+            ..Default::default()
+        },
+        model_ids: [0xc092, 0, 0],
+        ..bare_model()
+    }
+}
+
+#[test]
+fn g203_lightsync_resolves_by_its_firmware_model_words() {
+    // No depot lists `c092`, and the firmware name carries "Gaming Mouse",
+    // which the catalog's `G203 Lightsync` does not.
+    let index = g203_index();
+    let model = g203_lightsync_model();
+    assert!(resolve_in_index(&index, &model, None).is_none());
+    let hit = resolve_in_index(&index, &model, Some("G203 LIGHTSYNC Gaming Mouse"));
+    assert_eq!(hit.map(|(depot, _)| depot), Some("g203_lightsync"));
+}
+
+#[test]
+fn firmware_model_words_must_spell_the_whole_display_name() {
+    let index = g203_index();
+    let model = g203_lightsync_model();
+    for codename in [
+        "G203 Gaming Mouse",
+        "G102 LIGHTSYNC Gaming Mouse",
+        "G203 LIGHTSYNC 2 Gaming Mouse",
+        "Gaming Mouse",
+    ] {
+        assert!(
+            resolve_in_index(&index, &model, Some(codename)).is_none(),
+            "{codename} must not match a depot"
+        );
+    }
+}
+
+#[test]
+fn a_display_name_several_depots_share_matches_none_by_model_words() {
+    let index = catalog_index([
+        ("pro_mouse", catalog_entry("c085", "PRO", "MOUSE")),
+        ("pro_keyboard", catalog_entry("aadc", "PRO", "KEYBOARD")),
+        (
+            "pro_gaming_headset",
+            catalog_entry("0aa7", "PRO", "HEADSET"),
+        ),
+    ]);
+    let hit = resolve_in_index(&index, &bare_model(), Some("PRO Gaming Keyboard"));
+    assert!(hit.is_none(), "an ambiguous name must not pick a depot");
+}
+
 fn bare_model() -> DeviceModelInfo {
     DeviceModelInfo {
         entity_count: 0,

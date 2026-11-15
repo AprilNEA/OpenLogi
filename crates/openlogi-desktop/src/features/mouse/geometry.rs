@@ -487,7 +487,7 @@ fn map_slot_name(name: &str) -> Option<MouseControlId> {
 mod tests {
     use std::path::PathBuf;
 
-    use openlogi_assets::{Assignment, Direction, ImageEntry, Metadata, Origin, Point};
+    use openlogi_assets::{Assignment, ImageEntry, Metadata, Origin, Point};
     use openlogi_core::device::DeviceKind;
 
     use super::*;
@@ -567,6 +567,49 @@ mod tests {
         assert!(asset_has_button_labels(&asset, layout));
         assert!(!asset_has_button_labels(&asset, None));
         assert!(asset_hotspots_for_png(&asset, None, w, h).is_empty());
+    }
+
+    /// The G203 LIGHTSYNC depot (G HUB) marks G1–G6 in pixels and gives each
+    /// assignment a fractional pixel `label`. Under the standard layout its
+    /// render marks the buttons the fallback silhouette offered.
+    #[test]
+    fn g203_lightsync_render_marks_the_standard_buttons() {
+        let metadata: Metadata = serde_json::from_str(
+            r#"{"images":[
+              {"key":"device_image","origin":{"width":1440,"height":2791},"assignments":[
+                {"slotId":"g102g203_g1_m1","marker":{"x":374,"y":816.5},"label":{"x":-1400,"y":816.5}},
+                {"slotId":"g102g203_g2_m1","marker":{"x":1099.9,"y":816.5},"label":{"x":2840,"y":816.5}},
+                {"slotId":"g102g203_g3_m1","marker":{"x":723.6,"y":809.5},"label":{"x":723.6,"y":-200}},
+                {"slotId":"g102g203_g4_m1","marker":{"x":58.3,"y":1696.5},"label":{"x":-1400,"y":1696.5}},
+                {"slotId":"g102g203_g5_m1","marker":{"x":63.3,"y":1307.5},"label":{"x":-1400,"y":1307.5}},
+                {"slotId":"g102g203_g6_m1","marker":{"x":720,"y":1251.2},"label":{"x":2840,"y":1251.2}}]}]}"#,
+        )
+        .expect("G203 LIGHTSYNC metadata parses");
+        let asset = ResolvedAsset {
+            depot: "g203_lightsync".into(),
+            display_name: "G203 Lightsync".into(),
+            image_path: "front_black.png".into(),
+            metadata,
+            png_width: 1440,
+            png_height: 2791,
+            side_view: None,
+            ..g502_asset()
+        };
+        let layout = Some(openlogi_core::binding::GamingButtons::Standard.layout());
+        let (w, h) = asset_dimensions_for_png(&asset, 540., 1000.);
+        let hotspots = asset_hotspots_for_png(&asset, layout, w, h);
+        for button in [ButtonId::MiddleClick, ButtonId::Back, ButtonId::Forward] {
+            assert!(
+                hotspots.iter().any(|h| h.id == button.into()),
+                "{button:?} is marked"
+            );
+        }
+        assert_eq!(
+            hotspots.len(),
+            3,
+            "the primary clicks and the DPI button stay unmarked"
+        );
+        assert!(asset_has_button_labels(&asset, layout));
     }
 
     #[test]
@@ -905,7 +948,6 @@ mod tests {
                 slot_id: String::new(),
                 slot_name: (*slot_name).to_string(),
                 marker: Point { x: *x, y: *y },
-                label: Direction { x: 0, y: 0 },
             })
             .collect();
         ResolvedAsset {
