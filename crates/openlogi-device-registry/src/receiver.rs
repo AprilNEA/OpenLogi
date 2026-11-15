@@ -108,6 +108,12 @@ pub const RECEIVERS: &[ReceiverDescriptor] = &[
         ReceiverBrand::Lightspeed,
         ReceiverProtocol::Unifying,
     ),
+    // Lightspeed receiver, verified with a G PRO 2 LIGHTSPEED (WPID 0x40a8).
+    ReceiverDescriptor::logitech(
+        0xc543,
+        ReceiverBrand::Lightspeed,
+        ReceiverProtocol::Unifying,
+    ),
     ReceiverDescriptor::logitech(0xc548, ReceiverBrand::Bolt, ReceiverProtocol::Bolt),
     // Lightspeed receiver, verified with a PRO X SUPERLIGHT 2 DEX (WPID 0x40b8).
     ReceiverDescriptor::logitech(
@@ -171,6 +177,14 @@ mod tests {
     #[test]
     fn superlight_dex_receiver_is_lightspeed_over_unifying_protocol() {
         let receiver = find_receiver(LOGITECH_VENDOR_ID, 0xc54d).expect("c54d receiver");
+
+        assert_eq!(receiver.brand, ReceiverBrand::Lightspeed);
+        assert_eq!(receiver.protocol, ReceiverProtocol::Unifying);
+    }
+
+    #[test]
+    fn g_pro_2_receiver_is_lightspeed_over_unifying_protocol() {
+        let receiver = find_receiver(LOGITECH_VENDOR_ID, 0xc543).expect("c543 receiver");
 
         assert_eq!(receiver.brand, ReceiverBrand::Lightspeed);
         assert_eq!(receiver.protocol, ReceiverProtocol::Unifying);
