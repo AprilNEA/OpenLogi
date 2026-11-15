@@ -28,6 +28,18 @@ const MODIFIER_KEYS: [(CGEventFlags, HeldKey); 4] = [
 /// `kVK_LeftArrow`…`kVK_UpArrow`.
 const ARROW_KEYS: std::ops::RangeInclusive<u16> = 0x7b..=0x7e;
 
+/// The macOS Space shortcuts ⌃←/⌃→ need arrow flags the virtual HID keyboard
+/// cannot encode. Other arrow chords retain their usual virtual-HID path.
+pub(super) fn needs_arrow_flags(virtual_key: u16, flags: CGEventFlags) -> bool {
+    matches!(virtual_key, 0x7b | 0x7c)
+        && flags.contains(CGEventFlags::CGEventFlagControl)
+        && !flags.intersects(
+            CGEventFlags::CGEventFlagCommand
+                | CGEventFlags::CGEventFlagShift
+                | CGEventFlags::CGEventFlagAlternate,
+        )
+}
+
 /// Save a picture of the screen to the screenshot folder.
 pub(super) fn screenshot() {
     post_symbolic_hotkey(SCREENSHOT_TO_FILE);
@@ -77,9 +89,8 @@ impl SpaceShortcut {
     /// restored before the lock is released, and every event is built before
     /// the first is posted.
     ///
-    /// Each edge goes through the virtual HID keyboard when it carries the
-    /// edge, as a held chord's edges do, so the shortcut reaches WindowServer
-    /// as keyboard input. An edge it does not carry goes out as its `CGEvent`.
+    /// ⌃←/⌃→ use CGEvents so their Fn and numeric-pad flags reach
+    /// WindowServer. Other shortcuts use the virtual HID keyboard when available.
     ///
     /// Returns `false`, posting nothing, when a held chord keeps the
     /// shortcut's own key down: its key-up would end that hold early.
@@ -93,8 +104,11 @@ impl SpaceShortcut {
                 tracing::warn!("could not build the Space shortcut's key events");
                 return false;
             };
+            let needs_flags = needs_arrow_flags(self.virtual_key, self.flags);
             for edge in edges {
-                if !super::virtual_keyboard::edge(edge.virtual_key, edge.phase) {
+                // A virtual keyboard report cannot carry the arrow's Fn and
+                // numeric-pad flags that WindowServer matches for ⌃←/⌃→.
+                if needs_flags || !super::virtual_keyboard::edge(edge.virtual_key, edge.phase) {
                     edge.event.post(CGEventTapLocation::HID);
                 }
             }
@@ -340,7 +354,9 @@ mod tests {
 
     use core_graphics::event::{CGEventFlags, CGEventType, EventField};
 
-    use super::{HeldKey, HeldModifiers, HotkeyRestore, KeyEdge, KeyPhase, keystroke};
+    use super::{
+        HeldKey, HeldModifiers, HotkeyRestore, KeyEdge, KeyPhase, keystroke, needs_arrow_flags,
+    };
 
     const NONE: CGEventFlags = CGEventFlags::CGEventFlagNull;
     const COMMAND: CGEventFlags = CGEventFlags::CGEventFlagCommand;
@@ -349,6 +365,21 @@ mod tests {
     const OPTION: CGEventFlags = CGEventFlags::CGEventFlagAlternate;
     const FN: CGEventFlags = CGEventFlags::CGEventFlagSecondaryFn;
     const PAD: CGEventFlags = CGEventFlags::CGEventFlagNumericPad;
+
+    #[test]
+    fn only_control_left_and_right_require_the_cg_event_path() {
+        for arrow in [0x7b, 0x7c] {
+            assert!(needs_arrow_flags(arrow, CONTROL));
+            assert!(needs_arrow_flags(arrow, CONTROL | FN));
+            assert!(!needs_arrow_flags(arrow, NONE));
+            assert!(!needs_arrow_flags(arrow, COMMAND | CONTROL));
+            assert!(!needs_arrow_flags(arrow, CONTROL | SHIFT));
+            assert!(!needs_arrow_flags(arrow, CONTROL | OPTION));
+        }
+        assert!(!needs_arrow_flags(0x7d, CONTROL));
+        assert!(!needs_arrow_flags(0x7e, CONTROL));
+        assert!(!needs_arrow_flags(0x14, CONTROL));
+    }
 
     /// How an event reads back: a modifier key's edges become
     /// `FlagsChanged`, as a physical keyboard's do, so only the flags tell
@@ -399,6 +430,7 @@ mod tests {
     /// is how Apple keyboards report arrow keys.
     #[test]
     fn space_shortcut_presses_control_as_a_key_and_flags_the_arrow_like_a_keyboard() {
+        assert!(needs_arrow_flags(0x7c, CONTROL | FN));
         let events =
             keystroke(0x7c, CONTROL | FN, HeldModifiers::default()).expect("keyboard events");
         assert_eq!(
@@ -416,6 +448,7 @@ mod tests {
     /// as the Spaces record expects, or the Space does not move (#2178).
     #[test]
     fn a_custom_arrow_shortcut_flags_the_arrow_like_a_keyboard() {
+        assert!(needs_arrow_flags(0x7b, CONTROL));
         let events = keystroke(0x7b, CONTROL, HeldModifiers::default()).expect("keyboard events");
         assert_eq!(
             edges(&events),
@@ -432,6 +465,7 @@ mod tests {
     /// its modifiers are released in the reverse of their press order.
     #[test]
     fn keystroke_nests_several_modifiers_and_flags_only_arrows_as_numeric_pad() {
+        assert!(!needs_arrow_flags(0x14, COMMAND | SHIFT));
         let events =
             keystroke(0x14, COMMAND | SHIFT, HeldModifiers::default()).expect("keyboard events");
         assert_eq!(
