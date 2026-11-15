@@ -160,9 +160,7 @@ fn copy_diagnostics_action(
 /// The config-file location row with a reveal-in-file-manager button.
 fn about_config(cx: &App) -> gpui::Div {
     let pal = crate::ui::theme::palette(cx);
-    let path = openlogi_core::paths::config_path()
-        .map(|p| p.display().to_string())
-        .unwrap_or_default();
+    let path = openlogi_core::paths::config_path().map_or_default(|p| p.display().to_string());
 
     h_flex()
         .w_full()
