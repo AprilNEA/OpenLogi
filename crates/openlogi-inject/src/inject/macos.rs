@@ -405,12 +405,13 @@ fn key_event(vk: u16, mut flags: CGEventFlags, phase: KeyPhase) -> Option<CGEven
     Some(event)
 }
 
-/// Post a key-down + key-up pair for `vk` with `flags` set: through the
-/// virtual HID keyboard when it carries the pair, otherwise as the
-/// `CGEvent`s a physical keyboard sends, with each modifier pressed and
-/// released as a key of its own (see [`symbolic_hotkey::post_keystroke`]).
+/// Post a key-down + key-up pair for `vk` with `flags` set. ⌃←/⌃→ use
+/// CGEvents to retain Fn and numeric-pad flags; other keys use the virtual
+/// HID keyboard when it carries the pair. The CGEvent path presses and
+/// releases each modifier as a key of its own (see
+/// [`symbolic_hotkey::post_keystroke`]).
 fn post_key(vk: u16, flags: CGEventFlags) {
-    if !virtual_keyboard::tap(vk, flags) {
+    if symbolic_hotkey::needs_arrow_flags(vk, flags) || !virtual_keyboard::tap(vk, flags) {
         symbolic_hotkey::post_keystroke(vk, flags);
     }
 }
