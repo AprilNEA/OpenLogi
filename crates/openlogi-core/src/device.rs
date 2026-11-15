@@ -145,8 +145,8 @@ pub struct Capabilities {
     /// Backlight-only families aren't driven by the panel, so they don't earn
     /// an inert Lighting tab.
     pub lighting: bool,
-    /// Native vertical wheel inversion — HID++ `0x2121 HiResWheel` with the
-    /// firmware-reported `has_invert` capability.
+    /// Native scroll inversion through `0x2121 HiResWheel` or the touchpad's
+    /// writable natural-scrolling gesture in `0x6501 Gestures2`.
     pub scroll_inversion: bool,
     /// HID++ `0x2121 HiResWheel` is present, so the wheel reporting resolution
     /// can be read and changed independently of inversion support.

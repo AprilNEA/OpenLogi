@@ -1,4 +1,4 @@
-//! HID++ `0x2121 HiResWheel` mode reads and writes.
+//! HID++ wheel mode and native scroll inversion writes.
 
 use std::sync::Arc;
 
@@ -6,6 +6,7 @@ use hidpp::{
     channel::HidppChannel,
     device::Device,
     feature::CreatableFeature,
+    feature::gestures2::Gestures2Feature,
     feature::hires_wheel::{
         HiResWheelFeature, WheelEventTarget, WheelMode as HidppWheelMode,
         WheelResolution as HidppWheelResolution,
@@ -110,13 +111,11 @@ pub async fn set_scroll_wheel_mode_on(
     .await
 }
 
-/// Write the device's native vertical-scroll inversion flag while preserving
-/// its current resolution. Enabling inversion selects native HID reporting;
-/// disabling it preserves the current reporting target so an unrelated
-/// host-side consumer does not lose diverted wheel events.
+/// Set the device's native scroll direction. With `0x2121`, preserve the
+/// wheel's resolution and select native HID reporting when enabling inversion.
+/// Touchpads without that feature use the `0x6501` natural-scrolling gesture.
 ///
-/// Returns [`WriteError::FeatureUnsupported`] when the device lacks `0x2121` or
-/// reports that native inversion is not supported.
+/// Returns [`WriteError::FeatureUnsupported`] when the device cannot invert.
 pub async fn set_scroll_inversion(
     backend: &dyn HidBackend,
     route: &DeviceRoute,
@@ -124,9 +123,7 @@ pub async fn set_scroll_inversion(
 ) -> Result<(), WriteError> {
     let index = route.device_index();
     with_route(backend, route, move |channel| async move {
-        change_wheel_mode_on_channel(&channel, index, None, Some(inverted), true)
-            .await
-            .map(|_| ())
+        set_scroll_inversion_on_channel(&channel, index, inverted).await
     })
     .await
 }
@@ -137,15 +134,41 @@ pub async fn set_scroll_inversion_on(
     shared: &SharedChannel,
     inverted: bool,
 ) -> Result<(), WriteError> {
-    change_wheel_mode_on_channel(
-        shared.channel(),
-        shared.device_index(),
-        None,
-        Some(inverted),
-        true,
-    )
-    .await
-    .map(|_| ())
+    set_scroll_inversion_on_channel(shared.channel(), shared.device_index(), inverted).await
+}
+
+async fn set_scroll_inversion_on_channel(
+    channel: &Arc<HidppChannel>,
+    index: u8,
+    inverted: bool,
+) -> Result<(), WriteError> {
+    match change_wheel_mode_on_channel(channel, index, None, Some(inverted), true).await {
+        Ok(_) => Ok(()),
+        Err(WriteError::FeatureUnsupported { feature_hex })
+            if feature_hex == HiResWheelFeature::ID =>
+        {
+            let mut device = open_device(channel, index).await?;
+            let feature = open_feature::<Gestures2Feature>(&mut device).await?;
+            let supported = feature
+                .set_natural_scroll(inverted)
+                .await
+                .map_err(|error| {
+                    classify_hidpp_error(
+                        error,
+                        HidppOperation::WriteWheelMode,
+                        Gestures2Feature::ID,
+                    )
+                })?;
+            if supported {
+                Ok(())
+            } else {
+                Err(WriteError::FeatureUnsupported {
+                    feature_hex: Gestures2Feature::ID,
+                })
+            }
+        }
+        Err(error) => Err(error),
+    }
 }
 
 async fn change_wheel_mode_on_channel(
