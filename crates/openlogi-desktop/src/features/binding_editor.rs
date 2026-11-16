@@ -120,6 +120,7 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
         | Action::HoldModifier(_)
         | Action::TypeText(_) => "action-icons/keyboard.svg",
         Action::RunAppleScript(_) | Action::RunShellCommand(_) => "action-icons/terminal.svg",
+        Action::Module(_) => "action-icons/puzzle.svg",
     }
 }
 

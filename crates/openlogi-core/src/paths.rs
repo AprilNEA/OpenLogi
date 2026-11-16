@@ -35,6 +35,8 @@ const APP_DIR: &str = "openlogi";
 const DEV_APP_DIR: &str = "openlogi-dev";
 /// The user's configuration file, under [`config_dir`].
 pub const CONFIG_FILE: &str = "config.toml";
+/// The key modules folder, under [`config_dir`].
+const MODULES_DIR: &str = "modules";
 
 /// Which of the two side-by-side installs a process belongs to.
 ///
@@ -208,6 +210,15 @@ pub fn config_dir_for(profile: Profile) -> Result<PathBuf, PathsError> {
     Ok(xdg_config_home()?.join(profile.app_dir()))
 }
 
+/// The modules directory: one folder per installed key module, each holding
+/// its `module.toml` (see [`crate::module`]).
+///
+/// `$XDG_CONFIG_HOME/openlogi/modules`, default `~/.config/openlogi/modules`.
+/// Local macOS dev builds use `openlogi-dev` instead.
+pub fn modules_dir() -> Result<PathBuf, PathsError> {
+    Ok(config_dir()?.join(MODULES_DIR))
+}
+
 /// Full path to the user config file.
 pub fn config_path() -> Result<PathBuf, PathsError> {
     Ok(config_dir()?.join(CONFIG_FILE))
@@ -273,6 +284,14 @@ mod tests {
     #[test]
     fn data_dir_keeps_openlogi_under_xdg_data_home() {
         assert!(data_dir().expect("data dir").ends_with("openlogi"));
+    }
+
+    #[test]
+    fn modules_sit_beside_the_config_file() {
+        assert_eq!(
+            modules_dir().expect("modules dir"),
+            config_dir().expect("config dir").join("modules")
+        );
     }
 
     #[test]

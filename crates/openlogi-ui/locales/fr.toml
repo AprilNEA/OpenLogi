@@ -510,6 +510,7 @@ open_named_target = "Ouvrir %{name}"
 easy_switch_channel_1 = "Easy-Switch canal 1"
 easy_switch_channel_2 = "Easy-Switch canal 2"
 easy_switch_channel_3 = "Easy-Switch canal 3"
+key_module = "Module de touche"
 
 [pairing]
 choose_receiver = "Choose a receiver"

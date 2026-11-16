@@ -510,6 +510,7 @@ open_named_target = "Apri %{name}"
 easy_switch_channel_1 = "Easy-Switch canale 1"
 easy_switch_channel_2 = "Easy-Switch canale 2"
 easy_switch_channel_3 = "Easy-Switch canale 3"
+key_module = "Modulo tasto"
 
 [pairing]
 choose_receiver = "Choose a receiver"
