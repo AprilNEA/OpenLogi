@@ -6,7 +6,7 @@ use openlogi_core::device::{DeviceInventory, DeviceKind, PairedDevice, ReceiverI
 use openlogi_core::hid::WriteError;
 use openlogi_ipc::client::ProtocolSkew;
 use openlogi_ipc::testing::{Answer, in_memory_agent};
-use openlogi_ipc::{AgentRequest, AgentResponse, AgentStatus, ForegroundApps};
+use openlogi_ipc::{AgentRequest, AgentResponse, AgentStatus, ForegroundApps, InventoryHealth};
 
 use super::*;
 
