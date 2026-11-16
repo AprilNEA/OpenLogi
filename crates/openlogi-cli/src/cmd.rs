@@ -14,6 +14,7 @@ mod input_monitoring;
 pub mod keypad;
 pub mod light;
 pub mod list;
+pub mod modules;
 pub mod snapshot;
 
 #[derive(Debug, Subcommand)]
@@ -42,6 +43,8 @@ pub enum Command {
     Light(light::LightCmd),
     /// Show an image on a keypad LCD key in place of its binding's icon.
     Keypad(keypad::KeypadArgs),
+    /// List the key modules the running agent found.
+    Modules(modules::ModulesArgs),
 }
 
 impl Command {
@@ -64,6 +67,7 @@ impl Command {
             Self::Fixture(cmd) => cmd.run().await?,
             Self::Light(cmd) => cmd.run().await?,
             Self::Keypad(args) => keypad::run(args).await?,
+            Self::Modules(args) => modules::run(args).await?,
         }
         Ok(ExitCode::SUCCESS)
     }

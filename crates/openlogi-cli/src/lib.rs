@@ -227,6 +227,19 @@ mod tests {
     }
 
     #[test]
+    fn modules_list_parses_and_needs_its_action() {
+        let cli = Cli::try_parse_from(["openlogi", "modules", "list"])
+            .expect("valid modules invocation parses");
+        assert!(matches!(
+            cli.cmd,
+            Some(Command::Modules(cmd::modules::ModulesArgs {
+                action: cmd::modules::ModulesAction::List,
+            }))
+        ));
+        Cli::try_parse_from(["openlogi", "modules"]).expect_err("an action is required");
+    }
+
+    #[test]
     fn smartshift_leave_flipped_conflicts_with_sensitivity() {
         let result = Cli::try_parse_from([
             "openlogi",
