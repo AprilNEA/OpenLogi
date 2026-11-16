@@ -17,6 +17,7 @@
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSCameraUsageDescription</key><string>OpenLogi previews your Logitech webcam locally. Video never leaves your Mac.</string>
+  <key>NSAppleEventsUsageDescription</key><string>OpenLogi runs the AppleScript actions and key modules you set up, such as controlling a music app from a keypad key.</string>
   <!-- openlogi:// deep-link scheme. Mirror of the URL type `xtask macos
        package` stamps into the release app (xtask/src/support/info_plist.rs)
        — keep the two in sync. CFBundleURLName is the bundle name, not the

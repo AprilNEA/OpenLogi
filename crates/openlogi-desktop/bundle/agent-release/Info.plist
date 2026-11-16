@@ -37,5 +37,7 @@
   <true/>
   <key>NSHighResolutionCapable</key>
   <true/>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>OpenLogi runs the AppleScript actions and key modules you set up, such as controlling a music app from a keypad key.</string>
 </dict>
 </plist>
