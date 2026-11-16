@@ -64,6 +64,7 @@ use openlogi_core::device::{
     PairedDevice, StandaloneDevice, prettify_codename,
 };
 use openlogi_core::hid::{DisableKeysMask, DisableKeysState, HidppOperation};
+use openlogi_core::module::ModuleId;
 use openlogi_core::single_instance::{self, InstanceError, Role};
 use openlogi_fixture::{DeviceProfile, FixtureError, ProfileDeviceSettings, ProfileSetting};
 use openlogi_hid::{
@@ -76,9 +77,10 @@ use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus,
     BacklightObservation, ClientKind, ConfigReloadError, FlowIdentity, FlowPairTarget,
     FlowPairingCommandError, ForegroundApps, FoundDevice, Generation, Identity, InventoryHealth,
-    KeyImageError, LockKeyChange, LockKeyObservation, MonitorEvent, NoticeKind, NoticeObservation,
-    OBSERVE_HOLD, Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase,
-    PairingUpdate, RingObservation, SavedConfig, SavedConfigVerdict, check_key_image_size,
+    KeyImageError, LockKeyChange, LockKeyObservation, ModuleInfo, ModuleState, ModuleStatus,
+    MonitorEvent, NoticeKind, NoticeObservation, OBSERVE_HOLD, Observation, PROTOCOL_VERSION,
+    PairingCommandError, PairingFailure, PairingPhase, PairingUpdate, RingObservation, SavedConfig,
+    SavedConfigVerdict, check_key_image_size,
 };
 use succession::Compat;
 use tarpc::context::Context;
@@ -1651,6 +1653,54 @@ impl Agent for MockAgent {
         );
         Ok(())
     }
+
+    /// A scripted modules folder: one module running, one turned off, and
+    /// one folder whose manifest was refused, so the Settings section has
+    /// every kind of row to draw.
+    async fn list_modules(self, _: Context) -> Vec<ModuleStatus> {
+        mock_modules()
+    }
+}
+
+fn mock_modules() -> Vec<ModuleStatus> {
+    let module = |id: &str, name: &str, description: &str| ModuleInfo {
+        id: ModuleId::try_new(id.to_owned()).unwrap_or_else(|error| panic!("{id}: {error}")),
+        name: name.to_owned(),
+        description: Some(description.to_owned()),
+        version: Some("1.0.0".to_owned()),
+        platforms: vec!["macos".to_owned(), "linux".to_owned()],
+    };
+    vec![
+        ModuleStatus {
+            folder: "broken".to_owned(),
+            module: None,
+            enabled: false,
+            state: ModuleState::Invalid,
+            error: Some("no module.toml".to_owned()),
+        },
+        ModuleStatus {
+            folder: "spotify".to_owned(),
+            module: Some(module(
+                "com.example.spotify",
+                "Spotify Now Playing",
+                "Album art and play/pause for Spotify.",
+            )),
+            enabled: true,
+            state: ModuleState::Running,
+            error: None,
+        },
+        ModuleStatus {
+            folder: "weather".to_owned(),
+            module: Some(module(
+                "com.example.weather",
+                "Weather",
+                "The temperature outside.",
+            )),
+            enabled: false,
+            state: ModuleState::Disabled,
+            error: None,
+        },
+    ]
 }
 
 #[cfg(test)]

@@ -479,6 +479,10 @@ impl Agent for TestAgent {
         unreachable!("profile capture must never write a key image")
     }
 
+    async fn list_modules(self, _: TarpcContext) -> Vec<openlogi_ipc::ModuleStatus> {
+        unreachable!("profile capture never lists key modules")
+    }
+
     async fn reload_saved_config(
         self,
         _: TarpcContext,

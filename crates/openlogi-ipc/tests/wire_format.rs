@@ -60,10 +60,10 @@ use openlogi_ipc::{
     ConfigReloadError, FlowIdentity, FlowLinkState, FlowPairTarget, FlowPairingCommandError,
     FlowPairingFailure, FlowPairingPeer, FlowPairingPhase, FlowPeerStatus, FlowPlatform,
     FlowStatus, ForegroundApps, FoundDevice, Identity, InventoryHealth, KeyImageError,
-    LockKeyChange, LockKeyObservation, MonitorEvent, Notice, NoticeKind, NoticeObservation,
-    Observation, ObservedLight, PROTOCOL_VERSION, PairingCommandError, PairingFailure,
-    PairingPhase, PairingUpdate, RingObservation, SavedConfig, SavedConfigVerdict, SecureInput,
-    VirtualKeyboardStatus,
+    LockKeyChange, LockKeyObservation, ModuleInfo, ModuleState, ModuleStatus, MonitorEvent, Notice,
+    NoticeKind, NoticeObservation, Observation, ObservedLight, PROTOCOL_VERSION,
+    PairingCommandError, PairingFailure, PairingPhase, PairingUpdate, RingObservation, SavedConfig,
+    SavedConfigVerdict, SecureInput, VirtualKeyboardStatus,
 };
 use succession::{Compat, Run};
 
@@ -659,6 +659,64 @@ fn key_image_calls() {
         "04fc00004000",
     );
     assert_wire(&KeyImageError::Undecodable("bad".into()), "0503626164");
+}
+
+/// `Action::Module` is appended after the Easy-Switch channels and
+/// `ActionRingIcon::Module` after their icons; a module id crosses the wire
+/// as its string.
+#[test]
+fn module_action_and_icon() {
+    let id = openlogi_core::module::ModuleId::try_new("com.example.spotify".to_owned())
+        .expect("valid module id");
+    assert_wire(
+        &Action::Module(id),
+        "4113636f6d2e6578616d706c652e73706f74696679",
+    );
+    assert_wire(&ActionRingIcon::Module, "39");
+}
+
+/// `list_modules` is appended after `clear_key_image`. Its answer lists one
+/// running module and one folder whose manifest was refused.
+#[test]
+fn list_modules_call() {
+    assert_wire(&AgentRequest::ListModules {}, "3c");
+    let id = openlogi_core::module::ModuleId::try_new("com.example.spotify".to_owned())
+        .expect("valid module id");
+    let running = ModuleStatus {
+        folder: "spotify".into(),
+        module: Some(ModuleInfo {
+            id,
+            name: "Spotify".into(),
+            description: None,
+            version: Some("1.0".into()),
+            platforms: vec!["macos".into(), "linux".into()],
+        }),
+        enabled: true,
+        state: ModuleState::Running,
+        error: None,
+    };
+    let invalid = ModuleStatus {
+        folder: "broken".into(),
+        module: None,
+        enabled: false,
+        state: ModuleState::Invalid,
+        error: Some("bad".into()),
+    };
+    assert_wire(
+        &vec![running, invalid],
+        "020773706f746966790113636f6d2e6578616d706c652e73706f746966790753706f74696679000103312e3002056d61636f73056c696e75780104000662726f6b656e0000000103626164",
+    );
+    for (state, golden) in [
+        (ModuleState::Invalid, "00"),
+        (ModuleState::Unsupported, "01"),
+        (ModuleState::Disabled, "02"),
+        (ModuleState::Starting, "03"),
+        (ModuleState::Running, "04"),
+        (ModuleState::Restarting, "05"),
+        (ModuleState::Failed, "06"),
+    ] {
+        assert_wire(&state, golden);
+    }
 }
 
 /// A G-key's slot and an M key cross the wire by their persisted names.

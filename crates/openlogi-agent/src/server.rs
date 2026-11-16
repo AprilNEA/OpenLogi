@@ -33,9 +33,10 @@ use openlogi_ipc::transport;
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus,
     BacklightObservation, ClientKind, ConfigReloadError, FlowIdentity, FlowPairTarget,
-    FlowPairingCommandError, Generation, Identity, KeyImageError, LockKeyObservation, MonitorEvent,
-    NoticeObservation, Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure,
-    PairingUpdate, RingObservation, SavedConfig, SavedConfigVerdict, check_key_image_size,
+    FlowPairingCommandError, Generation, Identity, KeyImageError, LockKeyObservation, ModuleStatus,
+    MonitorEvent, NoticeObservation, Observation, PROTOCOL_VERSION, PairingCommandError,
+    PairingFailure, PairingUpdate, RingObservation, SavedConfig, SavedConfigVerdict,
+    check_key_image_size,
 };
 use succession::Compat;
 
@@ -635,6 +636,10 @@ impl Agent for AgentServer {
             clear_key_image_in(&self.orchestrator, &self.key_image_changes, &route, key).await?;
         info!(%route, key = %slot.config_name(), "clear_key_image");
         Ok(())
+    }
+
+    async fn list_modules(self, _: Context) -> Vec<ModuleStatus> {
+        Vec::new()
     }
 }
 

@@ -26,6 +26,7 @@ use openlogi_core::hid::{
     PasskeyMethod, PointerSpeed, ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode,
     SidetoneLevel, SmartShiftStatus, WriteError,
 };
+use openlogi_core::module::ModuleId;
 use serde::{Deserialize, Serialize};
 pub use succession::Identity;
 
@@ -199,6 +200,10 @@ pub use succession::Identity;
 /// v47: `Agent::{set_key_image, clear_key_image}` and [`KeyImageError`]
 ///      appended: an image supplied at runtime that a keypad LCD key shows
 ///      in place of its binding's glyph, held in the agent's memory only.
+///      `Action::Module` and `ActionRingIcon::Module` appended, and
+///      `Agent::list_modules` with [`ModuleStatus`], [`ModuleInfo`] and
+///      [`ModuleState`] after the key image calls: a key bound to a key
+///      module, and the modules the agent found and runs.
 pub const PROTOCOL_VERSION: u32 = 47;
 
 /// Environment variable through which the agent hands a supervised helper the
@@ -255,6 +260,64 @@ pub enum KeyImageError {
     /// The image is not a PNG or JPEG the agent could decode.
     #[error("the image could not be read: {0}")]
     Undecodable(String),
+}
+
+/// One folder in the modules directory, as [`Agent::list_modules`] reports
+/// it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModuleStatus {
+    /// The folder's name under the modules directory.
+    pub folder: String,
+    /// What the folder's `module.toml` says, or `None` when it is missing
+    /// or invalid ([`Self::error`] says why).
+    pub module: Option<ModuleInfo>,
+    /// Whether `config.toml` turns the module on.
+    pub enabled: bool,
+    /// Where the module stands.
+    pub state: ModuleState,
+    /// Why the manifest was refused, or how the module's last run ended
+    /// when that was a failure.
+    pub error: Option<String>,
+}
+
+/// What a module's `module.toml` says about it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModuleInfo {
+    /// The module's identifier, as [`Action::Module`] names it.
+    ///
+    /// [`Action::Module`]: openlogi_core::binding::Action::Module
+    pub id: ModuleId,
+    /// What the app calls the module.
+    pub name: String,
+    /// Its one-line description.
+    pub description: Option<String>,
+    /// Its own version.
+    pub version: Option<String>,
+    /// The platforms it runs on: `macos`, `linux`, `windows`.
+    pub platforms: Vec<String>,
+}
+
+/// Where one module stands.
+///
+/// Append new variants only: the enum crosses the bincode IPC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ModuleState {
+    /// The folder's manifest is missing or invalid, or another folder has
+    /// the same id; it never runs.
+    Invalid,
+    /// The module does not list this platform; it never runs here.
+    Unsupported,
+    /// The module is installed and turned off.
+    Disabled,
+    /// The module was started and has not answered `hello` yet.
+    Starting,
+    /// The module is running.
+    Running,
+    /// The module stopped and starts again after a delay.
+    Restarting,
+    /// The module failed to start five times in a row and stays stopped
+    /// until it is turned off and on again or its folder changes.
+    Failed,
 }
 
 /// Where the agent's device enumeration stands. The distinction matters
@@ -1330,4 +1393,8 @@ pub trait Agent {
     /// Show the binding's glyph on `key` again. Clearing a key that shows no
     /// image succeeds.
     async fn clear_key_image(route: DeviceRoute, key: ButtonId) -> Result<(), KeyImageError>;
+    /// Every folder in the modules directory and where its module stands,
+    /// in folder-name order. Empty until the agent arms, and when no module
+    /// is installed.
+    async fn list_modules() -> Vec<ModuleStatus>;
 }
