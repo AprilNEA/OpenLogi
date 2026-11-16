@@ -15,7 +15,8 @@ use std::io;
 use std::sync::{Arc, Mutex, PoisonError, RwLock, mpsc};
 use std::time::{Duration, Instant};
 
-use openlogi_core::binding::{Action, Binding, ButtonId};
+use openlogi_core::binding::{Action, Binding, ButtonId, GridKey};
+use openlogi_core::module::ModuleId;
 use tracing::{debug, info, warn};
 
 use self::button::{
@@ -89,6 +90,17 @@ pub enum ActionRequest {
         device_key: Option<String>,
         /// The zero-based channel.
         slot: u8,
+    },
+    /// A keypad grid key bound to a key module went down
+    /// ([`Action::Module`]). The agent hands the press to the module and
+    /// injects nothing.
+    ModulePressed {
+        /// The pressing keypad.
+        device_key: Option<String>,
+        /// The module the key's binding named.
+        module: ModuleId,
+        /// The physical key; its page is the keypad's current one.
+        key: GridKey,
     },
     /// A DPI or pointer-speed write an action made to the mouse at `route`
     /// settled. The mouse broadcasts nothing for a host write, so the agent
@@ -422,7 +434,34 @@ impl ActionExecutor {
         true
     }
 
+    /// Hand a press of a key bound to `module` to the agent, which delivers
+    /// it to the module. Only a keypad grid key can be a module's key; a
+    /// module bound to anything else does nothing. Nothing is injected
+    /// either way.
+    fn press_module(&self, module: &ModuleId, control: &PressControl, device_key: Option<&str>) {
+        let key = match control {
+            PressControl::Button(button) => button.grid_slot().map(|slot| slot.key),
+            PressControl::Key(_) => None,
+        };
+        let Some(key) = key else {
+            debug!(%module, "module bound to a control that is not a keypad key: nothing to do");
+            return;
+        };
+        let request = ActionRequest::ModulePressed {
+            device_key: device_key.map(str::to_owned),
+            module: module.clone(),
+            key,
+        };
+        if self.requests.send(request).is_err() {
+            warn!(%module, "agent runtime unavailable: module press ignored");
+        }
+    }
+
     fn dispatch_to(&self, action: &Action, device_key: Option<&str>, target: ActionDispatchTarget) {
+        if let Some(module) = action.module() {
+            debug!(%module, "module action outside a keypad key: nothing to do");
+            return;
+        }
         if let Some(request) = agent_request(action, device_key) {
             if self.requests.send(request).is_err() {
                 warn!(action = %action.label(), "agent runtime unavailable — request ignored");
@@ -707,14 +746,26 @@ impl ButtonEventHandler {
                     if matches!(action, Action::ShowActionsRing) {
                         self.ring_triggers.insert(press.token().clone());
                     }
-                    self.start_action(press.token(), action, press.device_key(), press.target());
+                    self.start_action(
+                        press.token(),
+                        press.control(),
+                        action,
+                        press.device_key(),
+                        press.target(),
+                    );
                 }
             }
             ButtonRuntimeEvent::Triggered { press, action } => {
                 if press.captured_by_os_hook() {
                     log_bound_action(press.control(), &action);
                 }
-                self.start_action(press.token(), &action, press.device_key(), press.target());
+                self.start_action(
+                    press.token(),
+                    press.control(),
+                    &action,
+                    press.device_key(),
+                    press.target(),
+                );
             }
             ButtonRuntimeEvent::Ended { press, reason } => {
                 self.held.end(press.token());
@@ -748,10 +799,15 @@ impl ButtonEventHandler {
     fn start_action(
         &mut self,
         press: &PressToken,
+        control: &PressControl,
         action: &Action,
         device_key: Option<&str>,
         target: ActionDispatchTarget,
     ) {
+        if let Some(module) = action.module() {
+            self.executor.press_module(module, control, device_key);
+            return;
+        }
         if (action.held_chord().is_some() || action.held_modifier().is_some())
             && target.resolve(action).is_none()
         {
@@ -1239,6 +1295,62 @@ mod tests {
             Ok(ActionRequest::ShowActionsRing {
                 device_key: Some("mouse".to_owned())
             })
+        );
+    }
+
+    /// A keypad key bound to a key module hands its press to the agent as a
+    /// module press, with the pressing keypad and the physical key, and goes
+    /// no further: the executor, and so the injector, never sees it. A
+    /// module bound to a mouse button reaches nobody.
+    #[test]
+    fn a_module_key_press_goes_to_the_agent_and_nowhere_else() {
+        let (_signal, device_io) = openlogi_hid::device_io_channel();
+        let (requests, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let mut runtime = ActionRuntime::new(
+            Arc::default(),
+            Arc::default(),
+            DeviceAccess {
+                channel: openlogi_hid::CaptureChannelSlot::default(),
+                registry: openlogi_hid::ChannelRegistry::default(),
+                receiver_access: crate::receiver_access::ReceiverAccess::default(),
+                device_io,
+                transport_turns: crate::hardware::TransportTurns::default(),
+            },
+            requests,
+        )
+        .expect("the button worker must start");
+        let buttons = runtime.dispatcher().buttons;
+        let module = ModuleId::try_new("com.example.spotify".to_owned()).expect("valid module id");
+        let binding = Binding::Single(Action::Module(module.clone()));
+        let session = HidppSessionId::new("keypad");
+        let middle = ButtonId::grid(GridKey::Middle);
+
+        buttons
+            .try_hidpp_down(
+                &session,
+                middle,
+                Some(&binding),
+                ActionDispatchTarget::Keyboard,
+            )
+            .expect("the press must be accepted");
+        assert!(buttons.try_hidpp_up(&session, middle));
+        assert_eq!(
+            received.blocking_recv(),
+            Some(ActionRequest::ModulePressed {
+                device_key: Some("keypad".to_owned()),
+                module,
+                key: GridKey::Middle,
+            })
+        );
+
+        buttons
+            .try_hook_down(ButtonId::MiddleClick, Some(&binding))
+            .expect("the press must be accepted");
+        assert!(buttons.try_hook_up(ButtonId::MiddleClick));
+        runtime.shutdown();
+        assert!(
+            received.try_recv().is_err(),
+            "a module on a mouse button sends nothing, and a module press nothing more"
         );
     }
 

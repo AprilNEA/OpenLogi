@@ -1209,7 +1209,7 @@ fn keyboard_spec_never_diverts_reserved_controls() {
 }
 
 /// The registry's MX Creative Keypad, wired: a route the LCD lookup knows.
-fn wired_keypad(key: &str, online: bool) -> AgentDevice {
+pub(super) fn wired_keypad(key: &str, online: bool) -> AgentDevice {
     let keypad = &openlogi_device_registry::keypad::KEYPADS[0];
     AgentDevice {
         route: Some(DeviceRoute::Direct {
@@ -1377,11 +1377,11 @@ fn a_paged_keypad_with_nothing_bound_captures_its_paging_keys() {
     );
 }
 
-fn page(number: u8) -> openlogi_core::binding::KeypadPage {
+pub(super) fn page(number: u8) -> openlogi_core::binding::KeypadPage {
     openlogi_core::binding::KeypadPage::new(number).expect("a valid page")
 }
 
-fn on_page(number: u8, key: GridKey) -> ButtonId {
+pub(super) fn on_page(number: u8, key: GridKey) -> ButtonId {
     ButtonId::Grid(openlogi_core::binding::GridSlot {
         page: page(number),
         key,
@@ -1510,7 +1510,7 @@ fn page_turns_need_pages_and_a_removed_page_falls_back_to_the_first() {
 }
 
 /// The route [`wired_keypad`] reaches the keypad by.
-fn keypad_route() -> DeviceRoute {
+pub(super) fn keypad_route() -> DeviceRoute {
     let keypad = &openlogi_device_registry::keypad::KEYPADS[0];
     DeviceRoute::Direct {
         vendor_id: keypad.vendor_id,

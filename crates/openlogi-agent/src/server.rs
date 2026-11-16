@@ -16,6 +16,7 @@ use futures::StreamExt as _;
 use openlogi_agent_core::action_ring::{ActionRingActivation, ActionRingManager};
 use openlogi_agent_core::backlight_overlay::BacklightOverlayManager;
 use openlogi_agent_core::event_monitor::SharedEventMonitor;
+use openlogi_agent_core::modules::ModuleHostHandle;
 use openlogi_agent_core::observable::ObservableState;
 use openlogi_agent_core::orchestrator::{self, Orchestrator, SharedHandles};
 use openlogi_agent_core::runtime::ActionDispatcher;
@@ -71,6 +72,9 @@ pub struct AgentServer {
     /// Taken by each key image change for its whole length
     /// ([`set_key_image_in`], [`clear_key_image_in`]).
     key_image_changes: Arc<Mutex<()>>,
+    /// The key-module host: scanned again on every config reload, and the
+    /// source of [`Agent::list_modules`].
+    pub modules: ModuleHostHandle,
 }
 
 impl AgentServer {
@@ -89,6 +93,7 @@ impl AgentServer {
         action_ring: Arc<ActionRingManager>,
         dispatcher: ActionDispatcher,
         backlight_overlay: BacklightOverlayManager,
+        modules: ModuleHostHandle,
     ) -> (Self, tokio::sync::mpsc::UnboundedReceiver<ClientKind>) {
         let ring_haptics = RingHapticPlayer::spawn(shared.clone());
         let (demand, declarations) = tokio::sync::mpsc::unbounded_channel();
@@ -105,6 +110,7 @@ impl AgentServer {
                 backlight_overlay,
                 demand,
                 key_image_changes: Arc::default(),
+                modules,
             },
             declarations,
         )
@@ -141,6 +147,9 @@ impl AgentServer {
                 }
                 self.observable.set_config_revision(revision);
                 self.dispatcher.cancel_all_buttons();
+                // A module folder dropped in before turning it on is found
+                // now rather than at the next periodic scan.
+                self.modules.rescan();
                 // The GUI's launch-at-login toggle reaches us through this
                 // reload, so re-reconcile the autostart from the new config.
                 crate::autostart::reconcile(launch_at_login);
@@ -639,7 +648,7 @@ impl Agent for AgentServer {
     }
 
     async fn list_modules(self, _: Context) -> Vec<ModuleStatus> {
-        Vec::new()
+        self.modules.statuses()
     }
 }
 

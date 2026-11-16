@@ -29,10 +29,25 @@ backon = { workspace = true }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 resvg = { version = "0.46", default-features = false }
 thiserror = { workspace = true }
-tokio = { workspace = true }
+# Key modules run as child processes, spoken to in newline-delimited JSON
+# over their stdin and stdout; their images arrive base64-encoded and their
+# settings come from `config.toml`.
+tokio = { workspace = true, features = ["process", "io-util"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+base64 = "0.22"
+toml = { workspace = true }
 tracing = { workspace = true }
 # The machine name Flow peers show for this computer.
 gethostname = "1.1.0"
+
+[target.'cfg(unix)'.dependencies]
+# killpg: a module is killed with its whole process group.
+libc = "0.2"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# `CREATE_NO_WINDOW`, so a console module opens no window.
+windows-sys = { workspace = true, features = ["Win32_System_Threading"] }
 
 [lints]
 workspace = true

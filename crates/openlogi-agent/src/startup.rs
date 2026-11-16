@@ -13,6 +13,7 @@ use futures::stream::{self, Stream};
 use openlogi_agent_core::action_ring::ActionRingManager;
 use openlogi_agent_core::backlight_overlay::BacklightOverlayManager;
 use openlogi_agent_core::event_monitor::EventMonitor;
+use openlogi_agent_core::modules::{ModuleHost, ModuleHostHandle, ModuleTimings};
 use openlogi_agent_core::observable::ObservableState;
 use openlogi_agent_core::orchestrator::{Orchestrator, SharedHandles};
 use openlogi_agent_core::runtime::scroll::{ScrollInputHandle, ScrollRuntime};
@@ -45,6 +46,11 @@ pub(crate) struct Core {
     /// demand channel. It buffers, so a declaration that lands before the
     /// gate listens is not lost.
     pub(crate) demand: tokio::sync::mpsc::UnboundedReceiver<openlogi_ipc::ClientKind>,
+    /// The key-module host's handle, shared with the IPC server.
+    pub(crate) modules: ModuleHostHandle,
+    /// The key-module host itself, started at arming: no module runs while
+    /// the agent is dormant.
+    pub(crate) module_host: ModuleHost,
 }
 
 /// Build the shared state and start the IPC server — everything safe before
@@ -77,15 +83,21 @@ pub(crate) async fn bootstrap(config: Config) -> Option<Core> {
         Arc::clone(&observable),
     ));
 
-    let (server, demand) = spawn_ipc_server(
-        Arc::clone(&orchestrator),
-        &shared,
-        Arc::clone(&observable),
-        Arc::clone(&pairing),
-        Arc::clone(&event_monitor),
-        &inputs,
-        backlight_overlay.clone(),
-    );
+    let modules_dir = openlogi_core::paths::modules_dir()
+        .inspect_err(|error| warn!(%error, "no modules folder: key modules are off"))
+        .ok();
+    let (modules, module_host) = ModuleHostHandle::new(modules_dir, ModuleTimings::default());
+
+    let (server, demand) = spawn_ipc_server(ServerServices {
+        orchestrator: Arc::clone(&orchestrator),
+        shared: &shared,
+        observable: Arc::clone(&observable),
+        pairing: Arc::clone(&pairing),
+        event_monitor: Arc::clone(&event_monitor),
+        inputs: &inputs,
+        backlight_overlay: backlight_overlay.clone(),
+        modules: modules.clone(),
+    });
     Some(Core {
         orchestrator,
         shared,
@@ -97,17 +109,34 @@ pub(crate) async fn bootstrap(config: Config) -> Option<Core> {
         #[cfg(target_os = "macos")]
         server,
         demand,
+        modules,
+        module_host,
     })
 }
 
-fn spawn_ipc_server(
+/// The agent's independent runtime services the IPC server owns.
+struct ServerServices<'a> {
     orchestrator: Arc<Mutex<Orchestrator>>,
-    shared: &SharedHandles,
+    shared: &'a SharedHandles,
     observable: Arc<ObservableState>,
     pairing: Arc<pairing::PairingManager>,
     event_monitor: Arc<EventMonitor>,
-    inputs: &InputServices,
+    inputs: &'a InputServices,
     backlight_overlay: BacklightOverlayManager,
+    modules: ModuleHostHandle,
+}
+
+fn spawn_ipc_server(
+    ServerServices {
+        orchestrator,
+        shared,
+        observable,
+        pairing,
+        event_monitor,
+        inputs,
+        backlight_overlay,
+        modules,
+    }: ServerServices<'_>,
 ) -> (
     AgentServer,
     tokio::sync::mpsc::UnboundedReceiver<openlogi_ipc::ClientKind>,
@@ -121,6 +150,7 @@ fn spawn_ipc_server(
         Arc::clone(&inputs.ring),
         inputs.dispatcher.clone(),
         backlight_overlay,
+        modules,
     );
     tokio::spawn(server::run(server.clone()));
     (server, demand)
