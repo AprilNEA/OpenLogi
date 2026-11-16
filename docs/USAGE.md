@@ -117,6 +117,15 @@ reconnects, and is gone after `clear-image` or an agent restart. Nothing is
 saved to `config.toml`. Setting a new image on the same key replaces the old
 one, and setting the same image again changes nothing.
 
+## Key modules
+
+A key module is a separate program that draws keypad LCD keys and handles
+their presses, such as a now-playing display. Install one by putting its
+folder in the modules folder beside `config.toml`, turn it on in Settings, and
+bind it to a key. `openlogi modules list` shows every installed module and
+where it stands, through the running agent. Writing a module, the manifest,
+and the protocol: [MODULES.md](MODULES.md).
+
 ## Automation API
 
 `openlogi api` is the JSON interface for launchers such as Raycast and local
