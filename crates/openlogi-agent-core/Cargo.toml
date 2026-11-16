@@ -23,9 +23,10 @@ openlogi-ui = { path = "../openlogi-ui", default-features = false }
 futures-lite = { workspace = true }
 # The keypad LCD watcher's doubling retry delay.
 backon = { workspace = true }
-# Keypad LCD tiles: rasterize an action icon's SVG and encode it as the JPEG
-# the keypad's image write carries. resvg matches the version gpui links.
-image = { version = "0.25", default-features = false, features = ["jpeg"] }
+# Keypad LCD tiles: rasterize an action icon's SVG, or decode a PNG or JPEG
+# supplied at runtime, and encode it as the JPEG the keypad's image write
+# carries. resvg matches the version gpui links.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 resvg = { version = "0.46", default-features = false }
 thiserror = { workspace = true }
 tokio = { workspace = true }
