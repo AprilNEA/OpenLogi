@@ -1105,6 +1105,25 @@ impl Request for PollEventMonitor {
     }
 }
 
+/// Read the key modules the agent found. The list arrives as
+/// [`GuiUpdate::Modules`]; an unreachable agent changes nothing, so the last
+/// list stays until a connected agent answers.
+pub struct ReadModules;
+
+impl Request for ReadModules {
+    type Answer = Vec<openlogi_ipc::ModuleStatus>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client.list_modules(context::current()).await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        if let Ok(modules) = outcome {
+            let _ = updates.send(GuiUpdate::Modules(modules));
+        }
+    }
+}
+
 /// The message from the GPUI thread to the client thread: one variant per
 /// request type, so the state tests can see exactly what was sent. Every
 /// request converts into it with `From`, and running it dispatches to the
@@ -1178,6 +1197,7 @@ commands! {
     ConfirmFlowPairing,
     CancelFlowPairing,
     StopFlowPairing,
+    ReadModules,
     #[cfg(all(target_os = "macos", debug_assertions))]
     PollEventMonitor,
 }

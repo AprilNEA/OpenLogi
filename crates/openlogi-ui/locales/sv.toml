@@ -657,6 +657,21 @@ downloaded_images_size = "Hämtade bilder använder för närvarande %{size}."
 cache_location = "Cacheplats"
 show_downloaded_images_description = "Visa mappen med hämtade bilder i din filhanterare."
 
+[modules]
+modules = "Modules"
+none_installed = "No modules installed"
+none_installed_description = "A module is a separate program that draws keypad keys and handles their presses. Put its folder in the modules folder, then turn it on here."
+folder = "Modules folder"
+security_note = "Modules are programs you install. OpenLogi runs only the ones turned on here and never downloads any. On macOS a module shares OpenLogi's permissions, so install only modules you trust."
+state_invalid = "Not a valid module: %{error}"
+state_unsupported = "Not available on this platform."
+state_off = "Off."
+state_starting = "Starting."
+state_running = "Running."
+state_restarting = "Restarting."
+state_restarting_after = "Restarting: %{error}."
+state_failed = "Stopped: %{error}. Turn it off and on to try again."
+
 [about]
 about_openlogi = "Om OpenLogi"
 copy_diagnostics = "Kopiera diagnostik"

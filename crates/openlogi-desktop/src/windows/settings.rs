@@ -58,6 +58,7 @@ mod assets;
 mod diagnostics;
 mod general;
 mod language;
+mod modules;
 // Windows needs no privacy grants — the WH_MOUSE_LL hook and raw HID access
 // work without one — so there the page would render empty; register it only
 // where it has content. `SettingsPage::index` tracks the shift.
@@ -75,6 +76,12 @@ pub enum SettingsPage {
     /// Where Linux shows input-device access, which the agent needs to run.
     #[cfg(target_os = "linux")]
     Permissions,
+    /// The installed key modules.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "no menu item or deep link opens it yet")
+    )]
+    Modules,
     About,
 }
 
@@ -88,16 +95,26 @@ impl SettingsPage {
             Self::Permissions => 2,
             // One lower on Windows: the Permissions page isn't registered
             // there (see the `mod permissions` cfg).
-            Self::About => {
+            Self::Modules => {
                 if cfg!(any(target_os = "macos", target_os = "linux")) {
                     5
                 } else {
                     4
                 }
             }
+            Self::About => {
+                if cfg!(any(target_os = "macos", target_os = "linux")) {
+                    6
+                } else {
+                    5
+                }
+            }
         }
     }
 }
+
+/// How often the open Settings window asks the agent for its key modules.
+const MODULES_POLL: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Appearance-page theme-grid filter. View-local (not persisted) UI state.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -158,6 +175,10 @@ pub struct SettingsView {
     /// rules through pkexec.
     #[cfg(target_os = "linux")]
     input_access_grant: permissions::InputAccessGrant,
+    /// Asks the agent for its key modules every few seconds while Settings is
+    /// open, so the Modules page shows a module starting, failing, or
+    /// restarting. Dropped with the view.
+    _modules_task: gpui::Task<()>,
     /// Drives the debug live event monitor: polls the agent on a timer while the
     /// Settings window is open. Dropping it with the view stops polling, which
     /// lets the agent's idle janitor turn monitoring back off.
@@ -177,30 +198,7 @@ impl SettingsView {
         let updater_obs = cx.observe(&updater, |_, _, cx| cx.notify());
         let installation_obs =
             cx.observe_global::<crate::platform::installation::Installation>(|_, cx| cx.notify());
-        let state_obs = cx.subscribe(&AppState::global(cx), |this, _, event: &StateEvent, cx| {
-            if matches!(event, StateEvent::LanguageChanged) {
-                // The cache-size line is localized text cached in view state
-                // (it interpolates an IO-derived size); rebuild it in the new
-                // locale.
-                this.asset_cache_desc = assets::cache_size_description();
-            }
-            if matches!(
-                event,
-                StateEvent::AgentChanged
-                    | StateEvent::DiagnosticsChanged
-                    | StateEvent::InventoryChanged
-                    | StateEvent::CameraPermissionChanged
-                    | StateEvent::SettingsChanged
-                    | StateEvent::LanguageChanged
-            ) {
-                // A settings change may have run the opportunistic
-                // registration ensure, so re-read the status snapshot.
-                if matches!(event, StateEvent::SettingsChanged) {
-                    this.refresh_registration_status(cx);
-                }
-                cx.notify();
-            }
-        });
+        let state_obs = cx.subscribe(&AppState::global(cx), Self::on_state_event);
         let activation_obs = Self::observe_registration_status(window, cx);
 
         let theme_search =
@@ -281,11 +279,53 @@ impl SettingsView {
             copied_gen: 0,
             asset_cache_desc: assets::cache_size_description(),
             registration_status: crate::platform::registration::status(),
+            _modules_task: Self::poll_modules(cx),
             #[cfg(target_os = "linux")]
             input_access_grant: permissions::InputAccessGrant::default(),
             #[cfg(all(target_os = "macos", debug_assertions))]
             _monitor_task: monitor_task,
         }
+    }
+
+    fn on_state_event(&mut self, _: Entity<AppState>, event: &StateEvent, cx: &mut Context<Self>) {
+        if matches!(event, StateEvent::LanguageChanged) {
+            // The cache-size line is localized text cached in view state
+            // (it interpolates an IO-derived size); rebuild it in the new
+            // locale.
+            self.asset_cache_desc = assets::cache_size_description();
+        }
+        if matches!(
+            event,
+            StateEvent::AgentChanged
+                | StateEvent::DiagnosticsChanged
+                | StateEvent::InventoryChanged
+                | StateEvent::CameraPermissionChanged
+                | StateEvent::SettingsChanged
+                | StateEvent::ModulesChanged
+                | StateEvent::LanguageChanged
+        ) {
+            // A settings change may have run the opportunistic
+            // registration ensure, so re-read the status snapshot.
+            if matches!(event, StateEvent::SettingsChanged) {
+                self.refresh_registration_status(cx);
+            }
+            cx.notify();
+        }
+    }
+
+    /// Ask the agent for its key modules now and every [`MODULES_POLL`]
+    /// until the returned task is dropped with the view.
+    fn poll_modules(cx: &mut Context<Self>) -> gpui::Task<()> {
+        cx.spawn(async move |_view, cx| {
+            loop {
+                cx.update(|cx| {
+                    if let Some(state) = AppState::try_read(cx) {
+                        state.refresh_modules();
+                    }
+                });
+                cx.background_executor().timer(MODULES_POLL).await;
+            }
+        })
     }
 
     fn refresh_registration_status(&mut self, cx: &mut Context<Self>) {
@@ -486,6 +526,9 @@ impl Render for SettingsView {
                 view.clone(),
                 self.asset_source_select.clone(),
                 self.asset_cache_desc.clone(),
+            ))
+            .page(modules::modules_page(
+                AppState::try_read(cx).map_or(&[][..], AppState::modules),
             ))
             .page(about::about_page(view, self.copied));
         // Surfaces competing macOS event taps (a pointer-lag cause) and, in debug

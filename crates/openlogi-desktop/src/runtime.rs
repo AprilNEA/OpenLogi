@@ -295,8 +295,24 @@ impl Runtime {
     fn on_agent_update(&mut self, update: ipc::GuiUpdate, cx: &AsyncApp) {
         match update {
             ipc::GuiUpdate::Snapshot(snapshot) => {
+                // A new agent, or one that loaded another config, may run
+                // other modules: ask again.
+                let modules_moved = self.snapshot.as_ref().is_none_or(|last| {
+                    last.config_revision != snapshot.config_revision
+                        || last.status.agent_version != snapshot.status.agent_version
+                });
                 self.apply_snapshot(&snapshot, cx);
                 self.snapshot = Some(*snapshot);
+                if modules_moved {
+                    cx.update(|cx| {
+                        if let Some(state) = AppState::try_read(cx) {
+                            state.refresh_modules();
+                        }
+                    });
+                }
+            }
+            ipc::GuiUpdate::Modules(modules) => {
+                cx.update(|cx| AppState::apply(cx, |state| state.apply_modules(modules)));
             }
             ipc::GuiUpdate::Reconnecting => {
                 cx.update(|cx| AppState::apply(cx, AppState::agent_link_lost));

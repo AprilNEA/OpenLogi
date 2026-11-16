@@ -88,6 +88,8 @@ pub(crate) enum StateEvent {
     SettingsChanged,
     /// The `[flow]` configuration or a peer's link state changed.
     FlowChanged,
+    /// The key modules the agent reported changed.
+    ModulesChanged,
     /// The interface language switched live. Views re-render localized strings
     /// on the accompanying refresh; this event is for localized text *cached
     /// in state*, which must be recomputed in the new locale.
@@ -123,6 +125,7 @@ impl StateEvent {
             | Self::CameraPermissionChanged
             | Self::SettingsChanged
             | Self::FlowChanged
+            | Self::ModulesChanged
             | Self::LanguageChanged => None,
         }
     }
@@ -278,6 +281,7 @@ impl AppState {
             | StateEvent::DeviceConfigChanged(_)
             | StateEvent::SettingsChanged
             | StateEvent::FlowChanged
+            | StateEvent::ModulesChanged
             | StateEvent::LanguageChanged => {
                 topic(event) && event.device().is_none_or(|key| self.is_current_device(key))
             }
