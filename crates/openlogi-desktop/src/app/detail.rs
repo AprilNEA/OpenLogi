@@ -422,13 +422,9 @@ fn pointer_tab(
     let pal = theme::palette(cx);
     let touchpad_scroll_only = AppState::try_read(cx).is_some_and(|state| {
         state.current_record().is_some_and(|record| {
-            record.kind.is_keyboard_family()
-                && record.capabilities.is_some_and(|caps| {
-                    caps.scroll_inversion
-                        && !caps.hires_wheel
-                        && !caps.pointer
-                        && !caps.pointer_scaling
-                })
+            record.capabilities.is_some_and(|caps| {
+                caps.scroll_inversion && !caps.hires_wheel && !caps.pointer && !caps.pointer_scaling
+            })
         })
     });
     tab_body(
@@ -446,7 +442,7 @@ fn pointer_tab(
                     dpi_panel.clone().into_any_element(),
                 )
                 .fill(),
-            )))
+            ).debug_selector(|| "pointer-tuning-card".into())))
             .children((!touchpad_scroll_only).then(|| pointer_grid_card(
                 PanelCard::new(
                     tr!("pointer.smartshift"),
@@ -454,7 +450,7 @@ fn pointer_tab(
                     smartshift_panel.clone().into_any_element(),
                 )
                 .fill(),
-            )))
+            ).debug_selector(|| "smartshift-card".into())))
             .child(
                 div()
                     .min_w(POINTER_CARD_MIN_W)
@@ -464,7 +460,7 @@ fn pointer_tab(
             .children(onboard_card(pal, cx).map(pointer_grid_card))
             // Full width, so it always starts its own row at the bottom.
             .children((!touchpad_scroll_only).then(||
-                div().w_full().child(
+                div().w_full().debug_selector(|| "momentum-card".into()).child(
                     PanelCard::new(
                         tr!("pointer.momentum_title"),
                         Icon::empty().path("action-icons/mouse.svg"),
@@ -586,7 +582,7 @@ fn onboard_memory_control(
         })
 }
 
-fn pointer_grid_card(card: impl IntoElement) -> impl IntoElement {
+fn pointer_grid_card(card: impl IntoElement) -> gpui::Div {
     // At 100%, two cards plus one 16 px gap fit exactly inside the 720 px
     // window minimum after this tab's 20 px side insets, while still leaving a
     // usable slider: 332·2 + 16 + 20·2 = 720. In rems, the whole relationship
@@ -678,6 +674,7 @@ fn scrolling_card(
         (!inversion_supported || inversion_is_software || matches!(hires, HiresWheel::Here))
             .then(|| inversion_description(inversion_supported, inversion_is_software));
     let inversion_row = h_flex()
+        .debug_selector(|| "scroll-inversion-row".into())
         .justify_between()
         .items_center()
         .gap_4()
@@ -722,6 +719,7 @@ fn scrolling_card(
         HiresWheel::Nowhere => tr!("pointer.wheel_resolution_unsupported"),
     };
     let resolution_row = v_flex()
+        .debug_selector(|| "wheel-resolution-row".into())
         .gap_2()
         .child(
             v_flex()
