@@ -128,7 +128,7 @@ Per-application profiles switch with the focused app. An `[apps]` alias lets one
         <td width="50%"><b>SmartShift</b><ul><li>Wheel mode and sensitivity</li><li>Scrolling force on SmartShift Enhanced mice</li><li>A permanent-ratchet switch</li></ul></td>
     </tr>
     <tr>
-        <td colspan="2"><img src="https://assets.openlogi.org/screenshots/macos/light/cards/scrolling.png" width="820" alt="Scrolling card with inversion, wheel resolution, and smooth wheel"><br><b>Scrolling</b><ul><li>Scroll inversion per device, natively or in software</li><li>Wheel resolution and smooth wheel scrolling</li><li>Hold Back or Forward and roll the wheel to scroll sideways on mice without a thumb wheel</li></ul></td>
+        <td colspan="2"><img src="https://assets.openlogi.org/screenshots/macos/light/cards/scrolling.png" width="820" alt="Scrolling card with inversion, wheel resolution, and smooth wheel"><br><b>Scrolling</b><ul><li>Scroll inversion per device, natively (including the K400 Plus touchpad) or in software</li><li>Wheel resolution and smooth scrolling on supported wheels</li><li>Hold Back or Forward and roll the wheel to scroll sideways on mice without a thumb wheel</li></ul></td>
     </tr>
 </table>
 
