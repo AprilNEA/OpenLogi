@@ -578,6 +578,7 @@ fn cards_sit_straight_above_or_beside_their_keys_when_there_is_room() {
         );
         assert_eq!(layout.leaders[i].len(), 2, "leader {i} is not straight");
     }
+    assert_eq!(layout.cards.len(), markers.len());
     for (i, card) in layout
         .cards
         .iter()
