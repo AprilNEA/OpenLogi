@@ -13,14 +13,15 @@
 //! with big-endian `u16` fields and the JPEG from byte 20; continuation
 //! packets carry the rest from byte 5. `part` is the packet's 1-based index
 //! `| 0x20`, `| 0x80` on the first packet and `| 0x40` on the last. The device
-//! acknowledges the image with `13 ff 02 2b [part] [status…]`: the last
-//! packet's part byte without its `0x20` marker, then `00 01` when it took the
-//! image.
+//! acknowledges every packet with `13 ff 02 2b [index | 0xc0] [status…]`,
+//! whatever flags the packet carried: `00 00` while more is to come, and
+//! `00 01` on the last packet when it took the image.
 //!
 //! The layout follows `node-logitech-mx-creative-console` (MIT), and was
 //! verified on hardware with `openlogi-hid`'s `mx_keypad_lcd_probe` (2026-10):
 //! single-packet JPEG tiles at the registry's key positions filled each key
-//! edge to edge, each answered by `13 ff 02 2b c1 00 01`. Where the panel's
+//! edge to edge, each answered by `13 ff 02 2b c1 00 01`; a two-packet photo
+//! tile (2026-11) was answered `c1 00 00`, then `c2 00 01`. Where the panel's
 //! keys sit is the product's identity fact, owned by
 //! [`openlogi_device_registry::keypad`].
 
@@ -43,8 +44,13 @@ const IMAGE_HEADER: [u8; 4] = output_header(VendorFunction::Image);
 const PACKET_LEN: usize = 4095;
 const FIRST_HEADER_LEN: usize = 20;
 const NEXT_HEADER_LEN: usize = 5;
-/// Marks every part byte; the acknowledgement echoes the part without it.
+/// Marks every part byte. An acknowledgement carries the packet's index with
+/// both [`FIRST_PART`] and [`LAST_PART`] instead ([`echoed_part`]).
 const PART_MARKER: u8 = 0x20;
+/// Set in the part byte of a write's first packet.
+const FIRST_PART: u8 = 0x80;
+/// Set in the part byte of a write's last packet.
+const LAST_PART: u8 = 0x40;
 /// The status bytes after the echoed part when the device took the image —
 /// the only status the hardware has been seen to send.
 const ACK_ACCEPTED: [u8; 2] = [0x00, 0x01];
@@ -105,9 +111,14 @@ pub async fn write_key_image_on(
         .key_origin(key.position())
         .ok_or_else(|| WriteError::Hidpp(format!("{key:?} is off the panel's key grid")))?;
     let packets = image_packets(origin, display.key_size, image);
-    // `image_packets` always yields the first packet; the ack echoes the
-    // last one's part.
-    let ack_part = packets[packets.len() - 1][4] & !PART_MARKER;
+    // The image's ack is its last packet's, whose index is the packet count.
+    let last_index = u8::try_from(packets.len()).map_err(|_| {
+        WriteError::Hidpp(format!(
+            "{} image packets are more than a part byte can number",
+            packets.len()
+        ))
+    })?;
+    let ack_part = echoed_part(last_index);
 
     let channel = shared.channel();
     let (ack_tx, ack_rx) = oneshot::channel();
@@ -166,12 +177,19 @@ fn image_ack(report: &[u8], ack_part: u8) -> Option<Result<(), [u8; 2]>> {
 fn part_byte(index: u8, count: usize) -> u8 {
     let mut byte = index | PART_MARKER;
     if index == 1 {
-        byte |= 0x80;
+        byte |= FIRST_PART;
     }
     if usize::from(index) == count {
-        byte |= 0x40;
+        byte |= LAST_PART;
     }
     byte
+}
+
+/// The part byte the device's acknowledgement of packet `index` carries: the
+/// index with both the first- and last-packet flags set, so only a
+/// one-packet write's ack equals its own part byte without the marker.
+fn echoed_part(index: u8) -> u8 {
+    index | FIRST_PART | LAST_PART
 }
 
 fn packet_header(part: u8) -> [u8; 5] {

@@ -149,10 +149,12 @@ fn only_a_wired_keypad_with_display_keys_has_a_key_display() {
 #[test]
 fn only_a_vendor_image_report_for_this_write_counts_as_an_ack() {
     // A single-packet write's part is 0xe1; the ack echoes it as 0xc1.
-    let part = 0xe1 & !PART_MARKER;
+    let part = echoed_part(1);
+    assert_eq!(part, 0xe1 & !PART_MARKER);
     assert_eq!(image_ack(&hardware_ack(), part), Some(Ok(())));
-    // The last packet of a three-packet write is 0x63, echoed as 0x43.
-    assert_eq!(image_ack(&hardware_ack(), 0x63 & !PART_MARKER), None);
+    // The last packet of a three-packet write is 0x63, echoed as 0xc3: the
+    // ack of its first packet is not the image's.
+    assert_eq!(image_ack(&hardware_ack(), echoed_part(3)), None);
     // A grid-key press shares the channel, not the function.
     assert_eq!(
         image_ack(&[0x13, 0xff, 0x02, 0x00, 0xc1, 0x00, 0x01], part),
@@ -202,6 +204,54 @@ async fn a_written_tile_lands_at_its_key_and_completes_on_the_ack() {
     assert_eq!(images.len(), 1);
     // Bottom-middle is row 2, column 1: (23 + 158, 6 + 2·158).
     assert_eq!(images[0][9..13], [0x00, 0xb5, 0x01, 0x42]);
+}
+
+/// A keypad that acknowledges each image packet as the hardware does: its
+/// index with both part flags set, `00 00` while more is to come and `00 01`
+/// on the last.
+async fn acknowledging_each_packet() -> (SharedChannel, ReplayChannelHandle) {
+    let (raw, handle) = ScriptedRawHidChannel::with_dynamic_responder(|request| {
+        let part = *request.get(4)?;
+        (request.first() == Some(&IMAGE_HEADER[0])).then(|| {
+            let mut ack = vec![0u8; 32];
+            let status = u8::from(part & LAST_PART != 0);
+            ack[..7].copy_from_slice(&[
+                0x13,
+                0xff,
+                0x02,
+                0x2b,
+                echoed_part(part & 0x1f),
+                0x00,
+                status,
+            ]);
+            ack
+        })
+    });
+    (
+        SharedChannel::new(scripted_channel(raw).await, KEYPAD),
+        handle,
+    )
+}
+
+#[tokio::test]
+async fn a_photo_tile_spanning_packets_completes_on_its_last_packets_ack() {
+    // 8000 bytes take two packets, like the photo tile the hardware answered
+    // `c1 00 00`, then `c2 00 01`; 12000 take three.
+    for (len, expected) in [(8000, &[0xa1, 0x62][..]), (12000, &[0xa1, 0x22, 0x63])] {
+        let (shared, handle) = acknowledging_each_packet().await;
+
+        write_key_image_on(&shared, display(), GridKey::Middle, &jpeg(len))
+            .await
+            .unwrap();
+
+        let parts: Vec<u8> = handle
+            .written_reports()
+            .into_iter()
+            .filter(|report| report.first() == Some(&IMAGE_HEADER[0]))
+            .map(|report| report[4])
+            .collect();
+        assert_eq!(parts, expected, "{len} bytes");
+    }
 }
 
 #[tokio::test(start_paused = true)]
