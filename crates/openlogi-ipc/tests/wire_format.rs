@@ -59,10 +59,10 @@ use openlogi_ipc::{
     AgentResponse, AgentSnapshot, AgentStatus, BacklightObservation, ChosenLight, ClientKind,
     ConfigReloadError, FlowIdentity, FlowLinkState, FlowPairTarget, FlowPairingCommandError,
     FlowPairingFailure, FlowPairingPeer, FlowPairingPhase, FlowPeerStatus, FlowPlatform,
-    FlowStatus, ForegroundApps, FoundDevice, Identity, InventoryHealth, LockKeyChange,
-    LockKeyObservation, MonitorEvent, Notice, NoticeKind, NoticeObservation, Observation,
-    ObservedLight, PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase,
-    PairingUpdate, RingObservation, SavedConfig, SavedConfigVerdict, SecureInput,
+    FlowStatus, ForegroundApps, FoundDevice, Identity, InventoryHealth, KeyImageError,
+    LockKeyChange, LockKeyObservation, MonitorEvent, Notice, NoticeKind, NoticeObservation,
+    Observation, ObservedLight, PROTOCOL_VERSION, PairingCommandError, PairingFailure,
+    PairingPhase, PairingUpdate, RingObservation, SavedConfig, SavedConfigVerdict, SecureInput,
     VirtualKeyboardStatus,
 };
 use succession::{Compat, Run};
@@ -119,7 +119,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// unreleased version and leave this pin alone (`crates/openlogi-ipc/AGENTS.md`).
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 46);
+    assert_eq!(PROTOCOL_VERSION, 47);
 }
 
 #[test]
@@ -616,6 +616,49 @@ fn keypad_page_actions_and_slots() {
         }),
         "1070616765323a677269644d6964646c65",
     );
+}
+
+/// The key image calls are appended after `action_ring_unhover`; the key
+/// crosses the wire by its persisted name and the image as its bytes.
+#[test]
+fn key_image_calls() {
+    let route = DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xc354,
+    };
+    let key = ButtonId::Grid(GridSlot {
+        page: KeypadPage::new(2).expect("page 2 exists"),
+        key: GridKey::Middle,
+    });
+    assert_wire(
+        &AgentRequest::SetKeyImage {
+            route: route.clone(),
+            key,
+            image: vec![0xff, 0xd8, 0xff],
+        },
+        "3a02fb6d04fb54c31070616765323a677269644d6964646c6503ffd8ff",
+    );
+    assert_wire(
+        &AgentRequest::ClearKeyImage { route, key },
+        "3b02fb6d04fb54c31070616765323a677269644d6964646c65",
+    );
+    assert_wire(&Ok::<(), KeyImageError>(()), "00");
+    assert_wire(&KeyImageError::DeviceNotFound, "00");
+    assert_wire(&KeyImageError::NoKeyDisplay, "01");
+    assert_wire(&KeyImageError::NotAGridKey, "02");
+    assert_wire(
+        &KeyImageError::PageOutOfRange {
+            pages: KeypadPage::new(3).expect("page 3 exists"),
+        },
+        "0303",
+    );
+    assert_wire(
+        &KeyImageError::TooLarge {
+            max: 4 * 1024 * 1024,
+        },
+        "04fc00004000",
+    );
+    assert_wire(&KeyImageError::Undecodable("bad".into()), "0503626164");
 }
 
 /// A G-key's slot and an M key cross the wire by their persisted names.

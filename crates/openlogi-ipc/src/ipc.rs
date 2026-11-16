@@ -13,7 +13,9 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::{ActionRingIcon, ActionRingSize, ActionRingSlot};
+use openlogi_core::binding::{
+    ActionRingIcon, ActionRingSize, ActionRingSlot, ButtonId, KeypadPage,
+};
 use openlogi_core::config::{ConfigRevision, FlowPeerName, FlowPublicKey, Lighting};
 use openlogi_core::device::{
     BatteryInfo, ChangedOnLight, DeviceInventory, DeviceKind, LightState, LockKey, StandaloneDevice,
@@ -194,7 +196,10 @@ pub use succession::Identity;
 ///      and `ActionRingIcon::{Channel1, Channel2, Channel3}` appended after
 ///      them — a device's move to another Easy-Switch channel, bound to a
 ///      button or an Actions Ring slot.
-pub const PROTOCOL_VERSION: u32 = 46;
+/// v47: `Agent::{set_key_image, clear_key_image}` and [`KeyImageError`]
+///      appended: an image supplied at runtime that a keypad LCD key shows
+///      in place of its binding's glyph, held in the agent's memory only.
+pub const PROTOCOL_VERSION: u32 = 47;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -207,6 +212,49 @@ pub const RUN_ENV: &str = "OPENLOGI_RUN";
 pub struct ConfigReloadError {
     /// Actionable config error including path and TOML location when known.
     pub message: String,
+}
+
+/// The largest image, in bytes, that [`Agent::set_key_image`] accepts.
+pub const MAX_KEY_IMAGE_BYTES: u32 = 4 * 1024 * 1024;
+
+/// Refuse an image of `len` bytes with [`KeyImageError::TooLarge`] when it is
+/// larger than [`MAX_KEY_IMAGE_BYTES`]. The agent applies it, and a client
+/// applies it before reading or sending, so an oversized file fails with this
+/// error rather than a dropped connection.
+pub fn check_key_image_size(len: usize) -> Result<(), KeyImageError> {
+    if u64::try_from(len).is_ok_and(|len| len <= u64::from(MAX_KEY_IMAGE_BYTES)) {
+        Ok(())
+    } else {
+        Err(KeyImageError::TooLarge {
+            max: MAX_KEY_IMAGE_BYTES,
+        })
+    }
+}
+
+/// Why the agent refused [`Agent::set_key_image`] or
+/// [`Agent::clear_key_image`].
+///
+/// Append new variants only: the enum crosses the bincode IPC.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+pub enum KeyImageError {
+    /// The agent knows no device at the route.
+    #[error("no device is known at that route")]
+    DeviceNotFound,
+    /// The device has no keys that show images.
+    #[error("the device has no keys that show images")]
+    NoKeyDisplay,
+    /// The key is not one of a keypad's grid keys.
+    #[error("the key is not a keypad grid key")]
+    NotAGridKey,
+    /// The key's page is past the keypad's last page, `pages`.
+    #[error("the keypad has no page past page {pages}")]
+    PageOutOfRange { pages: KeypadPage },
+    /// The image is larger than `max` bytes ([`MAX_KEY_IMAGE_BYTES`]).
+    #[error("the image is larger than {max} bytes")]
+    TooLarge { max: u32 },
+    /// The image is not a PNG or JPEG the agent could decode.
+    #[error("the image could not be read: {0}")]
+    Undecodable(String),
 }
 
 /// Where the agent's device enumeration stands. The distinction matters
@@ -1263,4 +1311,23 @@ pub trait Agent {
     /// held trigger cancels instead of choosing the slot last reported by
     /// [`Agent::action_ring_hover`].
     async fn action_ring_unhover(session_id: u64) -> Result<(), ActionRingCommandError>;
+    /// Show `image`, a PNG or JPEG of at most [`MAX_KEY_IMAGE_BYTES`] and at
+    /// most 4096 pixels on a side, on the LCD key `key` of the keypad on
+    /// `route` in place of its binding's glyph. `key` is a grid key on one
+    /// of the keypad's pages ([`ButtonId::Grid`]); the image shows while
+    /// that page is current.
+    ///
+    /// The agent turns the image upright as its EXIF orientation says, crops
+    /// it to a centred square, and scales it to the key. The key still runs
+    /// its binding when pressed. The image is held in the agent's memory
+    /// only: it lasts until [`Agent::clear_key_image`] or the agent exits,
+    /// and a new image for the same key replaces it.
+    async fn set_key_image(
+        route: DeviceRoute,
+        key: ButtonId,
+        image: Vec<u8>,
+    ) -> Result<(), KeyImageError>;
+    /// Show the binding's glyph on `key` again. Clearing a key that shows no
+    /// image succeeds.
+    async fn clear_key_image(route: DeviceRoute, key: ButtonId) -> Result<(), KeyImageError>;
 }

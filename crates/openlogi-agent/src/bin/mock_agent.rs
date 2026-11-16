@@ -57,7 +57,7 @@ use openlogi_agent_core::backlight_overlay::BacklightOverlayManager;
 use openlogi_agent_core::lock_keys::LockKeyIndicator;
 use openlogi_agent_core::notices::{LowBatteryWatch, NoticeBoard};
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::ActionRingSlot;
+use openlogi_core::binding::{ActionRingSlot, ButtonId};
 use openlogi_core::config::{AppSettings, Config, Lighting};
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind, LockKey,
@@ -76,9 +76,9 @@ use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus,
     BacklightObservation, ClientKind, ConfigReloadError, FlowIdentity, FlowPairTarget,
     FlowPairingCommandError, ForegroundApps, FoundDevice, Generation, Identity, InventoryHealth,
-    LockKeyChange, LockKeyObservation, MonitorEvent, NoticeKind, NoticeObservation, OBSERVE_HOLD,
-    Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase,
-    PairingUpdate, RingObservation, SavedConfig, SavedConfigVerdict,
+    KeyImageError, LockKeyChange, LockKeyObservation, MonitorEvent, NoticeKind, NoticeObservation,
+    OBSERVE_HOLD, Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase,
+    PairingUpdate, RingObservation, SavedConfig, SavedConfigVerdict, check_key_image_size,
 };
 use succession::Compat;
 use tarpc::context::Context;
@@ -667,6 +667,19 @@ impl State {
             .iter_mut()
             .find(|settings| settings.route == *route)
             .ok_or(WriteError::DeviceNotFound)
+    }
+
+    /// Refuse a key image change for a device the mock does not know, or one
+    /// whose keys show no images. The mock decodes nothing and keeps no
+    /// pages, so it never refuses an image as undecodable or a page as out of
+    /// range.
+    fn check_key_image_target(&self, route: &DeviceRoute) -> Result<(), KeyImageError> {
+        self.settings_for(route)
+            .map_err(|_| KeyImageError::DeviceNotFound)?;
+        if openlogi_hid::key_display_for(route).is_none() {
+            return Err(KeyImageError::NoKeyDisplay);
+        }
+        Ok(())
     }
 
     /// Whether `route` answers: it is online, and the console has not made it
@@ -1602,6 +1615,41 @@ impl Agent for MockAgent {
         _session_id: u64,
     ) -> Result<(), ActionRingCommandError> {
         Err(ActionRingCommandError::SessionNotFound)
+    }
+
+    async fn set_key_image(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        key: ButtonId,
+        image: Vec<u8>,
+    ) -> Result<(), KeyImageError> {
+        key.grid_slot().ok_or(KeyImageError::NotAGridKey)?;
+        check_key_image_size(image.len())?;
+        self.state.lock().await.check_key_image_target(&route)?;
+        info!(
+            %route,
+            key = %key.config_name(),
+            bytes = image.len(),
+            "set_key_image (no-op in the mock)"
+        );
+        Ok(())
+    }
+
+    async fn clear_key_image(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        key: ButtonId,
+    ) -> Result<(), KeyImageError> {
+        key.grid_slot().ok_or(KeyImageError::NotAGridKey)?;
+        self.state.lock().await.check_key_image_target(&route)?;
+        info!(
+            %route,
+            key = %key.config_name(),
+            "clear_key_image (no-op in the mock)"
+        );
+        Ok(())
     }
 }
 

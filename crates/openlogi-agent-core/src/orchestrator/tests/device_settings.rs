@@ -1508,3 +1508,146 @@ fn page_turns_need_pages_and_a_removed_page_falls_back_to_the_first() {
     orch.config.set_keypad_pages("keypad", page(1));
     assert_eq!(orch.keypad_page("keypad"), page(1));
 }
+
+/// The route [`wired_keypad`] reaches the keypad by.
+fn keypad_route() -> DeviceRoute {
+    let keypad = &openlogi_device_registry::keypad::KEYPADS[0];
+    DeviceRoute::Direct {
+        vendor_id: keypad.vendor_id,
+        product_id: keypad.product_id,
+    }
+}
+
+/// The face `key` shows in the key-display specs `orch` last published.
+fn published_face(orch: &Orchestrator, key: GridKey) -> crate::watchers::key_display::KeyFace {
+    let specs = orch.shared.key_display_specs.borrow();
+    let [spec] = specs.as_slice() else {
+        panic!("one keypad publishes one spec: {specs:?}");
+    };
+    spec.faces[&key].clone()
+}
+
+/// An image stands in for one key's glyph on its own page only, other keys
+/// keep theirs, and clearing it brings the glyph back. What the key
+/// dispatches never changes.
+#[test]
+fn a_key_image_replaces_one_glyph_on_its_page_until_cleared() {
+    use crate::runtime::PageTurn;
+    use crate::watchers::key_display::{KeyFace, KeyImage};
+    use openlogi_core::binding::{ActionRingIcon, GridSlot};
+    let icon = |action: Action| KeyFace::Icon(ActionRingIcon::for_action(&action));
+    let mut orch = paged_keypad();
+    let image = KeyImage::solid(8, [255, 0, 0]);
+    let slot = GridSlot {
+        page: page(2),
+        key: GridKey::Middle,
+    };
+
+    orch.set_key_image(&keypad_route(), slot, image.clone())
+        .unwrap();
+    assert_eq!(
+        published_face(&orch, GridKey::Middle),
+        icon(Action::Copy),
+        "page 1 is current"
+    );
+
+    orch.turn_keypad_page(Some("keypad"), PageTurn::Next);
+    assert_eq!(
+        published_face(&orch, GridKey::Middle),
+        KeyFace::Image(image)
+    );
+    assert_eq!(published_face(&orch, GridKey::TopLeft), icon(Action::Undo));
+    assert_eq!(
+        sole_keyboard_spec(&orch)
+            .expect("bound keys publish a spec")
+            .bindings
+            .get(&ButtonId::grid(GridKey::Middle)),
+        Some(&Binding::Single(Action::Paste)),
+        "the key still runs its binding"
+    );
+
+    orch.clear_key_image(&keypad_route(), slot).unwrap();
+    assert_eq!(published_face(&orch, GridKey::Middle), icon(Action::Paste));
+    orch.clear_key_image(&keypad_route(), slot)
+        .expect("clearing a key without an image succeeds");
+    assert!(orch.key_images.is_empty());
+}
+
+/// An image is set only on a known device whose keys show images, and only
+/// on one of its pages; a refusal changes nothing. A page the config has
+/// since removed can still be cleared.
+#[test]
+fn a_key_image_needs_a_keypad_and_one_of_its_pages() {
+    use crate::watchers::key_display::KeyImage;
+    use openlogi_core::binding::GridSlot;
+    use openlogi_ipc::KeyImageError;
+    let mut orch = paged_keypad();
+    orch.devices.push(dev("mouse", 1, true));
+    let image = KeyImage::solid(8, [255, 0, 0]);
+    let slot = |number, key| GridSlot {
+        page: page(number),
+        key,
+    };
+
+    assert_eq!(
+        orch.set_key_image(&keypad_route(), slot(3, GridKey::Middle), image.clone()),
+        Err(KeyImageError::PageOutOfRange { pages: page(2) })
+    );
+    let unknown = DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0x0001,
+    };
+    assert_eq!(
+        orch.set_key_image(&unknown, slot(1, GridKey::Middle), image.clone()),
+        Err(KeyImageError::DeviceNotFound)
+    );
+    assert_eq!(
+        orch.clear_key_image(&unknown, slot(1, GridKey::Middle)),
+        Err(KeyImageError::DeviceNotFound)
+    );
+    let mouse = bolt(1);
+    assert_eq!(
+        orch.set_key_image(&mouse, slot(1, GridKey::Middle), image.clone()),
+        Err(KeyImageError::NoKeyDisplay)
+    );
+    assert_eq!(
+        orch.clear_key_image(&mouse, slot(1, GridKey::Middle)),
+        Err(KeyImageError::NoKeyDisplay)
+    );
+    assert!(orch.key_images.is_empty());
+
+    orch.set_key_image(&keypad_route(), slot(2, GridKey::Middle), image)
+        .unwrap();
+    orch.config.set_keypad_pages("keypad", page(1));
+    orch.clear_key_image(&keypad_route(), slot(2, GridKey::Middle))
+        .unwrap();
+    assert!(orch.key_images.is_empty());
+}
+
+/// An image belongs to the keypad, not to one connection: it is shown
+/// again, in full, when the keypad comes back.
+#[test]
+fn a_key_image_outlives_a_reconnect() {
+    use crate::watchers::key_display::{KeyFace, KeyImage};
+    use openlogi_core::binding::GridSlot;
+    let mut orch = orchestrator(Config::default());
+    let online = [keypad_inventory(true)];
+    orch.refresh_inventory(&online, &[], false);
+    let image = KeyImage::solid(8, [0, 0, 255]);
+    let slot = GridSlot {
+        page: page(1),
+        key: GridKey::BottomRight,
+    };
+    orch.set_key_image(&keypad_route(), slot, image.clone())
+        .unwrap();
+    let before = panel_generation(&orch);
+
+    orch.refresh_inventory(&[keypad_inventory(false)], &[], false);
+    orch.refresh_inventory(&online, &[], false);
+
+    assert_ne!(panel_generation(&orch), before, "the panel is repainted");
+    assert_eq!(
+        published_face(&orch, GridKey::BottomRight),
+        KeyFace::Image(image)
+    );
+}
