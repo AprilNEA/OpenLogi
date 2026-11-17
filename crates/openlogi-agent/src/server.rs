@@ -627,8 +627,7 @@ impl Agent for AgentServer {
             &self.orchestrator,
             &self.key_image_changes,
             &route,
-            key,
-            image,
+            decode_key_image(key, image),
         )
         .await?;
         info!(%route, key = %slot.config_name(), bytes, "set_key_image");
@@ -652,18 +651,18 @@ impl Agent for AgentServer {
     }
 }
 
-/// Decode `image` and show it on `key` of the keypad on `route`, holding
-/// `changes` throughout: a slow decode then cannot land after a later set or
-/// clear of the same key.
+/// Run `decoded`, an image's decode ([`decode_key_image`]), and show the
+/// image on its key of the keypad on `route`, holding `changes` throughout:
+/// a slow decode then cannot land after a later set or clear of the same
+/// key. The decode does nothing until it is awaited here, in turn.
 async fn set_key_image_in(
     orchestrator: &Mutex<Orchestrator>,
     changes: &Mutex<()>,
     route: &DeviceRoute,
-    key: ButtonId,
-    image: Vec<u8>,
+    decoded: impl Future<Output = Result<(GridSlot, KeyImage), KeyImageError>>,
 ) -> Result<GridSlot, KeyImageError> {
     let _turn = changes.lock().await;
-    let (slot, image) = decode_key_image(key, image).await?;
+    let (slot, image) = decoded.await?;
     orchestrator
         .lock()
         .await
@@ -1513,40 +1512,44 @@ mod tests {
         );
     }
 
+    /// The longest a key image test waits for the agent before failing.
+    const WAIT: Duration = Duration::from_secs(5);
+
     /// A 2 by 2 opaque red PNG.
     const RED_PNG: &[u8] = b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR\x00\x00\x00\x02\x00\x00\x00\x02\x08\x02\x00\x00\x00\xfd\xd4\x9a\x73\x00\x00\x00\x10IDAT\x78\x9c\x63\xf8\xcf\xc0\x00\x44\x0c\x10\x0a\x00\x1f\xee\x03\xfd\x8b\x5f\x14\xd4\x00\x00\x00\x00IEND\xae\x42\x60\x82";
 
     #[tokio::test]
     async fn a_key_image_is_refused_before_the_orchestrator_is_asked() {
+        let decode = |key: ButtonId, image: Vec<u8>| async move {
+            tokio::time::timeout(WAIT, decode_key_image(key, image))
+                .await
+                .expect("the image is decoded or refused in time")
+        };
         let middle: ButtonId = "page2:gridMiddle".parse().unwrap();
-        let (slot, _) = decode_key_image(middle, RED_PNG.to_vec()).await.unwrap();
+        let (slot, _) = decode(middle, RED_PNG.to_vec()).await.unwrap();
         assert_eq!(slot.config_name(), "page2:gridMiddle");
 
         assert_eq!(
-            decode_key_image(ButtonId::MiddleClick, RED_PNG.to_vec())
+            decode(ButtonId::MiddleClick, RED_PNG.to_vec())
                 .await
                 .unwrap_err(),
             KeyImageError::NotAGridKey
         );
         let oversized = vec![0; usize::try_from(openlogi_ipc::MAX_KEY_IMAGE_BYTES).unwrap() + 1];
         assert_eq!(
-            decode_key_image(middle, oversized).await.unwrap_err(),
+            decode(middle, oversized).await.unwrap_err(),
             KeyImageError::TooLarge {
                 max: openlogi_ipc::MAX_KEY_IMAGE_BYTES
             }
         );
         assert!(matches!(
-            decode_key_image(middle, b"not an image".to_vec()).await,
+            decode(middle, b"not an image".to_vec()).await,
             Err(KeyImageError::Undecodable(_))
         ));
     }
 
-    /// A clear sent while an earlier set is still decoding is the last word:
-    /// the set lands first and the clear removes it, never the other way.
-    #[tokio::test]
-    async fn a_key_image_cleared_while_it_decodes_stays_cleared() {
-        use openlogi_agent_core::watchers::key_display::KeyFace;
-        use openlogi_core::binding::GridKey;
+    /// An orchestrator with one wired MX Creative Keypad, and its route.
+    fn keypad_orchestrator() -> (Orchestrator, DeviceRoute) {
         use openlogi_core::device::{
             Capabilities, DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports,
             PairedDevice, ReceiverInfo,
@@ -1586,6 +1589,17 @@ mod tests {
         let observable = Arc::new(ObservableState::new("test".to_string()));
         let mut orchestrator = Orchestrator::new(Config::default(), observable);
         orchestrator.refresh_inventory(&[keypad], &[], false);
+        (orchestrator, route)
+    }
+
+    /// A clear sent while an earlier set is still decoding is the last word:
+    /// the set lands first and the clear removes it, never the other way.
+    #[tokio::test]
+    async fn a_key_image_cleared_while_it_decodes_stays_cleared() {
+        use openlogi_agent_core::watchers::key_display::KeyFace;
+        use openlogi_core::binding::GridKey;
+
+        let (orchestrator, route) = keypad_orchestrator();
         let specs = orchestrator.shared().key_display_specs;
         let orchestrator = Arc::new(Mutex::new(orchestrator));
         let changes = Arc::new(Mutex::new(()));
@@ -1598,24 +1612,64 @@ mod tests {
             matches!(spec.faces[&GridKey::Middle], KeyFace::Image(_))
         };
 
-        set_key_image_in(&orchestrator, &changes, &route, middle, RED_PNG.to_vec())
-            .await
-            .unwrap();
+        tokio::time::timeout(
+            WAIT,
+            set_key_image_in(
+                &orchestrator,
+                &changes,
+                &route,
+                decode_key_image(middle, RED_PNG.to_vec()),
+            ),
+        )
+        .await
+        .expect("a set alone finishes in time")
+        .unwrap();
         assert!(shows_image(), "a set alone shows the image");
 
+        // A set whose decode the test holds until the clear has started.
+        let (decoding, entered) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel::<()>();
         let set = tokio::spawn({
             let (orchestrator, changes, route) =
                 (orchestrator.clone(), changes.clone(), route.clone());
             async move {
-                set_key_image_in(&orchestrator, &changes, &route, middle, RED_PNG.to_vec()).await
+                let decoded = async move {
+                    let _ = decoding.send(());
+                    let _ = released.await;
+                    decode_key_image(middle, RED_PNG.to_vec()).await
+                };
+                set_key_image_in(&orchestrator, &changes, &route, decoded).await
             }
         });
-        // Let the set reach its decode before the clear is sent.
-        tokio::task::yield_now().await;
-        clear_key_image_in(&orchestrator, &changes, &route, middle)
+        tokio::time::timeout(WAIT, entered)
             .await
+            .expect("the set reaches its decode in time")
             .unwrap();
-        set.await.unwrap().unwrap();
+        let mut clear = tokio::spawn({
+            let (orchestrator, changes, route) =
+                (orchestrator.clone(), changes.clone(), route.clone());
+            async move { clear_key_image_in(&orchestrator, &changes, &route, middle).await }
+        });
+        // On this single-threaded runtime the clear runs as soon as the test
+        // waits, so a clear that did not wait for the decoding set would be
+        // done well before this expires.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut clear)
+                .await
+                .is_err(),
+            "the clear finished while the set was still decoding"
+        );
+        release.send(()).unwrap();
+        tokio::time::timeout(WAIT, set)
+            .await
+            .expect("the set finishes in time")
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(WAIT, clear)
+            .await
+            .expect("the clear finishes in time")
+            .unwrap()
+            .unwrap();
 
         assert!(!shows_image(), "the clear came last");
     }
