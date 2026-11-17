@@ -663,12 +663,16 @@ mod tests {
         let restart = started + timings.first_restart;
         assert_eq!(host.next_restart(), Some(restart));
 
-        host.hold(&mut run_rx).await;
+        tokio::time::timeout(Duration::from_secs(5), host.hold(&mut run_rx))
+            .await
+            .expect("the host holds in time");
         tokio::time::advance(timings.first_restart + Duration::from_secs(1)).await;
         assert!(Instant::now() > restart, "the old deadline has passed");
         assert_eq!(host.next_restart(), None, "a held host wakes for nothing");
 
-        host.resume().await;
+        tokio::time::timeout(Duration::from_secs(5), host.resume())
+            .await
+            .expect("the host resumes in time");
         assert_eq!(
             host.next_restart(),
             Some(restart),

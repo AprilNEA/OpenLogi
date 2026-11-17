@@ -770,9 +770,12 @@ mod tests {
         ] {
             let (mut run, mut received) = detached_run();
             let before = stage.clone();
-            let next = run
-                .handle(Incoming::Ready { protocol: 2 }, &mut stage)
-                .await;
+            let next = tokio::time::timeout(
+                Duration::from_secs(5),
+                run.handle(Incoming::Ready { protocol: 2 }, &mut stage),
+            )
+            .await
+            .expect("the ready is handled in time");
             let Next::End(error) = next else {
                 panic!("a ready in protocol 2 must end the run while {before:?}");
             };
