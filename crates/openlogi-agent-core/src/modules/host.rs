@@ -416,8 +416,12 @@ impl Supervisor {
         }
     }
 
-    /// The earliest pending restart.
+    /// The earliest pending restart. A held host has none: it starts
+    /// nothing until it resumes.
     fn next_restart(&self) -> Option<Instant> {
+        if self.held {
+            return None;
+        }
         self.modules.values().filter_map(Module::restart_at).min()
     }
 
@@ -605,5 +609,64 @@ impl Supervisor {
 fn settle(id: &ModuleId, module: &mut Module, event: LifeEvent, now: Instant) {
     if let Err(refused) = module.step(id, event, now) {
         debug!(module = %id, %refused, "module event refused");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::modules::child::{RunEnd, RunHandle};
+
+    /// A host stopped while a module waits out its restart delay has no
+    /// deadline to wake for, even once the delay has passed: it would
+    /// otherwise wake at once, start nothing, and wake again without end.
+    #[tokio::test(start_paused = true)]
+    async fn a_held_host_waits_for_no_restart() {
+        let timings = ModuleTimings::default();
+        let (run_events, _run_rx) = mpsc::channel(1);
+        let (events, _events_rx) = mpsc::channel(1);
+        let (_listening, listening_rx) = watch::channel(true);
+        let mut host = Supervisor::new(
+            None,
+            timings,
+            Arc::default(),
+            run_events,
+            events,
+            listening_rx,
+        );
+        let id = ModuleId::try_new("com.example.test".to_owned()).unwrap();
+        let mut module = Module::new(timings, 0);
+        let started = Instant::now();
+        let run = LiveRun {
+            handle: RunHandle::detached(),
+            generation: 1,
+            fingerprint: 0,
+            settings: toml::Table::new(),
+        };
+        module.step(&id, LifeEvent::Started(run), started).unwrap();
+        let end = RunEnd {
+            ready_for: None,
+            error: Some("exited with status 3".into()),
+        };
+        module
+            .step(&id, LifeEvent::Ended { generation: 1, end }, started)
+            .unwrap();
+        host.modules.insert(id, module);
+        let restart = started + timings.first_restart;
+        assert_eq!(host.next_restart(), Some(restart));
+
+        host.held = true;
+        tokio::time::advance(timings.first_restart + Duration::from_secs(1)).await;
+        assert!(Instant::now() > restart, "the old deadline has passed");
+        assert_eq!(host.next_restart(), None, "a held host wakes for nothing");
+
+        host.held = false;
+        assert_eq!(
+            host.next_restart(),
+            Some(restart),
+            "it is due again on resume"
+        );
     }
 }
