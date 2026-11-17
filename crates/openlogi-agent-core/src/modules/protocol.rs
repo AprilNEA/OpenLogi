@@ -348,8 +348,16 @@ fn parse_slot(name: &str) -> Result<GridSlot, ProtocolError> {
 /// JPEG within [`KeyImage::decode`]'s limits. Blocking work: run it on the
 /// blocking pool.
 pub(super) fn decode_image(data: &str) -> Result<KeyImage, String> {
-    // Refuse an oversized image before allocating its bytes.
-    check_key_image_size(data.len() / 4 * 3).map_err(|error| error.to_string())?;
+    // Refuse an oversized image before allocating its bytes: each four
+    // characters carry three bytes, less one for each `=` of padding.
+    let padding = data
+        .bytes()
+        .rev()
+        .take(2)
+        .take_while(|&byte| byte == b'=')
+        .count();
+    check_key_image_size((data.len() / 4 * 3).saturating_sub(padding))
+        .map_err(|error| error.to_string())?;
     let bytes = STANDARD
         .decode(data)
         .map_err(|error| format!("the image is not base64: {error}"))?;
@@ -590,6 +598,26 @@ pub(super) mod tests {
         let oversized = "A".repeat(6 * 1024 * 1024);
         assert!(
             decode_image(&oversized)
+                .unwrap_err()
+                .contains("larger than")
+        );
+    }
+
+    /// An image of exactly the allowed size passes the check made before
+    /// its bytes are decoded, although its padded base64 text is longer
+    /// than four thirds of it; one byte more does not.
+    #[test]
+    fn an_image_at_the_size_cap_is_not_refused_as_too_large() {
+        let cap = usize::try_from(openlogi_ipc::MAX_KEY_IMAGE_BYTES).unwrap();
+        let at_cap = STANDARD.encode(vec![0; cap]);
+        assert!(at_cap.ends_with("=="), "the cap needs padding: {cap}");
+        let error = decode_image(&at_cap).unwrap_err();
+        assert!(
+            error.contains("PNG or JPEG"),
+            "refused for its content, not its size: {error}"
+        );
+        assert!(
+            decode_image(&STANDARD.encode(vec![0; cap + 1]))
                 .unwrap_err()
                 .contains("larger than")
         );
