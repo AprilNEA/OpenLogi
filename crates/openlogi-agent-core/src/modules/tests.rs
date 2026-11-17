@@ -28,11 +28,13 @@ use crate::watchers::key_display::KeyImage;
 /// then stops reading, `closer` closes its input, answers, and keeps
 /// running, `one` draws `keypad-1`'s middle key, `spam` draws without end
 /// once it has keys, `wrapper` starts a `sleep` of its own and never
-/// answers, `helper` starts one and answers as `normal` does, and `orphan`
+/// answers, `helper` starts one and answers as `normal` does, `orphan`
 /// answers, then starts one that holds its output open and exits with
-/// status 4, and `racer` answers, draws with `big.b64` without reading its
-/// keys, and exits with status 5 a tenth of a second later. Each run notes its process id in `pids.log`, and
-/// each `sleep` its own in `sleep.pids`.
+/// status 4, `racer` answers, draws with `big.b64` without reading its
+/// keys, and exits with status 5 a tenth of a second later, and `burst`
+/// answers, draws without reading its keys, and exits with status 6 at
+/// once. Each run notes its process id in `pids.log`, and each `sleep` its
+/// own in `sleep.pids`.
 const SCRIPT: &str = r#"#!/bin/sh
 dir="$OPENLOGI_MODULE_DIR"
 mode="$(cat "$dir/mode")"
@@ -52,6 +54,10 @@ while IFS= read -r line; do
       [ "$mode" = closer ] && exec 0<&-
       printf '{"type":"log","level":"info","message":"hello from the test module"}\n'
       printf '{"type":"ready","protocol":1}\n'
+      if [ "$mode" = burst ]; then
+        printf '{"type":"image_all","png":"%s"}\n' "$png"
+        exit 6
+      fi
       if [ "$mode" = racer ]; then
         printf '{"type":"image_all","png":"%s"}\n' "$(cat "$dir/big.b64")"
         sleep 0.1
@@ -791,6 +797,45 @@ async fn a_module_that_exits_while_its_child_holds_its_output_restarts() {
         host.events()
             .contains(&ModuleEvent::Stopped { module: id() }),
         "the agent heard the first run end: {:?}",
+        host.events()
+    );
+    host.shutdown().await;
+}
+
+/// A module that answers, draws, and exits at once ends each run the same
+/// way whichever the run notices first, the exit or the `ready`: its image
+/// arrives, and the run counts as one that got ready, so the module keeps
+/// restarting and is never marked failed.
+#[tokio::test]
+async fn a_module_that_draws_and_exits_at_once_counts_as_ready_every_run() {
+    let host = Harness::start(
+        "burst",
+        plan(true, &[], vec![key(1, GridKey::Middle)]),
+        timings(),
+    );
+    let stopped = |host: &Harness| {
+        host.events()
+            .iter()
+            .filter(|event| matches!(event, ModuleEvent::Stopped { .. }))
+            .count()
+    };
+    host.until("eight runs", |host| {
+        assert_ne!(
+            host.state().map(|(state, _)| state),
+            Some(ModuleState::Failed),
+            "a module that got ready is no failed start"
+        );
+        stopped(host) >= 8
+    })
+    .await;
+    let images = host
+        .events()
+        .iter()
+        .filter(|event| matches!(event, ModuleEvent::ImageAll { .. }))
+        .count();
+    assert!(
+        images >= stopped(&host),
+        "every run's image arrives before its end: {:?}",
         host.events()
     );
     host.shutdown().await;

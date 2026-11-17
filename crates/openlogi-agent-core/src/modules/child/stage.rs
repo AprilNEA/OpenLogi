@@ -47,8 +47,10 @@ impl RunStage {
     }
 
     /// Apply `event` at `now`: the one place a run's stage changes. A
-    /// `ready` from a module that already exited, or a second one, is
-    /// refused.
+    /// second `ready`, or a second exit, is refused. A `ready` read after
+    /// the module exited still counts: it wrote it before exiting, so the
+    /// run ends as one that got ready whichever of the two it noticed
+    /// first.
     pub(super) fn step(&mut self, event: StageEvent, now: Instant) -> Result<(), Refused> {
         let next = match (&*self, event) {
             (Self::Starting { .. }, StageEvent::Ready) => Self::Ready { since: now },
@@ -61,6 +63,18 @@ impl RunStage {
                 status,
                 until: now + grace,
                 since: Some(*since),
+            },
+            (
+                Self::Draining {
+                    status,
+                    until,
+                    since: None,
+                },
+                StageEvent::Ready,
+            ) => Self::Draining {
+                status: status.clone(),
+                until: *until,
+                since: Some(now),
             },
             (stage, event) => {
                 return Err(Refused {
@@ -144,8 +158,8 @@ mod tests {
     }
 
     /// Every edge a run's stage has, and the ones it refuses: a second
-    /// ready, a ready from a module that already exited, and a second
-    /// exit, each leaving the stage as it was.
+    /// ready, before or after the module exited, and a second exit, each
+    /// leaving the stage as it was.
     #[test]
     fn a_run_moves_from_starting_to_ready_to_draining_and_refuses_the_rest() {
         let start = Instant::now();
@@ -199,22 +213,38 @@ mod tests {
         }
     }
 
-    /// A module that exits before it answers drains without having been
-    /// ready, and its late `ready` is refused: the run never reports it.
+    /// A `ready` the run reads only after it noticed the module exit still
+    /// counts: the module wrote it before exiting, so the run ends as one
+    /// that got ready, its later output counts, and it takes no input.
     #[test]
-    fn a_ready_read_after_the_module_exited_is_refused() {
+    fn a_ready_read_after_the_module_exited_still_counts() {
         let start = Instant::now();
+        let read = start + Duration::from_millis(5);
         let mut stage = RunStage::starting(start + Duration::from_secs(10));
         stage.step(exited(), start).unwrap();
         assert!(!stage.answered());
         assert_eq!(stage.ready_for(start + GRACE), None);
+
+        stage.step(StageEvent::Ready, read).unwrap();
         assert_eq!(
-            stage.step(StageEvent::Ready, start),
+            stage,
+            RunStage::Draining {
+                status: "exited with status 3".into(),
+                until: start + GRACE,
+                since: Some(read),
+            },
+            "the drain keeps its end"
+        );
+        assert!(stage.answered(), "what it drew after ready counts");
+        assert!(!stage.takes_input(), "an exited module hears nothing");
+        assert_eq!(stage.ready_for(read), Some(Duration::ZERO));
+        assert_eq!(
+            stage.step(StageEvent::Ready, read),
             Err(Refused {
                 stage: "draining",
                 event: "ready"
-            })
+            }),
+            "a second ready is refused here too"
         );
-        assert!(!stage.answered(), "still never ready");
     }
 }

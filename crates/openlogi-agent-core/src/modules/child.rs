@@ -357,10 +357,14 @@ impl Run {
                 ));
             }
             Incoming::Ready { .. } => match stage.step(StageEvent::Ready, Instant::now()) {
-                Ok(()) => {
+                // A module read as ready only after it exited is told nothing
+                // and reported to the host as never running; the run still
+                // ends as one that got ready.
+                Ok(()) if stage.takes_input() => {
                     self.sink.send(RunEvent::Ready).await;
                     return Next::Ready;
                 }
+                Ok(()) => debug!(module = %id, "module got ready, then exited"),
                 Err(refused) => debug!(module = %id, %refused, "module sent ready: ignored"),
             },
             Incoming::Log { level, message } => self.log.module(&id, level, &message),
