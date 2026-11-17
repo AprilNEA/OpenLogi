@@ -11,13 +11,15 @@ use tokio::sync::{mpsc, watch};
 use tokio::time::{Instant, MissedTickBehavior};
 use tracing::{debug, info, warn};
 
-use super::child::{self, EventSink, RunEnd, RunEvent, RunHandle, RunSpec};
+use self::life::{LifeEvent, LiveRun, Module, ModuleLife};
+use super::child::{self, EventSink, RunEvent, RunSpec};
 use super::discovery::{self, Found};
-use super::restart::{AfterExit, Restarts};
 use super::{
     HostCommand, ModuleEvent, ModuleKey, ModulePlan, ModulePress, ModuleTimings, SharedModulePlan,
 };
 use crate::watchers::retry::wait_for_deadline;
+
+mod life;
 
 /// How many run events may wait for the host.
 const RUN_EVENT_QUEUE: usize = 64;
@@ -32,49 +34,12 @@ pub struct ModuleHost {
     listening: watch::Receiver<bool>,
 }
 
-/// One module's life across its runs.
-struct Module {
-    restarts: Restarts,
-    run: Option<LiveRun>,
-    phase: Phase,
-    /// How the last run that the host did not end ended, until a run gets
-    /// ready again.
-    last_error: Option<String>,
-    /// The plan's [`ModulePlan::turned_off`] count for it when last seen.
-    turned_off: u64,
-}
-
 /// An installed module that can run here.
 struct Installed {
     id: ModuleId,
     folder: PathBuf,
     executable: PathBuf,
     fingerprint: u64,
-}
-
-/// What happens next to a module with no live run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Phase {
-    /// Start it as soon as it is wanted.
-    Idle,
-    /// Start it at this time, if it is still wanted.
-    RestartAt(Instant),
-    /// It failed to start too often; it waits for a toggle or a new folder
-    /// fingerprint.
-    Failed { fingerprint: u64 },
-}
-
-/// A run the host started and has not seen end.
-struct LiveRun {
-    handle: RunHandle,
-    generation: u64,
-    ready: bool,
-    /// The folder fingerprint and settings it started with: a change to
-    /// either restarts it.
-    fingerprint: u64,
-    settings: toml::Table,
-    /// The host told it to stop.
-    stopping: bool,
 }
 
 /// The host's state while it runs.
@@ -181,20 +146,14 @@ impl ModuleHost {
             listening,
         } = self;
         let (run_events, mut run_rx) = mpsc::channel(RUN_EVENT_QUEUE);
-        let mut host = Supervisor {
+        let mut host = Supervisor::new(
             dir,
             timings,
-            found: Vec::new(),
-            plan: Arc::clone(&plan.borrow_and_update()),
-            modules: BTreeMap::new(),
-            generation: 0,
+            Arc::clone(&plan.borrow_and_update()),
             run_events,
             events,
             listening,
-            untold_stops: BTreeSet::new(),
-            held: false,
-            keypads: KeypadNames::default(),
-        };
+        );
         let mut rescan = tokio::time::interval(timings.rescan_every);
         rescan.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
@@ -258,6 +217,30 @@ impl ModuleHost {
 }
 
 impl Supervisor {
+    fn new(
+        dir: Option<PathBuf>,
+        timings: ModuleTimings,
+        plan: Arc<ModulePlan>,
+        run_events: mpsc::Sender<(ModuleId, u64, RunEvent)>,
+        events: mpsc::Sender<ModuleEvent>,
+        listening: watch::Receiver<bool>,
+    ) -> Self {
+        Self {
+            dir,
+            timings,
+            found: Vec::new(),
+            plan,
+            modules: BTreeMap::new(),
+            generation: 0,
+            run_events,
+            events,
+            listening,
+            untold_stops: BTreeSet::new(),
+            held: false,
+            keypads: KeypadNames::default(),
+        }
+    }
+
     /// Read the modules folder again. An unreadable folder keeps what was
     /// last found.
     async fn rescan(&mut self) {
@@ -317,28 +300,22 @@ impl Supervisor {
                 })
             })
             .collect();
-        self.stop_gone(&installed);
+        self.stop_gone(&installed, now);
         for module in installed {
             if self.due(&module, now) {
-                self.start(module);
+                self.start(module, now);
             }
         }
     }
 
     /// Stop each module whose folder is gone, invalid, or no longer for
     /// this platform, and forget it once its run has ended.
-    fn stop_gone(&mut self, installed: &[Installed]) {
+    fn stop_gone(&mut self, installed: &[Installed], now: Instant) {
         self.modules.retain(|id, module| {
             if installed.iter().any(|installed| installed.id == *id) {
                 return true;
             }
-            match module.run.as_mut() {
-                Some(run) => {
-                    stop(id, run);
-                    true
-                }
-                None => false,
-            }
+            module.step(id, LifeEvent::Stop, now).is_ok()
         });
     }
 
@@ -353,45 +330,34 @@ impl Supervisor {
         let settings = config.map(|config| &config.settings);
         let turned_off = self.plan.turned_off.get(id).copied().unwrap_or(0);
         let timings = self.timings;
-        let module = self.modules.entry(id.clone()).or_insert_with(|| Module {
-            restarts: Restarts::new(timings),
-            run: None,
-            phase: Phase::Idle,
-            last_error: None,
-            turned_off,
-        });
-        // Turning a module off is the toggle that clears a failure; the
-        // count says so even when this plan already turns it on again.
-        if module.turned_off != turned_off {
-            module.turned_off = turned_off;
-            if matches!(module.phase, Phase::Failed { .. } | Phase::RestartAt(_)) {
-                module.phase = Phase::Idle;
-                module.restarts = Restarts::new(timings);
-                module.last_error = None;
-            }
+        let module = self
+            .modules
+            .entry(id.clone())
+            .or_insert_with(|| Module::new(timings, turned_off));
+        if module.saw_turned_off(turned_off) {
+            settle(id, module, LifeEvent::TurnedOff, now);
         }
         if !enabled {
-            if let Some(run) = module.run.as_mut() {
-                stop(id, run);
+            if module.run().is_some() {
+                settle(id, module, LifeEvent::Stop, now);
             }
             return false;
         }
-        if let Phase::Failed { fingerprint } = module.phase {
-            if fingerprint == installed.fingerprint {
-                return false;
-            }
-            info!(module = %id, "module folder changed: trying the failed module again");
-            module.phase = Phase::Idle;
-            module.restarts = Restarts::new(timings);
+        settle(
+            id,
+            module,
+            LifeEvent::Folder {
+                fingerprint: installed.fingerprint,
+            },
+            now,
+        );
+        if module.stopping() {
+            return false;
         }
-        if let Some(run) = module.run.as_mut() {
-            if run.stopping {
-                return false;
-            }
+        if let Some(run) = module.run() {
             if run.fingerprint != installed.fingerprint || Some(&run.settings) != settings {
                 info!(module = %id, "module folder or settings changed: restarting it");
-                stop(id, run);
-                module.phase = Phase::Idle;
+                settle(id, module, LifeEvent::Stop, now);
                 return false;
             }
             let keys = Arc::new(keys);
@@ -404,11 +370,11 @@ impl Supervisor {
             });
             return false;
         }
-        !matches!(module.phase, Phase::RestartAt(at) if at > now)
+        module.due(now)
     }
 
     /// Start a run of `installed` with its current settings and keys.
-    fn start(&mut self, installed: Installed) {
+    fn start(&mut self, installed: Installed, now: Instant) {
         let Installed {
             id,
             folder,
@@ -440,28 +406,19 @@ impl Supervisor {
             },
         );
         if let Some(module) = self.modules.get_mut(&id) {
-            module.phase = Phase::Idle;
-            module.run = Some(LiveRun {
+            let run = LiveRun {
                 handle,
                 generation,
-                ready: false,
                 fingerprint,
                 settings,
-                stopping: false,
-            });
+            };
+            settle(&id, module, LifeEvent::Started(run), now);
         }
     }
 
     /// The earliest pending restart.
     fn next_restart(&self) -> Option<Instant> {
-        self.modules
-            .values()
-            .filter(|module| module.run.is_none())
-            .filter_map(|module| match module.phase {
-                Phase::RestartAt(at) => Some(at),
-                Phase::Idle | Phase::Failed { .. } => None,
-            })
-            .min()
+        self.modules.values().filter_map(Module::restart_at).min()
     }
 
     /// Fold one event of run `generation` of `id` in. An event of a run that
@@ -470,21 +427,10 @@ impl Supervisor {
         let Some(module) = self.modules.get_mut(id) else {
             return;
         };
-        let Some(run) = module
-            .run
-            .as_mut()
-            .filter(|run| run.generation == generation)
-        else {
-            return;
-        };
         match event {
-            RunEvent::Ready => {
-                run.ready = true;
-                module.last_error = None;
-                info!(module = %id, "module ready");
-            }
+            RunEvent::Ready => settle(id, module, LifeEvent::Ready { generation }, Instant::now()),
             RunEvent::Face(face) => {
-                if run.stopping {
+                if !module.takes_faces(generation) {
                     return;
                 }
                 if let Some(face) = self.keypads.to_config_keys(face) {
@@ -492,15 +438,12 @@ impl Supervisor {
                 }
             }
             RunEvent::Ended(end) => {
-                let run = module.run.take();
-                let stopping = run.as_ref().is_some_and(|run| run.stopping);
-                let fingerprint = run.map_or(0, |run| run.fingerprint);
-                module.phase = if stopping {
-                    info!(module = %id, "module stopped");
-                    Phase::Idle
-                } else {
-                    after_exit(id, module, &end, fingerprint)
-                };
+                if let Err(refused) =
+                    module.step(id, LifeEvent::Ended { generation, end }, Instant::now())
+                {
+                    debug!(module = %id, %refused, "end of a run that is no longer live: dropped");
+                    return;
+                }
                 self.forward(ModuleEvent::Stopped { module: id.clone() })
                     .await;
                 if !self.runnable().any(|found| {
@@ -544,11 +487,7 @@ impl Supervisor {
             slot,
         } = press;
         let device = self.keypads.name(&device);
-        let run = self
-            .modules
-            .get(&module)
-            .and_then(|module| module.run.as_ref())
-            .filter(|run| run.ready && !run.stopping);
+        let run = self.modules.get(&module).and_then(Module::running);
         if let Some(run) = run {
             if !run.handle.press(device, slot) {
                 warn!(%module, "module is behind on presses: press dropped");
@@ -561,11 +500,12 @@ impl Supervisor {
     /// Stop every run and wait, within the grace and a second more, for
     /// each to end: told to leave, killed past its grace, and reaped.
     async fn stop_all(&mut self, run_rx: &mut mpsc::Receiver<(ModuleId, u64, RunEvent)>) {
+        let now = Instant::now();
         let mut live: Vec<(ModuleId, u64)> = Vec::new();
         for (id, module) in &mut self.modules {
-            if let Some(run) = module.run.as_mut() {
-                stop(id, run);
-                live.push((id.clone(), run.generation));
+            if let Some(generation) = module.run().map(|run| run.generation) {
+                settle(id, module, LifeEvent::Stop, now);
+                live.push((id.clone(), generation));
             }
         }
         let deadline =
@@ -631,22 +571,15 @@ impl Supervisor {
                 } else if !enabled {
                     ModuleState::Disabled
                 } else {
-                    match module {
-                        Some(Module { run: Some(run), .. }) if run.stopping => {
+                    match module.map(Module::life) {
+                        Some(ModuleLife::Running { .. }) => ModuleState::Running,
+                        Some(ModuleLife::Stopping { .. } | ModuleLife::Waiting { .. }) => {
                             ModuleState::Restarting
                         }
-                        Some(Module { run: Some(run), .. }) if run.ready => ModuleState::Running,
-                        Some(Module {
-                            phase: Phase::RestartAt(_),
-                            run: None,
-                            ..
-                        }) => ModuleState::Restarting,
-                        Some(Module {
-                            phase: Phase::Failed { .. },
-                            run: None,
-                            ..
-                        }) => ModuleState::Failed,
-                        _ => ModuleState::Starting,
+                        Some(ModuleLife::Failed { .. }) => ModuleState::Failed,
+                        Some(ModuleLife::Idle { .. } | ModuleLife::Starting { .. }) | None => {
+                            ModuleState::Starting
+                        }
                     }
                 };
                 ModuleStatus {
@@ -660,33 +593,17 @@ impl Supervisor {
                     }),
                     enabled,
                     state,
-                    error: module.and_then(|module| module.last_error.clone()),
+                    error: module.and_then(Module::error).map(str::to_owned),
                 }
             })
             .collect()
     }
 }
 
-fn stop(id: &ModuleId, run: &mut LiveRun) {
-    if !run.stopping {
-        debug!(module = %id, "stopping module");
-        run.stopping = true;
-        run.handle.stop();
-    }
-}
-
-/// What follows a run of `id` that ended on its own, as `end` says.
-fn after_exit(id: &ModuleId, module: &mut Module, end: &RunEnd, fingerprint: u64) -> Phase {
-    let reason = end.error.clone().unwrap_or_else(|| "stopped".into());
-    module.last_error = Some(reason.clone());
-    match module.restarts.ended(end.ready_for) {
-        AfterExit::RestartIn(delay) => {
-            warn!(module = %id, %reason, delay_ms = delay.as_millis(), "module stopped: restarting");
-            Phase::RestartAt(Instant::now() + delay)
-        }
-        AfterExit::Failed => {
-            warn!(module = %id, %reason, "module failed to start five times in a row: leaving it stopped until it is turned off and on or its folder changes");
-            Phase::Failed { fingerprint }
-        }
+/// Apply `event` to `module`, which the caller has checked takes it; a
+/// refusal is logged and changes nothing.
+fn settle(id: &ModuleId, module: &mut Module, event: LifeEvent, now: Instant) {
+    if let Err(refused) = module.step(id, event, now) {
+        debug!(module = %id, %refused, "module event refused");
     }
 }

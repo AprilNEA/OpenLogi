@@ -111,6 +111,16 @@ impl RunHandle {
             let _ = stop.send(());
         }
     }
+
+    /// A handle on no run, for tests of the host's bookkeeping.
+    #[cfg(test)]
+    pub(super) fn detached() -> Self {
+        Self {
+            keys: watch::channel(Arc::new(Vec::new())).0,
+            presses: mpsc::channel(1).0,
+            stop: None,
+        }
+    }
 }
 
 /// Start one run of `spec`, owning `keys` until told otherwise.
