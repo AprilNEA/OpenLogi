@@ -30,8 +30,9 @@ use crate::watchers::key_display::KeyImage;
 /// once it has keys, `wrapper` starts a `sleep` of its own and never
 /// answers, `helper` starts one and answers as `normal` does, and `orphan`
 /// answers, then starts one that holds its output open and exits with
-/// status 4. Each run notes its process id in `pids.log`, and each `sleep`
-/// its own in `sleep.pids`.
+/// status 4, and `racer` answers, draws with `big.b64` without reading its
+/// keys, and exits with status 5 a tenth of a second later. Each run notes its process id in `pids.log`, and
+/// each `sleep` its own in `sleep.pids`.
 const SCRIPT: &str = r#"#!/bin/sh
 dir="$OPENLOGI_MODULE_DIR"
 mode="$(cat "$dir/mode")"
@@ -51,6 +52,11 @@ while IFS= read -r line; do
       [ "$mode" = closer ] && exec 0<&-
       printf '{"type":"log","level":"info","message":"hello from the test module"}\n'
       printf '{"type":"ready","protocol":1}\n'
+      if [ "$mode" = racer ]; then
+        printf '{"type":"image_all","png":"%s"}\n' "$(cat "$dir/big.b64")"
+        sleep 0.1
+        exit 5
+      fi
       [ "$mode" = deaf ] && exec sleep 30
       [ "$mode" = closer ] && exec sleep 30
       ;;
@@ -823,4 +829,64 @@ async fn a_module_that_closes_its_input_is_restarted() {
     host.until("a second start", |host| host.hellos().len() >= 2)
         .await;
     host.shutdown().await;
+}
+
+/// A module that exits while a write to it fails is reported by its exit,
+/// its output read to the end, not as a module that closed its input. The
+/// race is staged: the run's `keys` line is too long for the pipe, and the
+/// module draws a large image and exits without reading it, while the run
+/// is still decoding the image, so the blocked write fails as the module
+/// exits and the run next finds the exit and the failed write at once.
+#[tokio::test]
+async fn a_module_that_exits_as_a_write_to_it_fails_is_reported_by_its_exit() {
+    const RUNS: u64 = 20;
+    let dir = tempfile::tempdir().unwrap();
+    let folder = install(&dir.path().join("modules"), "racer");
+    fs::write(
+        folder.join("big.b64"),
+        base64::engine::general_purpose::STANDARD.encode(solid_png(1024, [0, 0, 255])),
+    )
+    .unwrap();
+    let keys = Arc::new(vec![
+        ModuleKey {
+            device: "keypad-1".into(),
+            ..key(1, GridKey::Middle)
+        };
+        4096
+    ]);
+    for generation in 0..RUNS {
+        let (events, mut received) = mpsc::channel(64);
+        let _run = child::start(
+            child::RunSpec {
+                id: id(),
+                folder: folder.clone(),
+                executable: folder.join("run.sh"),
+                settings: toml::Table::new(),
+                timings: timings(),
+            },
+            Arc::clone(&keys),
+            child::EventSink {
+                id: id(),
+                generation,
+                events,
+            },
+        );
+        let ended = async {
+            loop {
+                match received.recv().await {
+                    Some((_, _, child::RunEvent::Ended(end))) => return end,
+                    Some(_) => {}
+                    None => panic!("the run dropped its events"),
+                }
+            }
+        };
+        let end = tokio::time::timeout(WAIT, ended)
+            .await
+            .expect("the run ends in time");
+        assert_eq!(
+            end.error.as_deref(),
+            Some("exited with status 5"),
+            "run {generation}: {end:?}"
+        );
+    }
 }

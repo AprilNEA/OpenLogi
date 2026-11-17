@@ -193,6 +193,8 @@ enum Next {
     Continue,
     /// The module just answered `hello`: send it its keys.
     Ready,
+    /// A write to the module failed, as this says.
+    InputClosed(String),
     /// Kill the module, for this reason.
     End(String),
 }
@@ -257,19 +259,10 @@ impl Run {
                 }
                 () = wait_for_deadline(deadline) => Next::End(self.expired(&stage)),
                 status = child.wait(), if live => match status {
-                    Ok(status) => {
-                        // Before anything else: what it left in its group
-                        // holds the group's id, and may hold its output open.
-                        group.reaped();
-                        let exit = StageEvent::Exited { status: describe(status), grace };
-                        if let Err(refused) = stage.step(exit, Instant::now()) {
-                            debug!(module = %id, %refused, "module exit");
-                        }
-                        Next::Continue
-                    }
+                    Ok(status) => reaped(&mut group, &mut stage, status, grace),
                     Err(error) => Next::End(format!("could not be waited on: {error}")),
                 },
-                failed = &mut writer_failed, if live => Next::End(match failed {
+                failed = &mut writer_failed, if live => Next::InputClosed(match failed {
                     Ok(error) => format!("closed its input: {error}"),
                     Err(_) => "closed its input".into(),
                 }),
@@ -304,6 +297,16 @@ impl Run {
                     let keys = Arc::clone(&self.keys.borrow_and_update());
                     queue(&writer, protocol::keys(&keys))
                 }
+                next => next,
+            };
+            // A write fails when no one reads the module's input any more,
+            // which a module that has just exited does too: then its exit,
+            // not the write, says how it ended.
+            let next = match next {
+                Next::InputClosed(error) => match child.try_wait() {
+                    Ok(Some(status)) => reaped(&mut group, &mut stage, status, grace),
+                    _ => Next::End(error),
+                },
                 next => next,
             };
             if let Next::End(error) = next {
@@ -453,8 +456,24 @@ fn queue(writer: &mpsc::Sender<String>, line: String) -> Next {
         Err(mpsc::error::TrySendError::Full(_)) => Next::End("stopped reading its input".into()),
         // The writer stops only on a failed write while the run holds the
         // queue.
-        Err(mpsc::error::TrySendError::Closed(_)) => Next::End("closed its input".into()),
+        Err(mpsc::error::TrySendError::Closed(_)) => Next::InputClosed("closed its input".into()),
     }
+}
+
+/// The module was just reaped, having exited as `status` says: end what it
+/// left in its group before anything else, since that holds the group's id
+/// and may hold the module's output open, and read the output for `grace`
+/// more at most.
+fn reaped(group: &mut Group, stage: &mut RunStage, status: ExitStatus, grace: Duration) -> Next {
+    group.reaped();
+    let exit = StageEvent::Exited {
+        status: describe(status),
+        grace,
+    };
+    if let Err(refused) = stage.step(exit, Instant::now()) {
+        debug!(%refused, "module exit");
+    }
+    Next::Continue
 }
 
 /// Drain queued lines into `stdin` until the queue closes or a write fails;
