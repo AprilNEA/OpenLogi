@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use openlogi_core::binding::{ActionRingIcon, GridSlot};
+use openlogi_core::binding::{ActionRingIcon, GridSlot, LongPressBinding};
 use openlogi_core::module::ModuleId;
 
 use super::device_settings::{on_page, page, wired_keypad};
@@ -327,4 +327,45 @@ fn a_module_press_goes_to_the_key_on_the_current_page() {
             slot: slot(2, GridKey::TopLeft),
         })
     );
+}
+
+/// A key that runs a module on a long press and something else on a short
+/// one belongs to the module: the module is told it owns the key, draws on
+/// it, and hears its long presses, which go nowhere else.
+#[test]
+fn a_module_on_a_long_press_owns_its_key() {
+    let mut orch = module_keypad();
+    let mut config = orch.config.clone();
+    config.set_binding(
+        "keypad",
+        on_page(1, GridKey::TopLeft),
+        Binding::LongPress(LongPressBinding::new(
+            Action::Copy,
+            Action::Module(spotify()),
+        )),
+    );
+    orch.reload_config(config);
+    assert_eq!(
+        published_keys(&orch),
+        BTreeMap::from([owned(
+            spotify(),
+            &[slot(1, GridKey::TopLeft), slot(1, GridKey::Middle)]
+        )])
+    );
+    assert_eq!(
+        orch.module_press(Some("keypad"), &spotify(), GridKey::TopLeft),
+        Some(ModulePress {
+            module: spotify(),
+            device: "keypad".into(),
+            slot: slot(1, GridKey::TopLeft),
+        })
+    );
+    let art = KeyImage::solid(4, [0, 0, 255]);
+    orch.apply_module_event(ModuleEvent::Image {
+        module: spotify(),
+        device: "keypad".into(),
+        slot: slot(1, GridKey::TopLeft),
+        image: art.clone(),
+    });
+    assert_eq!(published_face(&orch, GridKey::TopLeft), KeyFace::Image(art));
 }

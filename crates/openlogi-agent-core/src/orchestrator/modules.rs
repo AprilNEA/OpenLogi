@@ -157,9 +157,20 @@ impl Orchestrator {
     }
 }
 
-/// The module a key bound as `binding` hands its presses and face to.
+/// The module a key bound as `binding` hands its presses and face to: the
+/// module the key shows, or else the one its long press runs, which the
+/// button runtime fires whatever the short action is. A long press that
+/// names a second module behind a first one reaches no module.
 fn bound_module(binding: Option<&Binding>) -> Option<ModuleId> {
-    binding
-        .and_then(Binding::key_action)
-        .and_then(|action| action.module().cloned())
+    let binding = binding?;
+    let shown = binding.key_action();
+    let long = match binding {
+        Binding::LongPress(press) => Some(press.long()),
+        _ => None,
+    };
+    shown
+        .as_ref()
+        .into_iter()
+        .chain(long)
+        .find_map(|action| action.module().cloned())
 }
