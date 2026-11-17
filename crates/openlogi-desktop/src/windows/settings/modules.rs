@@ -171,6 +171,8 @@ mod tests {
     /// explains it.
     #[test]
     fn each_state_has_its_own_line() {
+        let _locale = LOCALE_LOCK.lock().unwrap();
+        rust_i18n::set_locale("en");
         let lines = [
             state_line(&status(ModuleState::Invalid, Some("no module.toml"))),
             state_line(&status(ModuleState::Unsupported, None)),
