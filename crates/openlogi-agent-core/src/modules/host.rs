@@ -174,8 +174,7 @@ impl ModuleHost {
                         host.reconcile();
                     }
                     Some(HostCommand::StopAll(ack)) => {
-                        host.stop_all(&mut run_rx).await;
-                        host.held = true;
+                        host.hold(&mut run_rx).await;
                         let _ = ack.send(());
                     }
                     Some(HostCommand::Resume) => {
@@ -527,7 +526,14 @@ impl Supervisor {
         }
     }
 
-    /// Lift [`Self::stop_all`]'s hold: tell the agent which modules ended
+    /// Stop every run as [`Self::stop_all`] does, and start none until
+    /// [`Self::resume`].
+    async fn hold(&mut self, run_rx: &mut mpsc::Receiver<(ModuleId, u64, RunEvent)>) {
+        self.stop_all(run_rx).await;
+        self.held = true;
+    }
+
+    /// Lift [`Self::hold`]'s hold: tell the agent which modules ended
     /// while it was not listening, so their images go, and let the modules
     /// start again.
     async fn resume(&mut self) {
@@ -625,7 +631,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_held_host_waits_for_no_restart() {
         let timings = ModuleTimings::default();
-        let (run_events, _run_rx) = mpsc::channel(1);
+        let (run_events, mut run_rx) = mpsc::channel(1);
         let (events, _events_rx) = mpsc::channel(1);
         let (_listening, listening_rx) = watch::channel(true);
         let mut host = Supervisor::new(
@@ -657,12 +663,12 @@ mod tests {
         let restart = started + timings.first_restart;
         assert_eq!(host.next_restart(), Some(restart));
 
-        host.held = true;
+        host.hold(&mut run_rx).await;
         tokio::time::advance(timings.first_restart + Duration::from_secs(1)).await;
         assert!(Instant::now() > restart, "the old deadline has passed");
         assert_eq!(host.next_restart(), None, "a held host wakes for nothing");
 
-        host.held = false;
+        host.resume().await;
         assert_eq!(
             host.next_restart(),
             Some(restart),
