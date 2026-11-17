@@ -107,7 +107,7 @@ Host to module, on stdin:
 | --- | --- | --- |
 | `hello` | `protocol: 1`, `host: "openlogi"`, `host_version`, `module_id`, `settings` (object, `{}` when none) | The first message, once. |
 | `keys` | `keys: [{ "device", "slot", "size" }]` | The full set of keys bound to this module now: on every connected keypad, the current page's keys, for the app in front. Sent after `ready` and whenever the set changes: a rebind, a page turn, an app switch, a keypad connecting or leaving. Empty when there are none. |
-| `pressed` | `device`, `slot` | A key bound to the module went down. |
+| `pressed` | `device`, `slot` | A key bound to the module was pressed: as it goes down for a plain binding. For a long-press binding, a module on the long press hears it once the hold passes the long-press threshold, or at a release that comes after the threshold; a module on the short press hears it at a release before the threshold. |
 | `shutdown` | | The host is stopping the module: exit within 2 seconds or be killed. |
 
 `device` names one keypad: `keypad-1`, `keypad-2`, and so on, numbered in
