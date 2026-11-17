@@ -143,9 +143,8 @@ nix build 'github:AprilNEA/OpenLogi?dir=packaging#openlogi'
 ```
 
 Earlier versions of this guide used `github:AprilNEA/OpenLogi` without
-`?dir=packaging`. That URL now points to a deprecated alias: it needs Nix 2.26
-or newer, prints a warning on every evaluation, and will be removed in a later
-release. Add `?dir=packaging` to the input URL to move off it.
+`?dir=packaging`. The repository root has no Flake any more, so
+`nix flake update` fails on that URL. Add `?dir=packaging` to the input URL.
 
 ## Flatpak
 

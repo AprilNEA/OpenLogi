@@ -29,7 +29,6 @@
 /rust-toolchain.toml            @AprilNEA
 /rustfmt.toml                   @AprilNEA
 /prek.toml                      @AprilNEA
-/flake.nix                      @AprilNEA
 /devenv.nix                     @AprilNEA
 /devenv.yaml                    @AprilNEA
 /devenv.lock                    @AprilNEA
