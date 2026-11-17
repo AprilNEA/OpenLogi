@@ -29,9 +29,19 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 use tracing::{debug, error, info, warn};
 
+use self::platform::Group;
 use super::protocol::{self, Incoming, LineRead, LogLevel};
 use super::{ModuleEvent, ModuleKey, ModuleTimings};
 use crate::watchers::retry::wait_for_deadline;
+
+#[cfg(unix)]
+mod unix;
+#[cfg(unix)]
+use self::unix as platform;
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+use self::windows as platform;
 
 /// How many host lines may wait for a module to read them. A module that
 /// lets this many pile up has stopped reading and is killed.
@@ -198,12 +208,7 @@ impl Run {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        #[cfg(unix)]
-        command.process_group(0);
-        // A console module started by the windowless agent would otherwise
-        // open a console window of its own.
-        #[cfg(windows)]
-        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+        platform::prepare(&mut command);
         command.spawn()
     }
 
@@ -221,18 +226,16 @@ impl Run {
         let (Some(stdin), Some(stdout), Some(stderr)) =
             (child.stdin.take(), child.stdout.take(), child.stderr.take())
         else {
-            let group = child.id();
             return kill(
-                group,
+                &Group::of(&child),
                 &mut child,
                 None,
                 Some("its pipes could not be opened".into()),
             )
             .await;
         };
-        // The module's group bears its id; see `kill_group`.
-        let group = child.id();
-        info!(module = %id, pid = ?group, "module started");
+        let group = Group::of(&child);
+        info!(module = %id, pid = ?child.id(), "module started");
         let (writer, mut writer_failed) = spawn_writer(stdin);
         let mut reads = spawn_reader(BufReader::new(stdout));
         tokio::spawn(copy_stderr(BufReader::new(stderr), id.clone()));
@@ -251,12 +254,12 @@ impl Run {
             let drain_until = exit.as_ref().map(|(_, until)| *until);
             let next = tokio::select! {
                 _ = &mut self.stop => {
-                    return shut_down(&id, group, &mut child, writer, ready_at, grace).await;
+                    return shut_down(&id, &group, &mut child, writer, ready_at, grace).await;
                 }
                 () = tokio::time::sleep_until(ready_deadline), if !is_ready && live => {
                     let timeout = self.spec.timings.ready_timeout;
                     let error = format!("did not answer hello within {} s", timeout.as_secs_f32());
-                    return kill(group, &mut child, None, Some(error)).await;
+                    return kill(&group, &mut child, None, Some(error)).await;
                 }
                 status = child.wait(), if live => match status {
                     Ok(status) => {
@@ -279,14 +282,14 @@ impl Run {
                         }
                         match exit.take() {
                             Some((error, _)) => Next::End(error),
-                            None => return exited(group, &mut child, ready_at, grace).await,
+                            None => return exited(&group, &mut child, ready_at, grace).await,
                         }
                     }
                     read => self.take(read, &mut ready_at).await,
                 },
                 changed = self.keys.changed(), if is_ready && live => {
                     if changed.is_err() {
-                        return shut_down(&id, group, &mut child, writer, ready_at, grace).await;
+                        return shut_down(&id, &group, &mut child, writer, ready_at, grace).await;
                     }
                     let keys = Arc::clone(&self.keys.borrow_and_update());
                     queue(&writer, protocol::keys(&keys))
@@ -297,7 +300,7 @@ impl Run {
             };
             let ready_for = ready_at.map(|at| at.elapsed());
             if let Next::End(error) = next {
-                return kill(group, &mut child, ready_for, Some(error)).await;
+                return kill(&group, &mut child, ready_for, Some(error)).await;
             }
             if !is_ready
                 && exit.is_none()
@@ -306,7 +309,7 @@ impl Run {
                 debug!(module = %id, "module ready");
                 let keys = Arc::clone(&self.keys.borrow_and_update());
                 if let Next::End(error) = queue(&writer, protocol::keys(&keys)) {
-                    return kill(group, &mut child, Some(ready_at.elapsed()), Some(error)).await;
+                    return kill(&group, &mut child, Some(ready_at.elapsed()), Some(error)).await;
                 }
             }
         }
@@ -517,7 +520,7 @@ async fn copy_stderr<R: AsyncRead + Unpin>(stderr: BufReader<R>, id: ModuleId) {
 /// The module's stdout ended: give the process its grace to exit, kill it
 /// past that, and report how it ended. Whatever it left in its group goes.
 async fn exited(
-    group: Option<u32>,
+    group: &Group,
     child: &mut Child,
     ready_at: Option<Instant>,
     grace: Duration,
@@ -536,7 +539,7 @@ async fn exited(
 /// in its group goes either way.
 async fn shut_down(
     id: &ModuleId,
-    group: Option<u32>,
+    group: &Group,
     child: &mut Child,
     writer: mpsc::Sender<String>,
     ready_at: Option<Instant>,
@@ -546,7 +549,7 @@ async fn shut_down(
     let _ = writer.try_send(protocol::shutdown());
     drop(writer);
     let left = tokio::time::timeout(grace, child.wait()).await.is_ok();
-    kill_group(group, child);
+    group.kill(child);
     if !left {
         let _ = child.wait().await;
         info!(module = %id, "module did not shut down in time: killed");
@@ -560,41 +563,14 @@ async fn shut_down(
 /// Kill the module and its group, reap it, and report the run as
 /// `ready_for` and `error`.
 async fn kill(
-    group: Option<u32>,
+    group: &Group,
     child: &mut Child,
     ready_for: Option<Duration>,
     error: Option<String>,
 ) -> RunEnd {
-    kill_group(group, child);
+    group.kill(child);
     let _ = child.wait().await;
     RunEnd { ready_for, error }
-}
-
-/// Kill the module and, on Unix, every process left in its group, which
-/// bears the module's id, `group`. Called right after the module is reaped
-/// as well as before: children it left behind hold the group, and with it
-/// the id, until they are gone.
-fn kill_group(group: Option<u32>, child: &mut Child) {
-    #[cfg(unix)]
-    if let Some(group) = group.and_then(|pid| libc::pid_t::try_from(pid).ok()) {
-        #[expect(
-            unsafe_code,
-            reason = "killpg is the one call that signals a whole process group"
-        )]
-        // SAFETY: killpg only sends a signal. `group` is the group the
-        // module leads (`process_group(0)`). Its id cannot name another
-        // group while the module is unreaped or any process is left in its
-        // group; once both are gone the signal finds no group, unless the
-        // system has handed out every other process id since and the new
-        // holder of this one leads a group, which the signal sent at once
-        // after the reap gives no time for.
-        unsafe {
-            libc::killpg(group, libc::SIGKILL);
-        }
-    }
-    #[cfg(not(unix))]
-    let _ = group;
-    let _ = child.start_kill();
 }
 
 /// The unknown message types a run has logged, each logged once while there
