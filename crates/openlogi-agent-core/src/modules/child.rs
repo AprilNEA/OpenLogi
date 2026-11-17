@@ -350,9 +350,9 @@ impl Run {
     async fn handle(&mut self, message: Incoming, stage: &mut RunStage) -> Next {
         let id = self.spec.id.clone();
         match message {
-            Incoming::Ready { protocol }
-                if protocol != PROTOCOL && matches!(stage, RunStage::Starting { .. }) =>
-            {
+            // A first `ready` in another protocol is a failed start, read
+            // before or after the module exited.
+            Incoming::Ready { protocol } if protocol != PROTOCOL && !stage.answered() => {
                 return Next::End(format!(
                     "answered with protocol {protocol}; this OpenLogi speaks {PROTOCOL}"
                 ));
@@ -720,6 +720,71 @@ impl LogBudget {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A run of a module with no process behind it, and the receiver its
+    /// events go to.
+    fn detached_run() -> (Run, mpsc::Receiver<(ModuleId, u64, RunEvent)>) {
+        let id = ModuleId::try_new("com.example.test".to_owned()).unwrap();
+        let (events, received) = mpsc::channel(8);
+        let run = Run {
+            spec: RunSpec {
+                id: id.clone(),
+                folder: PathBuf::new(),
+                executable: PathBuf::new(),
+                settings: toml::Table::new(),
+                timings: ModuleTimings::default(),
+            },
+            sink: EventSink {
+                id,
+                generation: 1,
+                events,
+            },
+            keys: watch::channel(Arc::new(Vec::new())).1,
+            presses: mpsc::channel(1).1,
+            stop: oneshot::channel().1,
+            log: LogBudget::default(),
+            unknown: UnknownTypes::default(),
+        };
+        (run, received)
+    }
+
+    /// A first `ready` in another protocol ends the run as a failed start
+    /// whether the run reads it before or after it noticed the module exit;
+    /// read after, it does not count the run as one that got ready.
+    #[tokio::test]
+    async fn a_ready_in_another_protocol_is_a_failed_start_before_or_after_the_exit() {
+        let start = Instant::now();
+        let mut draining = RunStage::starting(start + Duration::from_secs(10));
+        draining
+            .step(
+                StageEvent::Exited {
+                    status: "exited with status 0".into(),
+                    grace: Duration::from_secs(2),
+                },
+                start,
+            )
+            .unwrap();
+        for mut stage in [
+            RunStage::starting(start + Duration::from_secs(10)),
+            draining,
+        ] {
+            let (mut run, mut received) = detached_run();
+            let before = stage.clone();
+            let next = run
+                .handle(Incoming::Ready { protocol: 2 }, &mut stage)
+                .await;
+            let Next::End(error) = next else {
+                panic!("a ready in protocol 2 must end the run while {before:?}");
+            };
+            assert_eq!(
+                error,
+                format!("answered with protocol 2; this OpenLogi speaks {PROTOCOL}")
+            );
+            assert_eq!(stage, before, "the run never counts as ready");
+            assert_eq!(stage.ready_for(start), None);
+            assert!(received.try_recv().is_err(), "the host hears nothing");
+        }
+    }
 
     #[test]
     fn the_log_budget_holds_a_window_and_counts_what_it_dropped() {

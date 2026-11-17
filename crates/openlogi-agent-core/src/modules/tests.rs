@@ -33,8 +33,9 @@ use crate::watchers::key_display::KeyImage;
 /// status 4, `racer` answers, draws with `big.b64` without reading its
 /// keys, and exits with status 5 a tenth of a second later, `burst`
 /// answers, draws without reading its keys, and exits with status 6 at
-/// once, and `leaver` closes its input, answers, and exits with status 7 a
-/// fifth of a second later. Each run notes its process id in `pids.log`, and each `sleep` its
+/// once, `leaver` closes its input, answers, and exits with status 7 a
+/// fifth of a second later, and `stranger` answers in protocol 2 and exits
+/// at once. Each run notes its process id in `pids.log`, and each `sleep` its
 /// own in `sleep.pids`.
 const SCRIPT: &str = r#"#!/bin/sh
 dir="$OPENLOGI_MODULE_DIR"
@@ -52,6 +53,10 @@ while IFS= read -r line; do
   case "$line" in
     *'"type":"hello"'*)
       [ "$mode" = silent ] || [ "$mode" = wrapper ] && continue
+      if [ "$mode" = stranger ]; then
+        printf '{"type":"ready","protocol":2}\n'
+        exit 0
+      fi
       [ "$mode" = closer ] || [ "$mode" = leaver ] && exec 0<&-
       printf '{"type":"log","level":"info","message":"hello from the test module"}\n'
       printf '{"type":"ready","protocol":1}\n'
@@ -844,6 +849,39 @@ async fn a_module_that_draws_and_exits_at_once_counts_as_ready_every_run() {
         "every run's image arrives before its end: {:?}",
         host.events()
     );
+    host.shutdown().await;
+}
+
+/// A module that answers in another protocol and exits at once fails to
+/// start every run, whichever the run notices first, the answer or the
+/// exit, and is marked failed with the protocol named.
+#[tokio::test]
+async fn a_module_answering_in_another_protocol_fails_whatever_comes_first() {
+    let timings = ModuleTimings {
+        first_restart: Duration::from_millis(10),
+        ..timings()
+    };
+    let host = Harness::start(
+        "stranger",
+        plan(true, &[], vec![key(1, GridKey::Middle)]),
+        timings,
+    );
+    host.until("five failed starts", |host| {
+        matches!(host.state(), Some((ModuleState::Failed, _)))
+    })
+    .await;
+    let (_, error) = host.state().unwrap();
+    assert_eq!(
+        error.as_deref(),
+        Some(
+            format!(
+                "answered with protocol 2; this OpenLogi speaks {}",
+                openlogi_core::module::PROTOCOL
+            )
+            .as_str()
+        )
+    );
+    assert_eq!(host.hellos().len(), 5, "five starts, then none");
     host.shutdown().await;
 }
 
