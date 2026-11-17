@@ -10,10 +10,9 @@
 //!
 //! A run ends when the module exits, whether or not its output closes,
 //! when its output closes, when it stops reading or closes its input, or
-//! when the host stops it. On Unix a module leads its own process group, and
-//! the end of a run takes the whole group: a wrapper script's children go
-//! with it instead of holding its pipes open or outliving it. Windows ends
-//! the module's own process only.
+//! when the host stops it. The end of a run takes the module's whole group
+//! (`unix`, `windows`): a wrapper script's children go with it instead of
+//! holding its pipes open or outliving it.
 
 use std::collections::HashSet;
 use std::path::PathBuf;

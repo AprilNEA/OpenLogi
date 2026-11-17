@@ -170,8 +170,10 @@ Rules:
 - On macOS and Linux a module leads its own process group, and the end of
   every run takes the whole group, whether the module was killed or left on
   its own: a wrapper script's children go with it, even when they hold its
-  output open. On Windows only the module's own process is ended: a wrapper
-  there must end its children itself.
+  output open. On Windows a module runs in a job object of its own, and the
+  end of every run ends every process in the job, so the children it starts
+  go with it too; one started in the moment between the module's launch and
+  its joining the job is not in it.
 - Since a module runs in its own process group on macOS and Linux, stdin
   closing is the only notice it gets if the agent crashes, and a module
   that ignores end of input outlives the agent.
