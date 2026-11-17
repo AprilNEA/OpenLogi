@@ -29,10 +29,12 @@ use tokio::time::Instant;
 use tracing::{debug, error, info, warn};
 
 use self::platform::Group;
+use self::stage::{RunStage, StageEvent};
 use super::protocol::{self, Incoming, LineRead, LogLevel};
 use super::{ModuleEvent, ModuleKey, ModuleTimings};
 use crate::watchers::retry::wait_for_deadline;
 
+mod stage;
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]
@@ -189,6 +191,8 @@ enum Read {
 /// What handling one message asks of the run.
 enum Next {
     Continue,
+    /// The module just answered `hello`: send it its keys.
+    Ready,
     /// Kill the module, for this reason.
     End(String),
 }
@@ -241,35 +245,27 @@ impl Run {
 
         let grace = self.spec.timings.shutdown_grace;
         let _ = writer.try_send(protocol::hello(&id, &self.spec.settings));
-        let ready_deadline = Instant::now() + self.spec.timings.ready_timeout;
-        let mut ready_at: Option<Instant> = None;
-        // Set once the module has exited: how, and until when what it wrote
-        // is still read. A child of its own may hold its output open past
-        // that.
-        let mut exit: Option<(String, Instant)> = None;
+        let mut stage = RunStage::starting(Instant::now() + self.spec.timings.ready_timeout);
         loop {
-            let is_ready = ready_at.is_some();
-            let live = exit.is_none();
-            let drain_until = exit.as_ref().map(|(_, until)| *until);
+            let input = stage.takes_input();
+            let live = stage.exit().is_none();
+            let deadline = stage.deadline();
             let next = tokio::select! {
                 _ = &mut self.stop => {
-                    return shut_down(&id, &group, &mut child, writer, ready_at, grace).await;
+                    let ready_for = stage.ready_for(Instant::now());
+                    return shut_down(&id, &group, &mut child, writer, ready_for, grace).await;
                 }
-                () = tokio::time::sleep_until(ready_deadline), if !is_ready && live => {
-                    let timeout = self.spec.timings.ready_timeout;
-                    let error = format!("did not answer hello within {} s", timeout.as_secs_f32());
-                    return kill(&group, &mut child, None, Some(error)).await;
-                }
+                () = wait_for_deadline(deadline) => Next::End(self.expired(&stage)),
                 status = child.wait(), if live => match status {
                     Ok(status) => {
-                        exit = Some((describe(status), Instant::now() + grace));
+                        let exit = StageEvent::Exited { status: describe(status), grace };
+                        if let Err(refused) = stage.step(exit, Instant::now()) {
+                            debug!(module = %id, %refused, "module exit");
+                        }
                         Next::Continue
                     }
                     Err(error) => Next::End(format!("could not be waited on: {error}")),
                 },
-                () = wait_for_deadline(drain_until), if !live => {
-                    Next::End(exit.take().map(|(error, _)| error).unwrap_or_default())
-                }
                 failed = &mut writer_failed, if live => Next::End(match failed {
                     Ok(error) => format!("closed its input: {error}"),
                     Err(_) => "closed its input".into(),
@@ -279,46 +275,57 @@ impl Run {
                         if let Some(error) = error {
                             debug!(module = %id, %error, "module stdout failed");
                         }
-                        match exit.take() {
-                            Some((error, _)) => Next::End(error),
-                            None => return exited(&group, &mut child, ready_at, grace).await,
-                        }
+                        let Some(status) = stage.exit() else {
+                            let ready_for = stage.ready_for(Instant::now());
+                            return exited(&group, &mut child, ready_for, grace).await;
+                        };
+                        Next::End(status.to_owned())
                     }
-                    read => self.take(read, &mut ready_at).await,
+                    read => self.take(read, &mut stage).await,
                 },
-                changed = self.keys.changed(), if is_ready && live => {
+                changed = self.keys.changed(), if input => {
                     if changed.is_err() {
-                        return shut_down(&id, &group, &mut child, writer, ready_at, grace).await;
+                        let ready_for = stage.ready_for(Instant::now());
+                        return shut_down(&id, &group, &mut child, writer, ready_for, grace).await;
                     }
                     let keys = Arc::clone(&self.keys.borrow_and_update());
                     queue(&writer, protocol::keys(&keys))
                 }
-                Some((device, slot)) = self.presses.recv(), if is_ready && live => {
+                Some((device, slot)) = self.presses.recv(), if input => {
                     queue(&writer, protocol::pressed(&device, slot))
                 }
             };
-            let ready_for = ready_at.map(|at| at.elapsed());
-            if let Next::End(error) = next {
-                return kill(&group, &mut child, ready_for, Some(error)).await;
-            }
-            if !is_ready
-                && exit.is_none()
-                && let Some(ready_at) = ready_at
-            {
-                debug!(module = %id, "module ready");
-                let keys = Arc::clone(&self.keys.borrow_and_update());
-                if let Next::End(error) = queue(&writer, protocol::keys(&keys)) {
-                    return kill(&group, &mut child, Some(ready_at.elapsed()), Some(error)).await;
+            let next = match next {
+                Next::Ready => {
+                    debug!(module = %id, "module ready");
+                    let keys = Arc::clone(&self.keys.borrow_and_update());
+                    queue(&writer, protocol::keys(&keys))
                 }
+                next => next,
+            };
+            if let Next::End(error) = next {
+                let ready_for = stage.ready_for(Instant::now());
+                return kill(&group, &mut child, ready_for, Some(error)).await;
             }
         }
     }
 
+    /// Why a run whose stage reached its deadline ends.
+    fn expired(&self, stage: &RunStage) -> String {
+        match stage.exit() {
+            Some(status) => status.to_owned(),
+            None => format!(
+                "did not answer hello within {} s",
+                self.spec.timings.ready_timeout.as_secs_f32()
+            ),
+        }
+    }
+
     /// Act on one line the module wrote.
-    async fn take(&mut self, read: Read, ready_at: &mut Option<Instant>) -> Next {
+    async fn take(&mut self, read: Read, stage: &mut RunStage) -> Next {
         let id = &self.spec.id;
         match read {
-            Read::Message(message) => return self.handle(message, ready_at).await,
+            Read::Message(message) => return self.handle(message, stage).await,
             Read::Malformed(error) => self.log.warn(id, format_args!("dropped a line: {error}")),
             Read::TooLong => self.log.warn(
                 id,
@@ -333,19 +340,23 @@ impl Run {
     }
 
     /// Act on one message from the module.
-    async fn handle(&mut self, message: Incoming, ready_at: &mut Option<Instant>) -> Next {
+    async fn handle(&mut self, message: Incoming, stage: &mut RunStage) -> Next {
         let id = self.spec.id.clone();
         match message {
-            Incoming::Ready { protocol } if ready_at.is_none() => {
-                if protocol != PROTOCOL {
-                    return Next::End(format!(
-                        "answered with protocol {protocol}; this OpenLogi speaks {PROTOCOL}"
-                    ));
-                }
-                *ready_at = Some(Instant::now());
-                self.sink.send(RunEvent::Ready).await;
+            Incoming::Ready { protocol }
+                if protocol != PROTOCOL && matches!(stage, RunStage::Starting { .. }) =>
+            {
+                return Next::End(format!(
+                    "answered with protocol {protocol}; this OpenLogi speaks {PROTOCOL}"
+                ));
             }
-            Incoming::Ready { .. } => debug!(module = %id, "module sent ready again: ignored"),
+            Incoming::Ready { .. } => match stage.step(StageEvent::Ready, Instant::now()) {
+                Ok(()) => {
+                    self.sink.send(RunEvent::Ready).await;
+                    return Next::Ready;
+                }
+                Err(refused) => debug!(module = %id, %refused, "module sent ready: ignored"),
+            },
             Incoming::Log { level, message } => self.log.module(&id, level, &message),
             Incoming::Unknown(kind) => {
                 if let Some(kind) = self.unknown.first_seen(&kind) {
@@ -356,7 +367,7 @@ impl Run {
             }
             // Only `log` may come before `ready`; anything else is a protocol
             // error, logged and dropped.
-            _ if ready_at.is_none() => {
+            _ if !stage.answered() => {
                 self.log.warn(
                     &id,
                     format_args!("sent a message other than log before ready: dropped"),
@@ -521,10 +532,9 @@ async fn copy_stderr<R: AsyncRead + Unpin>(stderr: BufReader<R>, id: ModuleId) {
 async fn exited(
     group: &Group,
     child: &mut Child,
-    ready_at: Option<Instant>,
+    ready_for: Option<Duration>,
     grace: Duration,
 ) -> RunEnd {
-    let ready_for = ready_at.map(|at| at.elapsed());
     let error = match tokio::time::timeout(grace, child.wait()).await {
         Ok(Ok(status)) => describe(status),
         Ok(Err(error)) => format!("could not be waited on: {error}"),
@@ -541,10 +551,9 @@ async fn shut_down(
     group: &Group,
     child: &mut Child,
     writer: mpsc::Sender<String>,
-    ready_at: Option<Instant>,
+    ready_for: Option<Duration>,
     grace: Duration,
 ) -> RunEnd {
-    let ready_for = ready_at.map(|at| at.elapsed());
     let _ = writer.try_send(protocol::shutdown());
     drop(writer);
     let left = tokio::time::timeout(grace, child.wait()).await.is_ok();
