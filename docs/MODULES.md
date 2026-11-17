@@ -135,8 +135,9 @@ Rules:
 
 - `log` may come before `ready`; any other message before `ready` is
   logged and dropped.
-- A message with an unknown `type` is logged once and ignored, so a module
-  written for a later protocol still runs. Unknown fields are ignored.
+- A message with an unknown `type` is logged once, within the rate limit
+  below, and ignored, so a module written for a later protocol still runs.
+  Unknown fields are ignored.
 - A line that is not valid JSON, or longer than 8 MiB, is logged and dropped.
 - An image is at most 4 MiB once decoded, and at most 4096 pixels on a side.
 - Module output to the log, from stderr and `log` alike, is rate-limited.

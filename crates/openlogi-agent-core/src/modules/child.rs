@@ -43,6 +43,11 @@ const PRESS_QUEUE: usize = 16;
 const READ_QUEUE: usize = 8;
 /// The longest stderr line kept; the rest of it is cut.
 const MAX_STDERR_LINE: usize = 4 * 1024;
+/// How many unknown message types a run remembers having logged. Past it,
+/// a new one is logged each time it comes, within the run's log budget.
+const UNKNOWN_TYPES: usize = 16;
+/// The longest unknown message type logged or remembered, in characters.
+const UNKNOWN_TYPE_CHARS: usize = 64;
 
 /// What a run needs to start.
 #[derive(Debug, Clone)]
@@ -140,7 +145,7 @@ pub(super) fn start(spec: RunSpec, keys: Arc<Vec<ModuleKey>>, sink: EventSink) -
             presses: press_rx,
             stop: stop_rx,
             log: LogBudget::default(),
-            unknown: HashSet::new(),
+            unknown: UnknownTypes::default(),
         }
         .drive()
         .await;
@@ -161,8 +166,7 @@ struct Run {
     presses: mpsc::Receiver<(String, GridSlot)>,
     stop: oneshot::Receiver<()>,
     log: LogBudget,
-    /// The unknown message types already logged, each logged once.
-    unknown: HashSet<String>,
+    unknown: UnknownTypes,
 }
 
 /// One framed stdout item, from the reader task.
@@ -342,8 +346,10 @@ impl Run {
             Incoming::Ready { .. } => debug!(module = %id, "module sent ready again: ignored"),
             Incoming::Log { level, message } => self.log.module(&id, level, &message),
             Incoming::Unknown(kind) => {
-                if self.unknown.insert(kind.clone()) {
-                    info!(module = %id, kind, "module sent a message type this OpenLogi does not know: ignored");
+                if let Some(kind) = self.unknown.first_seen(&kind) {
+                    self.log.emit(Instant::now(), &id, |id| {
+                        info!(module = %id, kind, "module sent a message type this OpenLogi does not know: ignored");
+                    });
                 }
             }
             // Only `log` may come before `ready`; anything else is a protocol
@@ -591,6 +597,30 @@ fn kill_group(group: Option<u32>, child: &mut Child) {
     let _ = child.start_kill();
 }
 
+/// The unknown message types a run has logged, each logged once while there
+/// is room to remember it.
+#[derive(Debug, Default)]
+struct UnknownTypes(HashSet<String>);
+
+impl UnknownTypes {
+    /// The name to log for the unknown type `kind`, cut to
+    /// [`UNKNOWN_TYPE_CHARS`] characters, or `None` when it was logged
+    /// before. At most [`UNKNOWN_TYPES`] names are remembered.
+    fn first_seen<'a>(&mut self, kind: &'a str) -> Option<&'a str> {
+        let name = kind
+            .char_indices()
+            .nth(UNKNOWN_TYPE_CHARS)
+            .map_or(kind, |(end, _)| &kind[..end]);
+        if self.0.contains(name) {
+            return None;
+        }
+        if self.0.len() < UNKNOWN_TYPES {
+            self.0.insert(name.to_owned());
+        }
+        Some(name)
+    }
+}
+
 fn describe(status: ExitStatus) -> String {
     match status.code() {
         Some(code) => format!("exited with status {code}"),
@@ -673,5 +703,32 @@ mod tests {
             "a new window reports the two dropped lines"
         );
         assert_eq!(budget.allow(start + LOG_WINDOW), Some(0));
+    }
+
+    /// A module that puts a counter in `type` can neither grow what the run
+    /// remembers without end nor log a line of any length: each type is
+    /// logged once while there is room, cut short, and past the room each
+    /// new one is logged within the budget.
+    #[test]
+    fn unknown_types_are_remembered_within_a_bound() {
+        let mut unknown = UnknownTypes::default();
+        assert_eq!(unknown.first_seen("status"), Some("status"));
+        assert_eq!(unknown.first_seen("status"), None, "logged once");
+        for count in 0..1_000 {
+            assert!(unknown.first_seen(&format!("tick-{count}")).is_some());
+        }
+        assert_eq!(unknown.0.len(), UNKNOWN_TYPES, "the names it remembers");
+        assert_eq!(unknown.first_seen("tick-0"), None, "remembered");
+        assert_eq!(
+            unknown.first_seen("tick-999"),
+            Some("tick-999"),
+            "a name past the room is logged again"
+        );
+        let long = "é".repeat(10_000);
+        assert_eq!(
+            unknown.first_seen(&long).map(|name| name.chars().count()),
+            Some(UNKNOWN_TYPE_CHARS),
+            "a long name is cut"
+        );
     }
 }
