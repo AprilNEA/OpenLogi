@@ -279,6 +279,21 @@ struct ModuleListWatch {
 }
 
 impl ModuleListWatch {
+    /// Note one update from the agent, and say whether to ask it for its
+    /// modules now.
+    fn update(&mut self, update: &ipc::GuiUpdate) -> bool {
+        match update {
+            ipc::GuiUpdate::Snapshot(snapshot) => {
+                self.snapshot(snapshot.config_revision, &snapshot.status.agent_version)
+            }
+            ipc::GuiUpdate::Reconnecting => {
+                self.link_lost();
+                false
+            }
+            _ => false,
+        }
+    }
+
     /// Note a snapshot of an agent running `config_revision` as
     /// `agent_version`, and say whether to ask it for its modules.
     fn snapshot(&mut self, config_revision: ConfigRevision, agent_version: &str) -> bool {
@@ -332,11 +347,9 @@ impl Runtime {
         reason = "one arm per agent update, each handing it to its AppState owner"
     )]
     fn on_agent_update(&mut self, update: ipc::GuiUpdate, cx: &AsyncApp) {
+        let modules_moved = self.modules.update(&update);
         match update {
             ipc::GuiUpdate::Snapshot(snapshot) => {
-                let modules_moved = self
-                    .modules
-                    .snapshot(snapshot.config_revision, &snapshot.status.agent_version);
                 self.apply_snapshot(&snapshot, cx);
                 self.snapshot = Some(*snapshot);
                 if modules_moved {
@@ -351,7 +364,6 @@ impl Runtime {
                 cx.update(|cx| AppState::apply(cx, |state| state.apply_modules(modules)));
             }
             ipc::GuiUpdate::Reconnecting => {
-                self.modules.link_lost();
                 cx.update(|cx| AppState::apply(cx, AppState::agent_link_lost));
             }
             ipc::GuiUpdate::Unreachable => {
@@ -759,9 +771,14 @@ mod tests {
     use openlogi_core::config::AssetSourcePreference;
 
     use openlogi_core::config::ConfigRevision;
+    use openlogi_ipc::{
+        AgentSnapshot, AgentStatus, FlowStatus, ForegroundApps, InventoryHealth, PROTOCOL_VERSION,
+        SecureInput, VirtualKeyboardStatus,
+    };
 
     use super::{AssetWatch, ModuleListWatch, Subscriptions, camera_targets, watch_key};
     use crate::services::assets::sync::model_key;
+    use crate::services::ipc::GuiUpdate;
 
     /// Stands in for a live subscription. Dropping a real one unsubscribes, so
     /// the tests below assert on drops rather than on any handle contents.
@@ -880,26 +897,48 @@ mod tests {
         assert_eq!(keys[0], keys[1]);
     }
 
+    /// A connected agent at `version`, its config at the default revision.
+    fn snapshot(version: &str) -> GuiUpdate {
+        GuiUpdate::Snapshot(Box::new(AgentSnapshot {
+            status: AgentStatus {
+                accessibility_granted: true,
+                hook_installed: true,
+                launch_at_login: false,
+                inventory: InventoryHealth::Ready,
+                protocol_version: PROTOCOL_VERSION,
+                agent_version: version.into(),
+                input_monitoring_granted: true,
+                hid_open_failures: false,
+                secure_input: SecureInput::Off,
+                virtual_keyboard: VirtualKeyboardStatus::Unsupported,
+            },
+            inventory: Vec::new(),
+            standalone: Vec::new(),
+            camera_active: false,
+            pairing: None,
+            foreground: ForegroundApps::default(),
+            lights: Vec::new(),
+            flow: FlowStatus::default(),
+            config_revision: ConfigRevision::default(),
+        }))
+    }
+
     /// The module list is asked for once per connection, config, and
-    /// version: a reconnect asks again even when the agent restarted with
-    /// the same config and version, since its module folders may have
-    /// changed meanwhile.
+    /// version, as the agent's updates arrive: a reconnect asks again even
+    /// when the agent restarted with the same config and version, since its
+    /// module folders may have changed meanwhile.
     #[test]
     fn the_module_list_is_asked_for_again_after_a_reconnect() {
         let mut watch = ModuleListWatch::default();
-        let revision = ConfigRevision::default();
-        assert!(watch.snapshot(revision, "0.9.0"), "a first snapshot asks");
-        assert!(
-            !watch.snapshot(revision, "0.9.0"),
-            "the same agent does not"
-        );
-        assert!(watch.snapshot(revision, "0.9.1"), "another version asks");
+        assert!(watch.update(&snapshot("0.9.0")), "a first snapshot asks");
+        assert!(!watch.update(&snapshot("0.9.0")), "the same agent does not");
+        assert!(watch.update(&snapshot("0.9.1")), "another version asks");
 
-        watch.link_lost();
+        assert!(!watch.update(&GuiUpdate::Reconnecting));
         assert!(
-            watch.snapshot(revision, "0.9.1"),
+            watch.update(&snapshot("0.9.1")),
             "an agent answering after a lost connection asks, its config and version unchanged"
         );
-        assert!(!watch.snapshot(revision, "0.9.1"));
+        assert!(!watch.update(&snapshot("0.9.1")));
     }
 }
