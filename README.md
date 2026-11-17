@@ -168,6 +168,7 @@ Feature coverage depends on what each device reports; the app shows only the con
 | Window-manager actions (desktops, Mission Control, …) | Native | Native equivalents | GNOME, KDE (KWin), Hyprland; some macOS-only actions do nothing |
 | Menu-bar / tray icon | ✓ | ✓ | — |
 | Device controls in the menu-bar / tray menu | ✓ | — | — |
+| [Key modules](docs/MODULES.md) on MX Creative Keypad LCD keys | ✓ | ✓, not yet tested on hardware | ✓, not yet tested on hardware |
 | In-app updates | Sparkle | Built-in | Built-in |
 
 ## Install
