@@ -33,6 +33,20 @@ pub struct ApiArgs {
     command: ApiCommand,
 }
 
+impl ApiArgs {
+    fn validate(&self) -> Result<(), ApiError> {
+        if let ApiCommand::Lighting(args) = &self.command {
+            let persistence = if self.save {
+                lighting::Persistence::Save
+            } else {
+                lighting::Persistence::Read
+            };
+            args.validate(persistence)?;
+        }
+        Ok(())
+    }
+}
+
 /// Machine-readable commands. Writes affect live hardware; saving is opt-in.
 #[derive(Debug, Subcommand)]
 pub enum ApiCommand {
@@ -147,18 +161,22 @@ impl Switch {
 
 /// Emit one JSON envelope and a matching process status, including runtime failures.
 pub async fn run(args: ApiArgs) -> Result<ExitCode> {
-    let result = match agent::connect().await {
-        Ok(client) => {
-            let path = args
-                .save
-                .then(openlogi_core::paths::config_path)
-                .transpose();
-            match path {
-                Ok(path) => execute(&client, args.command, path.as_deref()).await,
-                Err(error) => Err(ApiError::new("config_error", error.to_string())),
+    let result = if let Err(error) = args.validate() {
+        Err(error)
+    } else {
+        match agent::connect().await {
+            Ok(client) => {
+                let path = args
+                    .save
+                    .then(openlogi_core::paths::config_path)
+                    .transpose();
+                match path {
+                    Ok(path) => execute(&client, args.command, path.as_deref()).await,
+                    Err(error) => Err(ApiError::new("config_error", error.to_string())),
+                }
             }
+            Err(error) => Err(ApiError::from(error)),
         }
-        Err(error) => Err(ApiError::from(error)),
     };
     let success = result.is_ok();
     let mut stdout = io::stdout().lock();

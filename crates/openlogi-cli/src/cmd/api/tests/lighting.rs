@@ -33,7 +33,7 @@ fn args() -> LightingArgs {
     LightingArgs {
         device: route().to_string(),
         status: false,
-        enabled: Some(Power::Toggle),
+        set: Some(Power::Toggle),
         color: None,
         brightness: None,
     }
@@ -123,7 +123,7 @@ async fn lighting_status_reports_saved_values_without_any_hardware_or_file_write
         pending(),
     );
     let mut status = args();
-    status.enabled = None;
+    status.set = None;
     for explicit in [false, true] {
         status.status = explicit;
         let result = run_at(&client, &keyboard(), &status, &path, Persistence::Read)
@@ -178,7 +178,7 @@ async fn lighting_partial_colour_and_brightness_change_does_not_turn_disabled_li
     settings.set_dpi("unit:87654321", 2600.into());
     settings.save_to_path(&path).unwrap();
     let mut change = args();
-    change.enabled = None;
+    change.set = None;
     change.color = Some(Rgb::WHITE);
     change.brightness = Some(0);
     let expected = Lighting {
@@ -204,7 +204,7 @@ async fn lighting_changes_without_save_and_save_without_changes_make_no_rpc() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join(CONFIG_FILE);
     let mut read = args();
-    read.enabled = None;
+    read.set = None;
     let result = run_script_at(keyboard(), ApiCommand::Lighting(read), vec![], Some(&path)).await;
     assert_eq!(result["error"]["code"], "invalid_value");
     assert!(!path.exists());
@@ -260,17 +260,72 @@ async fn lighting_hardware_error_reports_already_saved_configuration() {
 #[test]
 fn lighting_cli_rejects_invalid_colours_brightness_and_switch_values() {
     for options in [
-        vec!["--color", "red"],
-        vec!["--color", "#ffffff"],
+        vec!["--colour", "red"],
+        vec!["--colour", "#ffffff"],
+        vec!["--colour", "+00000"],
         vec!["--brightness", "101"],
         vec!["--brightness", "-1"],
-        vec!["--enabled", "maybe"],
-        vec!["--status", "--enabled", "toggle"],
-        vec!["--status", "--save"],
+        vec!["--set", "maybe"],
+        vec!["--status", "--set", "toggle"],
+        vec!["--status", "--colour", "ffffff"],
+        vec!["--status", "--brightness", "50"],
     ] {
         let mut command = vec!["openlogi", "api", "lighting", "--device", "test"];
         command.extend(options);
         crate::Cli::try_parse_from(command)
             .expect_err("invalid lighting arguments must be rejected");
+    }
+}
+
+#[test]
+fn lighting_cli_uses_set_and_accepts_both_colour_spellings() {
+    for spelling in ["--colour", "--color"] {
+        let parsed = crate::Cli::try_parse_from([
+            "openlogi",
+            "api",
+            "lighting",
+            "--device",
+            "test",
+            "--set",
+            "on",
+            spelling,
+            "ff0000",
+            "--brightness",
+            "60",
+            "--save",
+        ])
+        .unwrap();
+        let Some(crate::cmd::Command::Api(ApiArgs {
+            command: ApiCommand::Lighting(args),
+            save: true,
+        })) = parsed.cmd
+        else {
+            panic!("expected a saved lighting command")
+        };
+        assert!(matches!(args.set, Some(Power::On)));
+        assert_eq!(args.color, Some(Rgb::new(255, 0, 0)));
+        assert_eq!(args.brightness, Some(60));
+    }
+}
+
+#[test]
+fn lighting_invalid_operations_are_validated_before_connecting_for_both_save_positions() {
+    for command in [
+        vec![
+            "openlogi", "api", "--save", "lighting", "--device", "test", "--status",
+        ],
+        vec![
+            "openlogi", "api", "lighting", "--device", "test", "--status", "--save",
+        ],
+        vec![
+            "openlogi", "api", "lighting", "--device", "test", "--set", "toggle",
+        ],
+    ] {
+        let parsed = crate::Cli::try_parse_from(command).unwrap();
+        let Some(crate::cmd::Command::Api(args)) = parsed.cmd else {
+            panic!("expected API command")
+        };
+        let error = serde_json::to_value(args.validate().expect_err("invalid operation")).unwrap();
+        assert_eq!(error["code"], "invalid_value");
     }
 }

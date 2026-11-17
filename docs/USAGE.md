@@ -97,10 +97,10 @@ unchanged.
 openlogi api status
 openlogi api devices
 # Copy an exact, non-null id from api devices; quote it as one argument.
-openlogi api lighting --device "$DEVICE_ID" --status
-openlogi api lighting --device "$DEVICE_ID" --enabled toggle --save
-openlogi api lighting --device "$DEVICE_ID" --enabled off --save
-openlogi api lighting --device "$DEVICE_ID" --enabled on --color ff8800 --brightness 60 --save
+openlogi api lighting --device "$DEVICE_ID"
+openlogi api lighting --device "$DEVICE_ID" --set toggle --save
+openlogi api lighting --device "$DEVICE_ID" --set off --save
+openlogi api lighting --device "$DEVICE_ID" --set on --colour ff8800 --brightness 60 --save
 openlogi api dpi --device "$DEVICE_ID"
 openlogi api dpi --device "$DEVICE_ID" --set 1200
 openlogi api dpi --device "$DEVICE_ID" --set 1200 --save
@@ -192,19 +192,20 @@ There is no profile-switch API yet.
 
 ### RGB keyboard lighting
 
-`lighting --status` reads the selected keyboard's effective saved RGB
+`lighting` reads the selected keyboard's effective saved RGB
 configuration without changing the file or sending a hardware command.
-Omitting `--status` has the same effect when no setting flags are supplied.
+An explicit `--status` is also accepted when no setting flags are supplied.
 Its `source: "configuration"` is intentional: OpenLogi has no RGB hardware
 readback, so this is not a promise that the LEDs currently match the file.
 If no RGB settings have been saved, the result reports the GUI defaults with
 `configured: false` and leaves the configuration untouched.
 
-Use `--enabled on|off|toggle`, `--color RRGGBB`, and/or
+Use `--set on|off|toggle`, `--colour RRGGBB`, and/or
 `--brightness 0..100` to change settings. Every change requires `--save`;
 a read with `--save` or a change without it fails with `invalid_value`.
 `--status` cannot be combined with changes or `--save`.
 Colours contain exactly six hexadecimal digits without a leading `#`.
+`--color` is an alias for `--colour`.
 Malformed values are CLI argument errors (exit 2), before any agent command.
 
 Omitted fields keep their saved values. Disabling retains colour and

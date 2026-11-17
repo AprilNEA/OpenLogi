@@ -18,13 +18,13 @@ pub struct LightingArgs {
     #[arg(long)]
     pub(super) device: String,
     /// Report saved settings without changing configuration or hardware (the default).
-    #[arg(long, conflicts_with_all = ["enabled", "color", "brightness", "save"])]
+    #[arg(long, conflicts_with_all = ["set", "color", "brightness"])]
     pub(super) status: bool,
     /// Change the saved enabled flag, retaining colour and brightness.
     #[arg(long, value_enum)]
-    pub(super) enabled: Option<Power>,
+    pub(super) set: Option<Power>,
     /// Static colour as exactly six hexadecimal digits, without '#'.
-    #[arg(long)]
+    #[arg(long = "colour", visible_alias = "color")]
     pub(super) color: Option<Rgb>,
     /// Brightness percent (0–100); does not implicitly enable lighting.
     #[arg(long, value_parser = clap::value_parser!(u8).range(0..=100))]
@@ -38,11 +38,42 @@ pub(super) enum Power {
     Toggle,
 }
 
+struct LightingChanges {
+    enabled: Option<Power>,
+    color: Option<Rgb>,
+    brightness: Option<u8>,
+}
+
+enum LightingOperation {
+    Read,
+    Change(LightingChanges),
+}
+
 impl LightingArgs {
-    fn changes_settings(&self) -> bool {
-        self.enabled.is_some() || self.color.is_some() || self.brightness.is_some()
+    pub(super) fn validate(&self, persistence: Persistence) -> Result<(), ApiError> {
+        self.operation(persistence).map(|_| ())
     }
 
+    fn operation(&self, persistence: Persistence) -> Result<LightingOperation, ApiError> {
+        let changes = LightingChanges {
+            enabled: self.set,
+            color: self.color,
+            brightness: self.brightness,
+        };
+        let has_update =
+            changes.enabled.is_some() || changes.color.is_some() || changes.brightness.is_some();
+        match (self.status, has_update, persistence) {
+            (_, false, Persistence::Read) => Ok(LightingOperation::Read),
+            (false, true, Persistence::Save) => Ok(LightingOperation::Change(changes)),
+            _ => Err(ApiError::new(
+                "invalid_value",
+                "lighting changes require --save; --status is read-only; omit --save to read saved settings",
+            )),
+        }
+    }
+}
+
+impl LightingChanges {
     fn apply(&self, lighting: &mut Lighting) {
         if let Some(enabled) = self.enabled {
             lighting.enabled = match enabled {
@@ -111,37 +142,30 @@ pub(super) async fn run_at(
             "selected device has no measured RGB keyboard lighting support",
         ));
     }
-    if args.status && (args.changes_settings() || persistence == Persistence::Save) {
-        return Err(ApiError::new("invalid_value", "--status is read-only"));
-    }
-    if args.changes_settings() != (persistence == Persistence::Save) {
-        return Err(ApiError::new(
-            "invalid_value",
-            "lighting changes require --save; omit --save to read saved settings",
-        ));
-    }
+    let operation = args.operation(persistence)?;
     let mut edit = Save::for_device(path, snapshot, &args.device)?;
     let configured = edit.lighting().is_some();
     let mut lighting = edit.lighting().cloned().unwrap_or_default();
-    let persistence = if args.changes_settings() {
-        args.apply(&mut lighting);
-        edit.set_lighting(lighting.clone())?;
-        // As in the GUI: save and reload before the write-only lighting RPC.
-        // A conflict must fail before we change hardware.
-        edit.commit(client).await?;
-        agent::call(client.set_lighting(context::current(), route, lighting.clone()))
-            .await
-            .map_err(|error| ApiError::from(error).after_write("saved"))?
-            .map_err(|error| ApiError::from(error).after_write("saved"))?;
-        "saved"
-    } else {
-        "not_saved"
+    let (configured, persistence) = match operation {
+        LightingOperation::Change(changes) => {
+            changes.apply(&mut lighting);
+            edit.set_lighting(lighting.clone())?;
+            // As in the GUI: save and reload before the write-only lighting RPC.
+            // A conflict must fail before we change hardware.
+            edit.commit(client).await?;
+            agent::call(client.set_lighting(context::current(), route, lighting.clone()))
+                .await
+                .map_err(|error| ApiError::from(error).after_write("saved"))?
+                .map_err(|error| ApiError::from(error).after_write("saved"))?;
+            (true, "saved")
+        }
+        LightingOperation::Read => (configured, "not_saved"),
     };
     Ok(json!({
         "device": args.device,
         "persistence": persistence,
         "source": "configuration",
-        "configured": configured || args.changes_settings(),
+        "configured": configured,
         "enabled": lighting.enabled,
         "color": lighting.color,
         "brightness": lighting.brightness,
