@@ -365,11 +365,7 @@ impl Run {
             },
             Incoming::Log { level, message } => self.log.module(&id, level, &message),
             Incoming::Unknown(kind) => {
-                if let Some(kind) = self.unknown.first_seen(&kind) {
-                    self.log.emit(Instant::now(), &id, |id| {
-                        info!(module = %id, kind, "module sent a message type this OpenLogi does not know: ignored");
-                    });
-                }
+                log_unknown(&mut self.log, &mut self.unknown, &id, &kind, Instant::now());
             }
             // Only `log` may come before `ready`; anything else is a protocol
             // error, logged and dropped.
@@ -631,6 +627,24 @@ impl UnknownTypes {
     }
 }
 
+/// Log that module `id` sent the unknown message type `kind`, at `now`:
+/// once while the type is remembered, and only within the run's log
+/// budget. Says whether a line was written.
+fn log_unknown(
+    log: &mut LogBudget,
+    unknown: &mut UnknownTypes,
+    id: &ModuleId,
+    kind: &str,
+    now: Instant,
+) -> bool {
+    let Some(kind) = unknown.first_seen(kind) else {
+        return false;
+    };
+    log.emit(now, id, |id| {
+        info!(module = %id, kind, "module sent a message type this OpenLogi does not know: ignored");
+    })
+}
+
 fn describe(status: ExitStatus) -> String {
     match status.code() {
         Some(code) => format!("exited with status {code}"),
@@ -671,13 +685,17 @@ impl LogBudget {
         Some(std::mem::take(&mut self.dropped))
     }
 
-    fn emit(&mut self, now: Instant, id: &ModuleId, log: impl FnOnce(&ModuleId)) {
-        if let Some(dropped) = self.allow(now) {
-            if dropped > 0 {
-                info!(module = %id, dropped, "module output was rate-limited");
-            }
-            log(id);
+    /// Write a line through `log` when the budget allows it at `now`, and
+    /// say whether it did.
+    fn emit(&mut self, now: Instant, id: &ModuleId, log: impl FnOnce(&ModuleId)) -> bool {
+        let Some(dropped) = self.allow(now) else {
+            return false;
+        };
+        if dropped > 0 {
+            info!(module = %id, dropped, "module output was rate-limited");
         }
+        log(id);
+        true
     }
 
     fn warn(&mut self, id: &ModuleId, message: std::fmt::Arguments<'_>) {
@@ -740,5 +758,33 @@ mod tests {
             Some(UNKNOWN_TYPE_CHARS),
             "a long name is cut"
         );
+    }
+
+    /// An unknown type is logged through the run's log budget like any
+    /// other line: with the budget spent, nothing is written, and in the
+    /// next window a new type is.
+    #[test]
+    fn unknown_types_are_logged_within_the_log_budget() {
+        let id = ModuleId::try_new("com.example.test".to_owned()).unwrap();
+        let start = Instant::now();
+        let mut budget = LogBudget::default();
+        let mut unknown = UnknownTypes::default();
+        assert!(log_unknown(&mut budget, &mut unknown, &id, "status", start));
+        assert!(
+            !log_unknown(&mut budget, &mut unknown, &id, "status", start),
+            "a type is logged once"
+        );
+        while budget.allow(start).is_some() {}
+        assert!(
+            !log_unknown(&mut budget, &mut unknown, &id, "progress", start),
+            "a spent budget writes nothing"
+        );
+        assert!(log_unknown(
+            &mut budget,
+            &mut unknown,
+            &id,
+            "volume",
+            start + LOG_WINDOW
+        ));
     }
 }
