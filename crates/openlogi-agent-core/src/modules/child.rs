@@ -300,11 +300,12 @@ impl Run {
                 next => next,
             };
             // A write fails when no one reads the module's input any more,
-            // which a module that has just exited does too: then its exit,
-            // not the write, says how it ended.
+            // which an exiting module's input stops being before the module
+            // can be reaped. Its exit, if it comes within the grace, says
+            // how it ended, not the write.
             let next = match next {
-                Next::InputClosed(error) => match child.try_wait() {
-                    Ok(Some(status)) => reaped(&mut group, &mut stage, status, grace),
+                Next::InputClosed(error) => match tokio::time::timeout(grace, child.wait()).await {
+                    Ok(Ok(status)) => reaped(&mut group, &mut stage, status, grace),
                     _ => Next::End(error),
                 },
                 next => next,

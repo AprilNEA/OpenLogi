@@ -31,9 +31,10 @@ use crate::watchers::key_display::KeyImage;
 /// answers, `helper` starts one and answers as `normal` does, `orphan`
 /// answers, then starts one that holds its output open and exits with
 /// status 4, `racer` answers, draws with `big.b64` without reading its
-/// keys, and exits with status 5 a tenth of a second later, and `burst`
+/// keys, and exits with status 5 a tenth of a second later, `burst`
 /// answers, draws without reading its keys, and exits with status 6 at
-/// once. Each run notes its process id in `pids.log`, and each `sleep` its
+/// once, and `leaver` closes its input, answers, and exits with status 7 a
+/// fifth of a second later. Each run notes its process id in `pids.log`, and each `sleep` its
 /// own in `sleep.pids`.
 const SCRIPT: &str = r#"#!/bin/sh
 dir="$OPENLOGI_MODULE_DIR"
@@ -51,9 +52,13 @@ while IFS= read -r line; do
   case "$line" in
     *'"type":"hello"'*)
       [ "$mode" = silent ] || [ "$mode" = wrapper ] && continue
-      [ "$mode" = closer ] && exec 0<&-
+      [ "$mode" = closer ] || [ "$mode" = leaver ] && exec 0<&-
       printf '{"type":"log","level":"info","message":"hello from the test module"}\n'
       printf '{"type":"ready","protocol":1}\n'
+      if [ "$mode" = leaver ]; then
+        sleep 0.2
+        exit 7
+      fi
       if [ "$mode" = burst ]; then
         printf '{"type":"image_all","png":"%s"}\n' "$png"
         exit 6
@@ -934,4 +939,50 @@ async fn a_module_that_exits_as_a_write_to_it_fails_is_reported_by_its_exit() {
             "run {generation}: {end:?}"
         );
     }
+}
+
+/// A module whose input closes shortly before it exits is reported by its
+/// exit: a write that fails in between waits up to the grace for the exit
+/// rather than ending the run as a module that closed its input.
+#[tokio::test]
+async fn a_module_that_exits_soon_after_its_input_closes_is_reported_by_its_exit() {
+    let dir = tempfile::tempdir().unwrap();
+    let folder = install(&dir.path().join("modules"), "leaver");
+    let keys = Arc::new(vec![key(1, GridKey::Middle)]);
+    let (events, mut received) = mpsc::channel(64);
+    let _run = child::start(
+        child::RunSpec {
+            id: id(),
+            folder: folder.clone(),
+            executable: folder.join("run.sh"),
+            settings: toml::Table::new(),
+            timings: ModuleTimings {
+                shutdown_grace: Duration::from_secs(3),
+                ..timings()
+            },
+        },
+        keys,
+        child::EventSink {
+            id: id(),
+            generation: 1,
+            events,
+        },
+    );
+    let ended = async {
+        loop {
+            match received.recv().await {
+                Some((_, _, child::RunEvent::Ended(end))) => return end,
+                Some(_) => {}
+                None => panic!("the run dropped its events"),
+            }
+        }
+    };
+    let end = tokio::time::timeout(WAIT, ended)
+        .await
+        .expect("the run ends in time");
+    assert_eq!(
+        end.error.as_deref(),
+        Some("exited with status 7"),
+        "{end:?}"
+    );
 }
