@@ -30,6 +30,7 @@ use futures::StreamExt as _;
 use openlogi_agent_core::action_ring::ActionRingRelease;
 use openlogi_agent_core::backlight_overlay::BacklightOverlayManager;
 use openlogi_agent_core::event_monitor::EventMonitor;
+use openlogi_agent_core::modules::{ModuleHost, ModuleHostHandle};
 use openlogi_agent_core::observable::ObservableState;
 use openlogi_agent_core::orchestrator::{Orchestrator, SharedHandles};
 use openlogi_agent_core::runtime::{ActionRequest, hook};
@@ -50,6 +51,13 @@ use crate::shutdown::{self, ShutdownRequest, ShutdownRequests, ShutdownSignals};
 use crate::startup::{self, Core, InputServices};
 use crate::virtual_keyboard::VirtualKeyboard;
 use crate::{autostart, overlay, server};
+
+/// How many key-module face changes may wait for the control loop.
+const MODULE_EVENT_QUEUE: usize = 64;
+
+/// The longest the exit waits for the module host: each module's two-second
+/// shutdown grace, plus the time to kill and reap the ones that overstay.
+const MODULE_SHUTDOWN_BOUND: std::time::Duration = std::time::Duration::from_secs(4);
 
 /// How long a dormant agent waits before leaving — generous next to the
 /// seconds a kickstarting GUI needs, and the window costs only an idle
@@ -251,6 +259,8 @@ impl Wanted {
             #[cfg(target_os = "macos")]
                 server: _,
             demand,
+            modules,
+            module_host,
         } = core;
         observable.set_virtual_keyboard(virtual_keyboard.status());
         // Closing the channel turns post-arming declarations into no-ops in
@@ -272,6 +282,8 @@ impl Wanted {
                 capture_mouse_events,
                 held_pointer: None,
                 virtual_keyboard,
+                modules,
+                key_modules: KeyModules::NotStarted(module_host),
             },
         }
     }
@@ -280,6 +292,15 @@ impl Wanted {
 /// An armed agent ready to start its watcher fleets.
 struct Armed {
     running: Running,
+}
+
+/// Where the key-module host stands in the agent's life.
+enum KeyModules {
+    /// Built, and started with the watchers: an exit before then, the
+    /// Input Monitoring relaunch, has no module to stop.
+    NotStarted(ModuleHost),
+    /// Running modules: every exit and every replacement stops them first.
+    Started,
 }
 
 /// The live agent state into which the select loop folds events.
@@ -309,6 +330,11 @@ struct Running {
     /// `CGEvent`s. The exit path releases it only after the action workers
     /// that press keys stopped.
     virtual_keyboard: VirtualKeyboard,
+    /// The key-module host's handle: presses go to it, and every exit or
+    /// replacement stops its modules first, once [`Self::key_modules`] says
+    /// they run.
+    modules: ModuleHostHandle,
+    key_modules: KeyModules,
 }
 
 impl Armed {
@@ -328,6 +354,12 @@ impl Armed {
         running.shared.flow.arm();
         let (mut watchers, inventory_refresh) = startup::spawn_state_watchers(&running.shared);
         let mut ring = running.inputs.ring.subscribe();
+        let (module_events_tx, mut module_events) = tokio::sync::mpsc::channel(MODULE_EVENT_QUEUE);
+        if let KeyModules::NotStarted(host) =
+            std::mem::replace(&mut running.key_modules, KeyModules::Started)
+        {
+            tokio::spawn(host.run(running.shared.module_plan.clone(), module_events_tx));
+        }
 
         info!("openlogi-agent started");
         loop {
@@ -345,7 +377,7 @@ impl Armed {
                     running.handle_shutdown_request(request).await;
                 }
                 (request, stopped) = running.hidpp_watchers.replacement_ready() => {
-                    running.complete_replacement(request, stopped);
+                    running.complete_replacement(request, stopped).await;
                 }
                 Some(event) = watchers.next() => {
                     running.apply_watcher(event, &inventory_refresh).await;
@@ -369,6 +401,16 @@ impl Armed {
                             .await
                             .switch_host_for_action(device_key.as_deref(), slot);
                     }
+                    ActionRequest::ModulePressed { device_key, module, key } => {
+                        let press = running
+                            .orchestrator
+                            .lock()
+                            .await
+                            .module_press(device_key.as_deref(), &module, key);
+                        if let Some(press) = press {
+                            running.modules.press(press);
+                        }
+                    }
                     ActionRequest::SettingsWritten { route } => {
                         running
                             .orchestrator
@@ -377,6 +419,9 @@ impl Armed {
                             .announce_settings_changed(&route);
                     }
                 },
+                Some(event) = module_events.recv() => {
+                    running.orchestrator.lock().await.apply_module_event(event);
+                }
                 Ok(()) = ring.changed() => {
                     running.apply_held_pointer().await;
                 }
@@ -744,14 +789,14 @@ impl Running {
 
     /// Called only after the old fleet has acknowledged teardown. Failed
     /// teardown resumes the current image instead of replacing it.
-    fn complete_replacement(&mut self, request: Replacement, stopped: bool) {
+    async fn complete_replacement(&mut self, request: Replacement, stopped: bool) {
         if !stopped {
             warn!("HID++ teardown was unclean — refusing replacement and retrying");
             self.restart_hidpp_watchers();
             let _ = request.retry.send(());
             return;
         }
-        self.restart(request);
+        self.restart(request).await;
     }
 
     fn restart_hidpp_watchers(&mut self) {
@@ -762,28 +807,38 @@ impl Running {
             WatcherFleet::Running(startup::spawn_hidpp_watchers(&self.shared, &self.inputs));
     }
 
+    /// The new image keeps this process and its children: the modules stop
+    /// first, so none outlives the exec as an orphan or a zombie of it, and
+    /// start again if the exec fails.
     #[cfg(all(unix, not(target_os = "macos")))]
-    fn restart(&mut self, Replacement { path, retry }: Replacement) {
+    async fn restart(&mut self, Replacement { path, retry }: Replacement) {
+        let started = matches!(self.key_modules, KeyModules::Started);
+        if started {
+            self.modules.stop_all(MODULE_SHUTDOWN_BOUND).await;
+        }
         let error = crate::binary_watch::replace_process(&path);
         warn!(%error, path = %path.display(), "exec of the updated agent failed — restoring the current image and retrying");
+        if started {
+            self.modules.resume().await;
+        }
         self.restart_hidpp_watchers();
         let _ = retry.send(());
     }
 
     #[cfg(target_os = "macos")]
-    fn restart(&mut self, Replacement { path, retry }: Replacement) {
+    async fn restart(&mut self, Replacement { path, retry }: Replacement) {
         if let Err(error) = crate::binary_watch::schedule(&path) {
             warn!(%error, "could not schedule updated agent relaunch — keeping the current image and retrying");
             self.restart_hidpp_watchers();
             let _ = retry.send(());
             return;
         }
-        self.exit_after_replacement_teardown("binary update");
+        self.exit_after_replacement_teardown("binary update").await;
     }
 
     #[cfg(not(unix))]
-    fn restart(&mut self, _request: Replacement) {
-        self.exit_after_replacement_teardown("binary update");
+    async fn restart(&mut self, _request: Replacement) {
+        self.exit_after_replacement_teardown("binary update").await;
     }
 
     /// Leave for good: nobody wants the agent until asked again, so the next
@@ -821,6 +876,7 @@ impl Running {
         reason: &str,
         tray_guard: Option<tokio::sync::oneshot::Sender<()>>,
     ) -> ! {
+        self.stop_modules().await;
         // Flow holds receiver leases and device I/O, so it stops first.
         self.shared.flow.shutdown().await;
         self.ring_haptics.finish().await;
@@ -834,8 +890,18 @@ impl Running {
     /// ownership, so a successor starts from native device state. A handover
     /// like [`Self::hand_over`]: the successor finds the armed session.
     #[cfg(any(target_os = "macos", not(unix)))]
-    fn exit_after_replacement_teardown(&mut self, reason: &str) -> ! {
+    async fn exit_after_replacement_teardown(&mut self, reason: &str) -> ! {
+        self.stop_modules().await;
         self.release_and_exit(reason, None)
+    }
+
+    /// Modules are the user's own programs: tell them to leave, and kill and
+    /// reap any that do not within their grace. A host that never started
+    /// has none.
+    async fn stop_modules(&mut self) {
+        if matches!(self.key_modules, KeyModules::Started) {
+            self.modules.shutdown(MODULE_SHUTDOWN_BOUND).await;
+        }
     }
 
     /// Release the hook, the input workers and the virtual keyboard, then

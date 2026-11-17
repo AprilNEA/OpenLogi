@@ -85,6 +85,47 @@ read `status` before deciding whether another write is needed. Firmware's
 temporary-manual mode cannot be restored by software; the command warns when
 an otherwise mode-preserving change would return it to automatic mode.
 
+## Keypad key images
+
+`openlogi keypad` puts a picture on one LCD key of an MX Creative Keypad in
+place of the icon of the action bound to it. Like `backlight`, it requires a
+running, protocol-compatible OpenLogi agent in the same `OPENLOGI_PROFILE`, and
+works through the agent's inventory and channel.
+
+```sh
+openlogi keypad set-image --key gridMiddle cover.png
+openlogi keypad set-image --key page2:gridTopLeft logo.jpg
+openlogi keypad --device "Creative" clear-image --key gridMiddle
+```
+
+`--key` names a grid key the way `config.toml` does: `gridTopLeft`,
+`gridTopMiddle`, `gridTopRight`, `gridMiddleLeft`, `gridMiddle`,
+`gridMiddleRight`, `gridBottomLeft`, `gridBottomMiddle`, or `gridBottomRight`
+for page 1, and `page2:gridMiddle` and so on for a later page. An image on a
+later page shows while that page is current. The page must be one the keypad
+has.
+
+The file is a PNG or JPEG of at most 4 MiB and at most 4096 pixels on a side;
+a larger camera photo is refused, so scale it down first. The agent turns it
+upright as its EXIF orientation says, crops it to a centred square, shows
+transparent areas as black, and scales it to the key. Pressing the key still
+runs its binding. `--device NAME` is a case-insensitive name substring;
+without it, the command selects the one online device with LCD keys.
+
+The image is held in the agent's memory only. It stays through page turns and
+reconnects, and is gone after `clear-image` or an agent restart. Nothing is
+saved to `config.toml`. Setting a new image on the same key replaces the old
+one, and setting the same image again changes nothing.
+
+## Key modules
+
+A key module is a separate program that draws keypad LCD keys and handles
+their presses, such as a now-playing display. Install one by putting its
+folder in the modules folder beside `config.toml`, turn it on in Settings, and
+bind it to a key. `openlogi modules list` shows every installed module and
+where it stands, through the running agent. Writing a module, the manifest,
+and the protocol: [MODULES.md](MODULES.md).
+
 ## Automation API
 
 `openlogi api` is the JSON interface for launchers such as Raycast and local

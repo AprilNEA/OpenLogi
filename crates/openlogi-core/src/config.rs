@@ -23,6 +23,7 @@ mod gestures;
 mod identity;
 mod key_trigger;
 mod migrate;
+mod modules;
 mod per_app;
 mod per_device;
 mod revision;
@@ -51,6 +52,7 @@ pub use flow::{
 pub use function_key::FunctionKey;
 pub use identity::canonical_device_key;
 pub use key_trigger::{KeyModifiers, KeyTrigger, KeyboardConfig, ParseTriggerError};
+pub use modules::ModuleConfig;
 pub use revision::ConfigRevision;
 pub use settings::LightSettings;
 pub use settings::{
@@ -65,9 +67,16 @@ use crate::app::AppAliases;
 use crate::binding::Action;
 #[cfg(all(test, feature = "fs"))]
 use crate::binding::{Binding, ButtonId, GestureDirection};
+use crate::module::ModuleId;
 /// The schema version the current build produces. Bumped whenever the
 /// persisted shape or enum vocabulary changes; readers inspect this value
 /// before consuming the rest of the file.
+///
+/// v12 adds the `[modules]` table that turns key modules on and hands them
+/// their settings, and the `Module` action that binds a key to one. Nothing
+/// older needs migrating; the bump makes a v11 build refuse a file that may
+/// hold either at the version check, instead of failing on the unknown table
+/// or action.
 ///
 /// v11 adds the `[flow]` section for cross-machine device handoff. Nothing
 /// older needs migrating, and a file without it loads as disabled Flow. The
@@ -132,7 +141,7 @@ use crate::binding::{Binding, ButtonId, GestureDirection};
 /// next save; [`Config::load_from_path`] accepts supported versions `1` through
 /// [`SCHEMA_VERSION`] so an invalid or forward file fails loudly instead of
 /// silently losing bindings.
-pub const SCHEMA_VERSION: u32 = 11;
+pub const SCHEMA_VERSION: u32 = 12;
 
 /// Top-level config document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -182,6 +191,10 @@ pub struct Config {
     /// rejects an `app:` profile key that names no alias here.
     #[serde(default, skip_serializing_if = "AppAliases::is_empty")]
     pub apps: AppAliases,
+    /// Key modules by id: whether each runs, and its settings
+    /// (`[modules."<id>"]`). A module installed but absent here is off.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub modules: BTreeMap<ModuleId, ModuleConfig>,
 }
 
 impl Default for Config {
@@ -195,6 +208,7 @@ impl Default for Config {
             ephemeral: false,
             keyboard: KeyboardConfig::default(),
             apps: AppAliases::default(),
+            modules: BTreeMap::new(),
         }
     }
 }

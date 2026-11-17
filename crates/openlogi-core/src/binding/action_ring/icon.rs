@@ -122,6 +122,8 @@ pub enum ActionRingIcon {
     Channel2,
     /// Easy-Switch channel 3 glyph.
     Channel3,
+    /// Key module glyph: a key a module draws, before it has drawn it.
+    Module,
 }
 
 impl ActionRingIcon {
@@ -189,11 +191,12 @@ impl ActionRingIcon {
             Self::Channel1 => "action-icons/square-1.svg",
             Self::Channel2 => "action-icons/square-2.svg",
             Self::Channel3 => "action-icons/square-3.svg",
+            Self::Module => "action-icons/puzzle.svg",
         }
     }
 
     /// Every icon offered by the Actions Ring editor.
-    pub const ALL: [Self; 57] = [
+    pub const ALL: [Self; 58] = [
         Self::Pointer,
         Self::Mouse,
         Self::Copy,
@@ -251,6 +254,7 @@ impl ActionRingIcon {
         Self::Channel1,
         Self::Channel2,
         Self::Channel3,
+        Self::Module,
     ];
 
     /// Stable catalog key used as this icon's accessible label.
@@ -312,6 +316,7 @@ impl ActionRingIcon {
             Self::Channel1 => "actions.easy_switch_channel_1",
             Self::Channel2 => "actions.easy_switch_channel_2",
             Self::Channel3 => "actions.easy_switch_channel_3",
+            Self::Module => "actions.key_module",
         }
     }
 }
@@ -337,6 +342,7 @@ macro_rules! derive_action_icon {
                     | Action::HoldModifier(_) => Self::Keyboard,
                     Action::RunAppleScript(_) | Action::RunShellCommand(_) => Self::Terminal,
                     Action::OpenApplication(_) => Self::Applications,
+                    Action::Module(_) => Self::Module,
                 }
             }
         }

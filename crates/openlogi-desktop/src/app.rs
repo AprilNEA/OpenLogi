@@ -389,7 +389,8 @@ impl AppView {
             StateEvent::AgentChanged
             | StateEvent::InventoryChanged
             | StateEvent::DeviceSelected(_) => true,
-            StateEvent::ForegroundChanged => !on_home,
+            // A key bound to a module is labelled by the module's name.
+            StateEvent::ForegroundChanged | StateEvent::ModulesChanged => !on_home,
             StateEvent::BindingsChanged(key) => {
                 footer_tracks_bindings()
                     || (!on_home

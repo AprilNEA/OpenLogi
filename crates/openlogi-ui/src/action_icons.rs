@@ -25,7 +25,8 @@ use gpui::{AssetSource, Result, SharedString};
 /// bundled `IconName` set does not cover — About-page icons, and `mouse-left` /
 /// `mouse-right`, which are lucide's `mouse` with one button filled in, and
 /// `square-1` … `square-3`, lucide's `square` around the digits of its
-/// `heading-1` … `heading-3`, for the Easy-Switch channel actions.
+/// `heading-1` … `heading-3`, for the Easy-Switch channel actions, and
+/// `puzzle`, the glyph a key module's key shows until the module draws it.
 ///
 /// `x.svg` duplicates `IconName::Close` on purpose: the overlay does not depend
 /// on gpui-component, and its ring cancel target has to match the settings-side
@@ -77,6 +78,7 @@ const ACTION_ICONS: &[(&str, &[u8])] = &[
     ("action-icons/palette.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/palette.svg"))),
     ("action-icons/pencil.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/pencil.svg"))),
     ("action-icons/play.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/play.svg"))),
+    ("action-icons/puzzle.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/puzzle.svg"))),
     ("action-icons/redo-2.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/redo-2.svg"))),
     ("action-icons/refresh-cw.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/refresh-cw.svg"))),
     ("action-icons/rotate-ccw.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/rotate-ccw.svg"))),

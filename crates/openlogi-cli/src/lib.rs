@@ -50,6 +50,7 @@ mod tests {
     use cmd::fixture::record_profile::RecordProfileArgs;
     use cmd::fixture::verify::VerifyArgs;
     use cmd::fixture::{FixtureCmd, FixtureRecordCmd};
+    use cmd::keypad::KeypadAction;
 
     /// Clap's own structural validation (arg ID collisions, invalid
     /// `conflicts_with` targets, etc.) — cheap and catches a broken derive
@@ -175,6 +176,67 @@ mod tests {
         ] {
             assert!(text.contains(expected), "missing {expected:?} in {text}");
         }
+    }
+
+    #[test]
+    fn keypad_set_image_takes_a_grid_key_a_file_and_a_global_device_filter() {
+        let cli = Cli::try_parse_from([
+            "openlogi",
+            "keypad",
+            "set-image",
+            "--key",
+            "page2:gridTopLeft",
+            "cover.png",
+            "--device",
+            "Creative",
+        ])
+        .expect("valid set-image invocation parses");
+
+        match cli.cmd.expect("subcommand present") {
+            Command::Keypad(args) => {
+                assert_eq!(args.device.as_deref(), Some("Creative"));
+                let KeypadAction::SetImage { key, file } = args.action else {
+                    panic!("expected SetImage, got {:?}", args.action);
+                };
+                assert_eq!(key.config_name(), "page2:gridTopLeft");
+                assert_eq!(file, std::path::PathBuf::from("cover.png"));
+            }
+            other => panic!("expected Keypad, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn keypad_needs_an_action_and_a_grid_key() {
+        Cli::try_parse_from(["openlogi", "keypad"]).expect_err("an action is required");
+        Cli::try_parse_from(["openlogi", "keypad", "set-image", "cover.png"])
+            .expect_err("--key is required");
+        Cli::try_parse_from(["openlogi", "keypad", "set-image", "--key", "gridMiddle"])
+            .expect_err("the file is required");
+        Cli::try_parse_from(["openlogi", "keypad", "clear-image", "--key", "MiddleClick"])
+            .expect_err("a mouse button is not a grid key");
+
+        let cli = Cli::try_parse_from(["openlogi", "keypad", "clear-image", "--key", "gridMiddle"])
+            .expect("valid clear-image invocation parses");
+        assert!(matches!(
+            cli.cmd,
+            Some(Command::Keypad(cmd::keypad::KeypadArgs {
+                device: None,
+                action: KeypadAction::ClearImage { .. },
+            }))
+        ));
+    }
+
+    #[test]
+    fn modules_list_parses_and_needs_its_action() {
+        let cli = Cli::try_parse_from(["openlogi", "modules", "list"])
+            .expect("valid modules invocation parses");
+        assert!(matches!(
+            cli.cmd,
+            Some(Command::Modules(cmd::modules::ModulesArgs {
+                action: cmd::modules::ModulesAction::List,
+            }))
+        ));
+        Cli::try_parse_from(["openlogi", "modules"]).expect_err("an action is required");
     }
 
     #[test]

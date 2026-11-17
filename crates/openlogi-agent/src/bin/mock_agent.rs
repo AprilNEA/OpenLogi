@@ -57,13 +57,14 @@ use openlogi_agent_core::backlight_overlay::BacklightOverlayManager;
 use openlogi_agent_core::lock_keys::LockKeyIndicator;
 use openlogi_agent_core::notices::{LowBatteryWatch, NoticeBoard};
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::ActionRingSlot;
+use openlogi_core::binding::{ActionRingSlot, ButtonId};
 use openlogi_core::config::{AppSettings, Config, Lighting};
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind, LockKey,
     PairedDevice, StandaloneDevice, prettify_codename,
 };
 use openlogi_core::hid::{DisableKeysMask, DisableKeysState, HidppOperation};
+use openlogi_core::module::ModuleId;
 use openlogi_core::single_instance::{self, InstanceError, Role};
 use openlogi_fixture::{DeviceProfile, FixtureError, ProfileDeviceSettings, ProfileSetting};
 use openlogi_hid::{
@@ -76,9 +77,10 @@ use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus,
     BacklightObservation, ClientKind, ConfigReloadError, FlowIdentity, FlowPairTarget,
     FlowPairingCommandError, ForegroundApps, FoundDevice, Generation, Identity, InventoryHealth,
-    LockKeyChange, LockKeyObservation, MonitorEvent, NoticeKind, NoticeObservation, OBSERVE_HOLD,
-    Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase,
-    PairingUpdate, RingObservation, SavedConfig, SavedConfigVerdict,
+    KeyImageError, LockKeyChange, LockKeyObservation, ModuleInfo, ModuleState, ModuleStatus,
+    MonitorEvent, NoticeKind, NoticeObservation, OBSERVE_HOLD, Observation, PROTOCOL_VERSION,
+    PairingCommandError, PairingFailure, PairingPhase, PairingUpdate, RingObservation, SavedConfig,
+    SavedConfigVerdict, check_key_image_size,
 };
 use succession::Compat;
 use tarpc::context::Context;
@@ -667,6 +669,19 @@ impl State {
             .iter_mut()
             .find(|settings| settings.route == *route)
             .ok_or(WriteError::DeviceNotFound)
+    }
+
+    /// Refuse a key image change for a device the mock does not know, or one
+    /// whose keys show no images. The mock decodes nothing and keeps no
+    /// pages, so it never refuses an image as undecodable or a page as out of
+    /// range.
+    fn check_key_image_target(&self, route: &DeviceRoute) -> Result<(), KeyImageError> {
+        self.settings_for(route)
+            .map_err(|_| KeyImageError::DeviceNotFound)?;
+        if openlogi_hid::key_display_for(route).is_none() {
+            return Err(KeyImageError::NoKeyDisplay);
+        }
+        Ok(())
     }
 
     /// Whether `route` answers: it is online, and the console has not made it
@@ -1603,6 +1618,89 @@ impl Agent for MockAgent {
     ) -> Result<(), ActionRingCommandError> {
         Err(ActionRingCommandError::SessionNotFound)
     }
+
+    async fn set_key_image(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        key: ButtonId,
+        image: Vec<u8>,
+    ) -> Result<(), KeyImageError> {
+        key.grid_slot().ok_or(KeyImageError::NotAGridKey)?;
+        check_key_image_size(image.len())?;
+        self.state.lock().await.check_key_image_target(&route)?;
+        info!(
+            %route,
+            key = %key.config_name(),
+            bytes = image.len(),
+            "set_key_image (no-op in the mock)"
+        );
+        Ok(())
+    }
+
+    async fn clear_key_image(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        key: ButtonId,
+    ) -> Result<(), KeyImageError> {
+        key.grid_slot().ok_or(KeyImageError::NotAGridKey)?;
+        self.state.lock().await.check_key_image_target(&route)?;
+        info!(
+            %route,
+            key = %key.config_name(),
+            "clear_key_image (no-op in the mock)"
+        );
+        Ok(())
+    }
+
+    /// A scripted modules folder: one module running, one turned off, and
+    /// one folder whose manifest was refused, so the Settings section has
+    /// every kind of row to draw.
+    async fn list_modules(self, _: Context) -> Vec<ModuleStatus> {
+        mock_modules()
+    }
+}
+
+fn mock_modules() -> Vec<ModuleStatus> {
+    let module = |id: &str, name: &str, description: &str| ModuleInfo {
+        id: ModuleId::try_new(id.to_owned()).unwrap_or_else(|error| panic!("{id}: {error}")),
+        name: name.to_owned(),
+        description: Some(description.to_owned()),
+        version: Some("1.0.0".to_owned()),
+        platforms: vec!["macos".to_owned(), "linux".to_owned()],
+    };
+    vec![
+        ModuleStatus {
+            folder: "broken".to_owned(),
+            module: None,
+            enabled: false,
+            state: ModuleState::Invalid,
+            error: Some("no module.toml".to_owned()),
+        },
+        ModuleStatus {
+            folder: "spotify".to_owned(),
+            module: Some(module(
+                "com.example.spotify",
+                "Spotify Now Playing",
+                "Album art and play/pause for Spotify.",
+            )),
+            enabled: true,
+            state: ModuleState::Running,
+            error: None,
+        },
+        ModuleStatus {
+            folder: "weather".to_owned(),
+            module: Some(module(
+                "com.example.weather",
+                "Weather",
+                "The temperature outside.",
+            )),
+            enabled: false,
+            state: ModuleState::Disabled,
+            error: None,
+        },
+    ]
 }
 
 #[cfg(test)]

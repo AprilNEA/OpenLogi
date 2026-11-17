@@ -12,9 +12,10 @@ use gpui_kit::component::{
     scroll::ScrollableElement, v_flex,
 };
 use openlogi_core::binding::{Action, ApplicationTarget, Category, GestureDirection};
+use openlogi_ipc::ModuleStatus;
 
 pub(crate) use self::shortcut_recorder::{Recording, RecordsShortcut, ShortcutRecorder};
-use crate::ui::action::localized_action_label;
+use crate::ui::action::action_label;
 use crate::ui::components::{MenuRow, control_input};
 use crate::ui::section::section_label;
 use crate::ui::theme::{ACCENT_BLUE, Palette, Typography as _};
@@ -120,6 +121,7 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
         | Action::HoldModifier(_)
         | Action::TypeText(_) => "action-icons/keyboard.svg",
         Action::RunAppleScript(_) | Action::RunShellCommand(_) => "action-icons/terminal.svg",
+        Action::Module(_) => "action-icons/puzzle.svg",
     }
 }
 
@@ -128,6 +130,9 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
 pub(crate) struct ActionOffer<'a> {
     pub extra: &'a [Action],
     pub hidden: &'a [Action],
+    /// The key modules the agent reported, which name the module actions
+    /// listed.
+    pub modules: &'a [ModuleStatus],
 }
 
 pub(crate) fn action_rows_with(
@@ -164,7 +169,7 @@ pub(crate) fn action_rows_with(
             .filter(|(_, action)| {
                 query.is_empty()
                     || category_matches
-                    || localized_action_label(action)
+                    || action_label(action, offer.modules)
                         .to_lowercase()
                         .contains(&query)
                     || action.label().to_lowercase().contains(&query)
@@ -178,7 +183,7 @@ pub(crate) fn action_rows_with(
                 .child(editor_section(category_label.into_owned(), pal))
                 .children(actions.into_iter().map(|(action_key, action)| {
                     let selected = current == Some(&action);
-                    let label = localized_action_label(&action);
+                    let label = action_label(&action, offer.modules);
                     let accessible_label = label.clone();
                     let icon_path = action_icon_path(&action);
                     let on_pick = on_pick.clone();

@@ -46,7 +46,7 @@ fn first_key(spec: &KeyDisplaySpec) -> Paint<'_> {
     Paint {
         spec,
         key: *key,
-        face: *face,
+        face,
     }
 }
 
@@ -67,7 +67,7 @@ fn a_new_panel_is_painted_in_full() {
         .iter()
         .find(|paint| paint.key == GridKey::Middle)
         .unwrap();
-    assert_eq!(middle.face, KeyFace::Icon(ActionRingIcon::Copy));
+    assert_eq!(*middle.face, KeyFace::Icon(ActionRingIcon::Copy));
 }
 
 #[test]
@@ -166,12 +166,12 @@ fn panels_are_tracked_independently() {
 fn identical_faces_render_once() {
     let mut tiles = Tiles::default();
     let face = KeyFace::Icon(ActionRingIcon::Copy);
-    let first = tiles.get(face, 118).unwrap();
-    let second = tiles.get(face, 118).unwrap();
+    let first = tiles.get(&face, 118).unwrap();
+    let second = tiles.get(&face, 118).unwrap();
     assert!(Arc::ptr_eq(&first, &second));
     assert!(!Arc::ptr_eq(
         &first,
-        &tiles.get(KeyFace::Blank, 118).unwrap()
+        &tiles.get(&KeyFace::Blank, 118).unwrap()
     ));
 }
 
@@ -309,9 +309,79 @@ fn a_key_whose_write_failed_is_repainted_even_when_its_old_face_returns() {
     assert_eq!(painted.next_retry(), Some(now + RETRY_DELAY));
     let retry = painted.plan(&copy, now + RETRY_DELAY);
     assert_eq!(keys(&retry), [GridKey::Middle]);
-    assert_eq!(retry[0].face, KeyFace::Icon(ActionRingIcon::Copy));
+    assert_eq!(*retry[0].face, KeyFace::Icon(ActionRingIcon::Copy));
     painted.record(&retry[0]);
 
     assert!(painted.plan(&copy, now + RETRY_DELAY).is_empty());
     assert_eq!(painted.next_retry(), None);
+}
+
+/// `spec` with `image` on its middle key.
+fn with_image(mut spec: KeyDisplaySpec, image: &KeyImage) -> KeyDisplaySpec {
+    spec.faces
+        .insert(GridKey::Middle, KeyFace::Image(image.clone()));
+    spec
+}
+
+#[test]
+fn a_key_is_repainted_when_its_image_changes_and_not_when_it_is_pushed_again() {
+    let mut painted = Painted::default();
+    let now = Instant::now();
+    let red = KeyImage::solid(8, [255, 0, 0]);
+    let specs = [with_image(spec(keypad(0xc354), 0, &[]), &red)];
+    let first = painted.plan(&specs, now);
+    record_all(&mut painted, &first);
+
+    // The same picture again, decoded afresh: nothing to paint.
+    let again = [with_image(
+        spec(keypad(0xc354), 0, &[]),
+        &KeyImage::solid(8, [255, 0, 0]),
+    )];
+    assert!(painted.plan(&again, now).is_empty());
+
+    let blue = [with_image(
+        spec(keypad(0xc354), 0, &[]),
+        &KeyImage::solid(8, [0, 0, 255]),
+    )];
+    let plan = painted.plan(&blue, now);
+    assert_eq!(keys(&plan), [GridKey::Middle]);
+    record_all(&mut painted, &plan);
+
+    // Cleared: the key goes back to its binding's face.
+    assert_eq!(
+        keys(&painted.plan(&[spec(keypad(0xc354), 0, &[])], now)),
+        [GridKey::Middle]
+    );
+}
+
+#[test]
+fn an_image_is_repainted_after_a_reset() {
+    let mut painted = Painted::default();
+    let now = Instant::now();
+    let image = KeyImage::solid(8, [255, 0, 0]);
+    let specs = [with_image(spec(keypad(0xc354), 3, &[]), &image)];
+    let first = painted.plan(&specs, now);
+    record_all(&mut painted, &first);
+
+    let after_wake = [with_image(spec(keypad(0xc354), 4, &[]), &image)];
+    let plan = painted.plan(&after_wake, now);
+    assert_eq!(keys(&plan), GridKey::ALL);
+    let middle = plan
+        .iter()
+        .find(|paint| paint.key == GridKey::Middle)
+        .unwrap();
+    assert_eq!(*middle.face, KeyFace::Image(image));
+}
+
+/// Image tiles are rendered for each paint and never kept, so a caller that
+/// supplies a new image every few seconds does not grow the cache.
+#[test]
+fn image_tiles_are_not_cached() {
+    let mut tiles = Tiles::default();
+    let face = KeyFace::Image(KeyImage::solid(8, [255, 0, 0]));
+    let first = tiles.get(&face, 118).unwrap();
+    let second = tiles.get(&face, 118).unwrap();
+    assert!(!Arc::ptr_eq(&first, &second));
+    assert_eq!(first, second);
+    assert!(tiles.rendered.is_empty());
 }

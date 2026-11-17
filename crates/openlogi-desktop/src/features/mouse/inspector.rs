@@ -299,6 +299,7 @@ fn button_inspector(
                 ActionOffer {
                     extra: data.extra_actions,
                     hidden: data.hidden_actions,
+                    ..ActionOffer::default()
                 },
                 &on_pick,
                 pal,
@@ -441,6 +442,7 @@ fn inherited_gesture_inspector(
                 ActionOffer {
                     extra: data.extra_actions,
                     hidden: data.hidden_actions,
+                    ..ActionOffer::default()
                 },
                 &on_pick,
                 pal,
@@ -514,8 +516,8 @@ fn gesture_inspector(
                 Some(&current),
                 picker,
                 ActionOffer {
-                    extra: &[],
                     hidden: data.hidden_actions,
+                    ..ActionOffer::default()
                 },
                 &on_pick,
                 pal,

@@ -510,6 +510,7 @@ open_named_target = "%{name} 열기"
 easy_switch_channel_1 = "Easy-Switch 채널 1"
 easy_switch_channel_2 = "Easy-Switch 채널 2"
 easy_switch_channel_3 = "Easy-Switch 채널 3"
+key_module = "키 모듈"
 
 [pairing]
 choose_receiver = "Choose a receiver"
@@ -655,6 +656,21 @@ clear_cache = "캐시 지우기"
 downloaded_images_size = "다운로드한 이미지가 현재 %{size}를 사용하고 있습니다."
 cache_location = "캐시 위치"
 show_downloaded_images_description = "다운로드한 이미지 폴더를 파일 관리자에서 표시합니다."
+
+[modules]
+modules = "Modules"
+none_installed = "No modules installed"
+none_installed_description = "A module is a separate program that draws keypad keys and handles their presses. Put its folder in the modules folder, then turn it on here."
+folder = "Modules folder"
+security_note = "Modules are programs you install. OpenLogi runs only the ones turned on here and never downloads any. On macOS a module shares OpenLogi's permissions, so install only modules you trust."
+state_invalid = "Not a valid module: %{error}"
+state_unsupported = "Not available on this platform."
+state_off = "Off."
+state_starting = "Starting."
+state_running = "Running."
+state_restarting = "Restarting."
+state_restarting_after = "Restarting: %{error}."
+state_failed = "Stopped: %{error}. Turn it off and on to try again."
 
 [about]
 about_openlogi = "OpenLogi 정보"
