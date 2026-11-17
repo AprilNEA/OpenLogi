@@ -197,7 +197,11 @@ mod tests {
             finish.send(()).unwrap();
             second.await.unwrap();
         };
-        let (result, ()) = tokio::join!(first, successor);
+        let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            tokio::join!(first, successor)
+        })
+        .await
+        .expect("saved RGB ordering must complete within ten seconds");
         result.unwrap();
     }
 
@@ -283,7 +287,11 @@ mod tests {
             .unwrap();
             finish.send(()).unwrap();
         };
-        let (result, ()) = tokio::join!(first, second);
+        let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            tokio::join!(first, second)
+        })
+        .await
+        .expect("independent keyboard writes must complete within ten seconds");
         result.unwrap();
     }
 

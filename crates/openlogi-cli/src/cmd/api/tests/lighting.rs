@@ -156,7 +156,12 @@ async fn a_delayed_reload_reply_keeps_the_original_save_revision() {
         assert_eq!(result["enabled"], true);
         release_first.notify_one();
     };
-    let (older, ()) = tokio::join!(first, second);
+    let (older, ()) = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        Box::pin(async { tokio::join!(first, second) }),
+    )
+    .await
+    .expect("delayed reload coordination must complete within ten seconds");
     assert_eq!(envelope(older)["error"]["persistence"], "saved");
     assert!(
         Config::load_from_path(&path)
