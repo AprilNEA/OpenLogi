@@ -50,8 +50,10 @@ gridMiddle = { Module = "com.example.weather" }
 
 A key whose long press runs a module and whose short press runs another
 action belongs to the module as well: the module draws it and hears its long
-presses, and a short press runs the other action. A long press that names a
-second module behind a first one reaches no module.
+presses, and a short press runs the other action. Until the module draws it,
+after a `clear`, and once the module stops, such a key shows its short
+action's icon rather than the module glyph. A long press that names a second
+module behind a first one reaches no module.
 
 `openlogi modules list` prints every folder and where its module stands:
 running, starting, restarting, turned off, failed, invalid, or not for this

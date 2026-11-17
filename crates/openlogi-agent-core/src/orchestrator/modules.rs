@@ -57,8 +57,8 @@ impl Orchestrator {
 
     /// What a key bound as `binding` at `slot` of `device` shows when the
     /// binding hands it to a module: the image the module sent for it, or
-    /// `None` for the binding's own face (the module glyph, for a module
-    /// that has sent none).
+    /// `None` for the binding's own face (the module glyph, or the short
+    /// action's icon for a key the module owns through its long press).
     pub(super) fn module_face(
         &self,
         device: &str,

@@ -331,7 +331,9 @@ fn a_module_press_goes_to_the_key_on_the_current_page() {
 
 /// A key that runs a module on a long press and something else on a short
 /// one belongs to the module: the module is told it owns the key, draws on
-/// it, and hears its long presses, which go nowhere else.
+/// it, and hears its long presses, which go nowhere else. Until it draws,
+/// and once it stops, the key shows its short action's icon, not the module
+/// glyph.
 #[test]
 fn a_module_on_a_long_press_owns_its_key() {
     let mut orch = module_keypad();
@@ -360,6 +362,11 @@ fn a_module_on_a_long_press_owns_its_key() {
             slot: slot(1, GridKey::TopLeft),
         })
     );
+    assert_eq!(
+        published_face(&orch, GridKey::TopLeft),
+        KeyFace::Icon(ActionRingIcon::Copy),
+        "the short action's icon until the module draws"
+    );
     let art = KeyImage::solid(4, [0, 0, 255]);
     orch.apply_module_event(ModuleEvent::Image {
         module: spotify(),
@@ -368,4 +375,10 @@ fn a_module_on_a_long_press_owns_its_key() {
         image: art.clone(),
     });
     assert_eq!(published_face(&orch, GridKey::TopLeft), KeyFace::Image(art));
+    orch.apply_module_event(ModuleEvent::Stopped { module: spotify() });
+    assert_eq!(
+        published_face(&orch, GridKey::TopLeft),
+        KeyFace::Icon(ActionRingIcon::Copy),
+        "and again once it stops"
+    );
 }

@@ -1458,7 +1458,9 @@ impl Orchestrator {
     /// capture session dispatches, under the same "bound" rule. A key with
     /// an image set for the current page ([`Self::set_key_image`]) shows the
     /// image instead, bound or not; a key bound to a key module shows the
-    /// image that module last sent for it, or the module glyph until then.
+    /// image that module last sent for it, or its binding's own face until
+    /// then: the module glyph, or the short action's icon for a key the
+    /// module owns through its long press.
     fn key_display_specs_for(&self) -> Vec<KeyDisplaySpec> {
         self.display_keypads()
             .map(|keypad| {
