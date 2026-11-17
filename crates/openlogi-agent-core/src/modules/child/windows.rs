@@ -44,6 +44,11 @@ impl Group {
         let _ = child.start_kill();
     }
 
+    /// The module was just reaped: kill what it left in its job now.
+    pub(super) fn reaped(&mut self) {
+        self.terminate();
+    }
+
     fn terminate(&self) {
         if let Some(job) = &self.0 {
             #[expect(unsafe_code, reason = "TerminateJobObject is a Win32 call")]

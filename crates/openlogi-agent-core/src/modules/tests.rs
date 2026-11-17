@@ -260,7 +260,12 @@ impl Harness {
     }
 
     async fn until(&self, what: &str, done: impl Fn(&Self) -> bool) {
-        let deadline = tokio::time::Instant::now() + WAIT;
+        self.within(WAIT, what, done).await;
+    }
+
+    /// Wait until `done`, failing the test after `limit`.
+    async fn within(&self, limit: Duration, what: &str, done: impl Fn(&Self) -> bool) {
+        let deadline = tokio::time::Instant::now() + limit;
         while !done(self) {
             assert!(
                 tokio::time::Instant::now() < deadline,
@@ -752,18 +757,29 @@ async fn a_killed_wrapper_takes_its_children_with_it() {
 }
 
 /// A ready module that exits while a child of its own holds its output open
-/// has still ended: the child goes with it, and the module starts again.
+/// has still ended: the child goes with it as soon as the module is reaped,
+/// not once the output's grace runs out, and the module starts again.
 #[tokio::test]
 async fn a_module_that_exits_while_its_child_holds_its_output_restarts() {
+    let timings = ModuleTimings {
+        shutdown_grace: Duration::from_secs(5),
+        ..timings()
+    };
     let host = Harness::start(
         "orphan",
         plan(true, &[], vec![key(1, GridKey::Middle)]),
-        timings(),
+        timings,
     );
-    host.until("a second start", |host| host.hellos().len() >= 2)
-        .await;
+    host.until("the first run's child", |host| {
+        !host.lines("sleep.pids").is_empty()
+    })
+    .await;
     let first = host.lines("sleep.pids").remove(0);
-    host.until("the first run's child gone", |_| !exists(&first))
+    host.within(Duration::from_secs(1), "the first run's child gone", |_| {
+        !exists(&first)
+    })
+    .await;
+    host.until("a second start", |host| host.hellos().len() >= 2)
         .await;
     assert!(
         host.events()

@@ -237,7 +237,7 @@ impl Run {
             )
             .await;
         };
-        let group = Group::of(&child);
+        let mut group = Group::of(&child);
         info!(module = %id, pid = ?child.id(), "module started");
         let (writer, mut writer_failed) = spawn_writer(stdin);
         let mut reads = spawn_reader(BufReader::new(stdout));
@@ -253,11 +253,14 @@ impl Run {
             let next = tokio::select! {
                 _ = &mut self.stop => {
                     let ready_for = stage.ready_for(Instant::now());
-                    return shut_down(&id, &group, &mut child, writer, ready_for, grace).await;
+                    return shut_down(&id, &mut group, &mut child, writer, ready_for, grace).await;
                 }
                 () = wait_for_deadline(deadline) => Next::End(self.expired(&stage)),
                 status = child.wait(), if live => match status {
                     Ok(status) => {
+                        // Before anything else: what it left in its group
+                        // holds the group's id, and may hold its output open.
+                        group.reaped();
                         let exit = StageEvent::Exited { status: describe(status), grace };
                         if let Err(refused) = stage.step(exit, Instant::now()) {
                             debug!(module = %id, %refused, "module exit");
@@ -277,7 +280,7 @@ impl Run {
                         }
                         let Some(status) = stage.exit() else {
                             let ready_for = stage.ready_for(Instant::now());
-                            return exited(&group, &mut child, ready_for, grace).await;
+                            return exited(&mut group, &mut child, ready_for, grace).await;
                         };
                         Next::End(status.to_owned())
                     }
@@ -286,7 +289,7 @@ impl Run {
                 changed = self.keys.changed(), if input => {
                     if changed.is_err() {
                         let ready_for = stage.ready_for(Instant::now());
-                        return shut_down(&id, &group, &mut child, writer, ready_for, grace).await;
+                        return shut_down(&id, &mut group, &mut child, writer, ready_for, grace).await;
                     }
                     let keys = Arc::clone(&self.keys.borrow_and_update());
                     queue(&writer, protocol::keys(&keys))
@@ -530,13 +533,16 @@ async fn copy_stderr<R: AsyncRead + Unpin>(stderr: BufReader<R>, id: ModuleId) {
 /// The module's stdout ended: give the process its grace to exit, kill it
 /// past that, and report how it ended. Whatever it left in its group goes.
 async fn exited(
-    group: &Group,
+    group: &mut Group,
     child: &mut Child,
     ready_for: Option<Duration>,
     grace: Duration,
 ) -> RunEnd {
     let error = match tokio::time::timeout(grace, child.wait()).await {
-        Ok(Ok(status)) => describe(status),
+        Ok(Ok(status)) => {
+            group.reaped();
+            describe(status)
+        }
         Ok(Err(error)) => format!("could not be waited on: {error}"),
         Err(_) => "closed its output and kept running".into(),
     };
@@ -548,7 +554,7 @@ async fn exited(
 /// in its group goes either way.
 async fn shut_down(
     id: &ModuleId,
-    group: &Group,
+    group: &mut Group,
     child: &mut Child,
     writer: mpsc::Sender<String>,
     ready_for: Option<Duration>,
@@ -556,9 +562,10 @@ async fn shut_down(
 ) -> RunEnd {
     let _ = writer.try_send(protocol::shutdown());
     drop(writer);
-    let left = tokio::time::timeout(grace, child.wait()).await.is_ok();
-    group.kill(child);
-    if !left {
+    if tokio::time::timeout(grace, child.wait()).await.is_ok() {
+        group.reaped();
+    } else {
+        group.kill(child);
         let _ = child.wait().await;
         info!(module = %id, "module did not shut down in time: killed");
     }
