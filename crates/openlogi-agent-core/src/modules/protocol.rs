@@ -379,7 +379,11 @@ pub(super) mod tests {
         let mut reader = BufReader::with_capacity(capacity, input);
         let mut buf = Vec::new();
         let mut out = Vec::new();
-        loop {
+        // Every read but the last consumes at least one byte, so one more
+        // read than there are bytes reaches the end. The reader is in
+        // memory and never waits, so this count, not a timer, bounds a
+        // read_line that stops consuming.
+        for _ in 0..=input.len() {
             let read = read_line(&mut reader, &mut buf, max).await.unwrap();
             let text = String::from_utf8(buf.clone()).unwrap();
             let eof = read == LineRead::Eof;
@@ -388,6 +392,10 @@ pub(super) mod tests {
                 return out;
             }
         }
+        panic!(
+            "read_line did not reach the end of {} bytes: {out:?}",
+            input.len()
+        );
     }
 
     #[tokio::test]

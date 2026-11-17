@@ -1334,13 +1334,29 @@ mod tests {
             )
             .expect("the press must be accepted");
         assert!(buttons.try_hidpp_up(&session, middle));
+        // The button worker is a thread of its own: wait for it, within a
+        // bound.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let pressed = loop {
+            match received.try_recv() {
+                Ok(request) => break request,
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "the module press never reached the agent"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                Err(error) => panic!("the runtime dropped its requests: {error}"),
+            }
+        };
         assert_eq!(
-            received.blocking_recv(),
-            Some(ActionRequest::ModulePressed {
+            pressed,
+            ActionRequest::ModulePressed {
                 device_key: Some("keypad".to_owned()),
                 module,
                 key: GridKey::Middle,
-            })
+            }
         );
 
         buttons

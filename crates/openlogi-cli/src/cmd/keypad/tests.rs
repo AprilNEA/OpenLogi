@@ -15,6 +15,9 @@ use super::*;
 
 type Step = Box<dyn FnOnce(AgentRequest) -> Answer + Send>;
 
+/// The longest a command may take against the in-memory agent.
+const WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// The MX Creative Keypad, wired.
 fn keypad() -> DeviceInventory {
     DeviceInventory {
@@ -105,7 +108,9 @@ async fn script(args: KeypadArgs, steps: Vec<Step>) -> (Result<()>, String) {
         pending(),
     );
     let mut out = Vec::new();
-    let result = execute(args, Ok(client), &mut out).await;
+    let result = tokio::time::timeout(WAIT, execute(args, Ok(client), &mut out))
+        .await
+        .expect("the command finishes in time");
     assert!(queue.lock().unwrap().is_empty(), "missing expected RPC");
     (result, String::from_utf8(out).unwrap())
 }

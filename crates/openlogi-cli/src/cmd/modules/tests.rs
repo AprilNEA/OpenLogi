@@ -6,6 +6,9 @@ use openlogi_ipc::{AgentRequest, AgentResponse, ModuleInfo};
 
 use super::*;
 
+/// The longest a command may take against the in-memory agent.
+const WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
 fn list() -> ModulesArgs {
     ModulesArgs {
         action: ModulesAction::List,
@@ -25,7 +28,10 @@ async fn run_with(modules: Vec<ModuleStatus>) -> String {
         pending(),
     );
     let mut out = Vec::new();
-    execute(list(), Ok(client), &mut out).await.unwrap();
+    tokio::time::timeout(WAIT, execute(list(), Ok(client), &mut out))
+        .await
+        .expect("the command finishes in time")
+        .unwrap();
     String::from_utf8(out).unwrap()
 }
 
@@ -68,12 +74,15 @@ async fn each_folder_is_listed_with_its_state_and_error() {
 
 #[tokio::test]
 async fn no_agent_is_an_error() {
-    let error = execute(
+    let mut out = Vec::new();
+    let failed = execute(
         list(),
         Err(ConnectError::Endpoint(std::io::ErrorKind::NotFound.into())),
-        &mut Vec::new(),
-    )
-    .await
-    .unwrap_err();
+        &mut out,
+    );
+    let error = tokio::time::timeout(WAIT, failed)
+        .await
+        .expect("the command fails in time")
+        .unwrap_err();
     assert!(format!("{error:#}").contains("running, compatible OpenLogi agent"));
 }

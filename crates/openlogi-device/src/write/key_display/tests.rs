@@ -238,10 +238,17 @@ async fn a_photo_tile_spanning_packets_completes_on_its_last_packets_ack() {
     // 8000 bytes take two packets, like the photo tile the hardware answered
     // `c1 00 00`, then `c2 00 01`; 12000 take three.
     for (len, expected) in [(8000, &[0xa1, 0x62][..]), (12000, &[0xa1, 0x22, 0x63])] {
-        let (shared, handle) = acknowledging_each_packet().await;
-
-        write_key_image_on(&shared, display(), GridKey::Middle, &jpeg(len))
+        let (shared, handle) = tokio::time::timeout(ACK_TIMEOUT, acknowledging_each_packet())
             .await
+            .expect("the scripted keypad opens in time");
+
+        // Past the write's own acknowledgement timeout, so that timeout's
+        // error is what a missed acknowledgement reports.
+        let image = jpeg(len);
+        let write = write_key_image_on(&shared, display(), GridKey::Middle, &image);
+        tokio::time::timeout(ACK_TIMEOUT * 2, write)
+            .await
+            .expect("the write ends in time")
             .unwrap();
 
         let parts: Vec<u8> = handle

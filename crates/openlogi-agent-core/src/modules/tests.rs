@@ -72,6 +72,9 @@ done
 
 const ID: &str = "com.example.test";
 
+/// The longest a test waits for the host to do something before failing.
+const WAIT: Duration = Duration::from_secs(10);
+
 fn id() -> ModuleId {
     ModuleId::try_new(ID.to_owned()).unwrap()
 }
@@ -246,7 +249,7 @@ impl Harness {
     }
 
     async fn until(&self, what: &str, done: impl Fn(&Self) -> bool) {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let deadline = tokio::time::Instant::now() + WAIT;
         while !done(self) {
             assert!(
                 tokio::time::Instant::now() < deadline,
@@ -257,6 +260,36 @@ impl Harness {
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+    }
+
+    /// Shut the host down, failing when it does not answer within [`WAIT`]:
+    /// [`ModuleHostHandle::shutdown`] gives up silently at its bound.
+    async fn shutdown(&self) {
+        let asked = tokio::time::Instant::now();
+        self.handle.shutdown(WAIT).await;
+        assert!(
+            asked.elapsed() < WAIT,
+            "the host did not shut down within {WAIT:?}: state {:?}",
+            self.state()
+        );
+    }
+
+    /// Stop every module, failing when the host does not answer within
+    /// [`WAIT`].
+    async fn stop_all(&self) {
+        let asked = tokio::time::Instant::now();
+        self.handle.stop_all(WAIT).await;
+        assert!(
+            asked.elapsed() < WAIT,
+            "the host did not stop its modules within {WAIT:?}: state {:?}",
+            self.state()
+        );
+    }
+
+    async fn resume(&self) {
+        tokio::time::timeout(WAIT, self.handle.resume())
+            .await
+            .expect("the host takes the resume in time");
     }
 }
 
@@ -338,7 +371,7 @@ async fn a_module_hears_hello_its_keys_and_presses_and_leaves_on_shutdown() {
     );
     assert_eq!(host.hellos().len(), 1, "new keys do not restart the module");
 
-    host.handle.shutdown(Duration::from_secs(5)).await;
+    host.shutdown().await;
     assert_eq!(host.received().last().unwrap(), r#"{"type":"shutdown"}"#);
     assert!(host.handle.statuses().is_empty());
 }
@@ -393,7 +426,7 @@ async fn changed_settings_restart_the_module_with_a_fresh_hello() {
         host.state() == Some((ModuleState::Running, None))
     })
     .await;
-    host.handle.shutdown(Duration::from_secs(5)).await;
+    host.shutdown().await;
 }
 
 /// A module that exits is started again, and the faces it drew go with it.
@@ -423,7 +456,7 @@ async fn an_exited_module_drops_its_faces_and_restarts() {
         host.handle.statuses()[0].error.as_deref(),
         Some("exited with status 3")
     );
-    host.handle.shutdown(Duration::from_secs(5)).await;
+    host.shutdown().await;
 }
 
 /// A module that never answers `hello` is killed at the deadline and, after
@@ -469,7 +502,7 @@ async fn a_module_that_never_gets_ready_fails_until_toggled() {
     host.plan.send_replace(toggled_plan(true, 1));
     host.until("a sixth start", |host| host.hellos().len() == 6)
         .await;
-    host.handle.shutdown(Duration::from_secs(5)).await;
+    host.shutdown().await;
 }
 
 /// A module turned off is never started, and one that stops reading its
@@ -510,7 +543,7 @@ async fn a_disabled_module_never_runs_and_a_deaf_one_is_killed() {
         }
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
-    host.handle.shutdown(Duration::from_secs(5)).await;
+    host.shutdown().await;
 }
 
 /// A module knows each keypad only as `keypad-1`, `keypad-2`, and so on,
@@ -559,7 +592,7 @@ async fn a_module_sees_keypads_by_name_never_by_config_key() {
         "no config key reaches the module: {:?}",
         host.received()
     );
-    host.handle.shutdown(Duration::from_secs(5)).await;
+    host.shutdown().await;
 }
 
 /// `stop_all` tells every module to leave and reaps it, starts none while
@@ -576,7 +609,7 @@ async fn stop_all_reaps_every_module_and_resume_starts_them_again() {
         .await;
     let [pid] = host.lines("pids.log").try_into().unwrap();
 
-    host.handle.stop_all(Duration::from_secs(5)).await;
+    host.stop_all().await;
     assert_eq!(host.received().last().unwrap(), r#"{"type":"shutdown"}"#);
     assert!(!exists(&pid), "the module is gone and reaped, no zombie");
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -588,7 +621,7 @@ async fn stop_all_reaps_every_module_and_resume_starts_them_again() {
         "nothing reaches an agent that is not listening"
     );
 
-    host.handle.resume().await;
+    host.resume().await;
     host.until("the second run", |host| host.hellos().len() == 2)
         .await;
     host.until("the restarted module", |host| {
@@ -601,7 +634,7 @@ async fn stop_all_reaps_every_module_and_resume_starts_them_again() {
         "the first run's end is told on resume: {:?}",
         host.events()
     );
-    host.handle.shutdown(Duration::from_secs(5)).await;
+    host.shutdown().await;
 }
 
 /// A module that was ready and then stopped reading was not a failed
@@ -635,7 +668,7 @@ async fn a_ready_module_that_stalls_five_times_keeps_restarting() {
         }
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
-    host.handle.shutdown(Duration::from_secs(5)).await;
+    host.shutdown().await;
 }
 
 /// An off and an on that reach the host as one plan still clear a failed
@@ -658,7 +691,7 @@ async fn an_off_and_on_coalesced_into_one_plan_clear_a_failure() {
     host.plan.send_replace(toggled_plan(true, 1));
     host.until("a sixth start", |host| host.hellos().len() == 6)
         .await;
-    host.handle.shutdown(Duration::from_secs(5)).await;
+    host.shutdown().await;
 }
 
 /// A module drawing faster than the agent takes its images still hears
@@ -675,7 +708,7 @@ async fn a_module_flooding_an_undrained_agent_still_hears_shutdown() {
         .await;
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    host.handle.shutdown(Duration::from_secs(5)).await;
+    host.shutdown().await;
     assert_eq!(host.received().last().unwrap(), r#"{"type":"shutdown"}"#);
     assert!(host.handle.statuses().is_empty(), "the host stopped");
 }
@@ -704,5 +737,6 @@ async fn a_killed_wrapper_takes_its_children_with_it() {
         sleeps.iter().all(|pid| !exists(pid))
     })
     .await;
-    host.handle.shutdown(Duration::from_secs(5)).await;
+    host.shutdown().await;
 }
+
