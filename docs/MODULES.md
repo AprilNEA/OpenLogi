@@ -140,7 +140,8 @@ Rules:
 - A line that is not valid JSON, or longer than 8 MiB, is logged and dropped.
 - An image is at most 4 MiB once decoded, and at most 4096 pixels on a side.
 - Module output to the log, from stderr and `log` alike, is rate-limited.
-- Read stdin promptly. A module that stops reading is killed.
+- Read stdin promptly, and keep it open. A module that stops reading, or
+  closes stdin and keeps running, is killed.
 - Exit when stdin closes: the agent has gone.
 
 ## Lifecycle
@@ -160,10 +161,11 @@ Rules:
 - Turning a module off, removing its folder, quitting the agent, or the
   agent replacing itself after an update sends it `shutdown`; one that is
   still running 2 seconds later is killed.
-- On macOS and Linux a module leads its own process group, and a kill takes
-  the whole group, so a wrapper script's children go with it. On Windows
-  only the module's own process is killed: a wrapper there must end its
-  children itself.
+- On macOS and Linux a module leads its own process group, and the end of
+  every run takes the whole group, whether the module was killed or left on
+  its own: a wrapper script's children go with it, even when they hold its
+  output open. On Windows only the module's own process is ended: a wrapper
+  there must end its children itself.
 - Since a module runs in its own process group on macOS and Linux, stdin
   closing is the only notice it gets if the agent crashes, and a module
   that ignores end of input outlives the agent.

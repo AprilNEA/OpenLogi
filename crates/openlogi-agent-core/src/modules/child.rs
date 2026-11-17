@@ -8,9 +8,12 @@
 //! never sits half-read in a `select!`; and a stderr task copies its stderr
 //! into the agent's log at debug level.
 //!
-//! On Unix a module leads its own process group, and a kill takes the whole
-//! group: a wrapper script's children go with it instead of holding its
-//! pipes open. Windows kills the module's own process only.
+//! A run ends when the module exits, whether or not its output closes,
+//! when its output closes, when it stops reading or closes its input, or
+//! when the host stops it. On Unix a module leads its own process group, and
+//! the end of a run takes the whole group: a wrapper script's children go
+//! with it instead of holding its pipes open or outliving it. Windows ends
+//! the module's own process only.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -28,6 +31,7 @@ use tracing::{debug, error, info, warn};
 
 use super::protocol::{self, Incoming, LineRead, LogLevel};
 use super::{ModuleEvent, ModuleKey, ModuleTimings};
+use crate::watchers::retry::wait_for_deadline;
 
 /// How many host lines may wait for a module to read them. A module that
 /// lets this many pile up has stopped reading and is killed.
@@ -177,14 +181,14 @@ enum Next {
 }
 
 impl Run {
-    async fn drive(mut self) -> RunEnd {
-        let id = self.spec.id.clone();
+    /// Start the module's process, its pipes open.
+    fn spawn(&self) -> std::io::Result<Child> {
         let mut command = Command::new(&self.spec.executable);
         // No arguments; the agent's environment plus the module's id and
         // folder.
         command
             .current_dir(&self.spec.folder)
-            .env(ENV_MODULE_ID, id.as_ref())
+            .env(ENV_MODULE_ID, self.spec.id.as_ref())
             .env(ENV_MODULE_DIR, &self.spec.folder)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -196,7 +200,12 @@ impl Run {
         // open a console window of its own.
         #[cfg(windows)]
         command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
-        let mut child = match command.spawn() {
+        command.spawn()
+    }
+
+    async fn drive(mut self) -> RunEnd {
+        let id = self.spec.id.clone();
+        let mut child = match self.spawn() {
             Ok(child) => child,
             Err(error) => {
                 return RunEnd {
@@ -208,76 +217,113 @@ impl Run {
         let (Some(stdin), Some(stdout), Some(stderr)) =
             (child.stdin.take(), child.stdout.take(), child.stderr.take())
         else {
+            let group = child.id();
             return kill(
+                group,
                 &mut child,
                 None,
                 Some("its pipes could not be opened".into()),
             )
             .await;
         };
-        info!(module = %id, pid = ?child.id(), "module started");
-        let writer = spawn_writer(stdin);
+        // The module's group bears its id; see `kill_group`.
+        let group = child.id();
+        info!(module = %id, pid = ?group, "module started");
+        let (writer, mut writer_failed) = spawn_writer(stdin);
         let mut reads = spawn_reader(BufReader::new(stdout));
         tokio::spawn(copy_stderr(BufReader::new(stderr), id.clone()));
 
+        let grace = self.spec.timings.shutdown_grace;
         let _ = writer.try_send(protocol::hello(&id, &self.spec.settings));
         let ready_deadline = Instant::now() + self.spec.timings.ready_timeout;
         let mut ready_at: Option<Instant> = None;
+        // Set once the module has exited: how, and until when what it wrote
+        // is still read. A child of its own may hold its output open past
+        // that.
+        let mut exit: Option<(String, Instant)> = None;
         loop {
             let is_ready = ready_at.is_some();
+            let live = exit.is_none();
+            let drain_until = exit.as_ref().map(|(_, until)| *until);
             let next = tokio::select! {
                 _ = &mut self.stop => {
-                    return shut_down(&id, &mut child, writer, ready_at, self.spec.timings.shutdown_grace)
-                        .await;
+                    return shut_down(&id, group, &mut child, writer, ready_at, grace).await;
                 }
-                () = tokio::time::sleep_until(ready_deadline), if !is_ready => {
+                () = tokio::time::sleep_until(ready_deadline), if !is_ready && live => {
                     let timeout = self.spec.timings.ready_timeout;
                     let error = format!("did not answer hello within {} s", timeout.as_secs_f32());
-                    return kill(&mut child, None, Some(error)).await;
+                    return kill(group, &mut child, None, Some(error)).await;
                 }
-                read = reads.recv() => match read {
-                    Some(Read::Message(message)) => self.handle(message, &mut ready_at).await,
-                    Some(Read::Malformed(error)) => {
-                        self.log.warn(&id, format_args!("dropped a line: {error}"));
+                status = child.wait(), if live => match status {
+                    Ok(status) => {
+                        exit = Some((describe(status), Instant::now() + grace));
                         Next::Continue
                     }
-                    Some(Read::TooLong) => {
-                        self.log.warn(
-                            &id,
-                            format_args!("dropped a line longer than {} MiB", protocol::MAX_LINE >> 20),
-                        );
-                        Next::Continue
-                    }
-                    end @ (Some(Read::End(_)) | None) => {
-                        if let Some(Read::End(Some(error))) = end {
+                    Err(error) => Next::End(format!("could not be waited on: {error}")),
+                },
+                () = wait_for_deadline(drain_until), if !live => {
+                    Next::End(exit.take().map(|(error, _)| error).unwrap_or_default())
+                }
+                failed = &mut writer_failed, if live => Next::End(match failed {
+                    Ok(error) => format!("closed its input: {error}"),
+                    Err(_) => "closed its input".into(),
+                }),
+                read = reads.recv() => match read.unwrap_or(Read::End(None)) {
+                    Read::End(error) => {
+                        if let Some(error) = error {
                             debug!(module = %id, %error, "module stdout failed");
                         }
-                        return exited(&mut child, ready_at, self.spec.timings.shutdown_grace).await;
+                        match exit.take() {
+                            Some((error, _)) => Next::End(error),
+                            None => return exited(group, &mut child, ready_at, grace).await,
+                        }
                     }
+                    read => self.take(read, &mut ready_at).await,
                 },
-                changed = self.keys.changed(), if is_ready => {
+                changed = self.keys.changed(), if is_ready && live => {
                     if changed.is_err() {
-                        return shut_down(&id, &mut child, writer, ready_at, self.spec.timings.shutdown_grace)
-                            .await;
+                        return shut_down(&id, group, &mut child, writer, ready_at, grace).await;
                     }
                     let keys = Arc::clone(&self.keys.borrow_and_update());
                     queue(&writer, protocol::keys(&keys))
                 }
-                Some((device, slot)) = self.presses.recv(), if is_ready => {
+                Some((device, slot)) = self.presses.recv(), if is_ready && live => {
                     queue(&writer, protocol::pressed(&device, slot))
                 }
             };
+            let ready_for = ready_at.map(|at| at.elapsed());
             if let Next::End(error) = next {
-                return kill(&mut child, ready_at.map(|at| at.elapsed()), Some(error)).await;
+                return kill(group, &mut child, ready_for, Some(error)).await;
             }
-            if !is_ready && let Some(ready_at) = ready_at {
+            if !is_ready
+                && exit.is_none()
+                && let Some(ready_at) = ready_at
+            {
                 debug!(module = %id, "module ready");
                 let keys = Arc::clone(&self.keys.borrow_and_update());
                 if let Next::End(error) = queue(&writer, protocol::keys(&keys)) {
-                    return kill(&mut child, Some(ready_at.elapsed()), Some(error)).await;
+                    return kill(group, &mut child, Some(ready_at.elapsed()), Some(error)).await;
                 }
             }
         }
+    }
+
+    /// Act on one line the module wrote.
+    async fn take(&mut self, read: Read, ready_at: &mut Option<Instant>) -> Next {
+        let id = &self.spec.id;
+        match read {
+            Read::Message(message) => return self.handle(message, ready_at).await,
+            Read::Malformed(error) => self.log.warn(id, format_args!("dropped a line: {error}")),
+            Read::TooLong => self.log.warn(
+                id,
+                format_args!(
+                    "dropped a line longer than {} MiB",
+                    protocol::MAX_LINE >> 20
+                ),
+            ),
+            Read::End(_) => {}
+        }
+        Next::Continue
     }
 
     /// Act on one message from the module.
@@ -378,27 +424,37 @@ impl Run {
 }
 
 /// Queue one line for the module, or end the run when the module has
-/// stopped reading.
+/// stopped reading or closed its input.
 fn queue(writer: &mpsc::Sender<String>, line: String) -> Next {
     match writer.try_send(line) {
+        Ok(()) => Next::Continue,
         Err(mpsc::error::TrySendError::Full(_)) => Next::End("stopped reading its input".into()),
-        // A closed writer means the module closed its stdin or exited, and
-        // the reader will see its stdout end.
-        Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => Next::Continue,
+        // The writer stops only on a failed write while the run holds the
+        // queue.
+        Err(mpsc::error::TrySendError::Closed(_)) => Next::End("closed its input".into()),
     }
 }
 
-/// Drain queued lines into `stdin` until the queue closes or a write fails.
-fn spawn_writer(mut stdin: ChildStdin) -> mpsc::Sender<String> {
+/// Drain queued lines into `stdin` until the queue closes or a write fails;
+/// the receiver hears of a failed write.
+fn spawn_writer(
+    mut stdin: ChildStdin,
+) -> (mpsc::Sender<String>, oneshot::Receiver<std::io::Error>) {
     let (writer, mut lines) = mpsc::channel::<String>(WRITE_QUEUE);
+    let (failed, failure) = oneshot::channel();
     tokio::spawn(async move {
         while let Some(line) = lines.recv().await {
-            if stdin.write_all(line.as_bytes()).await.is_err() || stdin.flush().await.is_err() {
+            let written = match stdin.write_all(line.as_bytes()).await {
+                Ok(()) => stdin.flush().await,
+                Err(error) => Err(error),
+            };
+            if let Err(error) = written {
+                let _ = failed.send(error);
                 return;
             }
         }
     });
-    writer
+    (writer, failure)
 }
 
 /// Frame `stdout` into messages until it ends.
@@ -453,33 +509,28 @@ async fn copy_stderr<R: AsyncRead + Unpin>(stderr: BufReader<R>, id: ModuleId) {
 }
 
 /// The module's stdout ended: give the process its grace to exit, kill it
-/// past that, and report how it ended.
-async fn exited(child: &mut Child, ready_at: Option<Instant>, grace: Duration) -> RunEnd {
+/// past that, and report how it ended. Whatever it left in its group goes.
+async fn exited(
+    group: Option<u32>,
+    child: &mut Child,
+    ready_at: Option<Instant>,
+    grace: Duration,
+) -> RunEnd {
     let ready_for = ready_at.map(|at| at.elapsed());
-    match tokio::time::timeout(grace, child.wait()).await {
-        Ok(Ok(status)) => RunEnd {
-            ready_for,
-            error: Some(describe(status)),
-        },
-        Ok(Err(error)) => RunEnd {
-            ready_for,
-            error: Some(format!("could not be waited on: {error}")),
-        },
-        Err(_) => {
-            kill(
-                child,
-                ready_for,
-                Some("closed its output and kept running".into()),
-            )
-            .await
-        }
-    }
+    let error = match tokio::time::timeout(grace, child.wait()).await {
+        Ok(Ok(status)) => describe(status),
+        Ok(Err(error)) => format!("could not be waited on: {error}"),
+        Err(_) => "closed its output and kept running".into(),
+    };
+    kill(group, child, ready_for, Some(error)).await
 }
 
 /// The host asked the module `id` to leave: send `shutdown`, close its
-/// stdin, and kill it if it is still there after `grace`.
+/// stdin, and kill it if it is still there after `grace`. Whatever it left
+/// in its group goes either way.
 async fn shut_down(
     id: &ModuleId,
+    group: Option<u32>,
     child: &mut Child,
     writer: mpsc::Sender<String>,
     ready_at: Option<Instant>,
@@ -488,8 +539,9 @@ async fn shut_down(
     let ready_for = ready_at.map(|at| at.elapsed());
     let _ = writer.try_send(protocol::shutdown());
     drop(writer);
-    if tokio::time::timeout(grace, child.wait()).await.is_err() {
-        kill_group(child);
+    let left = tokio::time::timeout(grace, child.wait()).await.is_ok();
+    kill_group(group, child);
+    if !left {
         let _ = child.wait().await;
         info!(module = %id, "module did not shut down in time: killed");
     }
@@ -499,30 +551,43 @@ async fn shut_down(
     }
 }
 
-/// Kill the process and report the run as `ready_for` and `error`.
-async fn kill(child: &mut Child, ready_for: Option<Duration>, error: Option<String>) -> RunEnd {
-    kill_group(child);
+/// Kill the module and its group, reap it, and report the run as
+/// `ready_for` and `error`.
+async fn kill(
+    group: Option<u32>,
+    child: &mut Child,
+    ready_for: Option<Duration>,
+    error: Option<String>,
+) -> RunEnd {
+    kill_group(group, child);
     let _ = child.wait().await;
     RunEnd { ready_for, error }
 }
 
-/// Kill the module and, on Unix, every process left in its group. Called
-/// before the module is reaped: its group, which bears its id, cannot be
-/// another's until then.
-fn kill_group(child: &mut Child) {
+/// Kill the module and, on Unix, every process left in its group, which
+/// bears the module's id, `group`. Called right after the module is reaped
+/// as well as before: children it left behind hold the group, and with it
+/// the id, until they are gone.
+fn kill_group(group: Option<u32>, child: &mut Child) {
     #[cfg(unix)]
-    if let Some(group) = child.id().and_then(|pid| libc::pid_t::try_from(pid).ok()) {
+    if let Some(group) = group.and_then(|pid| libc::pid_t::try_from(pid).ok()) {
         #[expect(
             unsafe_code,
             reason = "killpg is the one call that signals a whole process group"
         )]
-        // SAFETY: killpg only sends a signal; `group` is the group the
-        // module leads (`process_group(0)`), and the unreaped module keeps
-        // that id from being reused.
+        // SAFETY: killpg only sends a signal. `group` is the group the
+        // module leads (`process_group(0)`). Its id cannot name another
+        // group while the module is unreaped or any process is left in its
+        // group; once both are gone the signal finds no group, unless the
+        // system has handed out every other process id since and the new
+        // holder of this one leads a group, which the signal sent at once
+        // after the reap gives no time for.
         unsafe {
             libc::killpg(group, libc::SIGKILL);
         }
     }
+    #[cfg(not(unix))]
+    let _ = group;
     let _ = child.start_kill();
 }
 

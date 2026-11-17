@@ -25,16 +25,20 @@ use crate::watchers::key_display::KeyImage;
 /// The test module. `mode` in its folder picks how it answers:
 /// `normal` answers `hello` and draws every key it is given, `exit` draws
 /// and then exits with status 3, `silent` never answers, `deaf` answers and
-/// then stops reading, `one` draws `keypad-1`'s middle key, `spam` draws
-/// without end once it has keys, and `wrapper` starts a `sleep` of its own
-/// and never answers. Each run notes its process id in `pids.log`.
+/// then stops reading, `closer` closes its input, answers, and keeps
+/// running, `one` draws `keypad-1`'s middle key, `spam` draws without end
+/// once it has keys, `wrapper` starts a `sleep` of its own and never
+/// answers, `helper` starts one and answers as `normal` does, and `orphan`
+/// answers, then starts one that holds its output open and exits with
+/// status 4. Each run notes its process id in `pids.log`, and each `sleep`
+/// its own in `sleep.pids`.
 const SCRIPT: &str = r#"#!/bin/sh
 dir="$OPENLOGI_MODULE_DIR"
 mode="$(cat "$dir/mode")"
 png="$(cat "$dir/png.b64")"
 printf '%s|%s\n' "$OPENLOGI_MODULE_ID" "$(pwd -P)" >> "$dir/env.log"
 printf '%s\n' "$$" >> "$dir/pids.log"
-if [ "$mode" = wrapper ]; then
+if [ "$mode" = wrapper ] || [ "$mode" = helper ]; then
   sleep 300 &
   printf '%s\n' "$!" >> "$dir/sleep.pids"
 fi
@@ -44,14 +48,21 @@ while IFS= read -r line; do
   case "$line" in
     *'"type":"hello"'*)
       [ "$mode" = silent ] || [ "$mode" = wrapper ] && continue
+      [ "$mode" = closer ] && exec 0<&-
       printf '{"type":"log","level":"info","message":"hello from the test module"}\n'
       printf '{"type":"ready","protocol":1}\n'
       [ "$mode" = deaf ] && exec sleep 30
+      [ "$mode" = closer ] && exec sleep 30
       ;;
     *'"keys":[]'*) ;;
     *'"type":"keys"'*)
       case "$mode" in
         one) printf '{"type":"image","device":"keypad-1","slot":"gridMiddle","png":"%s"}\n' "$png" ;;
+        orphan)
+          sleep 300 &
+          printf '%s\n' "$!" >> "$dir/sleep.pids"
+          exit 4
+          ;;
         spam)
           if [ -z "$spammer" ]; then
             while :; do printf '{"type":"image_all","png":"%s"}\n' "$png" || exit; done &
@@ -740,3 +751,60 @@ async fn a_killed_wrapper_takes_its_children_with_it() {
     host.shutdown().await;
 }
 
+/// A ready module that exits while a child of its own holds its output open
+/// has still ended: the child goes with it, and the module starts again.
+#[tokio::test]
+async fn a_module_that_exits_while_its_child_holds_its_output_restarts() {
+    let host = Harness::start(
+        "orphan",
+        plan(true, &[], vec![key(1, GridKey::Middle)]),
+        timings(),
+    );
+    host.until("a second start", |host| host.hellos().len() >= 2)
+        .await;
+    let first = host.lines("sleep.pids").remove(0);
+    host.until("the first run's child gone", |_| !exists(&first))
+        .await;
+    assert!(
+        host.events()
+            .contains(&ModuleEvent::Stopped { module: id() }),
+        "the agent heard the first run end: {:?}",
+        host.events()
+    );
+    host.shutdown().await;
+}
+
+/// A module that leaves promptly on `shutdown` still takes the children it
+/// started with it.
+#[tokio::test]
+async fn a_module_that_leaves_on_shutdown_takes_its_children() {
+    let host = Harness::start(
+        "helper",
+        plan(true, &[], vec![key(1, GridKey::Middle)]),
+        timings(),
+    );
+    host.until("the module to run", |host| {
+        host.state() == Some((ModuleState::Running, None))
+    })
+    .await;
+    let [sleep] = host.lines("sleep.pids").try_into().unwrap();
+
+    host.shutdown().await;
+    assert_eq!(host.received().last().unwrap(), r#"{"type":"shutdown"}"#);
+    host.until("its child gone", |_| !exists(&sleep)).await;
+}
+
+/// A ready module that closes its input but keeps running is restarted as
+/// soon as a line for it cannot be written, not left holding keys whose
+/// presses it can never read: here its `keys`, the first line after ready.
+#[tokio::test]
+async fn a_module_that_closes_its_input_is_restarted() {
+    let host = Harness::start(
+        "closer",
+        plan(true, &[], vec![key(1, GridKey::Middle)]),
+        timings(),
+    );
+    host.until("a second start", |host| host.hellos().len() >= 2)
+        .await;
+    host.shutdown().await;
+}
