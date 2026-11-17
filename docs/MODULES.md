@@ -176,6 +176,13 @@ Rules:
   end of every run ends every process in the job, so the children it starts
   go with it too; one started in the moment between the module's launch and
   its joining the job is not in it.
+- An app a module opens for the user, Weather say, must not be a plain
+  child of the module, or it ends with the run. On macOS, `open` hands the
+  app to LaunchServices, which starts it apart from the module already. On
+  Linux, start it in a new session, with `setsid` (`setsid xdg-open ...`) or
+  the `setsid()` call, so it leaves the module's group. On Windows, create
+  it with the `CREATE_BREAKAWAY_FROM_JOB` flag, which the module's job
+  allows.
 - Since a module runs in its own process group on macOS and Linux, stdin
   closing is the only notice it gets if the agent crashes, and a module
   that ignores end of input outlives the agent.
