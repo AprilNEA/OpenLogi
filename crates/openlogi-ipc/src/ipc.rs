@@ -194,6 +194,7 @@ pub use succession::Identity;
 ///      and `ActionRingIcon::{Channel1, Channel2, Channel3}` appended after
 ///      them — a device's move to another Easy-Switch channel, bound to a
 ///      button or an Actions Ring slot.
+///      `set_saved_lighting` appended — revision-fenced RGB writes.
 pub const PROTOCOL_VERSION: u32 = 46;
 
 /// Environment variable through which the agent hands a supervised helper the
@@ -1263,4 +1264,13 @@ pub trait Agent {
     /// held trigger cancels instead of choosing the slot last reported by
     /// [`Agent::action_ring_hover`].
     async fn action_ring_unhover(session_id: u64) -> Result<(), ActionRingCommandError>;
+
+    /// Apply RGB settings from `revision` of the saved configuration. Reject a
+    /// superseded revision before I/O and serialize saved applications through
+    /// native completion, so delayed clients cannot overwrite newer settings.
+    async fn set_saved_lighting(
+        route: DeviceRoute,
+        lighting: Lighting,
+        revision: ConfigRevision,
+    ) -> Result<(), WriteError>;
 }

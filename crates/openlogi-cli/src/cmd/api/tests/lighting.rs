@@ -69,17 +69,102 @@ fn reload(path: &Path, expected: Lighting) -> Step {
 
 fn write(expected: Lighting) -> Step {
     Box::new(move |request| {
-        let AgentRequest::SetLighting {
+        let AgentRequest::SetSavedLighting {
             route: requested,
             lighting,
+            revision,
         } = request
         else {
             panic!("unexpected RPC {request:?}");
         };
         assert_eq!(requested, route());
         assert_eq!(lighting, expected);
-        AgentResponse::SetLighting(Ok(()))
+        assert_ne!(revision, openlogi_core::config::ConfigRevision::default());
+        AgentResponse::SetSavedLighting(Ok(()))
     })
+}
+
+#[tokio::test]
+async fn a_delayed_reload_reply_keeps_the_original_save_revision() {
+    use crate::cmd::api::lighting::{Persistence, run_at};
+    use openlogi_core::config::{ConfigFile, ConfigRevision};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::Notify;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(CONFIG_FILE);
+    config(&path);
+    let first_reload = Arc::new(Notify::new());
+    let release_first = Arc::new(Notify::new());
+    let reloads = Arc::new(AtomicUsize::new(0));
+    let revisions = Arc::new(Mutex::new(Vec::<ConfigRevision>::new()));
+    let client = in_memory_agent(
+        {
+            let path = path.clone();
+            let first_reload = first_reload.clone();
+            let release_first = release_first.clone();
+            move |request| {
+                let path = path.clone();
+                let first_reload = first_reload.clone();
+                let release_first = release_first.clone();
+                let reloads = reloads.clone();
+                let revisions = revisions.clone();
+                Box::pin(async move {
+                    Ok(match request {
+                        AgentRequest::ReloadConfig {} => {
+                            let (_, file) = ConfigFile::load_from_path(&path).unwrap();
+                            revisions.lock().unwrap().push(file.revision());
+                            if reloads.fetch_add(1, Ordering::SeqCst) == 0 {
+                                first_reload.notify_one();
+                                release_first.notified().await;
+                            }
+                            AgentResponse::ReloadConfig(Ok(()))
+                        }
+                        AgentRequest::SetSavedLighting {
+                            lighting, revision, ..
+                        } => {
+                            let saved = revisions.lock().unwrap();
+                            // B's on arrives first; A's off still names A's save,
+                            // even though B has since changed the file and reloaded.
+                            assert_eq!(revision, saved[usize::from(lighting.enabled)]);
+                            AgentResponse::SetSavedLighting(if lighting.enabled {
+                                Ok(())
+                            } else {
+                                Err(WriteError::WriteSuperseded {
+                                    operation: openlogi_core::hid::HidppOperation::Lighting,
+                                })
+                            })
+                        }
+                        unexpected => panic!("unexpected RPC {unexpected:?}"),
+                    })
+                })
+            }
+        },
+        pending(),
+    );
+    let snapshot = keyboard();
+    let mut off = args();
+    off.set = Some(Power::Off);
+    let first = run_at(&client, &snapshot, &off, &path, Persistence::Save);
+    let second = async {
+        first_reload.notified().await;
+        let mut on = args();
+        on.set = Some(Power::On);
+        let result = run_at(&client, &snapshot, &on, &path, Persistence::Save)
+            .await
+            .unwrap();
+        assert_eq!(result["enabled"], true);
+        release_first.notify_one();
+    };
+    let (older, ()) = tokio::join!(first, second);
+    assert_eq!(envelope(older)["error"]["persistence"], "saved");
+    assert!(
+        Config::load_from_path(&path)
+            .unwrap()
+            .lighting("unit:12345678")
+            .unwrap()
+            .enabled
+    );
 }
 
 #[tokio::test]
@@ -238,8 +323,8 @@ async fn lighting_hardware_error_reports_already_saved_configuration() {
         vec![
             reload(&path, off.clone()),
             Box::new(|request| {
-                assert!(matches!(request, AgentRequest::SetLighting { .. }));
-                AgentResponse::SetLighting(Err(WriteError::Hid(
+                assert!(matches!(request, AgentRequest::SetSavedLighting { .. }));
+                AgentResponse::SetSavedLighting(Err(WriteError::Hid(
                     "simulated transport failure".into(),
                 )))
             }),

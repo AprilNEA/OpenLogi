@@ -44,10 +44,12 @@ mod context;
 mod disable_keys;
 mod light;
 mod rgb_control;
+mod saved_lighting;
 mod write_order;
 
 pub use context::HardwareContext;
 pub(crate) use disable_keys::{write_disabled_keys_in_background, write_manual_disable_keys};
+pub use saved_lighting::{SavedLightingTarget, SavedLightingWrites};
 pub(crate) use write_order::{WriteOrder, WriteTicket};
 
 /// Upper bound on a single HID++ write. `hidpp` has no request timeout of its

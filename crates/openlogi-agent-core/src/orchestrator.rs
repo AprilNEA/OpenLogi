@@ -2326,6 +2326,26 @@ impl Orchestrator {
         previous != self.mouse_context().1
     }
 
+    /// Capture the stable identity and active link for a saved RGB write. The
+    /// target resolves its configuration entry against the latest file, so a
+    /// concurrent route adoption cannot leave it looking up a removed key.
+    #[must_use]
+    pub fn saved_lighting_target(
+        &self,
+        route: &DeviceRoute,
+    ) -> Option<crate::hardware::SavedLightingTarget> {
+        let device = self
+            .devices
+            .iter()
+            .find(|device| device.route.as_ref() == Some(route))?;
+        Some(crate::hardware::SavedLightingTarget::new(
+            stable_id(device),
+            device
+                .online
+                .then(|| DeviceIdentity::from_parts(device.serial.as_deref(), device.unit_id)),
+        ))
+    }
+
     /// Replace the config (after `config.toml` changed) and rebuild everything.
     /// The file is one the agent did not see saved, as at startup or after a
     /// hand edit (see [`ConfigSource::Loaded`]).

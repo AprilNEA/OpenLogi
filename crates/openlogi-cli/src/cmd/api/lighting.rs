@@ -152,11 +152,16 @@ pub(super) async fn run_at(
             edit.set_lighting(lighting.clone())?;
             // As in the GUI: save and reload before the write-only lighting RPC.
             // A conflict must fail before we change hardware.
-            edit.commit(client).await?;
-            agent::call(client.set_lighting(context::current(), route, lighting.clone()))
-                .await
-                .map_err(|error| ApiError::from(error).after_write("saved"))?
-                .map_err(|error| ApiError::from(error).after_write("saved"))?;
+            let revision = edit.commit(client).await?;
+            agent::call(client.set_saved_lighting(
+                context::current(),
+                route,
+                lighting.clone(),
+                revision,
+            ))
+            .await
+            .map_err(|error| ApiError::from(error).after_write("saved"))?
+            .map_err(|error| ApiError::from(error).after_write("saved"))?;
             (true, "saved")
         }
         LightingOperation::Read => (configured, "not_saved"),

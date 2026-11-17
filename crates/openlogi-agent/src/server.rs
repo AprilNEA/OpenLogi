@@ -52,6 +52,7 @@ use tracing::{debug, info, warn};
 /// Shared handle to the agent's state, cloned per connection (and per request).
 #[derive(Clone)]
 pub struct AgentServer {
+    saved_lighting: Arc<openlogi_agent_core::hardware::SavedLightingWrites>,
     pub orchestrator: Arc<Mutex<Orchestrator>>,
     pub shared: SharedHandles,
     /// Everything the GUI observes, answered from here rather than recomposed
@@ -89,6 +90,7 @@ impl AgentServer {
         let (demand, declarations) = tokio::sync::mpsc::unbounded_channel();
         (
             Self {
+                saved_lighting: Arc::default(),
                 orchestrator,
                 shared,
                 observable,
@@ -216,6 +218,32 @@ impl Agent for AgentServer {
         lighting: Lighting,
     ) -> Result<(), WriteError> {
         self.shared.device(&route).lighting(&lighting)?.wait().await
+    }
+
+    async fn set_saved_lighting(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        lighting: Lighting,
+        revision: ConfigRevision,
+    ) -> Result<(), WriteError> {
+        let path = openlogi_core::paths::config_path()
+            .map_err(|error| WriteError::Hid(error.to_string()))?;
+        let target = self
+            .orchestrator
+            .lock()
+            .await
+            .saved_lighting_target(&route)
+            .ok_or(WriteError::DeviceNotFound)?;
+        self.saved_lighting
+            .apply(
+                &path,
+                revision,
+                self.shared.device(&route),
+                &target,
+                &lighting,
+            )
+            .await
     }
 
     async fn set_smartshift(

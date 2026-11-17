@@ -218,8 +218,11 @@ backlight and standalone Litra controls are separate surfaces.
 
 Changes use the same order as the GUI: stage the edit, refuse per-link
 overrides, atomically save only if the loaded configuration revision still
-matches, reload the agent configuration, then apply the existing RGB RPC.
+matches, reload the agent configuration, then apply RGB through a revision-fenced RPC.
 A save conflict sends no hardware write; it is not retried as another toggle.
+The agent serializes saved lighting applications per keyboard and refuses a
+superseded RGB choice before hardware I/O. An intervening unrelated save is
+allowed when the device's effective RGB settings still match the request.
 If reload or hardware application fails after saving, the error includes
 `persistence: "saved"`. The preference may therefore take effect on a later
 reconnect. No hardware readback verification is claimed.

@@ -135,8 +135,11 @@ impl Save {
             .map_err(refused)
     }
 
-    pub(super) async fn commit(self, client: &AgentClient) -> Result<(), ApiError> {
-        self.0.commit().map_err(|error| {
+    pub(super) async fn commit(
+        self,
+        client: &AgentClient,
+    ) -> Result<openlogi_core::config::ConfigRevision, ApiError> {
+        let revision = self.0.commit().map_err(|error| {
             let code = match &error {
                 ConfigError::Conflict { .. } => "config_conflict",
                 ConfigError::Write { source, .. }
@@ -150,7 +153,7 @@ impl Save {
                 .after_write("not_saved")
         })?;
         match agent::call(client.reload_config(context::current())).await {
-            Ok(Ok(())) => Ok(()),
+            Ok(Ok(())) => Ok(revision),
             Ok(Err(error)) => Err(ApiError::new(
                 "config_reload_failed",
                 format!(
