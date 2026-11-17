@@ -39,9 +39,9 @@ pub(super) fn slot(value: u8) -> FlowHostSlot {
 
 /// A device on slot 0 here, and on `peer_slot` at [`peer`] when given.
 pub(super) fn configured(device: &str, peer_slot: Option<u8>) -> FlowDevice {
-    let peers = peer_slot
-        .map(|value| BTreeMap::from([(peer(), slot(value))]))
-        .unwrap_or_default();
+    let peers = peer_slot.map_or_else(Default::default, |value| {
+        BTreeMap::from([(peer(), slot(value))])
+    });
     FlowDevice::new(key(device), slot(0), peers).expect("distinct slots")
 }
 

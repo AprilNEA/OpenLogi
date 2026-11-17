@@ -141,14 +141,13 @@ impl AgentProfile {
         let certificates: Vec<Vec<u8>> = profile
             .get("DeveloperCertificates")
             .and_then(Value::as_array)
-            .map(|certs| {
+            .map_or_else(Vec::new, |certs| {
                 certs
                     .iter()
                     .filter_map(Value::as_data)
                     .map(<[u8]>::to_vec)
                     .collect()
-            })
-            .unwrap_or_default();
+            });
         if certificates.is_empty() {
             bail!("{name}: the profile allows no signing certificate");
         }
