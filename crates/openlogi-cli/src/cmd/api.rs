@@ -16,6 +16,7 @@ use tarpc::context;
 
 use crate::agent;
 
+mod lighting;
 mod output;
 mod persistence;
 use output::{ApiError, devices, envelope, inventory_health, select_device, virtual_keyboard};
@@ -39,6 +40,8 @@ pub enum ApiCommand {
     Status,
     /// List agent-known devices, opaque IDs, battery and measured capabilities.
     Devices,
+    /// Read saved RGB keyboard lighting, or change it with --save.
+    Lighting(lighting::LightingArgs),
     /// Read DPI, or set it immediately (add --save to persist).
     Dpi {
         /// Exact opaque ID returned by `api devices`; names are not accepted.
@@ -188,6 +191,7 @@ async fn execute(
     // agent::snapshot helper intentionally turns them into prose.
     let snapshot = agent::call(client.snapshot(context::current())).await?;
     let mut save = path
+        .filter(|_| !matches!(command, ApiCommand::Lighting(_)))
         .map(|path| Save::prepare(path, &snapshot, &command))
         .transpose()?;
     let mut result = match command {
@@ -205,6 +209,7 @@ async fn execute(
             "inventory": inventory_health(snapshot.status.inventory),
             "devices": devices(&snapshot),
         })),
+        ApiCommand::Lighting(args) => lighting::run(client, &snapshot, &args, path).await,
         ApiCommand::Dpi { device, set } => {
             dpi(client, select_device(&snapshot, &device)?, set).await
         }

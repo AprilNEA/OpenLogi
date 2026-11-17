@@ -1,8 +1,9 @@
-//! Stage a config edit before hardware I/O; commit only after verified readback.
+//! Stage a config edit before hardware I/O. Device settings commit after
+//! verified readback; RGB lighting commits before its write-only hardware RPC.
 
 use std::path::Path;
 
-use openlogi_core::config::{ConfigError, DeviceEdit, DeviceEditError, DeviceSetting};
+use openlogi_core::config::{ConfigError, DeviceEdit, DeviceEditError, DeviceSetting, Lighting};
 use openlogi_core::device_order::{DeviceIdentity, DeviceStableId};
 use openlogi_core::hid::{DeviceRoute, Dpi, ReportRate, SmartShiftStatus};
 use openlogi_ipc::{AgentClient, AgentSnapshot};
@@ -51,6 +52,25 @@ impl Save {
                 ));
             }
         };
+        let mut save = Self::for_device(path, snapshot, device)?;
+        // Stage the DPI the command names now, so a per-link override refuses
+        // it before any hardware I/O.
+        if let ApiCommand::Dpi {
+            set: Some(value), ..
+        } = command
+        {
+            save.0
+                .set(DeviceSetting::Dpi(Dpi::from(*value)))
+                .map_err(refused)?;
+        }
+        Ok(save)
+    }
+
+    pub(super) fn for_device(
+        path: &Path,
+        snapshot: &AgentSnapshot,
+        device: &str,
+    ) -> Result<Self, ApiError> {
         let route = select_device(snapshot, device)?;
         let (slot, model) = snapshot
             .inventory
@@ -83,17 +103,16 @@ impl Save {
             model.serial_number.as_deref(),
             model.unit_id,
         );
-        let mut edit = DeviceEdit::load(path, &stable, Some(&identity)).map_err(refused)?;
-        // Stage the DPI the command names now, so a per-link override refuses
-        // it before any hardware I/O.
-        if let ApiCommand::Dpi {
-            set: Some(value), ..
-        } = command
-        {
-            edit.set(DeviceSetting::Dpi(Dpi::from(*value)))
-                .map_err(refused)?;
-        }
+        let edit = DeviceEdit::load(path, &stable, Some(&identity)).map_err(refused)?;
         Ok(Self(edit))
+    }
+
+    pub(super) fn lighting(&self) -> Option<&Lighting> {
+        self.0.lighting()
+    }
+
+    pub(super) fn set_lighting(&mut self, lighting: Lighting) -> Result<(), ApiError> {
+        self.0.set_lighting(lighting).map_err(refused)
     }
 
     pub(super) fn fn_lock(&mut self, value: bool) -> Result<(), ApiError> {
@@ -127,11 +146,8 @@ impl Save {
                 }
                 _ => "config_save_failed",
             };
-            ApiError::new(
-                code,
-                format!("hardware readback succeeded, but configuration was not saved: {error}"),
-            )
-            .after_write("not_saved")
+            ApiError::new(code, format!("configuration was not saved: {error}"))
+                .after_write("not_saved")
         })?;
         match agent::call(client.reload_config(context::current())).await {
             Ok(Ok(())) => Ok(()),

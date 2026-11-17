@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use thiserror::Error;
 
-use super::{Config, ConfigError, ConfigFile, ConfigRevision, DisableKey, SmartShift};
+use super::{Config, ConfigError, ConfigFile, ConfigRevision, DisableKey, Lighting, SmartShift};
 use crate::device_order::{DeviceIdentity, DeviceStableId};
 use crate::hid::{DisableKeysMask, Dpi, LightCommand, ReportRate};
 
@@ -132,6 +132,34 @@ pub struct DeviceEdit {
 }
 
 impl DeviceEdit {
+    /// Effective saved RGB lighting on this device's current link.
+    /// This is configuration, not a hardware observation.
+    #[must_use]
+    pub fn lighting(&self) -> Option<&Lighting> {
+        self.edit
+            .config
+            .devices
+            .get(&self.key)
+            .and_then(|device| device.effective_lighting(&self.link))
+    }
+
+    /// Stage device-wide RGB lighting, refusing a link override that would
+    /// mask it. Nothing reaches the file before [`Self::commit`].
+    pub fn set_lighting(&mut self, lighting: Lighting) -> Result<(), DeviceEditError> {
+        if self
+            .edit
+            .config
+            .devices
+            .get(&self.key)
+            .and_then(|device| device.links.get(&self.link))
+            .is_some_and(|link| link.overrides.lighting.is_some())
+        {
+            return Err(DeviceEditError::LinkOverride);
+        }
+        self.edit.config.set_lighting(&self.key, lighting);
+        Ok(())
+    }
+
     /// Read the config at `path` for a change to the device reached as
     /// `stable`, whose probe read `identity` — `None` while it is offline.
     /// The settings go where the agent reads them for that device
