@@ -12,8 +12,8 @@ use std::sync::Arc;
 
 use gpui::{
     Anchor, AnyElement, App, AppContext as _, Context, Div, ElementId, Hsla, InteractiveElement,
-    IntoElement, ParentElement, SharedString, StatefulInteractiveElement as _, Styled, Svg, Window,
-    canvas, div, fill, img, point, prelude::FluentBuilder as _, px, rgb, svg,
+    IntoElement, ParentElement, Pixels, SharedString, StatefulInteractiveElement as _, Styled, Svg,
+    Window, canvas, div, fill, point, prelude::FluentBuilder as _, px, rgb, svg,
 };
 use gpui_kit::base::Button as BaseButton;
 use gpui_kit::component::{
@@ -38,7 +38,7 @@ use super::widgets::{
     receiver_slot_label, settings_button,
 };
 use crate::features::lighting::visual as light_visual;
-use crate::services::assets::GlowGeometry;
+use crate::services::assets::{GlowGeometry, device_image as filtered_device_image};
 use crate::services::ipc::UnpairFailure;
 use crate::state::{AppState, DeviceRecord, ObservedConnection};
 use crate::ui::battery::{BatteryIndicator, glance_hint};
@@ -210,7 +210,7 @@ fn device_card(
                         .when_some(glow, |this, (geom, color)| {
                             this.child(glow_canvas(geom, color))
                         })
-                        .child(device_image(record, light_enabled, light_settings, pal)),
+                        .child(device_image(record, light_enabled, light_settings, pal, px(theme::GALLERY_PHOTO_H))),
                 )
                 // Outside the dimmed render, so an offline card's status
                 // stays legible.
@@ -650,6 +650,7 @@ fn device_image(
     light_enabled: bool,
     light_settings: LightSettings,
     pal: Palette,
+    height: Pixels,
 ) -> AnyElement {
     if record.kind == DeviceKind::Light {
         return light_visual::gallery(
@@ -668,7 +669,10 @@ fn device_image(
         .as_ref()
         .and_then(|a| a.hero_image_path.clone())
     {
-        return img(path).max_w_full().max_h_full().into_any_element();
+        return filtered_device_image(path, height)
+            .max_w_full()
+            .max_h_full()
+            .into_any_element();
     }
     // Cameras carry no depot asset, so give them a recognisable glyph on their
     // gallery card instead of the generic chip fallback.
