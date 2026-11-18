@@ -27,6 +27,9 @@ ignore = [
     # (tokio-serde 0.9 is current and binds bincode 1.x). Revisit if tarpc
     # adopts another codec — which would be a breaking protocol change.
     { id = "RUSTSEC-2025-0141", reason = "tarpc's wire codec; unmaintained-by-choice, no upgrade path" },
+    # tarpc 0.38 requires humantime 2.4. This informational maintenance
+    # advisory has no patched release. Revisit when tarpc replaces it.
+    { id = "RUSTSEC-2026-0542", reason = "tarpc's required dependency; maintenance notice with no patched release" },
 ]
 
 [licenses]

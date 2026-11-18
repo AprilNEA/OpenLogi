@@ -578,10 +578,11 @@ fn cards_sit_straight_above_or_beside_their_keys_when_there_is_room() {
         );
         assert_eq!(layout.leaders[i].len(), 2, "leader {i} is not straight");
     }
-    for i in top_xs.len()..markers.len() {
+    for (offset, card) in layout.cards[top_xs.len()..markers.len()].iter().enumerate() {
         assert!(
-            layout.cards[i].left >= img_w,
-            "card {i} is not beside the board"
+            card.left >= img_w,
+            "card {} is not beside the board",
+            top_xs.len() + offset
         );
     }
     assert!(layout.pane_w > img_w);
