@@ -23,7 +23,6 @@ openlogi-camera = { path = "../openlogi-camera" }
 openlogi-hook = { path = "../openlogi-hook" }
 openlogi-assets = { path = "../openlogi-assets" }
 openlogi-ipc = { path = "../openlogi-ipc" }
-openlogi-permissions = { path = "../openlogi-permissions" }
 tarpc = { workspace = true }
 gpui-kit = { workspace = true }
 swr-core = { workspace = true }
@@ -57,6 +56,9 @@ appicon = { git = "https://github.com/AprilNEA/appicon", tag = "v0.1.1" }
 [build-dependencies]
 embed-resource = "3.0.9"
 serde_json.workspace = true
+
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+openlogi-permissions = { path = "../openlogi-permissions" }
 
 # Window chrome, host OS string, and installed-app icon lookup only — the
 # menu-bar status item lives in the agent, not here.

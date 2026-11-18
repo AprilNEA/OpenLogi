@@ -16,7 +16,6 @@ path = "src/main.rs"
 
 [dependencies]
 openlogi-core = { path = "../openlogi-core", features = ["logging", "worker"] }
-openlogi-hook = { path = "../openlogi-hook" }
 openlogi-ipc = { path = "../openlogi-ipc" }
 openlogi-ui = { path = "../openlogi-ui" }
 anyhow = { workspace = true }
@@ -37,6 +36,9 @@ gpui = { workspace = true, features = ["test-support"] }
 
 [build-dependencies]
 embed-resource = "3.0.9"
+
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+openlogi-hook = { path = "../openlogi-hook" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # CGGetActiveDisplayList/CGDisplayBounds: placing the ring on the cursor's

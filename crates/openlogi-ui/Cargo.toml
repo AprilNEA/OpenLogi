@@ -11,7 +11,6 @@ description = "Presentation code shared by the OpenLogi settings app and its Act
 publish = false
 
 [dependencies]
-openlogi-core = { path = "../openlogi-core" }
 # `gpui` only — deliberately neither `gpui-component` nor its icon set. Every
 # dependency added here lands in the overlay helper too, so the widget kit and
 # the artwork only the app draws both stay on the app's side. Optional so the
@@ -22,6 +21,9 @@ gpui = { workspace = true, optional = true }
 [features]
 default = ["gpui"]
 gpui = ["dep:gpui"]
+
+[dev-dependencies]
+openlogi-core = { path = "../openlogi-core" }
 
 [lints]
 workspace = true
