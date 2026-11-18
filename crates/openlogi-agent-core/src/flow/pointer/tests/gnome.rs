@@ -81,6 +81,12 @@ fn gnome_wayland_round_trip() {
     check_private_bus();
 }
 
+fn assert_no_layout(probe: &mut PointerProbe) {
+    assert_eq!(probe.layout_generation(), Some(""));
+    assert!(probe.state().is_none());
+    assert!(probe.warp(DesktopPoint { x: 1.0, y: 1.0 }).is_err());
+}
+
 fn check_private_bus() {
     let script = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -100,10 +106,11 @@ fn check_private_bus() {
             .unwrap()
             .success()
     );
-    let mut state = PointerLoop::new(
-        PointerProbe::connect().expect("GNOME Wayland needs a compositor pointer probe"),
-        Duration::ZERO,
-    );
+    let mut probe =
+        PointerProbe::connect().expect("GNOME Wayland needs a compositor pointer probe");
+    assert_no_layout(&mut probe);
+    let mut state = PointerLoop::new(probe, Duration::ZERO);
+    assert_no_layout(&mut state.pointer);
     assert!(
         state.edges.segments().is_empty(),
         "agent starts before extension"
@@ -128,6 +135,7 @@ fn check_private_bus() {
     assert!(state.sample(ms(400)).is_none());
     state.refresh(GEOMETRY_REFRESH * 2);
     assert!(state.edges.segments().is_empty());
+    assert_no_layout(&mut state.pointer);
     call("Mode", &["unlock"]);
     state.refresh(GEOMETRY_REFRESH * 3);
     assert!(state.sample(ms(800)).is_none());
