@@ -1,5 +1,8 @@
 //! Registry of HID++ channels owned by the persistent inventory enumerator.
 
+mod confirmed_link;
+
+use confirmed_link::ConfirmedLink;
 use std::collections::HashSet;
 use std::hash::Hash;
 use std::sync::{Arc, Mutex, PoisonError, RwLock, Weak};
@@ -265,40 +268,6 @@ impl Default for ChannelRegistry {
     }
 }
 
-/// A local radio observation tied to one channel lifetime and physical unit.
-struct ConfirmedLink {
-    route: DeviceRoute,
-    unit: [u8; 4],
-    channel: Weak<HidppChannel>,
-    online: bool,
-    at: Instant,
-    // An authoritative scan can supersede presence before the agent consumes
-    // the independent instruction to reapply this return's volatile settings.
-    overrides_scan: bool,
-    needs_reapply: bool,
-}
-
-impl ConfirmedLink {
-    fn paired_index(&self, inventory: &DeviceInventory) -> Option<usize> {
-        inventory.paired.iter().position(|p| {
-            p.model_info
-                .as_ref()
-                .is_some_and(|m| m.unit_id == self.unit)
-                && DeviceRoute::for_slot(inventory, p.slot).as_ref() == Some(&self.route)
-        })
-    }
-
-    fn apply(&self, inventory: &mut DeviceInventory) -> bool {
-        let Some(index) = self.paired_index(inventory) else {
-            return false;
-        };
-        if self.overrides_scan {
-            inventory.paired[index].online = self.online;
-        }
-        inventory.paired[index].online
-    }
-}
-
 /// Never queue behind a complete receiver enumeration. A register reply has
 /// no software ID, so the task that submitted it keeps the host-wide phase
 /// until the read settles, even if the handoff has already used radio proof.
@@ -508,15 +477,12 @@ impl ChannelRegistry {
         }
         drop(state);
         links.retain(|link| link.channel.strong_count() != 0 && link.route != *route);
-        links.push(ConfirmedLink {
-            route: route.clone(),
+        links.push(ConfirmedLink::new(
+            route.clone(),
+            Arc::downgrade(shared.channel()),
             unit,
-            channel: Arc::downgrade(shared.channel()),
             online,
-            at: Instant::now(),
-            overrides_scan: true,
-            needs_reapply: online,
-        });
+        ));
         self.inner.notify_change();
         self.link_changed.send_modify(|()| {});
         true
@@ -538,17 +504,14 @@ impl ChannelRegistry {
     ) -> Vec<(DeviceRoute, [u8; 4])> {
         let mut links = self.links.lock().unwrap_or_else(PoisonError::into_inner);
         let mut returned = Vec::new();
-        for link in &mut *links {
+        links.retain_mut(|link| {
             if let Some((_, channel)) = self.paired_transport(&link.route)
                 && Weak::ptr_eq(&link.channel, &Arc::downgrade(&channel))
             {
-                for inventory in &mut *inventories {
-                    if link.apply(inventory) && std::mem::take(&mut link.needs_reapply) {
-                        returned.push((link.route.clone(), link.unit));
-                    }
-                }
+                return link.reconcile(inventories, &mut returned);
             }
-        }
+            true
+        });
         returned
     }
 
@@ -570,15 +533,7 @@ impl ChannelRegistry {
             if !Weak::ptr_eq(&link.channel, &Arc::downgrade(&channel)) {
                 return true;
             }
-            if healthy && started >= link.at {
-                link.overrides_scan = false;
-                return link.needs_reapply
-                    && link
-                        .paired_index(inventory)
-                        .is_some_and(|i| inventory.paired[i].online);
-            }
-            link.apply(inventory);
-            true
+            link.observe_scan(inventory, started, healthy)
         });
         let inventories = std::slice::from_ref(inventory);
         self.publish(
