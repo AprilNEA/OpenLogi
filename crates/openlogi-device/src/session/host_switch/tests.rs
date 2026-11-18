@@ -1912,45 +1912,4 @@ async fn a_pre_arrival_read_lost_on_the_radio_does_not_consume_the_watch() {
     );
 }
 
-#[tokio::test]
-async fn a_bolt_link_and_fresh_pairing_record_can_confirm_before_the_radio_answers() {
-    let (raw, handle) = ScriptedRawHidChannel::with_dynamic_responder(|request| {
-        if !matches!(request, [_, 0xff, 0x83, 0xb5, 0x51, ..]) {
-            return None;
-        }
-        let mut response = vec![0x11, 0xff, 0x83, 0xb5, 0x51, 2, 0x34, 0x12];
-        response.extend_from_slice(&UNIT);
-        response.resize(20, 0);
-        Some(response)
-    });
-    let incoming = raw.incoming_sender();
-    let channel = raw_scripted_channel(raw.presenting_as(0xc548)).await;
-    let route = DeviceRoute::Bolt {
-        receiver_uid: "test".into(),
-        slot: 1,
-    };
-    let registry = ChannelRegistry::default();
-    registry.publish(
-        NodeId::from("flow-fast-pairing-record".to_owned()),
-        vec![],
-        vec![route.clone()],
-        channel,
-    );
-    let (_signal, gate) = device_io_channel();
-    let watch = registry.watch_bolt_link(&route, UNIT, true, gate).unwrap();
-    incoming
-        .send(vec![0x10, 1, 0x41, 0, 2, 0x34, 0x12])
-        .unwrap();
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_secs(1), watch)
-            .await
-            .unwrap()
-    );
-    assert!(
-        handle
-            .written_reports()
-            .iter()
-            .all(|report| report[1] == 0xff),
-        "the sleeping device was never queried"
-    );
-}
+mod bolt_arrival;

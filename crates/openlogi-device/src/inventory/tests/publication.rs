@@ -332,7 +332,7 @@ async fn an_in_flight_scan_cannot_undo_a_confirmed_bolt_departure() {
     let started = std::time::Instant::now();
     registry.publish_scan(node.clone(), &mut original, channel.clone(), started, true);
     let (_signal, gate) = crate::device_io_channel();
-    let mut changes = registry.subscribe_links();
+    let changes = registry.subscribe_links();
     let departure = registry.watch_bolt_link(&route, unit, false, gate).unwrap();
     incoming.send(vec![0x10, 1, 0x41, 0, 0x42, 0, 0]).unwrap();
     assert!(
@@ -340,7 +340,12 @@ async fn an_in_flight_scan_cannot_undo_a_confirmed_bolt_departure() {
             .await
             .unwrap()
     );
-    changes.changed().await.unwrap();
+    assert!(
+        changes
+            .has_changed()
+            .expect("registry keeps its link subscription open"),
+        "a confirmed departure must publish a link change before returning"
+    );
 
     let mut stale = original.clone();
     assert!(

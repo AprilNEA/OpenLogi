@@ -331,6 +331,46 @@ async fn pairing_confirms(
     )
 }
 
+/// Probe the addressed device while the receiver independently watches the
+/// slot. A pairing event can request an immediate read. Without one, allow
+/// the radio to settle and keep the first speculative request short.
+async fn probe_bolt_unit(
+    shared: &SharedChannel,
+    gate: &crate::DeviceIoGate,
+    announced: &Notify,
+) -> Option<[u8; 4]> {
+    use crate::{HidppFeatureErrorKind, HidppOperation, WriteError};
+
+    let normal_budget = Duration::from_millis(1500);
+    let mut budget = tokio::select! {
+        () = announced.notified() => normal_budget,
+        () = tokio::time::sleep(Duration::from_millis(400)) => Duration::from_millis(350),
+    };
+    while gate.allows_io() {
+        let read = crate::get_unit_id_on(shared, HidppOperation::ChangeHost);
+        match tokio::time::timeout(budget, read).await {
+            Ok(Ok(unit)) => return unit,
+            Err(_)
+            | Ok(Err(
+                WriteError::DeviceUnreachable { .. }
+                | WriteError::RequestTimedOut { .. }
+                | WriteError::HidppFeature {
+                    kind: HidppFeatureErrorKind::Busy,
+                    ..
+                },
+            )) => {}
+            Ok(Err(_)) => return None,
+        }
+        // Leave enough time for a later request to clear an abandoned header.
+        budget = normal_budget;
+        tokio::select! {
+            () = announced.notified() => {}
+            () = tokio::time::sleep(Duration::from_millis(150)) => {}
+        }
+    }
+    None
+}
+
 /// Direct channels capture found dead while inventory still publishes them.
 /// Held weakly so a report never keeps a retired connection from draining.
 #[derive(Default)]
@@ -406,56 +446,37 @@ impl ChannelRegistry {
         let registry = self.clone();
         let shared = SharedChannel::new(channel, route.clone());
         Some(async move {
-            // Some receivers deliver the first link-up late, or before the
-            // radio will answer a device query. During this transfer only,
-            // also try the same read-only identity proof on a bounded cadence.
-            let retry = Duration::from_millis(150);
-            let mut next_probe = tokio::time::Instant::now() + Duration::from_millis(400);
-            let mut speculative = true;
-            loop {
-                let announced = tokio::select! {
-                    biased;
-                    event = events.recv() => match event {
-                        Ok(Event::DeviceConnection(c)) if c.index == slot && c.online == online => Some(c.wpid),
-                        Ok(_) => continue,
-                        Err(_) => break,
-                    },
-                    () = tokio::time::sleep_until(next_probe), if online => None,
-                };
-                if !gate.allows_io() {
-                    break;
-                }
-                if online {
-                    // The link report and a fresh USB pairing record together
-                    // identify an arrived unit without first waking its radio.
-                    if let Some(wpid) = announced
-                        && pairing_confirms(&receiver, &node, slot, wpid, expected).await
+            let announced = Notify::new();
+            let event_proof = async {
+                while let Ok(event) = events.recv().await {
+                    if !gate.allows_io() {
+                        break;
+                    }
+                    if let Event::DeviceConnection(c) = event
+                        && c.index == slot
+                        && c.online == online
                     {
-                        return gate.allows_io() && registry.record_link(&shared, expected, true);
-                    }
-                    // An unanswered read sent while the radio is away has a
-                    // longer transport timeout than the entire handoff. Give
-                    // the initial speculative read a short budget. A later
-                    // read has time to clear the abandoned header's fence.
-                    let budget = if speculative && announced.is_none() {
-                        Duration::from_millis(350)
-                    } else {
-                        Duration::from_millis(1500)
-                    };
-                    speculative = false;
-                    let read = crate::get_unit_id_on(&shared, crate::HidppOperation::ChangeHost);
-                    match tokio::time::timeout(budget, read).await {
-                        Ok(Ok(Some(unit))) if unit == expected => {}
-                        Ok(Ok(Some(_))) => break,
-                        _ => {
-                            next_probe = tokio::time::Instant::now() + retry;
-                            continue;
+                        if !online
+                            || pairing_confirms(&receiver, &node, slot, c.wpid, expected).await
+                        {
+                            return true;
                         }
+                        announced.notify_one();
                     }
                 }
-                return gate.allows_io() && registry.record_link(&shared, expected, online);
-            }
-            false
+                false
+            };
+            tokio::pin!(event_proof);
+            let confirmed = tokio::select! {
+                biased;
+                verified = &mut event_proof => verified,
+                unit = probe_bolt_unit(&shared, &gate, &announced), if online => match unit {
+                    Some(unit) => unit == expected,
+                    None if gate.allows_io() => event_proof.await,
+                    None => false,
+                },
+            };
+            confirmed && gate.allows_io() && registry.record_link(&shared, expected, online)
         })
     }
 
