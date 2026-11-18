@@ -28,7 +28,8 @@ use super::{AppState, StateEvent};
 
 /// Which timer steps the Device tab's backlight card shows — a disclosure,
 /// not a keyboard setting: the keyboard keeps whatever duration was last
-/// written, and switching shows or hides steps without writing anything.
+/// written, and switching shows or hides steps without writing the keyboard.
+/// The choice is saved in `config.toml`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum DurationSteps {
     /// The short timers Logi Options+ offers by default.
@@ -176,15 +177,26 @@ impl AppState {
         StateEvent::BacklightChanged(key.clone()).into()
     }
 
-    /// Which timer steps the backlight card is showing.
+    /// Which timer steps the backlight card is showing, as saved in
+    /// `config.toml` so the choice survives the GUI restarting.
     #[must_use]
     pub fn duration_steps(&self) -> DurationSteps {
-        self.duration_steps
+        if self.config.app_settings.extended_backlight_durations {
+            DurationSteps::Extended
+        } else {
+            DurationSteps::Short
+        }
     }
 
-    /// Show or hide timers past 30 seconds. Writes nothing to the keyboard.
+    /// Show or hide timers past 30 seconds, and save the choice. Writes
+    /// nothing to the keyboard.
     pub fn set_duration_steps(&mut self, steps: DurationSteps) -> StateEvents {
-        self.duration_steps = steps;
+        let extended = steps == DurationSteps::Extended;
+        if self.config.app_settings.extended_backlight_durations != extended {
+            self.config
+                .edit(|config| config.app_settings.extended_backlight_durations = extended);
+            self.persist_config("extended backlight durations");
+        }
         self.for_current_device(StateEvent::BacklightChanged)
     }
 
