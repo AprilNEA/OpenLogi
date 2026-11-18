@@ -237,6 +237,11 @@ pub struct AppSettings {
     /// overrides. Off by default.
     #[serde(default)]
     pub momentum_scrolling: MomentumScrolling,
+    /// Whether the keyboard backlight card offers timers past 30 seconds. A
+    /// display choice: the keyboard keeps whatever duration was last written
+    /// either way. Off by default, like Logi Options+.
+    #[serde(default)]
+    pub extended_backlight_durations: bool,
     /// Which app icon the user picked. Applied at launch, and whenever it
     /// changes, by whichever process owns a surface showing one — on macOS the
     /// GUI hands the choice to the Dock and writes it onto the bundle (so the
@@ -508,6 +513,7 @@ impl Default for AppSettings {
             smooth_scroll: false,
             vertical_scroll_sensitivity: VerticalScrollSensitivity::DEFAULT,
             momentum_scrolling: MomentumScrolling::default(),
+            extended_backlight_durations: false,
             auto_download_assets: true,
             asset_source: AssetSourcePreference::Automatic,
             language: None,
