@@ -15,10 +15,125 @@ const INTERFACE = `<node><interface name="org.openlogi.FlowPointer">
     </method>
 </interface></node>`;
 
+const Phase = Object.freeze({
+    Idle: 'idle',
+    Preparing: 'preparing',
+    Waiting: 'waiting',
+    Finished: 'finished',
+});
+
+export class CursorPlacement {
+    #state = {phase: Phase.Idle};
+
+    constructor(desktop) {
+        this._desktop = desktop;
+    }
+
+    // Compare the exact state object: a callback from an earlier request can
+    // run while another request is waiting. Retire ownership before cleanup,
+    // as releasing tracking can itself deliver a position notification.
+    #transition(from, to, confirmed = false) {
+        if (this.#state !== from)
+            return false;
+        this.#state = to;
+        if (from.phase === Phase.Waiting)
+            from.timer.destroy();
+        if (from.request && from.request !== to.request) {
+            for (const release of from.request.cleanup.reverse()) {
+                try {
+                    release();
+                } catch (error) {
+                    console.debug(`OpenLogi Flow tracker cleanup failed: ${error.message}`);
+                }
+            }
+            from.request.reply(confirmed);
+        }
+        return this.#state === to;
+    }
+
+    cancel() {
+        const current = this.#state;
+        if (current.phase === Phase.Preparing || current.phase === Phase.Waiting)
+            this.#transition(current, {phase: Phase.Finished});
+    }
+
+    place(targetX, targetY, expiresUs, reply) {
+        const x = Math.round(targetX);
+        const y = Math.round(targetY);
+        const now = GLib.get_monotonic_time();
+        const deadline = Math.min(expiresUs, now + 500_000);
+        if (deadline <= now || !this._desktop.monitors().some(m =>
+            x >= m.x && x < m.x + m.width && y >= m.y && y < m.y + m.height)) {
+            reply(false);
+            return;
+        }
+
+        const request = {reply, cleanup: []};
+        const preparing = {phase: Phase.Preparing, request};
+        if (!this.#transition(this.#state, preparing))
+            return;
+
+        // A synchronous callback may cancel during acquisition. In that case
+        // the resource just returned belongs to the abandoned request.
+        const keep = release => {
+            if (this.#state !== preparing) {
+                release();
+                return false;
+            }
+            request.cleanup.push(release);
+            return true;
+        };
+        const check = () => {
+            const current = this.#state;
+            if (current.phase !== Phase.Waiting || current.request !== request)
+                return;
+            const [actualX, actualY] = this._desktop.pointer();
+            if (actualX === x && actualY === y)
+                this.#transition(current, {phase: Phase.Finished}, GLib.get_monotonic_time() < deadline);
+        };
+
+        try {
+            const tracker = this._desktop.tracker();
+            const signal = tracker.connect('position-invalidated', check);
+            if (!keep(() => tracker.disconnect(signal)))
+                return;
+            if (tracker.track_position && tracker.untrack_position) {
+                tracker.track_position();
+                if (!keep(() => tracker.untrack_position()))
+                    return;
+            }
+            const timeoutMs = Math.max(1, Math.ceil((deadline - GLib.get_monotonic_time()) / 1000));
+            const timer = GLib.timeout_source_new(timeoutMs);
+            const waiting = {phase: Phase.Waiting, request, timer};
+            timer.set_callback(() => {
+                this.#transition(waiting, {phase: Phase.Finished});
+                return GLib.SOURCE_REMOVE;
+            });
+            timer.attach(null);
+            if (GLib.get_monotonic_time() >= deadline) {
+                timer.destroy();
+                this.#transition(preparing, {phase: Phase.Finished});
+                return;
+            }
+            if (!this.#transition(preparing, waiting)) {
+                timer.destroy();
+                return;
+            }
+            this._desktop.warp(x, y);
+            check();
+        } catch (error) {
+            console.debug(`OpenLogi Flow placement failed: ${error.message}`);
+            if (this.#state.request === request)
+                this.cancel();
+        }
+    }
+}
+
 export class FlowPointer {
     constructor(desktop) {
         this._desktop = desktop;
         this._owner = null;
+        this._placement = new CursorPlacement(desktop);
         this.invalidate();
         this._object = Gio.DBusExportedObject.wrapJSObject(INTERFACE, this);
         this._object.export(Gio.DBus.session, '/org/openlogi/FlowPointer');
@@ -34,7 +149,7 @@ export class FlowPointer {
     }
 
     invalidate() {
-        this._finish?.(false);
+        this._placement.cancel();
         this._generation = GLib.uuid_string_random();
     }
 
@@ -72,71 +187,7 @@ export class FlowPointer {
     PlacePointerMonotonicAsync([generation, targetX, targetY, expiresUs], call) {
         if (!this._allowed(call, generation))
             return;
-        const x = Math.round(targetX);
-        const y = Math.round(targetY);
-        const now = GLib.get_monotonic_time();
-        // Limit Shell work even when a caller supplies a distant deadline.
-        const deadline = Math.min(expiresUs, now + 500_000);
-        const reply = ok => call.return_value(new GLib.Variant('(b)', [ok]));
-        if (deadline <= now || !this._desktop.monitors().some(m =>
-            x >= m.x && x < m.x + m.width && y >= m.y && y < m.y + m.height)) {
-            reply(false);
-            return;
-        }
-
-        this._finish?.(false);
-        let signal = 0;
-        let timer = 0;
-        let tracking = false;
-        let issued = false;
-        let tracker;
-        const finish = ok => {
-            if (this._finish !== finish)
-                return;
-            this._finish = null;
-            if (signal)
-                tracker.disconnect(signal);
-            if (tracking)
-                tracker.untrack_position();
-            if (timer)
-                GLib.Source.remove(timer);
-            const confirmed = ok && GLib.get_monotonic_time() < deadline;
-            reply(confirmed);
-        };
-        this._finish = finish;
-        const check = () => {
-            if (!issued)
-                return;
-            const [actualX, actualY] = this._desktop.pointer();
-            if (actualX === x && actualY === y)
-                finish(true);
-        };
-
-        try {
-            tracker = this._desktop.tracker();
-            // Mutter can queue the warp on its input thread. Subscribe before
-            // issuing it and also check once for synchronous completion.
-            signal = tracker.connect('position-invalidated', check);
-            if (tracker.track_position && tracker.untrack_position) {
-                tracker.track_position();
-                tracking = true;
-            }
-            const timeoutMs = Math.max(1, Math.ceil((deadline - GLib.get_monotonic_time()) / 1000));
-            timer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, timeoutMs, () => {
-                timer = 0;
-                finish(false);
-                return GLib.SOURCE_REMOVE;
-            });
-            if (GLib.get_monotonic_time() >= deadline) {
-                finish(false);
-                return;
-            }
-            issued = true;
-            this._desktop.warp(x, y);
-            check();
-        } catch (error) {
-            console.debug(`OpenLogi Flow placement failed: ${error.message}`);
-            finish(false);
-        }
+        this._placement.place(targetX, targetY, expiresUs,
+            ok => call.return_value(new GLib.Variant('(b)', [ok])));
     }
 }

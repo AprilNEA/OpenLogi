@@ -98,6 +98,13 @@ simulated desktop. Run it from the repository root with GJS and gdbus installed:
 cargo test -p openlogi-agent-core gnome_wayland_round_trip -- --ignored --nocapture
 ```
 
+To exercise synchronous tracker callbacks, replacement, and cancellation during
+placement setup without a desktop or a session bus, run:
+
+```sh
+gjs -m crates/openlogi-hook/gnome-shell-extension/tests/flowPlacement.test.js
+```
+
 The animation-policy regression tests need Node.js 22 or newer and no running shell:
 
 ```sh
