@@ -1779,3 +1779,178 @@ fn a_rename_queued_before_a_departure_drops_the_old_slot_names() {
         "the linked devices keep their slot numbers"
     );
 }
+
+#[tokio::test]
+async fn bolt_arrival_reads_the_unit_on_the_announced_offline_slot() {
+    use std::time::Duration;
+
+    let (raw, _) = ScriptedRawHidChannel::with_responder(keyboard_with_the_expected_unit);
+    let incoming = raw.incoming_sender();
+    let channel = raw_scripted_channel(raw.presenting_as(0xc548)).await;
+    let route = DeviceRoute::Bolt {
+        receiver_uid: "test".to_owned(),
+        slot: 1,
+    };
+    let node = NodeId::from("receiver".to_owned());
+    let registry = ChannelRegistry::default();
+    registry.publish(node.clone(), vec![], vec![route.clone()], channel.clone());
+    assert!(
+        registry.lookup(&route).is_none(),
+        "offline slot cannot be used for writes"
+    );
+    let (signal, gate) = device_io_channel();
+    let mut arrival = Box::pin(
+        registry
+            .watch_bolt_link(&route, UNIT, true, gate.clone())
+            .unwrap(),
+    );
+    // An online report on the sibling slot, then a disconnect on our slot.
+    incoming
+        .send(vec![0x10, 2, 0x41, 0, 2, 0x34, 0x12])
+        .unwrap();
+    incoming
+        .send(vec![0x10, 1, 0x41, 0, 0x42, 0x34, 0x12])
+        .unwrap();
+    assert!(
+        futures_lite::future::poll_once(arrival.as_mut())
+            .await
+            .is_none()
+    );
+    incoming
+        .send(vec![0x10, 1, 0x41, 0, 2, 0x34, 0x12])
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), arrival)
+            .await
+            .unwrap()
+    );
+
+    // A missed receiver announcement still gets a live, identity-bound read.
+    let missed = registry
+        .watch_bolt_link(&route, UNIT, true, gate.clone())
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), missed)
+            .await
+            .unwrap()
+    );
+    let replacement = registry
+        .watch_bolt_link(&route, REPLACEMENT_UNIT, true, gate.clone())
+        .unwrap();
+    assert!(
+        !tokio::time::timeout(Duration::from_secs(1), replacement)
+            .await
+            .unwrap()
+    );
+
+    // The authoritative inventory wins the race to publish an online row.
+    // The physical return still owns exactly one settings replay in the agent.
+    let mut visible = crate::channel::scripted::bolt_inventory(UNIT, true);
+    registry.publish_scan(
+        node.clone(),
+        &mut visible,
+        channel,
+        std::time::Instant::now(),
+        true,
+    );
+    assert_eq!(
+        registry.reconcile_links(std::slice::from_mut(&mut visible)),
+        vec![(route.clone(), UNIT)]
+    );
+    assert!(
+        registry
+            .reconcile_links(std::slice::from_mut(&mut visible))
+            .is_empty()
+    );
+    let retired = registry
+        .watch_bolt_link(&route, UNIT, true, gate.clone())
+        .unwrap();
+    let suspended = registry.watch_bolt_link(&route, UNIT, true, gate).unwrap();
+    registry.remove_node(&node);
+    incoming
+        .send(vec![0x10, 1, 0x41, 0, 2, 0x34, 0x12])
+        .unwrap();
+    assert!(
+        !tokio::time::timeout(Duration::from_secs(1), retired)
+            .await
+            .unwrap()
+    );
+    assert!(signal.suspend());
+    assert!(
+        !tokio::time::timeout(Duration::from_secs(1), suspended)
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn a_pre_arrival_read_lost_on_the_radio_does_not_consume_the_watch() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    let first = AtomicBool::new(true);
+    let (raw, _) = ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+        if first.swap(false, Ordering::SeqCst) {
+            return None;
+        }
+        keyboard_with_the_expected_unit(request)
+    });
+    let channel = raw_scripted_channel(raw.presenting_as(0xc548)).await;
+    let route = DeviceRoute::Bolt {
+        receiver_uid: "test".to_owned(),
+        slot: 1,
+    };
+    let node = NodeId::from("receiver".to_owned());
+    let registry = ChannelRegistry::default();
+    registry.publish(node, vec![], vec![route.clone()], channel);
+    let (_signal, gate) = device_io_channel();
+    let watch = registry.watch_bolt_link(&route, UNIT, true, gate).unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(3), watch)
+            .await
+            .expect("radio return within Flow's advertised arrival window")
+    );
+}
+
+#[tokio::test]
+async fn a_bolt_link_and_fresh_pairing_record_can_confirm_before_the_radio_answers() {
+    let (raw, handle) = ScriptedRawHidChannel::with_dynamic_responder(|request| {
+        if !matches!(request, [_, 0xff, 0x83, 0xb5, 0x51, ..]) {
+            return None;
+        }
+        let mut response = vec![0x11, 0xff, 0x83, 0xb5, 0x51, 2, 0x34, 0x12];
+        response.extend_from_slice(&UNIT);
+        response.resize(20, 0);
+        Some(response)
+    });
+    let incoming = raw.incoming_sender();
+    let channel = raw_scripted_channel(raw.presenting_as(0xc548)).await;
+    let route = DeviceRoute::Bolt {
+        receiver_uid: "test".into(),
+        slot: 1,
+    };
+    let registry = ChannelRegistry::default();
+    registry.publish(
+        NodeId::from("flow-fast-pairing-record".to_owned()),
+        vec![],
+        vec![route.clone()],
+        channel,
+    );
+    let (_signal, gate) = device_io_channel();
+    let watch = registry.watch_bolt_link(&route, UNIT, true, gate).unwrap();
+    incoming
+        .send(vec![0x10, 1, 0x41, 0, 2, 0x34, 0x12])
+        .unwrap();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(1), watch)
+            .await
+            .unwrap()
+    );
+    assert!(
+        handle
+            .written_reports()
+            .iter()
+            .all(|report| report[1] == 0xff),
+        "the sleeping device was never queried"
+    );
+}

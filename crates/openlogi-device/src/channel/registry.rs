@@ -9,11 +9,14 @@ use hidpp::channel::HidppChannel;
 use tokio::sync::{Notify, watch};
 
 use crate::{DeviceRoute, SharedChannel};
+use openlogi_core::device::DeviceInventory;
+use std::time::{Duration, Instant};
 
 struct Publication<Node, Channel> {
     node: Node,
     sequence: u64,
     routes: Vec<DeviceRoute>,
+    offline: Vec<DeviceRoute>,
     channel: Channel,
 }
 
@@ -36,6 +39,7 @@ impl<Node: Eq, Channel> NodeRegistry<Node, Channel> {
         &mut self,
         node: Node,
         routes: impl IntoIterator<Item = DeviceRoute>,
+        offline: Vec<DeviceRoute>,
         channel: Channel,
         same_channel: fn(&Channel, &Channel) -> bool,
     ) -> bool {
@@ -52,10 +56,14 @@ impl<Node: Eq, Channel> NodeRegistry<Node, Channel> {
                 && routes
                     .iter()
                     .all(|route| publication.routes.contains(route));
-            if same_routes && same_channel(&publication.channel, &channel) {
+            if same_routes
+                && publication.offline == offline
+                && same_channel(&publication.channel, &channel)
+            {
                 return false;
             }
             publication.routes = routes;
+            publication.offline = offline;
             publication.channel = channel;
             return true;
         }
@@ -66,6 +74,7 @@ impl<Node: Eq, Channel> NodeRegistry<Node, Channel> {
             node,
             sequence,
             routes,
+            offline,
             channel,
         });
         true
@@ -79,11 +88,18 @@ impl<Node: Eq, Channel> NodeRegistry<Node, Channel> {
     }
 
     fn lookup(&self, route: &DeviceRoute) -> Option<&Channel> {
+        self.lookup_matching(|p| p.routes.contains(route))
+            .map(|p| &p.channel)
+    }
+
+    fn lookup_matching(
+        &self,
+        accepts: impl Fn(&Publication<Node, Channel>) -> bool,
+    ) -> Option<&Publication<Node, Channel>> {
         self.publications
             .iter()
-            .filter(|publication| publication.routes.contains(route))
+            .filter(|p| accepts(p))
             .min_by_key(|publication| publication.sequence)
-            .map(|publication| &publication.channel)
     }
 
     fn any_current(&self, mut predicate: impl FnMut(&DeviceRoute, &Channel) -> bool) -> bool {
@@ -166,11 +182,21 @@ impl<Node: Eq, Channel> Registry<Node, Channel> {
         routes: impl IntoIterator<Item = DeviceRoute>,
         channel: Channel,
     ) {
+        self.publish(node, routes, Vec::new(), channel);
+    }
+
+    fn publish(
+        &self,
+        node: Node,
+        routes: impl IntoIterator<Item = DeviceRoute>,
+        offline: Vec<DeviceRoute>,
+        channel: Channel,
+    ) {
         let changed = self
             .state
             .write()
             .unwrap_or_else(PoisonError::into_inner)
-            .replace_node(node, routes, channel, self.same_channel);
+            .replace_node(node, routes, offline, channel, self.same_channel);
         if changed {
             self.notify_change();
         }
@@ -224,6 +250,8 @@ impl<Node: Eq, Channel> Registry<Node, Channel> {
 pub struct ChannelRegistry {
     inner: Registry<NodeId, Arc<HidppChannel>>,
     dead: Arc<DeadChannelReports>,
+    links: Arc<Mutex<Vec<ConfirmedLink>>>,
+    link_changed: watch::Sender<()>,
 }
 
 impl Default for ChannelRegistry {
@@ -231,8 +259,76 @@ impl Default for ChannelRegistry {
         Self {
             inner: Registry::new(Arc::ptr_eq),
             dead: Arc::default(),
+            links: Arc::default(),
+            link_changed: watch::channel(()).0,
         }
     }
+}
+
+/// A local radio observation tied to one channel lifetime and physical unit.
+struct ConfirmedLink {
+    route: DeviceRoute,
+    unit: [u8; 4],
+    channel: Weak<HidppChannel>,
+    online: bool,
+    at: Instant,
+    // An authoritative scan can supersede presence before the agent consumes
+    // the independent instruction to reapply this return's volatile settings.
+    overrides_scan: bool,
+    needs_reapply: bool,
+}
+
+impl ConfirmedLink {
+    fn paired_index(&self, inventory: &DeviceInventory) -> Option<usize> {
+        inventory.paired.iter().position(|p| {
+            p.model_info
+                .as_ref()
+                .is_some_and(|m| m.unit_id == self.unit)
+                && DeviceRoute::for_slot(inventory, p.slot).as_ref() == Some(&self.route)
+        })
+    }
+
+    fn apply(&self, inventory: &mut DeviceInventory) -> bool {
+        let Some(index) = self.paired_index(inventory) else {
+            return false;
+        };
+        if self.overrides_scan {
+            inventory.paired[index].online = self.online;
+        }
+        inventory.paired[index].online
+    }
+}
+
+/// Never queue behind a complete receiver enumeration. A register reply has
+/// no software ID, so the task that submitted it keeps the host-wide phase
+/// until the read settles, even if the handoff has already used radio proof.
+async fn pairing_confirms(
+    receiver: &hidpp::receiver::bolt::Receiver,
+    node: &NodeId,
+    slot: u8,
+    wpid: u16,
+    unit: [u8; 4],
+) -> bool {
+    let Some(phase) =
+        crate::host_lock::lock_receiver_registers(node, Duration::from_millis(25)).await
+    else {
+        return false;
+    };
+    if !phase.coordinated() {
+        return false;
+    }
+    let receiver = receiver.clone();
+    let read = tokio::spawn(async move {
+        let _phase = phase;
+        receiver
+            .get_device_pairing_information(slot)
+            .await
+            .is_ok_and(|p| p.online && p.wpid == wpid && p.unit_id == unit)
+    });
+    matches!(
+        tokio::time::timeout(Duration::from_millis(80), read).await,
+        Ok(Ok(true))
+    )
 }
 
 /// Direct channels capture found dead while inventory still publishes them.
@@ -271,6 +367,211 @@ impl ChannelRegistry {
         channel: Arc<HidppChannel>,
     ) {
         self.inner.replace_node(node, routes, channel);
+    }
+
+    /// Publish offline pairings alongside the live routes. Offline slots can
+    /// be probed for identity but never supply a writable channel to clients.
+    pub(crate) fn publish(
+        &self,
+        node: NodeId,
+        online: Vec<DeviceRoute>,
+        offline: Vec<DeviceRoute>,
+        channel: Arc<HidppChannel>,
+    ) {
+        self.inner.publish(node, online, offline, channel);
+    }
+
+    /// Subscribe before the sender writes. A Bolt link-up is a cue to read
+    /// the physical unit on the slot; a link-down withdraws only the matching
+    /// previously known pairing. Dropping the future removes its listener.
+    #[must_use]
+    pub fn watch_bolt_link(
+        &self,
+        route: &DeviceRoute,
+        expected: [u8; 4],
+        online: bool,
+        gate: crate::DeviceIoGate,
+    ) -> Option<impl Future<Output = bool> + Send + 'static> {
+        use hidpp::receiver::bolt::{Event, Receiver};
+        let DeviceRoute::Bolt { slot, .. } = route else {
+            return None;
+        };
+        if expected == [0; 4] {
+            return None;
+        }
+        let slot = *slot;
+        let (node, channel) = self.paired_transport(route)?;
+        let receiver = Receiver::new(Arc::clone(&channel)).ok()?;
+        let events = receiver.listen();
+        let registry = self.clone();
+        let shared = SharedChannel::new(channel, route.clone());
+        Some(async move {
+            // Some receivers deliver the first link-up late, or before the
+            // radio will answer a device query. During this transfer only,
+            // also try the same read-only identity proof on a bounded cadence.
+            let retry = Duration::from_millis(150);
+            let mut next_probe = tokio::time::Instant::now() + Duration::from_millis(400);
+            let mut speculative = true;
+            loop {
+                let announced = tokio::select! {
+                    biased;
+                    event = events.recv() => match event {
+                        Ok(Event::DeviceConnection(c)) if c.index == slot && c.online == online => Some(c.wpid),
+                        Ok(_) => continue,
+                        Err(_) => break,
+                    },
+                    () = tokio::time::sleep_until(next_probe), if online => None,
+                };
+                if !gate.allows_io() {
+                    break;
+                }
+                if online {
+                    // The link report and a fresh USB pairing record together
+                    // identify an arrived unit without first waking its radio.
+                    if let Some(wpid) = announced
+                        && pairing_confirms(&receiver, &node, slot, wpid, expected).await
+                    {
+                        return gate.allows_io() && registry.record_link(&shared, expected, true);
+                    }
+                    // An unanswered read sent while the radio is away has a
+                    // longer transport timeout than the entire handoff. Give
+                    // the initial speculative read a short budget. A later
+                    // read has time to clear the abandoned header's fence.
+                    let budget = if speculative && announced.is_none() {
+                        Duration::from_millis(350)
+                    } else {
+                        Duration::from_millis(1500)
+                    };
+                    speculative = false;
+                    let read = crate::get_unit_id_on(&shared, crate::HidppOperation::ChangeHost);
+                    match tokio::time::timeout(budget, read).await {
+                        Ok(Ok(Some(unit))) if unit == expected => {}
+                        Ok(Ok(Some(_))) => break,
+                        _ => {
+                            next_probe = tokio::time::Instant::now() + retry;
+                            continue;
+                        }
+                    }
+                }
+                return gate.allows_io() && registry.record_link(&shared, expected, online);
+            }
+            false
+        })
+    }
+
+    fn record_link(&self, shared: &SharedChannel, unit: [u8; 4], online: bool) -> bool {
+        let mut links = self.links.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut state = self
+            .inner
+            .state
+            .write()
+            .unwrap_or_else(PoisonError::into_inner);
+        let route = shared.route();
+        let Some(publication) = state
+            .publications
+            .iter_mut()
+            .filter(|p| p.routes.contains(route) || p.offline.contains(route))
+            .min_by_key(|p| p.sequence)
+            .filter(|p| Arc::ptr_eq(&p.channel, shared.channel()))
+        else {
+            return false;
+        };
+        let (add, remove) = if online {
+            (&mut publication.routes, &mut publication.offline)
+        } else {
+            (&mut publication.offline, &mut publication.routes)
+        };
+        remove.retain(|r| r != route);
+        if !add.contains(route) {
+            add.push(route.clone());
+        }
+        drop(state);
+        links.retain(|link| link.channel.strong_count() != 0 && link.route != *route);
+        links.push(ConfirmedLink {
+            route: route.clone(),
+            unit,
+            channel: Arc::downgrade(shared.channel()),
+            online,
+            at: Instant::now(),
+            overrides_scan: true,
+            needs_reapply: online,
+        });
+        self.inner.notify_change();
+        self.link_changed.send_modify(|()| {});
+        true
+    }
+
+    /// Wakes the orchestrator to apply the new physical presence independently
+    /// of the full enumeration which may still be walking features.
+    #[must_use]
+    pub fn subscribe_links(&self) -> watch::Receiver<()> {
+        self.link_changed.subscribe()
+    }
+
+    /// Merge current presence and consume each confirmed return exactly once.
+    /// A return orders settings replay even when intervening snapshots never
+    /// showed this device offline. The route and unit together identify it.
+    pub fn reconcile_links(
+        &self,
+        inventories: &mut [DeviceInventory],
+    ) -> Vec<(DeviceRoute, [u8; 4])> {
+        let mut links = self.links.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut returned = Vec::new();
+        for link in &mut *links {
+            if let Some((_, channel)) = self.paired_transport(&link.route)
+                && Weak::ptr_eq(&link.channel, &Arc::downgrade(&channel))
+            {
+                for inventory in &mut *inventories {
+                    if link.apply(inventory) && std::mem::take(&mut link.needs_reapply) {
+                        returned.push((link.route.clone(), link.unit));
+                    }
+                }
+            }
+        }
+        returned
+    }
+
+    /// Commit a node scan and its routes together. A live observation made
+    /// during the scan wins over its older pairing snapshot.
+    pub(crate) fn publish_scan(
+        &self,
+        node: NodeId,
+        inventory: &mut DeviceInventory,
+        channel: Arc<HidppChannel>,
+        started: Instant,
+        healthy: bool,
+    ) {
+        let mut links = self.links.lock().unwrap_or_else(PoisonError::into_inner);
+        links.retain_mut(|link| {
+            if link.channel.strong_count() == 0 {
+                return false;
+            }
+            if !Weak::ptr_eq(&link.channel, &Arc::downgrade(&channel)) {
+                return true;
+            }
+            if healthy && started >= link.at {
+                link.overrides_scan = false;
+                return link.needs_reapply
+                    && link
+                        .paired_index(inventory)
+                        .is_some_and(|i| inventory.paired[i].online);
+            }
+            link.apply(inventory);
+            true
+        });
+        let inventories = std::slice::from_ref(inventory);
+        self.publish(
+            node,
+            crate::inventory::routes_for_inventories(inventories, true),
+            crate::inventory::routes_for_inventories(inventories, false),
+            channel,
+        );
+    }
+
+    fn paired_transport(&self, route: &DeviceRoute) -> Option<(NodeId, Arc<HidppChannel>)> {
+        let state = self.inner.state.read().ok()?;
+        let p = state.lookup_matching(|p| p.routes.contains(route) || p.offline.contains(route))?;
+        Some((p.node.clone(), Arc::clone(&p.channel)))
     }
 
     /// Remove every route and channel reference owned by `node`.

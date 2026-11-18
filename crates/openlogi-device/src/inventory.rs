@@ -130,14 +130,17 @@ struct PreparedNodes {
     retiring: Vec<NodeId>,
 }
 
-fn routes_for_inventories(inventories: &[DeviceInventory]) -> Vec<DeviceRoute> {
+pub(crate) fn routes_for_inventories(
+    inventories: &[DeviceInventory],
+    online: bool,
+) -> Vec<DeviceRoute> {
     inventories
         .iter()
         .flat_map(|inventory| {
             inventory
                 .paired
                 .iter()
-                .filter(|paired| paired.online)
+                .filter(|paired| paired.online == online)
                 .filter_map(|paired| DeviceRoute::for_slot(inventory, paired.slot))
         })
         .collect()
@@ -689,7 +692,7 @@ impl Enumerator {
             {
                 identities.observe(&node, &inventory.receiver);
             }
-            let settled = settle_probe(&mut self.ledger, &node, probe.verdict, probe.inventory);
+            let mut settled = settle_probe(&mut self.ledger, &node, probe.verdict, probe.inventory);
             // A replacement whose probe exhausted the replay grace with nothing
             // to show surfaces the node offline in this very snapshot: its
             // return is an ordinary offline→online transition. A partial live
@@ -717,18 +720,16 @@ impl Enumerator {
                     warn!("node probe keeps failing — retiring its channel before reopen");
                 }
             } else if let Some(registry) = &self.registry {
-                let routes = settled
-                    .inventory
-                    .as_ref()
-                    .map_or_else(Vec::new, |inventory| {
-                        routes_for_inventories(std::slice::from_ref(inventory))
-                    });
-                if settled.inventory.is_none() {
-                    registry.remove_node(&node);
+                if let Some(inventory) = settled.inventory.as_mut() {
+                    registry.publish_scan(
+                        node.clone(),
+                        inventory,
+                        channel,
+                        now,
+                        probe.verdict.is_healthy(),
+                    );
                 } else {
-                    // A healthy receiver may have no online slots. Keep its
-                    // USB transport published while withdrawing those routes.
-                    registry.replace_node(node.clone(), routes, channel);
+                    registry.remove_node(&node);
                 }
             }
             inventories.extend(settled.inventory);

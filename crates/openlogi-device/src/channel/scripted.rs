@@ -70,6 +70,45 @@ pub(crate) async fn scripted_channel(raw: impl RawHidChannel) -> Arc<HidppChanne
     )
 }
 
+/// A known Bolt mouse with one verified physical identity, for exercising
+/// registry publications across the slot's online and offline transitions.
+#[cfg(test)]
+pub(crate) fn bolt_inventory(
+    unit_id: [u8; 4],
+    online: bool,
+) -> openlogi_core::device::DeviceInventory {
+    use openlogi_core::device::{
+        DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports, PairedDevice, ReceiverInfo,
+    };
+    DeviceInventory {
+        receiver: ReceiverInfo {
+            name: "Bolt".into(),
+            vendor_id: 0x046d,
+            product_id: 0xc548,
+            unique_id: Some("test".into()),
+        },
+        paired: vec![PairedDevice {
+            slot: 1,
+            codename: None,
+            wpid: None,
+            kind: DeviceKind::Mouse,
+            online,
+            battery: None,
+            capabilities: None,
+            settings_revision: 0,
+            hidpp10: false,
+            model_info: Some(DeviceModelInfo {
+                entity_count: 1,
+                serial_number: None,
+                unit_id,
+                transports: DeviceTransports::default(),
+                model_ids: [0; 3],
+                extended_model_id: 0,
+            }),
+        }],
+    }
+}
+
 /// Build a route-bound scripted channel for a higher-layer test.
 #[cfg(feature = "test-support")]
 pub async fn scripted_shared_channel(
