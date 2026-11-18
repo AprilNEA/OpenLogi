@@ -167,6 +167,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "gpui")]
     #[test]
     fn the_low_battery_notice_icon_is_embedded() {
         let loaded = ActionIcons.load(LOW_BATTERY_ICON);
@@ -176,6 +177,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "gpui")]
     #[test]
     fn the_lock_key_indicator_icon_is_embedded() {
         let loaded = ActionIcons.load(LOCK_KEY_ICON);
