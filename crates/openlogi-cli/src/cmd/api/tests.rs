@@ -17,6 +17,7 @@ use openlogi_ipc::{
 use super::*;
 
 mod easy_switch;
+mod lighting;
 mod persistence;
 mod report_rate;
 

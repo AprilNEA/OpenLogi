@@ -138,12 +138,24 @@ impl Request for SetDpi {
 pub struct SetLighting {
     pub route: DeviceRoute,
     pub lighting: Lighting,
+    /// A persisted change is fenced against later saves; transient previews are not.
+    pub revision: Option<openlogi_core::config::ConfigRevision>,
 }
 
 impl Request for SetLighting {
     type Answer = Result<(), WriteError>;
 
     async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        if let Some(revision) = self.revision {
+            return client
+                .set_saved_lighting(
+                    context::current(),
+                    self.route.clone(),
+                    self.lighting.clone(),
+                    revision,
+                )
+                .await;
+        }
         client
             .set_lighting(
                 context::current(),

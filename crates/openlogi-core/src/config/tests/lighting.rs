@@ -3,6 +3,75 @@
 use super::*;
 
 #[test]
+fn rgb_device_edit_reads_effective_link_state_but_refuses_a_shadowed_write() {
+    use crate::device_order::{DeviceIdentity, DeviceStableId};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    let stable = DeviceStableId::Bolt {
+        receiver_uid: "rgb-test".into(),
+        slot: 1,
+    };
+    let identity = DeviceIdentity::Unit([1, 2, 3, 4]);
+    let base = Lighting {
+        enabled: true,
+        color: crate::color::Rgb::WHITE,
+        brightness: 50,
+    };
+    let override_value = Lighting {
+        enabled: false,
+        brightness: 23,
+        ..base.clone()
+    };
+    let mut config = Config::default();
+    config.set_lighting("unit:01020304", base.clone());
+    config
+        .devices
+        .get_mut("unit:01020304")
+        .unwrap()
+        .links
+        .insert(
+            stable.route_key(),
+            LinkConfig {
+                overrides: LinkOverrides {
+                    lighting: Some(override_value.clone()),
+                    ..LinkOverrides::default()
+                },
+                ..LinkConfig::default()
+            },
+        );
+    config.save_to_path(&path).unwrap();
+    let before = fs::read_to_string(&path).unwrap();
+    let mut edit = DeviceEdit::load(&path, &stable, Some(&identity)).unwrap();
+    assert_eq!(edit.lighting(), Some(&override_value));
+    assert!(matches!(
+        edit.set_lighting(base),
+        Err(DeviceEditError::LinkOverride)
+    ));
+    assert_eq!(fs::read_to_string(&path).unwrap(), before);
+}
+
+#[test]
+fn rgb_device_edit_conflict_keeps_the_other_writers_settings() {
+    use crate::device_order::{DeviceIdentity, DeviceStableId};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    Config::default().save_to_path(&path).unwrap();
+    let stable = DeviceStableId::Bolt {
+        receiver_uid: "rgb-test".into(),
+        slot: 1,
+    };
+    let identity = DeviceIdentity::Unit([1, 2, 3, 4]);
+    let mut edit = DeviceEdit::load(&path, &stable, Some(&identity)).unwrap();
+    edit.set_lighting(Lighting::default()).unwrap();
+    let mut external = Config::load_from_path(&path).unwrap();
+    external.set_dpi("unit:87654321", 1200.into());
+    external.save_to_path(&path).unwrap();
+    let before = fs::read_to_string(&path).unwrap();
+    assert!(matches!(edit.commit(), Err(ConfigError::Conflict { .. })));
+    assert_eq!(fs::read_to_string(&path).unwrap(), before);
+}
+
+#[test]
 fn lighting_roundtrips_per_device() {
     let mut cfg = Config::default();
     cfg.set_lighting(

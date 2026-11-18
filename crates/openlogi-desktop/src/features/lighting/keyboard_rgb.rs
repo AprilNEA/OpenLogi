@@ -186,3 +186,90 @@ fn swatch(color: Rgb, current: &Lighting, pal: Palette) -> impl IntoElement {
             });
         })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::assets::AssetResolver;
+    use crate::state::tests::{KNOWN_MOUSE_KEY, direct_inventory, reload::agent_loaded};
+    use crate::state::{ConfigPersistence, Sources};
+    use gpui::AppContext as _;
+    use openlogi_core::config::{Config, ConfigEdit, ConfigFile};
+    use openlogi_core::device::{Capabilities, DeviceKind};
+
+    #[gpui::test]
+    fn external_rgb_save_repaints_open_lighting_panel(cx: &mut gpui::TestAppContext) {
+        use std::{cell::Cell, rc::Rc};
+
+        let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(openlogi_core::paths::CONFIG_FILE);
+        let mut initial = Config::default();
+        initial.set_lighting(KNOWN_MOUSE_KEY, Lighting::default());
+        initial.save_to_path(&path).unwrap();
+        let (config, file) = ConfigFile::load_from_path(&path).unwrap();
+        let before = file.revision();
+        let resolver = AssetResolver::new();
+        let mut keyboard = direct_inventory([0xa3, 0x93, 0xca, 0xe0]);
+        keyboard.paired[0].kind = DeviceKind::Keyboard;
+        keyboard.paired[0].capabilities = Some(Capabilities {
+            lighting: true,
+            ..Capabilities::default()
+        });
+        let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = AppState::new(Sources {
+            inventories: &[keyboard],
+            persistence: ConfigPersistence::UserFile(file),
+            ..Sources::in_memory(config, &resolver, commands)
+        });
+        // Settle connection state before opening the panel: the only later
+        // invalidation must be the externally changed lighting itself.
+        let _ = state.apply_agent_snapshot(&agent_loaded(before), &resolver, &[]);
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            theme::register_builtin_themes(cx);
+            AppState::set_global(cx.new(|_| state), cx);
+        });
+        let (view, cx) = cx.add_window_view(|_, cx| LightingPanel::new(cx));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.read(|cx| assert_eq!(view.read(cx).brightness.seated(), 100));
+        cx.run_until_parked();
+        let repainted = Rc::new(Cell::new(false));
+        let _watch = cx.update(|_, cx| {
+            let repainted = Rc::clone(&repainted);
+            cx.observe(&view, move |_, _| repainted.set(true))
+        });
+
+        let mut external = ConfigEdit::load(&path).unwrap();
+        let changed = Lighting {
+            enabled: false,
+            color: Rgb::WHITE,
+            brightness: 35,
+        };
+        external
+            .config_mut()
+            .set_lighting(KNOWN_MOUSE_KEY, changed.clone());
+        let revision = external.commit().unwrap();
+        cx.update(|_, cx| {
+            AppState::apply(cx, |state| {
+                state
+                    .apply_agent_snapshot(&agent_loaded(revision), &resolver, &[])
+                    .events
+            });
+        });
+        cx.run_until_parked();
+        assert!(
+            repainted.get(),
+            "the external save must invalidate the open panel before drawing"
+        );
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.read(|cx| {
+            assert_eq!(
+                view.read(cx).brightness.seated(),
+                35,
+                "the retained slider follows the external save without reopening the tab"
+            );
+        });
+        cx.read(|cx| assert_eq!(AppState::try_read(cx).unwrap().lighting(), changed));
+    }
+}

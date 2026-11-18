@@ -1106,6 +1106,16 @@ impl Agent for MockAgent {
         Ok(())
     }
 
+    async fn set_saved_lighting(
+        self,
+        context: Context,
+        route: DeviceRoute,
+        lighting: Lighting,
+        _: openlogi_core::config::ConfigRevision,
+    ) -> Result<(), WriteError> {
+        self.set_lighting(context, route, lighting).await
+    }
+
     async fn set_smartshift(
         self,
         _: Context,

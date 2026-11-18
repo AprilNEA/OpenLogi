@@ -75,7 +75,7 @@ Things OpenLogi does that Options+ won't:
 - **Run on Linux.** Linux is a first-class platform in OpenLogi.
 - **Gestures on supported buttons.** Assign gesture actions to supported controls — or turn gestures off entirely.
 - **Plain-text config.** Everything is one TOML file you can sync between machines however you like.
-- **Script it.** A real CLI alongside the GUI: a JSON [automation API](docs/USAGE.md#automation-api) for DPI, SmartShift, Fn-lock, and report rate, plus hardware diagnostics.
+- **Script it.** A real CLI alongside the GUI: a JSON [automation API](docs/USAGE.md#automation-api) for DPI, SmartShift, Fn-lock, report rate, and saved RGB lighting controls, plus hardware diagnostics.
 
 ## Features
 
@@ -137,7 +137,7 @@ Per-application profiles switch with the focused app. An `[apps]` alias lets one
 <table>
     <tr>
         <td width="50%"><img src="https://assets.openlogi.org/screenshots/macos/light/cards/keys-backlight.png" width="400" alt="Keys and Backlight cards for an MX Keys S"></td>
-        <td width="50%"><b>Keyboard</b><ul><li>Fn Lock, and multi-platform keyboards that stay on the host OS layout</li><li>Backlight level, automatic brightness, battery saving, and how long the keys stay lit</li><li>The backlight level shown on screen as it changes</li><li>Static RGB on supported keyboards</li></ul></td>
+        <td width="50%"><b>Keyboard</b><ul><li>Fn Lock, and multi-platform keyboards that stay on the host OS layout</li><li>Backlight level, automatic brightness, battery saving, and how long the keys stay lit</li><li>The backlight level shown on screen as it changes</li><li>Static RGB on supported keyboards</li><li>Saved RGB status, power toggles, color, and brightness through the CLI</li></ul></td>
     </tr>
     <tr>
         <td width="50%"><img src="https://assets.openlogi.org/screenshots/macos/light/cards/litra.png" width="400" alt="Litra Glow lighting panel with brightness and color temperature"></td>
@@ -234,7 +234,16 @@ To read the script before running it, and for the AUR package, Flatpak, NixOS, a
 
 ## Usage (CLI)
 
-See [USAGE.md](docs/USAGE.md)
+Use `openlogi api devices` to find a device ID. For a supported RGB keyboard:
+
+```sh
+openlogi api lighting --device "$DEVICE_ID"
+openlogi api lighting --device "$DEVICE_ID" --set toggle --save
+```
+
+The first command reads saved settings; the second toggles lighting while retaining
+color and brightness. Changes require `--save`. See [USAGE.md](docs/USAGE.md) for
+explicit on/off, color and brightness controls, JSON output, and hardware diagnostics.
 
 ## Configuration
 

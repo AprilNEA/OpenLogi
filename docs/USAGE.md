@@ -97,6 +97,10 @@ unchanged.
 openlogi api status
 openlogi api devices
 # Copy an exact, non-null id from api devices; quote it as one argument.
+openlogi api lighting --device "$DEVICE_ID"
+openlogi api lighting --device "$DEVICE_ID" --set toggle --save
+openlogi api lighting --device "$DEVICE_ID" --set off --save
+openlogi api lighting --device "$DEVICE_ID" --set on --colour ff8800 --brightness 60 --save
 openlogi api dpi --device "$DEVICE_ID"
 openlogi api dpi --device "$DEVICE_ID" --set 1200
 openlogi api dpi --device "$DEVICE_ID" --set 1200 --save
@@ -137,6 +141,7 @@ stdout cannot provide a JSON envelope.
 | --- | --- |
 | `status` | `agent_version`, `inventory`, `accessibility_granted`, `input_monitoring_granted`, `hook_installed`, `hid_open_failures`, `launch_at_login` |
 | `devices` | `inventory`, `devices`: array of `id`, `name`, `kind`, `online`, `battery`, `capabilities`, `light_capabilities` |
+| `lighting` | `device`, `persistence`, `source` (`configuration`), `configured` (boolean), `enabled` (boolean), `color` (six lowercase hex digits), `brightness` (0–100) |
 | `dpi` | `device`, `persistence`, `current` (integer), `supported` (array of integers) |
 | `smartshift` | `device`, `persistence`, `mode` (`free` or `ratchet`), `auto_disengage` (integer), `tunable_torque` (1–100, percent of the wheel's maximum force, or null) |
 | `fn-lock` | `device`, `persistence`, `fn_lock`, `default_fn_lock` (boolean, or null when the keyboard reports no firmware default) |
@@ -184,6 +189,43 @@ Saving edits only the selected setting, preserving unrelated preferences and
 comments. A per-link override of that setting is refused with `link_override`
 rather than silently saving a default that the override would supersede.
 There is no profile-switch API yet.
+
+### RGB keyboard lighting
+
+`lighting` reads the selected keyboard's effective saved RGB
+configuration without changing the file or sending a hardware command.
+An explicit `--status` is also accepted when no setting flags are supplied.
+Its `source: "configuration"` is intentional: OpenLogi has no RGB hardware
+readback, so this is not a promise that the LEDs currently match the file.
+If no RGB settings have been saved, the result reports the GUI defaults with
+`configured: false` and leaves the configuration untouched.
+
+Use `--set on|off|toggle`, `--colour RRGGBB`, and/or
+`--brightness 0..100` to change settings. Every change requires `--save`;
+a read with `--save` or a change without it fails with `invalid_value`.
+`--status` cannot be combined with changes or `--save`.
+Colours contain exactly six hexadecimal digits without a leading `#`.
+`--color` is an alias for `--colour`.
+Malformed values are CLI argument errors (exit 2), before any agent command.
+
+Omitted fields keep their saved values. Disabling retains colour and
+brightness, re-enabling restores them, and changing colour or brightness
+does not implicitly turn disabled lighting on. A toggle flips the saved
+enabled flag, not an inferred hardware state. Brightness zero and disabled
+lighting remain separate settings. The command requires an online keyboard
+with measured RGB lighting support and a persistent identity; keyboard
+backlight and standalone Litra controls are separate surfaces.
+
+Changes use the same order as the GUI: stage the edit, refuse per-link
+overrides, atomically save only if the loaded configuration revision still
+matches, reload the agent configuration, then apply RGB through a revision-fenced RPC.
+A save conflict sends no hardware write; it is not retried as another toggle.
+The agent serializes saved lighting applications per keyboard and refuses a
+superseded RGB choice before hardware I/O. An intervening unrelated save is
+allowed when the device's effective RGB settings still match the request.
+If reload or hardware application fails after saving, the error includes
+`persistence: "saved"`. The preference may therefore take effect on a later
+reconnect. No hardware readback verification is claimed.
 
 `os-layout` changes an agent setting rather than the device, so it requires
 both `--set` and `--save`; without `--save` it fails with `invalid_value`. The

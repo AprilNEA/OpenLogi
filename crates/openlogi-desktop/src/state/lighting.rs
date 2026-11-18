@@ -48,6 +48,7 @@ impl AppState {
         };
         let key = record.persistent_config_key().map(str::to_string);
         let target = record.route.clone();
+        let persisted = key.is_some();
         if let Some(key) = key {
             self.config
                 .edit(|config| config.set_lighting(&key, lighting.clone()));
@@ -61,7 +62,11 @@ impl AppState {
             debug!("transient device lighting applied without persistence");
         }
         if let Some(route) = target {
-            self.send_ipc(crate::services::ipc::SetLighting { route, lighting });
+            self.send_ipc(crate::services::ipc::SetLighting {
+                route,
+                lighting,
+                revision: persisted.then(|| self.config.revision()),
+            });
         }
         events
     }
