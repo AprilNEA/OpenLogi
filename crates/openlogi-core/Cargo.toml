@@ -15,7 +15,7 @@ default = ["fs", "locale"]
 # The line between the host-touching config I/O and everything else here, which
 # is pure data and stays checkable against `wasm32-unknown-unknown` (see xtask's
 # `WASM_PORTABLE_CRATES`). On by default, so no consumer here is affected.
-fs = ["dep:atomic-write-file", "dep:etcetera", "dep:sha2", "dep:toml_edit"]
+fs = ["dep:atomic-write-file", "dep:etcetera", "dep:sha2", "dep:toml", "dep:toml_edit"]
 # Locale negotiation over the shared catalogs in `openlogi-ui/locales/`. Gated
 # for the same wasm reason as `fs`: `sys-locale` reads the host's language
 # preference and `rust-i18n` owns the process-global locale.
@@ -30,7 +30,7 @@ logging = ["dep:tracing-subscriber"]
 [dependencies]
 openlogi-device-registry = { workspace = true }
 serde = { workspace = true }
-toml = { workspace = true }
+toml = { workspace = true, optional = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 etcetera = { version = "0.11.0", optional = true }
@@ -54,6 +54,7 @@ plist = "1.10.0"
 
 [dev-dependencies]
 tempfile = "3"
+toml = { workspace = true }
 
 [lints]
 workspace = true
