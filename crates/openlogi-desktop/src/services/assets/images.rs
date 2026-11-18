@@ -59,43 +59,127 @@ fn evict_device_image(path: &Path, height: u32, window: &mut gpui::Window, cx: &
 const RECENT_DEVICE_IMAGE_SIZES: usize = 4;
 
 #[derive(Default)]
-struct DeviceImageSizes(RefCell<HashMap<PathBuf, PathImageSizes>>);
+struct DeviceImageSizes(RefCell<HashMap<PathBuf, PathImageState>>);
 
 #[derive(Default)]
-struct PathImageSizes {
-    recent: VecDeque<u32>,
-    last_loaded: Option<u32>,
+enum PathImageState {
+    #[default]
+    Unrequested,
+    Pending {
+        recent: RecentImageSizes,
+    },
+    Drawable {
+        recent: RecentImageSizes,
+        height: u32,
+    },
+}
+
+enum ImageEvent {
+    Requested(u32),
+    Loaded(u32),
+}
+
+// The newest request is always present, including while no image is drawable.
+struct RecentImageSizes {
+    newest: u32,
+    older: VecDeque<u32>,
+}
+
+impl RecentImageSizes {
+    fn new(height: u32) -> Self {
+        Self {
+            newest: height,
+            older: VecDeque::new(),
+        }
+    }
+
+    fn contains(&self, height: u32) -> bool {
+        self.newest == height || self.older.contains(&height)
+    }
+
+    fn request(&mut self, height: u32) -> Option<u32> {
+        if self.newest == height {
+            return None;
+        }
+        self.older.retain(|&size| size != height);
+        self.older.push_back(self.newest);
+        self.newest = height;
+        if self.older.len() >= RECENT_DEVICE_IMAGE_SIZES {
+            self.older.pop_front()
+        } else {
+            None
+        }
+    }
+}
+
+impl PathImageState {
+    fn transition(&mut self, event: ImageEvent) -> Option<u32> {
+        let (next, expired) = match (std::mem::take(self), event) {
+            (Self::Unrequested, ImageEvent::Requested(height)) => (
+                Self::Pending {
+                    recent: RecentImageSizes::new(height),
+                },
+                None,
+            ),
+            (Self::Pending { mut recent }, ImageEvent::Requested(height)) => {
+                let expired = recent.request(height);
+                (Self::Pending { recent }, expired)
+            }
+            (Self::Drawable { mut recent, height }, ImageEvent::Requested(requested)) => {
+                let expired = recent
+                    .request(requested)
+                    .filter(|&expired| expired != height);
+                (Self::Drawable { recent, height }, expired)
+            }
+            (Self::Pending { recent }, ImageEvent::Loaded(height)) if recent.contains(height) => {
+                (Self::Drawable { recent, height }, None)
+            }
+            (Self::Drawable { recent, height }, ImageEvent::Loaded(loaded))
+                if recent.contains(loaded) =>
+            {
+                let expired = (!recent.contains(height)).then_some(height);
+                (
+                    Self::Drawable {
+                        recent,
+                        height: loaded,
+                    },
+                    expired,
+                )
+            }
+            (state, ImageEvent::Loaded(_)) => (state, None),
+        };
+        *self = next;
+        expired
+    }
+
+    fn drawable_height(&self) -> Option<u32> {
+        match self {
+            Self::Drawable { height, .. } => Some(*height),
+            Self::Unrequested | Self::Pending { .. } => None,
+        }
+    }
 }
 
 impl gpui::Global for DeviceImageSizes {}
 
 impl DeviceImageSizes {
     fn record(&self, path: &Path, height: u32) -> Option<u32> {
-        let mut sizes = self.0.borrow_mut();
-        let state = sizes.entry(path.to_owned()).or_default();
-        state.recent.retain(|&size| size != height);
-        state.recent.push_back(height);
-        if state.recent.len() > RECENT_DEVICE_IMAGE_SIZES {
-            state
-                .recent
-                .pop_front()
-                .filter(|height| Some(*height) != state.last_loaded)
-        } else {
-            None
-        }
+        self.0
+            .borrow_mut()
+            .entry(path.to_owned())
+            .or_default()
+            .transition(ImageEvent::Requested(height))
     }
 
     fn loaded(&self, path: &Path, height: u32) -> Option<u32> {
-        let mut sizes = self.0.borrow_mut();
-        let state = sizes.get_mut(path)?;
-        state
-            .last_loaded
-            .replace(height)
-            .filter(|previous| !state.recent.contains(previous))
+        self.0
+            .borrow_mut()
+            .get_mut(path)?
+            .transition(ImageEvent::Loaded(height))
     }
 
     fn last_loaded(&self, path: &Path) -> Option<u32> {
-        self.0.borrow().get(path)?.last_loaded
+        self.0.borrow().get(path)?.drawable_height()
     }
 }
 
@@ -463,10 +547,29 @@ mod rendering_tests {
             retained.insert(height);
             assert!(retained.len() <= RECENT_DEVICE_IMAGE_SIZES);
         }
-        let oldest = *history.0.borrow()[path].recent.front().unwrap();
+        let oldest = *retained.iter().min().unwrap();
         assert_eq!(history.record(path, oldest), None);
         assert_ne!(history.record(path, 300), Some(oldest));
         assert_eq!(history.record(other, 200), None);
+    }
+
+    #[test]
+    fn completions_without_a_retained_request_do_not_change_the_drawable_size() {
+        let history = DeviceImageSizes::default();
+        let path = std::path::Path::new("front.png");
+        assert_eq!(history.loaded(path, 100), None);
+        assert_eq!(history.last_loaded(path), None);
+        assert_eq!(history.record(path, 100), None);
+        assert_eq!(history.loaded(path, 200), None);
+        assert_eq!(history.last_loaded(path), None);
+        assert_eq!(history.loaded(path, 100), None);
+        for height in 101..200 {
+            history.record(path, height);
+        }
+        assert_eq!(history.loaded(path, 101), None);
+        assert_eq!(history.last_loaded(path), Some(100));
+        assert_eq!(history.loaded(path, 199), Some(100));
+        assert_eq!(history.last_loaded(path), Some(199));
     }
 
     #[test]
