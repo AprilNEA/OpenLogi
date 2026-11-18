@@ -455,6 +455,12 @@ under a profile. The desktop app does not create aliases; write them here.
 
 ### Flow
 
+On GNOME Wayland, install and enable version 4 or later of the
+[OpenLogi Shell extension](../crates/openlogi-hook/gnome-shell-extension/README.md)
+to switch away at a screen edge and place the incoming cursor on the unlocked
+desktop. Without the extension, a paired peer can still switch the devices to
+the GNOME host.
+
 `[flow]` holds the cross-machine device handoff settings. Without it, Flow is
 disabled. Pairing writes each peer with its pinned public key; write the layout
 and devices here. Its fields are:

@@ -160,6 +160,7 @@ Feature coverage depends on what each device reports; the app shows only the con
 
 | Feature | macOS | Windows | Linux |
 | --- | --- | --- | --- |
+| Flow edge handoff | ✓ | ✓ | X11, or an unlocked GNOME Wayland desktop with the [v4+ companion extension](crates/openlogi-hook/gnome-shell-extension/README.md) |
 | Mouse button remapping and gestures | ✓ | ✓ | ✓ |
 | Keyboard F-key remapping | ✓ | ✓ | — |
 | Per-application profiles | ✓ | ✓ | X11, wlroots (sway, Hyprland), GNOME with the [companion extension](crates/openlogi-hook/gnome-shell-extension/README.md) |
