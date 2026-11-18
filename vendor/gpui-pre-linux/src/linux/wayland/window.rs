@@ -714,6 +714,36 @@ impl PresentationState {
     }
 }
 
+/// OpenLogi patch (#1989): the `wp_viewport` destination for a logical
+/// `size`, or `None` while either side is still zero, since
+/// `set_destination(0, 0)` is a protocol error.
+fn viewport_destination(size: Size<Pixels>) -> Option<(i32, i32)> {
+    let width = f32::from(size.width) as i32;
+    let height = f32::from(size.height) as i32;
+    (width > 0 && height > 0).then_some((width, height))
+}
+
+#[cfg(test)]
+mod viewport_destination_tests {
+    use super::viewport_destination;
+    use gpui::{px, size};
+
+    #[test]
+    fn an_unconfigured_surface_gets_no_destination() {
+        assert_eq!(viewport_destination(size(px(0.), px(0.))), None);
+        assert_eq!(viewport_destination(size(px(0.), px(300.))), None);
+        assert_eq!(viewport_destination(size(px(300.), px(0.))), None);
+    }
+
+    #[test]
+    fn a_configured_surface_keeps_its_logical_size() {
+        assert_eq!(
+            viewport_destination(size(px(1920.), px(1080.))),
+            Some((1920, 1080))
+        );
+    }
+}
+
 #[cfg(test)]
 mod presentation_state_tests {
     use super::PresentationState;
@@ -1540,11 +1570,8 @@ impl WaylandWindowStatePtr {
             // it until the compositor assigns a real size; the configure that
             // follows calls back in here with it. Upstream:
             // https://github.com/zed-industries/zed/pull/61368
-            let width = f32::from(size.width) as i32;
-            let height = f32::from(size.height) as i32;
             if let Some(viewport) = &state.viewport
-                && width > 0
-                && height > 0
+                && let Some((width, height)) = viewport_destination(size)
             {
                 viewport.set_destination(width, height);
             }
