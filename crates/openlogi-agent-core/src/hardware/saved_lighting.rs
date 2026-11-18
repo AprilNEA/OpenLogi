@@ -18,11 +18,20 @@ use super::DeviceOp;
 pub struct SavedLightingTarget {
     stable: DeviceStableId,
     identity: Option<DeviceIdentity>,
+    unit: [u8; 4],
 }
 
 impl SavedLightingTarget {
-    pub(crate) fn new(stable: DeviceStableId, identity: Option<DeviceIdentity>) -> Self {
-        Self { stable, identity }
+    pub(crate) fn new(
+        stable: DeviceStableId,
+        identity: Option<DeviceIdentity>,
+        unit: [u8; 4],
+    ) -> Self {
+        Self {
+            stable,
+            identity,
+            unit,
+        }
     }
 
     fn authorizes(&self, config: &Config, lighting: &Lighting) -> bool {
@@ -52,6 +61,7 @@ impl SavedLightingWrites {
         lighting: &Lighting,
     ) -> Result<(), WriteError> {
         let route = device.route.clone();
+        let device = device.confirming_saved_lighting(target.unit)?;
         self.apply_with(path, revision, &route, target, lighting, || async move {
             device.lighting(lighting)?.finish().await
         })
@@ -97,6 +107,132 @@ mod tests {
     use super::*;
     use openlogi_core::config::{ConfigEdit, Lighting, LinkConfig, LinkOverrides};
 
+    fn rgb_responder(request: &[u8]) -> Option<Vec<u8>> {
+        let mut response = vec![0; 20];
+        response[..4].copy_from_slice(request.get(..4)?);
+        response[0] = 0x11;
+        match (request[2], request[3] >> 4) {
+            (0, 1) => response[4] = 4,
+            (0, 0) => response[4] = u8::from(request[4..6] == [0x80, 0x70]) * 4,
+            (4, 0) => response[4] = 1,
+            (4, 1) => {
+                response[4] = request[4];
+                response[6] = 1;
+                response[7] = 1;
+            }
+            (4, 2) => {
+                response[4] = request[4];
+                response[5] = request[5];
+                response[7] = 1;
+            }
+            (4, 3) => {}
+            _ => return None,
+        }
+        Some(response)
+    }
+
+    #[tokio::test]
+    async fn saved_lighting_refuses_replaced_receiver_device() {
+        use crate::hardware::{DeviceAccess, TransportTurns};
+        use crate::receiver_access::{ExclusiveAccessReason, ReceiverAccess};
+        use crate::test_support::{UNIT, reporting_unit};
+        let route = DeviceRoute::Bolt {
+            receiver_uid: "saved-rgb".into(),
+            slot: 1,
+        };
+        let unit = Arc::new(Mutex::new(UNIT));
+        let registry = openlogi_hid::ChannelRegistry::default();
+        let (_, reports) = openlogi_device::test_support::publish_scripted_channel(
+            &registry,
+            "saved-rgb",
+            route.clone(),
+            reporting_unit(unit.clone(), rgb_responder),
+        )
+        .await;
+        let access = ReceiverAccess::default();
+        let device = DeviceAccess {
+            channel: Arc::new(std::sync::RwLock::new(None)),
+            registry,
+            receiver_access: access.clone(),
+            device_io: openlogi_hid::device_io_channel().1,
+            transport_turns: TransportTurns::default(),
+        };
+        let target = SavedLightingTarget::new(
+            DeviceStableId::Bolt {
+                receiver_uid: "saved-rgb".into(),
+                slot: 1,
+            },
+            Some(DeviceIdentity::Serial("saved-rgb".into())),
+            UNIT,
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(openlogi_core::paths::CONFIG_FILE);
+        let revision = ConfigEdit::load(&path).unwrap().commit().unwrap();
+        let writes = SavedLightingWrites::default();
+        let lighting = Lighting::default();
+        for replaced in [true, false] {
+            let held = access
+                .acquire_exclusive(ExclusiveAccessReason::Pairing)
+                .await;
+            let mut pending = std::pin::pin!(writes.apply(
+                &path,
+                revision,
+                device.op(&route),
+                &target,
+                &lighting
+            ));
+            tokio::select! { biased; result = &mut pending => panic!("write bypassed pairing: {result:?}"), () = std::future::ready(()) => {} }
+            *unit.lock().unwrap() = if replaced {
+                [0x87, 0x65, 0x43, 0x21]
+            } else {
+                UNIT
+            };
+            drop(held);
+            let result = tokio::time::timeout(std::time::Duration::from_secs(10), pending)
+                .await
+                .unwrap();
+            assert!(reports.written_reports().iter().any(|r| r[2] == 0x0e));
+            if replaced {
+                assert!(
+                    matches!(result, Err(WriteError::DeviceNotFound)),
+                    "{result:?}"
+                );
+                assert!(
+                    !reports
+                        .written_reports()
+                        .iter()
+                        .any(|r| r[2] == 4 && r[3] >> 4 == 3)
+                );
+            } else {
+                result.unwrap();
+                assert_eq!(
+                    reports
+                        .written_reports()
+                        .iter()
+                        .filter(|r| r[2] == 4 && r[3] >> 4 == 3)
+                        .count(),
+                    1
+                );
+            }
+        }
+        let unknown = SavedLightingTarget::new(
+            DeviceStableId::Bolt {
+                receiver_uid: "saved-rgb".into(),
+                slot: 1,
+            },
+            None,
+            [0; 4],
+        );
+        let before = reports.written_reports().len();
+        assert!(matches!(
+            writes
+                .apply(&path, revision, device.op(&route), &unknown, &lighting)
+                .await,
+            Err(WriteError::DeviceNotFound)
+        ));
+        assert_eq!(reports.written_reports().len(), before);
+    }
+
     fn route() -> DeviceRoute {
         DeviceRoute::Direct {
             vendor_id: 0x046d,
@@ -113,6 +249,7 @@ mod tests {
                 [0x12, 0x34, 0x56, 0x78],
             ),
             Some(DeviceIdentity::Unit([0x12, 0x34, 0x56, 0x78])),
+            [0x12, 0x34, 0x56, 0x78],
         )
     }
 
@@ -304,7 +441,8 @@ mod tests {
             slot: 1,
         };
         let identity = DeviceIdentity::Unit([0x12, 0x34, 0x56, 0x78]);
-        let target = SavedLightingTarget::new(stable.clone(), Some(identity));
+        let target =
+            SavedLightingTarget::new(stable.clone(), Some(identity), [0x12, 0x34, 0x56, 0x78]);
         let legacy = stable.physical_key().unwrap();
         let lighting = Lighting::default();
         let mut edit = ConfigEdit::load(&path).unwrap();

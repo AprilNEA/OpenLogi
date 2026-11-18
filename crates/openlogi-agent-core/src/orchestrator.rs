@@ -1969,8 +1969,13 @@ impl Orchestrator {
         // A disabled entry is re-applied too: it writes black, and a device
         // whose firmware powers its lighting back on would otherwise ignore the
         // user's "off" after every reconnect.
-        if let Some(lighting) = device.and_then(|d| d.effective_lighting(&route_key)) {
-            crate::hardware::set_lighting_in_background(self.shared.device(&route), lighting);
+        if let Some(lighting) = device.and_then(|d| d.effective_lighting(&route_key))
+            && let Ok(device) = self
+                .shared
+                .device(&route)
+                .confirming_saved_lighting(dev.unit_id)
+        {
+            crate::hardware::set_lighting_in_background(device, lighting);
         }
         if let Some(fn_lock) = self.config.fn_lock(key) {
             self.shared.write_fn_lock_in_background(&route, fn_lock);
@@ -2343,6 +2348,7 @@ impl Orchestrator {
             device
                 .online
                 .then(|| DeviceIdentity::from_parts(device.serial.as_deref(), device.unit_id)),
+            device.unit_id,
         ))
     }
 

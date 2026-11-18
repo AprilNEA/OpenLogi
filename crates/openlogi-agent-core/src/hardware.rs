@@ -329,6 +329,20 @@ impl DeviceOp {
         Self { unit, ..self }
     }
 
+    /// Saved RGB must never address an unidentified device in a reusable receiver slot.
+    pub(crate) fn confirming_saved_lighting(self, unit: [u8; 4]) -> Result<Self, WriteError> {
+        let unit = known_unit(unit);
+        if unit.is_none()
+            && matches!(
+                self.route,
+                DeviceRoute::Bolt { .. } | DeviceRoute::Unifying { .. }
+            )
+        {
+            return Err(WriteError::DeviceNotFound);
+        }
+        Ok(self.confirming(unit))
+    }
+
     /// Resolve the authoritative channel without acquiring the receiver
     /// lease. Callers that manage their own lease/thread lifecycle across
     /// more than one write (the volatile-settings reapply sequence) resolve
@@ -489,19 +503,18 @@ impl DeviceOp {
             .admit()
             .ok_or(WriteError::DeviceNotFound)?;
         let DeviceAccess {
-            channel: capture,
             registry,
             receiver_access,
             device_io,
             ..
-        } = self.access;
+        } = self.access.clone();
         let route = self.route.clone();
         let (r, g, b) = lighting_rgb(lighting);
         let write = openlogi_hid::write::LightingWrite {
             method: openlogi_hid::LightingMethod::Auto,
             color: openlogi_core::color::Rgb::new(r, g, b),
         };
-        openlogi_hid::lighting::LightingJob::spawn(&self.route, move |cancel| async move {
+        openlogi_hid::lighting::LightingJob::spawn(&self.route.clone(), move |cancel| async move {
             let _lease = tokio::time::timeout(WRITE_TIMEOUT, receiver_access.acquire_for_io())
                 .await
                 .map_err(|_| WriteError::RequestTimedOut {
@@ -510,7 +523,11 @@ impl DeviceOp {
             if !device_io.allows_io() {
                 return Err(WriteError::DeviceNotFound);
             }
-            let channel = authoritative_channel(Some(&capture), &registry, &route)?;
+            let channel = tokio::time::timeout(WRITE_TIMEOUT, self.reach(HidppOperation::Lighting))
+                .await
+                .map_err(|_| WriteError::RequestTimedOut {
+                    operation: HidppOperation::Lighting,
+                })??;
             let lease = write
                 .apply_on(
                     &channel,
