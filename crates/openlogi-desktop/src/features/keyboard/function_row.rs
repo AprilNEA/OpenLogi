@@ -800,7 +800,7 @@ fn key_slots_from_layouts(
     state: Option<&AppState>,
     scope: KeyEditScope,
 ) -> Vec<KeySlot> {
-    let key_actions = state.map(AppState::keypad_key_actions).unwrap_or_default();
+    let key_actions = state.map_or_else(Default::default, AppState::keypad_key_actions);
     // Nine-button presses run the M1 slots whatever profile was last edited.
     let g_profile = match scope.gaming_mode {
         GamingKeyMode::Profiles => scope.g_profile,
