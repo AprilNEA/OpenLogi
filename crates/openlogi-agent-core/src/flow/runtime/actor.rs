@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use openlogi_core::config::{FlowConfig, FlowEdge, FlowPeer, FlowPeerName, FlowPublicKey};
+use openlogi_core::device_order::PhysicalDeviceKey;
 use openlogi_flow::frame::{Envelope, FrameKind, InboundRole};
 use openlogi_flow::generated as proto;
 use openlogi_flow::sas::PublicKey;
@@ -11,7 +12,7 @@ use openlogi_flow::session::{LinkState, PeerSessionHandle, SessionManager, Trust
 use openlogi_flow::transport::{IncomingRpc, TransportError, error_envelope, message_envelope};
 use openlogi_ipc::{FlowLinkState, FlowPeerStatus};
 use tokio::sync::{mpsc, oneshot, watch};
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
@@ -68,6 +69,7 @@ struct Outgoing {
     /// Taken when the peer's result arrives.
     result: Option<oneshot::Sender<proto::HandoffResult>>,
     task: JoinHandle<()>,
+    _departures: JoinSet<bool>,
 }
 
 pub(super) struct Actor {
@@ -76,6 +78,7 @@ pub(super) struct Actor {
     inventory: watch::Receiver<Arc<[InventoryDevice]>>,
     devices: LocalDevices,
     ledger: IncomingLedger,
+    arrivals: JoinSet<Option<(PhysicalDeviceKey, bool)>>,
     state: watch::Sender<TrustedInitialState>,
     revision: u64,
     pointer: PointerThread,
@@ -120,6 +123,7 @@ impl Actor {
             inventory,
             devices,
             ledger: IncomingLedger::default(),
+            arrivals: JoinSet::new(),
             state,
             revision: initial_revision(),
             pointer,
@@ -163,6 +167,15 @@ impl Actor {
                     self.inventory_changed();
                 }
                 () = sleep_until(deadline) => self.expire(),
+                proof = self.arrivals.join_next(), if !self.arrivals.is_empty() => {
+                    if let Some(Ok(Some((device, pointing)))) = proof {
+                        let now = Instant::now();
+                        if self.ledger.deadline().is_some_and(|end| now < end) {
+                            let observation = self.ledger.observe_presence(now, |key| (key == &device).then_some(pointing));
+                            self.apply_observation(observation);
+                        }
+                    }
+                }
                 crossing = self.crossings.recv(), if self.crossings_open => {
                     if let Some(crossing) = crossing {
                         self.crossed(&crossing);
@@ -261,6 +274,22 @@ impl Actor {
             debug!(peer = %peer.name, "no device to hand to the Flow peer");
             return;
         }
+        let mut departures = JoinSet::new();
+        for outgoing in &devices {
+            if let Some((route, unit)) = self
+                .devices
+                .find(&outgoing.identity)
+                .and_then(super::super::devices::LocalDevice::arrival_target)
+                && let Some(watch) = self.hardware.registry.watch_bolt_link(
+                    route,
+                    unit,
+                    false,
+                    self.hardware.device_io.clone(),
+                )
+            {
+                departures.spawn(watch);
+            }
+        }
         let transfer_id = sender::new_transfer_id();
         info!(
             peer = %peer.name,
@@ -301,6 +330,7 @@ impl Actor {
             peer: peer.key,
             transfer_id,
             result: Some(result_tx),
+            _departures: departures,
             task,
         });
     }
@@ -361,6 +391,26 @@ impl Actor {
         );
         match &decision {
             ArmDecision::Armed(accept) => {
+                self.arrivals = JoinSet::new();
+                for requested in &request.devices {
+                    let Some(device) = self.devices.find(requested) else {
+                        continue;
+                    };
+                    let Some((route, expected)) = device.arrival_target() else {
+                        continue;
+                    };
+                    if let Some(watch) = self.hardware.registry.watch_bolt_link(
+                        route,
+                        expected,
+                        true,
+                        self.hardware.device_io.clone(),
+                    ) {
+                        let key = device.key().clone();
+                        let pointing = device.is_pointing();
+                        self.arrivals
+                            .spawn(async move { watch.await.then_some((key, pointing)) });
+                    }
+                }
                 info!(transfer = accept.transfer_id, "Flow handoff armed");
                 message_envelope(FrameKind::HandoffAccept, accept)
             }
@@ -386,6 +436,7 @@ impl Actor {
                 };
                 match self.ledger.cancel(peer, cancel.transfer_id) {
                     CancelOutcome::Disarmed => {
+                        self.arrivals = JoinSet::new();
                         info!(transfer = cancel.transfer_id, "Flow handoff cancelled");
                     }
                     CancelOutcome::Ignored => {
@@ -423,13 +474,17 @@ impl Actor {
         let inventory = Arc::clone(&self.inventory.borrow_and_update());
         self.devices = LocalDevices::join(&self.config, &inventory);
         let observation = self.ledger.observe(&self.devices, Instant::now());
+        self.apply_observation(observation);
+        self.publish_state();
+    }
+
+    fn apply_observation(&mut self, observation: crate::flow::handoff::Observation) {
         if let Some(entry) = observation.entry {
             self.pointer.place(entry);
         }
         if let Some(done) = observation.completed {
             self.finish(&done);
         }
-        self.publish_state();
     }
 
     fn expire(&mut self) {
@@ -438,7 +493,8 @@ impl Actor {
         }
     }
 
-    fn finish(&self, done: &CompletedTransfer) {
+    fn finish(&mut self, done: &CompletedTransfer) {
+        self.arrivals = JoinSet::new();
         info!(
             transfer = done.result.transfer_id,
             outcome = ?done.result.outcome,

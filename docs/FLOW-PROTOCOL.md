@@ -205,7 +205,7 @@ are presentation/diagnostics and never correlate.
 State machine, sender view (receiver mirrors it):
 
 ```
-IDLE ──edge trigger──► REQUESTED ──Accept──► SWITCHING ──0x41 at receiver──► DONE
+IDLE ──edge trigger──► REQUESTED ──Accept──► SWITCHING ──arrival confirmed──► DONE
                           │                     │    ▲
                           │ Reject/timeout      │    │ HandoffResult
                           ▼                     │    │ (uni, by transfer_id)
@@ -216,10 +216,14 @@ IDLE ──edge trigger──► REQUESTED ──Accept──► SWITCHING ─�
 - The sender **never** issues `set_current_host` before `HandoffAccept`.
   After issuing it the sender is blind to the device (the radio has left);
   everything after that point is the receiver's to report.
-- The receiver arms an arrival watch on `Accept` (HID++ 1.0 connection
-  notification sub-ID 0x41, or the equivalent arrival evidence for
-  Bluetooth-direct — open question in the design doc) and reports
-  `HandoffResult` per device: `ARRIVED`, `PARTIAL`, `TIMEOUT`.
+- Before accepting, a receiver with a known Bolt slot subscribes to link
+  changes for the requested physical unit. A matching link-up and fresh
+  pairing record can confirm arrival. A read of the slot's unit ID can
+  also confirm it if the notification is missed or the radio wakes late.
+  Full inventory updates still confirm arrivals on every transport.
+- The first confirmed pointing device places the cursor at the entry edge.
+  Each device counts once toward the transfer result. A confirmed Bolt
+  return also starts the normal reconnect settings replay.
 - `transfer_id` is random per attempt and is the idempotency key: a
   duplicate `HandoffRequest` (sender retry after a lost response) is
   answered from the existing transfer's state, never double-armed.

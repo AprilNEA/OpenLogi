@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::Duration;
 
 use openlogi_core::config::FlowConfig;
-use openlogi_hid::{ChannelPool, DeviceIoGate};
+use openlogi_hid::{ChannelPool, ChannelRegistry, DeviceIoGate};
 use openlogi_ipc::{FlowLinkState, FlowPeerStatus};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -80,6 +80,7 @@ impl FlowController {
     pub(crate) fn new(
         config: &FlowConfig,
         observable: Arc<ObservableState>,
+        registry: ChannelRegistry,
         channel_pool: ChannelPool,
         receiver_access: ReceiverAccess,
         device_io: DeviceIoGate,
@@ -96,6 +97,7 @@ impl FlowController {
                 pairing: FlowPairing::new(Arc::clone(&observable)),
                 observable,
                 hardware: FlowHardware {
+                    registry,
                     channel_pool,
                     receiver_access,
                     device_io,

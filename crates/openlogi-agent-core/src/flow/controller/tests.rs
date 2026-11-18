@@ -24,6 +24,7 @@ fn controller(config: &FlowConfig) -> (FlowController, Arc<ObservableState>) {
     let controller = FlowController::new(
         config,
         Arc::clone(&observable),
+        hardware.registry,
         hardware.channel_pool,
         hardware.receiver_access,
         hardware.device_io,

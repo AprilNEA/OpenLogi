@@ -116,16 +116,22 @@ pub const RECEIVER_REGISTER_TIMEOUT: Duration = Duration::from_secs(10);
 /// host cannot arbitrate the phase at all. Dropping it releases the phase.
 #[derive(Debug)]
 pub struct ReceiverRegisterPhase {
-    _lock: Option<HostLock>,
+    lock: Option<HostLock>,
 }
 
 impl ReceiverRegisterPhase {
+    /// An optional fast read can use device-addressed I/O instead when the
+    /// lock directory was unavailable and the phase is only best-effort.
+    pub(crate) const fn coordinated(&self) -> bool {
+        self.lock.is_some()
+    }
+
     /// A phase for a test that drives a scripted receiver: no other process
     /// talks to it, so there is nothing to arbitrate.
     #[cfg(test)]
     #[must_use]
     pub(crate) fn uncontended() -> Self {
-        Self { _lock: None }
+        Self { lock: None }
     }
 }
 
@@ -153,7 +159,7 @@ pub async fn lock_receiver_registers(
     timeout: Duration,
 ) -> Option<ReceiverRegisterPhase> {
     match lock_within(&node_lock_name(node), timeout).await {
-        Ok(Some(lock)) => Some(ReceiverRegisterPhase { _lock: Some(lock) }),
+        Ok(Some(lock)) => Some(ReceiverRegisterPhase { lock: Some(lock) }),
         Ok(None) => {
             debug!(
                 node = %node,
@@ -161,7 +167,7 @@ pub async fn lock_receiver_registers(
             );
             None
         }
-        Err(_) => Some(ReceiverRegisterPhase { _lock: None }),
+        Err(_) => Some(ReceiverRegisterPhase { lock: None }),
     }
 }
 

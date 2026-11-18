@@ -328,6 +328,7 @@ impl Armed {
         running.shared.flow.arm();
         let (mut watchers, inventory_refresh) = startup::spawn_state_watchers(&running.shared);
         let mut ring = running.inputs.ring.subscribe();
+        let mut links = running.shared.channel_registry.subscribe_links();
 
         info!("openlogi-agent started");
         loop {
@@ -377,6 +378,13 @@ impl Armed {
                             .announce_settings_changed(&route);
                     }
                 },
+                Ok(()) = links.changed() => {
+                    let mut orchestrator = running.orchestrator.lock().await;
+                    orchestrator.apply_confirmed_links();
+                    if orchestrator.needs_reapply_confirmation() {
+                        inventory_refresh.request_settings_confirmation();
+                    }
+                }
                 Ok(()) = ring.changed() => {
                     running.apply_held_pointer().await;
                 }
