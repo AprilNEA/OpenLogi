@@ -379,6 +379,19 @@ async fn one_device_that_cannot_switch_keeps_every_device_here() {
         delay: Duration::ZERO,
     };
 
+    // Both read-only preparations must be in flight before either returns.
+    // The resulting writes are still ordered mouse first, then keyboard.
+    let barrier = tokio::sync::Barrier::new(2);
+    let parallel = prepare_all(&devices, |_| async {
+        barrier.wait().await;
+        Ok(Some(switch()))
+    })
+    .await
+    .expect("independent devices prepare concurrently");
+    assert_eq!(parallel[0].0, devices[0].identity);
+    assert_eq!(parallel[1].0, devices[1].identity);
+    assert_eq!(started.load(Ordering::SeqCst), 0);
+
     // The mouse prepares; the keyboard's slot for the peer is empty.
     let split = prepare_all(&devices, |device| {
         let prepared = if device.identity == devices[0].identity {

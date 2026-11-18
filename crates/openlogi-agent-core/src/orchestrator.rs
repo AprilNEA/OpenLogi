@@ -886,9 +886,11 @@ impl Orchestrator {
         let (watched_lights_tx, watched_lights) = watch::channel(Arc::new(Vec::new()));
         openlogi_inject::set_desktop_switch(desktop_switch(&config.app_settings));
         let receiver_access = ReceiverAccess::default();
+        let channel_registry = ChannelRegistry::default();
         let flow = FlowController::new(
             &config.flow,
             Arc::clone(&observable),
+            channel_registry.clone(),
             hardware.channel_pool(),
             receiver_access.clone(),
             hardware.device_io(),
@@ -906,7 +908,7 @@ impl Orchestrator {
             dpi_cycle: Arc::new(RwLock::new(DpiCycles::default())),
             capture_plans,
             capture_channel: Arc::new(RwLock::new(None)),
-            channel_registry: ChannelRegistry::default(),
+            channel_registry,
             keyboard_specs,
             keyboard_channel: Arc::new(RwLock::new(None)),
             key_display_specs,

@@ -5994,6 +5994,7 @@ version = "0.9.0"
 dependencies = [
  "axwatch",
  "backon",
+ "futures-concurrency",
  "futures-lite",
  "gethostname",
  "image",
