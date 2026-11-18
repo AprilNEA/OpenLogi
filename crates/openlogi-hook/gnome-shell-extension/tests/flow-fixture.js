@@ -4,6 +4,8 @@ import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import {FlowPointer} from '../openlogi-frontmost@openlogi.dev/flowPointer.js';
 
+const wallNow = Date.now;
+const monotonicNow = GLib.get_monotonic_time;
 let position = [0, 0, false];
 const WarpMode = Object.freeze({Delayed: 'delayed', Confined: 'confined', Interrupt: 'interrupt'});
 let mode = WarpMode.Delayed;
@@ -46,6 +48,7 @@ const desktop = {
 const panel = Gio.DBusExportedObject.wrapJSObject(`<node><interface name="org.openlogi.Test">
     <method name="Move"><arg type="i" direction="in"/><arg type="i" direction="in"/><arg type="b" direction="in"/></method>
     <method name="Mode"><arg type="s" direction="in"/></method>
+    <method name="SimulateLateDelivery"><arg type="b" direction="in"/></method>
     <method name="Stats"><arg type="u" direction="out"/><arg type="u" direction="out"/><arg type="i" direction="out"/><arg type="b" direction="out"/></method>
 </interface></node>`, {
     Move(x, y, ctrl) { position = [x, y, ctrl]; },
@@ -62,6 +65,12 @@ const panel = Gio.DBusExportedObject.wrapJSObject(`<node><interface name="org.op
             return;
         }
         call.return_value(null);
+    },
+    SimulateLateDelivery(enabled) {
+        // Only the simulated Shell process sees the time at dispatch. Two seconds
+        // passed in the queue and the wall clock stepped back by one minute.
+        GLib.get_monotonic_time = enabled ? () => monotonicNow() + 2_000_000 : monotonicNow;
+        Date.now = enabled ? () => wallNow() - 60_000 : wallNow;
     },
     Stats() { return [reads, warps, tracking, callback !== null]; },
 });

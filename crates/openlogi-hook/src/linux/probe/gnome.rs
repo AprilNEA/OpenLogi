@@ -2,10 +2,9 @@
 //! a token the extension invalidates on lock, monitor or controller changes.
 //! An old layout can never move the cursor or produce a new pointer sample.
 
-use std::{
-    io,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use std::{io, time::Duration};
+
+use rustix::time::{ClockId, clock_gettime};
 
 use tracing::debug;
 use zbus::blocking::{Connection, connection::Builder};
@@ -24,12 +23,12 @@ type Rect = (i32, i32, i32, i32);
 trait FlowPointer {
     fn get_layout(&self) -> zbus::Result<(String, Vec<Rect>)>;
     fn read_pointer(&self, generation: &str) -> zbus::Result<(i32, i32, bool)>;
-    fn place_pointer(
+    fn place_pointer_monotonic(
         &self,
         generation: &str,
         x: f64,
         y: f64,
-        expires_ms: u64,
+        deadline_us: u64,
     ) -> zbus::Result<bool>;
 }
 
@@ -107,15 +106,14 @@ impl Probe {
 
     pub(super) fn warp(&self, to: DesktopPoint) -> Result<(), WarpError> {
         let proxy = self.proxy.as_ref().ok_or(WarpError::OutsideDisplays)?;
-        // Shell may process a queued call after this worker has timed out.
-        let expires = SystemTime::now() + Duration::from_millis(500);
-        let expires_ms = expires
-            .duration_since(UNIX_EPOCH)
-            .ok()
-            .and_then(|d| u64::try_from(d.as_millis()).ok())
-            .ok_or_else(|| WarpError::Rejected(io::Error::other("invalid placement deadline")))?;
+        // GLib.get_monotonic_time() in Linux Shell uses CLOCK_MONOTONIC.
+        // The absolute deadline includes time queued on the session bus.
+        let now = Duration::try_from(clock_gettime(ClockId::Monotonic))
+            .map_err(|error| WarpError::Rejected(io::Error::other(error)))?;
+        let deadline_us = u64::try_from((now + Duration::from_millis(500)).as_micros())
+            .map_err(|error| WarpError::Rejected(io::Error::other(error)))?;
         if proxy
-            .place_pointer(&self.generation, to.x, to.y, expires_ms)
+            .place_pointer_monotonic(&self.generation, to.x, to.y, deadline_us)
             .map_err(|e| WarpError::Rejected(io::Error::other(e)))?
         {
             Ok(())

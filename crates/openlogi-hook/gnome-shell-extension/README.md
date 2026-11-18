@@ -30,7 +30,10 @@ edge when the first pointing device arrives.
 Flow uses a separate object at `/org/openlogi/FlowPointer` on the same bus
 name. Its methods accept the session-bus owner of `org.openlogi.OpenLogi.Flow`.
 `GetLayout` supplies a generation and logical rectangles. `ReadPointer` and
-`PlacePointer` require that generation. Lock, monitor changes, controller
+`PlacePointerMonotonic` require that generation. Placement carries an absolute
+Linux monotonic deadline in microseconds, including time spent waiting on the
+bus. Use the agent and companion from the same build for cursor placement.
+Lock, monitor changes, controller
 replacement, and extension disable invalidate it.
 
 ## Install

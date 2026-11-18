@@ -154,6 +154,7 @@ fn check_private_bus() {
             y: 360.0
         }
     );
+    assert_queued_placement_expires(&mut state.pointer);
     // Arrival motion and a later dwell sample cannot send the mouse back.
     state.configure(super::PointerSettings {
         sides: super::ArmedSides::from_sides([super::EdgeSide::Left]),
@@ -183,6 +184,17 @@ fn check_private_bus() {
     drop(state);
 
     measure_motion();
+}
+
+fn assert_queued_placement_expires(pointer: &mut PointerProbe) {
+    call("SimulateLateDelivery", &["true"]);
+    let before = call("Stats", &[]);
+    assert!(
+        pointer.warp(DesktopPoint { x: 80.0, y: 90.0 }).is_err(),
+        "a queued placement must expire even if the wall clock moves backwards"
+    );
+    assert_eq!(call("Stats", &[]), before, "expired call reached the seat");
+    call("SimulateLateDelivery", &["false"]);
 }
 
 fn assert_other_caller_denied() {

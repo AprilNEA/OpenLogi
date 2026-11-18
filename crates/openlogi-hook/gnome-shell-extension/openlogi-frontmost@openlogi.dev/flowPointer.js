@@ -9,7 +9,7 @@ const INTERFACE = `<node><interface name="org.openlogi.FlowPointer">
         <arg type="s" direction="in"/>
         <arg type="i" direction="out"/><arg type="i" direction="out"/><arg type="b" direction="out"/>
     </method>
-    <method name="PlacePointer">
+    <method name="PlacePointerMonotonic">
         <arg type="s" direction="in"/><arg type="d" direction="in"/><arg type="d" direction="in"/>
         <arg type="t" direction="in"/><arg type="b" direction="out"/>
     </method>
@@ -69,23 +69,22 @@ export class FlowPointer {
             call.return_value(new GLib.Variant('(iib)', this._desktop.pointer()));
     }
 
-    PlacePointerAsync([generation, targetX, targetY, expiresMs], call) {
+    PlacePointerMonotonicAsync([generation, targetX, targetY, expiresUs], call) {
         if (!this._allowed(call, generation))
             return;
         const x = Math.round(targetX);
         const y = Math.round(targetY);
-        const remaining = expiresMs - Date.now();
+        const now = GLib.get_monotonic_time();
+        // Limit Shell work even when a caller supplies a distant deadline.
+        const deadline = Math.min(expiresUs, now + 500_000);
         const reply = ok => call.return_value(new GLib.Variant('(b)', [ok]));
-        if (remaining <= 0 || !this._desktop.monitors().some(m =>
+        if (deadline <= now || !this._desktop.monitors().some(m =>
             x >= m.x && x < m.x + m.width && y >= m.y && y < m.y + m.height)) {
             reply(false);
             return;
         }
 
         this._finish?.(false);
-        // Bound Shell work even if a caller supplies a distant deadline.
-        const timeout = Math.min(remaining, 500);
-        const deadline = GLib.get_monotonic_time() + timeout * 1000;
         let signal = 0;
         let timer = 0;
         let tracking = false;
@@ -122,11 +121,16 @@ export class FlowPointer {
                 tracker.track_position();
                 tracking = true;
             }
-            timer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, timeout, () => {
+            const timeoutMs = Math.max(1, Math.ceil((deadline - GLib.get_monotonic_time()) / 1000));
+            timer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, timeoutMs, () => {
                 timer = 0;
                 finish(false);
                 return GLib.SOURCE_REMOVE;
             });
+            if (GLib.get_monotonic_time() >= deadline) {
+                finish(false);
+                return;
+            }
             issued = true;
             this._desktop.warp(x, y);
             check();
