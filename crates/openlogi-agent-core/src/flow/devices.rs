@@ -51,6 +51,18 @@ impl LocalDevice {
         &self.identity
     }
 
+    /// The local receiver slot and physical unit ID to verify on arrival.
+    pub(crate) fn arrival_target(&self) -> Option<(&DeviceRoute, [u8; 4])> {
+        let route = self.route.as_ref()?;
+        let unit = self.identity.ids.iter().find_map(|id| {
+            match CanonicalDeviceIdentifier::try_from(id).ok()? {
+                CanonicalDeviceIdentifier::UnitId(unit) => Some(unit.to_be_bytes()),
+                _ => None,
+            }
+        })?;
+        Some((route, unit))
+    }
+
     /// Whether the device is present and awake on this host.
     pub(crate) const fn is_online(&self) -> bool {
         self.online
