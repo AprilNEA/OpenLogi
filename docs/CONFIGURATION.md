@@ -498,6 +498,10 @@ layout entries use the same edge, a layout entry or `peer_channels` names a
 peer that `[[flow.peers]]` does not define, two device entries share a key, a
 device has no `self` slot, or two machines share one slot.
 
+After a Flow handoff to Windows, the first wheel notch can scroll in the opposite
+direction if you scroll before the mouse accepts its saved scroll direction.
+See [Windows wheel direction after handoff](FLOW-PROTOCOL.md#windows-wheel-direction-after-handoff).
+
 ## Actions
 
 Action names are the serialized Rust variant names, including `Copy`,

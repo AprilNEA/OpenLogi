@@ -1338,9 +1338,8 @@ pub(crate) fn reapply_mouse_volatile_in_background(
             };
             let turn = op.access.transport_turns.turn_for(&op.route);
             if let Some(change) = wheel {
-                let (plans, route) = (&capture_plans, &op.route);
-                let result = timed_on_current_channel(&op, &turn, |shared| async move {
-                    write_native_wheel_mode(change, &shared, plans, route).await
+                let result = timed_on_current_channel(&op, &turn, |shared| {
+                    reapply_native_wheel(change, shared, &capture_plans, &op.access)
                 })
                 .await;
                 log_wheel_result(index, change, result);
@@ -1627,6 +1626,43 @@ pub(crate) enum NativeWheelWrite {
     Written,
     /// A capture session now owns the wheel, so nothing was written.
     StoodDown,
+}
+
+/// A mouse can accept ordinary wheel input while its first HID++ transaction
+/// is still unanswered. Recover within the original transport turn and its
+/// five-second budget. Each attempt reads the device mode before writing, so
+/// an applied write whose reply was lost is verified without repeating it.
+async fn reapply_native_wheel(
+    change: WheelModeChange,
+    shared: SharedChannel,
+    plans: &SharedCapturePlans,
+    access: &DeviceAccess,
+) -> Result<NativeWheelWrite, WriteError> {
+    let apply = || write_native_wheel_mode(change, &shared, plans, shared.route());
+    let result = tokio::time::timeout(Duration::from_secs(1), apply())
+        .await
+        .unwrap_or(Err(WriteError::RequestTimedOut {
+            operation: HidppOperation::WriteWheelMode,
+        }));
+    if matches!(
+        result,
+        Err(WriteError::RequestTimedOut { .. }
+            | WriteError::DeviceUnreachable { .. }
+            | WriteError::HidppFeature {
+                kind: openlogi_hid::HidppFeatureErrorKind::Busy,
+                ..
+            })
+    ) && access.device_io.allows_io()
+        && !access.receiver_access.exclusive_requested()
+        && access.registry.is_current(&shared)
+    {
+        debug!(
+            index = shared.route().device_index(),
+            "checking wheel mode again after an unanswered reconnect operation"
+        );
+        return apply().await;
+    }
+    result
 }
 
 /// Write `change` through `shared` unless the latest capture publication
@@ -2393,6 +2429,69 @@ mod tests {
                 "{path:?}: a native wheel still gets the configured mode"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn wheel_reapply_verifies_an_applied_write_whose_reply_was_lost() {
+        use std::sync::atomic::{AtomicU8, Ordering};
+
+        let registry = ChannelRegistry::default();
+        let route = DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xb035,
+        };
+        let mode = AtomicU8::new(0);
+        let (shared, handle) = openlogi_device::test_support::publish_scripted_channel(
+            &registry,
+            "wheel-ack-loss",
+            route,
+            move |r| {
+                let data = match (r[2], r[3] >> 4) {
+                    (0, 1) => [4, 0, 0],
+                    (0, 0) if r[4..6] == [0x21, 0x21] => [7, 0, 0],
+                    (7, 0) => [8, 0b1100, 24],
+                    (7, 1) => [mode.load(Ordering::SeqCst), 0, 0],
+                    (7, 2) => {
+                        mode.store(r[4], Ordering::SeqCst);
+                        return None;
+                    }
+                    _ => return None,
+                };
+                let mut reply = r[..4].to_vec();
+                reply.extend(data);
+                Some(reply)
+            },
+        )
+        .await;
+        let (_io, gate) = openlogi_hid::device_io_channel();
+        let access = DeviceAccess {
+            channel: Arc::new(RwLock::new(None)),
+            registry,
+            receiver_access: ReceiverAccess::default(),
+            device_io: gate,
+            transport_turns: TransportTurns::default(),
+        };
+        let result = tokio::time::timeout(
+            WRITE_TIMEOUT,
+            reapply_native_wheel(
+                WheelModeChange::Inversion(true),
+                shared,
+                &no_capture_plans(),
+                &access,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(result, NativeWheelWrite::Written);
+        assert_eq!(
+            handle
+                .written_reports()
+                .iter()
+                .filter(|report| report[2] == 7 && report[3] >> 4 == 2)
+                .count(),
+            1
+        );
     }
 
     struct PublishedMouse {

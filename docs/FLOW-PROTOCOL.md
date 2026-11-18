@@ -236,6 +236,22 @@ IDLE ──edge trigger──► REQUESTED ──Accept──► SWITCHING ─�
   (per-display segments, not a union bounding rect) and clamps to the
   nearest valid point.
 
+### Windows wheel direction after handoff
+
+On a mouse with native scroll inversion, Windows can deliver wheel input as
+soon as the radio reconnects. OpenLogi restores the receiving host's saved
+direction through HID++ `0x2121`. If you scroll immediately, the first
+notch can go the opposite way before the mouse accepts that setting.
+Flow keeps the setting per device and allows wheel input during this interval.
+The Windows low-level mouse hook reports a wheel delta without a source mouse
+identifier. [Windows mouse hook event fields](https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-msllhookstruct)
+
+For diagnosis, compare the receiving agent's `Flow handoff armed` timestamp
+with the wheel-mode readback. With `openlogi_device::write::hires_wheel=debug`
+enabled, `wheel mode written and verified` records the applied setting and
+`wheel mode already set` records a matching read. `HandoffResult` reports
+which devices arrived. Settings can finish applying afterward.
+
 ## Clipboard & files
 
 Lazy, pull-based: bytes move only on paste. Every target OS supports
