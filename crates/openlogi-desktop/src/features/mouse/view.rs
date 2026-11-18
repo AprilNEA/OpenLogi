@@ -6,7 +6,7 @@ use std::sync::Arc;
 use gpui::{
     AnyElement, App, AppContext as _, Context, ElementId, Entity, FocusHandle, Focusable, Hsla,
     InteractiveElement, IntoElement, ParentElement, Pixels, Render, RenderOnce, SharedString, Size,
-    StatefulInteractiveElement as _, Styled, Subscription, Window, canvas, div, hsla, img,
+    StatefulInteractiveElement as _, Styled, Subscription, Window, canvas, div, hsla,
     prelude::FluentBuilder as _, px, rgb, size,
 };
 use gpui_kit::base::{Button as BaseButton, ElementExt as _};
@@ -32,7 +32,7 @@ use crate::app::{glow_canvas, keyboard_glow};
 use crate::features::binding_editor::{Recording, RecordsShortcut, ShortcutRecorder};
 use crate::features::keyboard::editors::{PowerUserKind, text_editor_placeholder};
 use crate::features::profiles::{profile_canvas_status, profile_name};
-use crate::services::assets::{GlowGeometry, ResolvedAsset};
+use crate::services::assets::{GlowGeometry, ResolvedAsset, device_image};
 use crate::state::{AppState, BindingLayer, DeviceKey, DeviceRecord, StateEvent};
 use crate::ui::theme::{self, ACCENT_BLUE};
 
@@ -887,10 +887,14 @@ fn breathing_art(
             let side_w = side_view_width(a, mouse_h);
             h_flex()
                 .when_some(a.side_view.as_ref(), |this, side| {
-                    this.child(img(side.image_path.clone()).w(px(side_w)).h(px(mouse_h)))
+                    this.child(
+                        device_image(side.image_path.clone(), px(mouse_h))
+                            .w(px(side_w))
+                            .h(px(mouse_h)),
+                    )
                 })
                 .child(
-                    img(a.image_path.clone())
+                    device_image(a.image_path.clone(), px(mouse_h))
                         .w(px(mouse_w - side_w))
                         .h(px(mouse_h)),
                 )

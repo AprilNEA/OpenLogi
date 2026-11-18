@@ -327,6 +327,7 @@ fn device_list_row(
     view: gpui::Entity<AppView>,
     pal: Palette,
 ) -> BaseButton {
+    const PHOTO_H: f32 = 68.;
     let record = &state.devices()[idx];
     let active = idx == active_idx;
     let connectivity = Connectivity::new(record.is_online(), agent_live(state));
@@ -353,7 +354,7 @@ fn device_list_row(
             div()
                 .relative()
                 .w(px(120.))
-                .h(px(68.))
+                .h(px(PHOTO_H))
                 .flex_none()
                 .flex()
                 .items_center()
@@ -363,7 +364,13 @@ fn device_list_row(
                 .when_some(glow, |this, (geom, color)| {
                     this.child(super::glow_canvas(geom, color))
                 })
-                .child(device_image(record, light_enabled, light_settings, pal)),
+                .child(device_image(
+                    record,
+                    light_enabled,
+                    light_settings,
+                    pal,
+                    px(PHOTO_H),
+                )),
         )
         .child(
             v_flex()
