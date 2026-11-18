@@ -3,8 +3,9 @@
 //! [`PointerProbe`] reads the cursor, the held modifier keys and the display
 //! bounds, and moves the cursor. All of them share the platform's native
 //! desktop coordinate space, in which the displays tile without overlap:
-//! global display points on macOS, root-window pixels on X11, and the
-//! virtual-screen coordinates that Win32 reports to this process on Windows.
+//! global display points on macOS, logical stage coordinates on GNOME Wayland,
+//! root-window pixels on X11, and the virtual-screen coordinates that Win32
+//! reports to this process on Windows.
 //!
 //! On Windows this space differs from [`CursorPosition`](crate::CursorPosition),
 //! which divides by each monitor's DPI scale to match GPUI. Two displays with
@@ -91,9 +92,10 @@ pub struct PointerProbe {
 impl PointerProbe {
     /// Open the probe for the current desktop session.
     ///
-    /// `None` when this session cannot report or move the cursor: a native
-    /// Wayland session, an X11 session whose display is unreachable, or a
-    /// platform without a backend.
+    /// `None` when this session cannot report or move the cursor: an unsupported
+    /// Wayland desktop, an X11 session whose display is unreachable, or a
+    /// platform without a backend. A GNOME probe can connect before the
+    /// Shell extension starts. Its layout stays empty until Shell answers.
     #[must_use]
     pub fn connect() -> Option<Self> {
         #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
@@ -132,6 +134,17 @@ impl PointerProbe {
         }
     }
 
+    /// Identity of the compositor layout last read by this probe. GNOME
+    /// changes it across lock, restart and topology changes, even when the
+    /// rectangles match. Other backends identify layouts by bounds alone.
+    #[must_use]
+    pub fn layout_generation(&self) -> Option<&str> {
+        #[cfg(target_os = "linux")]
+        return self.inner.generation();
+        #[cfg(not(target_os = "linux"))]
+        None
+    }
+
     /// Move the cursor to `to`, which must lie on an active display.
     ///
     /// # Errors
@@ -139,8 +152,17 @@ impl PointerProbe {
     /// [`WarpError::OutsideDisplays`] when no active display contains `to`, and
     /// [`WarpError::Rejected`] when the window system refuses the move.
     pub fn warp(&mut self, to: DesktopPoint) -> Result<(), WarpError> {
+        let previous = self.layout_generation().map(str::to_owned);
         if !self.displays().iter().any(|display| display.contains(to)) {
             return Err(WarpError::OutsideDisplays);
+        }
+        if previous
+            .as_deref()
+            .is_some_and(|token| !token.is_empty() && Some(token) != self.layout_generation())
+        {
+            return Err(WarpError::Rejected(std::io::Error::other(
+                "display layout changed",
+            )));
         }
         #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
         {
