@@ -6291,6 +6291,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "openlogi-core",
  "openlogi-inject",
+ "rustix 1.1.4",
  "thiserror 2.0.18",
  "tracing",
  "wayland-client",

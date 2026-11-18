@@ -58,6 +58,8 @@ finish-args:
   # ── D-Bus ──────────────────────────────────────────────────────────────────
   # Media-key actions drive whatever player is on the bus, over MPRIS.
   - --talk-name=org.mpris.MediaPlayer2.*
+  # Flow uses the companion on the user session bus.
+  - --talk-name=org.openlogi.Frontmost
 
 modules:
   - name: openlogi

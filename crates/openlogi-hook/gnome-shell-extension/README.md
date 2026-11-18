@@ -15,7 +15,10 @@ animation ends, especially near screen edges ([#1210](https://github.com/AprilNE
 Other windows retain their normal animation policy; disabling the extension
 restores GNOME's original policy. The global animation setting is never changed.
 
-No titles, window contents, or input are read, and the extension adds no UI.
+On an unlocked GNOME Wayland desktop the extension also supplies Flow with the
+logical monitor rectangles, cursor position and Control-key state. The Flow
+worker samples the pointer on motion and dwell, and places it at the entry
+edge when the first pointing device arrives.
 
 ## D-Bus surface
 
@@ -24,13 +27,24 @@ No titles, window contents, or input are read, and the extension adds no UI.
 - method: `GetFocusedWmClass() -> s` (empty string when nothing is focused)
 - signal: `FocusedWmClassChanged(s)` (emitted on each GNOME focus change)
 
+Flow uses a separate object at `/org/openlogi/FlowPointer` on the same bus
+name. Its methods accept the session-bus owner of `org.openlogi.OpenLogi.Flow`.
+`GetLayout` supplies a generation and logical rectangles. `ReadPointer` and
+`PlacePointerMonotonic` require that generation. Placement carries an absolute
+Linux monotonic deadline in microseconds, including time spent waiting on the
+bus. Use the agent and companion from the same build for cursor placement.
+Lock, monitor changes, controller
+replacement, and extension disable invalidate it.
+
 ## Install
+
+Run from the repository root.
 
 ```sh
 UUID=openlogi-frontmost@openlogi.dev
 DEST="$HOME/.local/share/gnome-shell/extensions/$UUID"
 mkdir -p "$DEST"
-cp metadata.json extension.js ringAnimation.js "$DEST"/
+cp -R "crates/openlogi-hook/gnome-shell-extension/$UUID/." "$DEST/"
 ```
 
 On Wayland the shell cannot be reloaded in place, so **log out and back in** to
@@ -69,6 +83,27 @@ should match the pointer away from edges; near an edge it should move only far
 enough inward to keep the ring visible. Hover and click a slot to verify its
 hit target matches the drawing. Ordinary application windows should still
 animate. Disable the extension to verify that its animation override is removed.
+
+For Flow, enable it on both computers, pair the peer and assign the mouse and
+keyboard channels in OpenLogi. Push through the configured edge in each
+direction over a native Wayland window. Both devices should follow and the
+cursor should land just inside the entry edge. Repeat with Control required.
+Disabling the extension leaves incoming hardware handoffs available. Re-enable
+it to restore cursor placement and outgoing handoffs on the next layout refresh.
+
+The Linux integration test starts a private D-Bus and a GJS service with a
+simulated desktop. Run it from the repository root with GJS and gdbus installed:
+
+```sh
+cargo test -p openlogi-agent-core gnome_wayland_round_trip -- --ignored --nocapture
+```
+
+To exercise synchronous tracker callbacks, replacement, and cancellation during
+placement setup without a desktop or a session bus, run:
+
+```sh
+gjs -m crates/openlogi-hook/gnome-shell-extension/tests/flowPlacement.test.js
+```
 
 The animation-policy regression tests need Node.js 22 or newer and no running shell:
 

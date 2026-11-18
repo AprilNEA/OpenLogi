@@ -388,3 +388,6 @@ fn a_thread_without_a_pointer_exits_and_ignores_commands() {
     thread.waker().moved();
     thread.stop();
 }
+
+#[cfg(target_os = "linux")]
+mod gnome;

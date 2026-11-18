@@ -18,6 +18,7 @@ tracing = { workspace = true }
 evdev = { workspace = true }
 futures-lite = { workspace = true }
 libc = "0.2"
+rustix = { version = "1", features = ["time"] }
 wayland-client = "0.31"
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 x11rb = { version = "0.13", features = ["randr"] }

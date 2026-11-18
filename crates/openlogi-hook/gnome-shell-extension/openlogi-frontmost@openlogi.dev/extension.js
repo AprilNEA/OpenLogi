@@ -6,14 +6,17 @@
 // the focused window is otherwise not visible to ordinary clients.
 //
 // It also keeps Actions Ring surfaces out of GNOME's window animations so
-// their initial pointer coordinates stay valid. No titles, window contents,
-// or input are read. ESM module style; targets GNOME Shell 45+.
+// their initial pointer coordinates stay valid. Flow reads cursor position and
+// Control state in the unlocked session. ESM module style for GNOME Shell 45+.
 
+import Clutter from 'gi://Clutter';
+import Meta from 'gi://Meta';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import {Extension, InjectionManager} from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
+import {FlowPointer} from './flowPointer.js';
 import {withoutRingAnimation} from './ringAnimation.js';
 
 const DBUS_NAME = 'org.openlogi.Frontmost';
@@ -44,12 +47,34 @@ export default class OpenLogiFrontmostExtension extends Extension {
             'notify::focus-window',
             () => this._emitFocusedWmClassChanged());
 
+        if (Meta.is_wayland_compositor()) {
+            this._flow = new FlowPointer({
+                active: () => !Main.sessionMode.isLocked && !Main.sessionMode.isGreeter,
+                monitors: () => Main.layoutManager.monitors,
+                pointer: () => {
+                    const [x, y, mask] = global.get_pointer();
+                    return [x, y, Boolean(mask & Clutter.ModifierType.CONTROL_MASK)];
+                },
+                tracker: () => global.backend?.get_cursor_tracker?.()
+                    ?? Meta.CursorTracker.get_for_display(global.display),
+                warp: (x, y) => Clutter.get_default_backend().get_default_seat().warp_pointer(x, y),
+            });
+            this._layoutChanged = Main.layoutManager.connect('monitors-changed', () => this._flow.invalidate());
+            this._modeChanged = Main.sessionMode.connect('updated', () => this._flow.invalidate());
+        }
+
         this._ringAnimations = new InjectionManager();
         this._ringAnimations.overrideMethod(
             Main.wm, '_shouldAnimateActor', withoutRingAnimation);
     }
 
     disable() {
+        if (this._flow) {
+            Main.layoutManager.disconnect(this._layoutChanged);
+            Main.sessionMode.disconnect(this._modeChanged);
+            this._flow.destroy();
+            this._flow = null;
+        }
         this._ringAnimations?.clear();
         this._ringAnimations = null;
         if (this._focusChangedId) {
