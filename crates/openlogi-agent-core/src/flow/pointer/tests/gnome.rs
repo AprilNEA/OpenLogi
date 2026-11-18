@@ -17,8 +17,8 @@ impl Drop for Shell {
     }
 }
 
-fn call(method: &str, args: &[&str]) -> String {
-    let result = Command::new("gdbus")
+fn fixture_call(method: &str, args: &[&str]) -> std::process::Output {
+    Command::new("gdbus")
         .args([
             "call",
             "--session",
@@ -32,7 +32,11 @@ fn call(method: &str, args: &[&str]) -> String {
         ])
         .args(args)
         .output()
-        .unwrap();
+        .unwrap()
+}
+
+fn call(method: &str, args: &[&str]) -> String {
+    let result = fixture_call(method, args);
     assert!(
         result.status.success(),
         "{}",
@@ -137,6 +141,11 @@ fn check_private_bus() {
     assert!(state.sample(ms(1400)).is_some(), "new generation can dwell");
 
     call("Move", &["-1280", "360", "false"]);
+    call("Mode", &["delayed"]);
+    let typo = fixture_call("Mode", &["interupt"]);
+    assert!(!typo.status.success(), "unknown mode must be refused");
+    assert!(String::from_utf8_lossy(&typo.stderr).contains("InvalidArgs"));
+    // The rejected mode must leave the previous delayed warp operational.
     state.place(&entry(proto::Side::Left, 1.0 / 3.0));
     assert_eq!(
         state.pointer.state().unwrap().position,

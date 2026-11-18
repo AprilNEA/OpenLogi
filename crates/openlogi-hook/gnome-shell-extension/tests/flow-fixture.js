@@ -5,7 +5,8 @@ import GLib from 'gi://GLib';
 import {FlowPointer} from '../openlogi-frontmost@openlogi.dev/flowPointer.js';
 
 let position = [0, 0, false];
-let mode = 'delayed';
+const WarpMode = Object.freeze({Delayed: 'delayed', Confined: 'confined', Interrupt: 'interrupt'});
+let mode = WarpMode.Delayed;
 let reads = 0;
 let warps = 0;
 let callback = null;
@@ -28,13 +29,13 @@ const desktop = {
     tracker: () => tracker,
     warp(x, y) {
         warps++;
-        if (mode === 'delayed') {
+        if (mode === WarpMode.Delayed) {
             GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
                 position = [x, y, false];
                 callback?.();
                 return GLib.SOURCE_REMOVE;
             });
-        } else if (mode === 'interrupt') {
+        } else if (mode === WarpMode.Interrupt) {
             GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
                 service.invalidate();
                 return GLib.SOURCE_REMOVE;
@@ -48,13 +49,19 @@ const panel = Gio.DBusExportedObject.wrapJSObject(`<node><interface name="org.op
     <method name="Stats"><arg type="u" direction="out"/><arg type="u" direction="out"/><arg type="i" direction="out"/><arg type="b" direction="out"/></method>
 </interface></node>`, {
     Move(x, y, ctrl) { position = [x, y, ctrl]; },
-    Mode(value) {
+    ModeAsync([value], call) {
         if (value === 'enable') service = new FlowPointer(desktop);
         else if (value === 'disable') { service.destroy(); service = null; }
         else if (value === 'lock' || value === 'unlock') {
             active = value === 'unlock';
             service.invalidate();
-        } else mode = value;
+        } else if (Object.values(WarpMode).includes(value)) {
+            mode = value;
+        } else {
+            call.return_dbus_error('org.freedesktop.DBus.Error.InvalidArgs', `Unknown fixture mode: ${value}`);
+            return;
+        }
+        call.return_value(null);
     },
     Stats() { return [reads, warps, tracking, callback !== null]; },
 });
