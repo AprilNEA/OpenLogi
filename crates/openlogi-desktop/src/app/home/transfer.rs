@@ -5,12 +5,11 @@
 use std::path::{Path, PathBuf};
 
 use gpui::{
-    App, Context, IntoElement, ParentElement as _, PathPromptOptions, SharedString, Styled as _,
-    Window, div, prelude::FluentBuilder as _, px,
+    App, Context, InteractiveElement as _, IntoElement, ParentElement as _, PathPromptOptions,
+    SharedString, Styled as _, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_kit::component::{
     Icon, WindowExt as _,
-    dialog::DialogButtonProps,
     menu::{PopupMenu, PopupMenuItem},
     v_flex,
 };
@@ -18,7 +17,7 @@ use openlogi_core::binding::ButtonId;
 use openlogi_core::config::{Config, SettingsTransfer, SkipReason, SkippedItem, TransferItem};
 
 use crate::state::{AppState, TransferSource};
-use crate::ui::components::control_button;
+use crate::ui::components::{confirm_cancel_footer, control_button};
 use crate::ui::theme::{self, Palette, Typography as _};
 
 const COPY_ICON: &str = "action-icons/copy.svg";
@@ -33,9 +32,7 @@ pub(super) fn transfer_items(
     window: &mut Window,
     cx: &mut Context<PopupMenu>,
 ) -> PopupMenu {
-    let sources = AppState::try_read(cx)
-        .map(|state| state.transfer_sources(record_key))
-        .unwrap_or_default();
+    let sources = AppState::try_read(cx).map_or_default(|state| state.transfer_sources(record_key));
     let menu = if sources.is_empty() {
         menu.item(
             PopupMenuItem::new(tr!("device.copy_settings_from"))
@@ -122,12 +119,10 @@ fn open_transfer_preview(
         }
         alert
             .child(preview(&transfer, theme::palette(cx)))
-            .button_props(
-                DialogButtonProps::default()
-                    .ok_text(tr!("device.copy_settings"))
-                    .cancel_text(tr!("common.cancel"))
-                    .show_cancel(true),
-            )
+            .footer(confirm_cancel_footer(
+                "copy-settings-confirm",
+                tr!("device.copy_settings"),
+            ))
             .on_ok({
                 let record_key = record_key.clone();
                 let source = source.clone();
@@ -168,8 +163,7 @@ fn import_settings(window: &mut Window, cx: &mut App, record_key: String) {
                 ),
                 Ok(file) => {
                     let sources = AppState::try_read(cx)
-                        .map(|state| state.file_transfer_sources(&record_key, &file))
-                        .unwrap_or_default();
+                        .map_or_default(|state| state.file_transfer_sources(&record_key, &file));
                     match sources.as_slice() {
                         [] => open_message(
                             window,
@@ -205,6 +199,7 @@ fn open_source_choice(
                         let source = source.clone();
                         let record_key = record_key.clone();
                         control_button(("import-settings-source", index))
+                            .debug_selector(move || format!("import-settings-source-{index}"))
                             .label(source.name.clone())
                             .w_full()
                             .on_click(move |_, window, cx| {
@@ -251,8 +246,7 @@ fn export_settings(window: &mut Window, cx: &mut App, record_key: &str, display_
 }
 
 fn write_export(export: &Config, path: &Path) -> Result<(), String> {
-    let text = export.to_toml_string().map_err(|error| error.to_string())?;
-    std::fs::write(path, text).map_err(|error| error.to_string())
+    export.write_copy(path).map_err(|error| error.to_string())
 }
 
 fn open_message(window: &mut Window, cx: &mut App, title: SharedString, text: SharedString) {
@@ -263,6 +257,7 @@ fn open_message(window: &mut Window, cx: &mut App, title: SharedString, text: Sh
 
 fn preview(transfer: &SettingsTransfer, pal: Palette) -> impl IntoElement {
     v_flex()
+        .debug_selector(|| "copy-settings-preview".into())
         .gap_3()
         .when(!transfer.changed.is_empty(), |column| {
             column.child(section(
@@ -330,6 +325,8 @@ fn skipped_label(skipped: &SkippedItem) -> SharedString {
         SkipReason::NoPointerSpeed => tr!("device.copy_settings_no_pointer_speed"),
         SkipReason::NotOnAMouse => tr!("device.copy_settings_not_on_a_mouse"),
         SkipReason::NotFromAFile => tr!("device.copy_settings_not_from_a_file"),
+        SkipReason::NotMeasured => tr!("device.copy_settings_not_measured"),
+        SkipReason::AppAliasConflict => tr!("device.copy_settings_app_alias_conflict"),
     };
     tr!(
         "device.copy_settings_skipped_item",
@@ -337,3 +334,6 @@ fn skipped_label(skipped: &SkippedItem) -> SharedString {
         reason => reason
     )
 }
+
+#[cfg(test)]
+mod tests;

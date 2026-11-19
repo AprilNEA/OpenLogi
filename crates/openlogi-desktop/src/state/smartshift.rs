@@ -233,7 +233,6 @@ impl AppState {
         let key = record.device_key();
         let persistent_key = record.persistent_config_key().map(str::to_string);
         let route = record.route.clone();
-        let can_confirm = route.is_some();
         if let Some(persistent_key) = persistent_key {
             self.config.edit(|config| {
                 config.set_smartshift(
@@ -245,6 +244,19 @@ impl AppState {
                 return events;
             }
         }
+        self.write_smartshift(key, route, status);
+        events
+    }
+
+    /// Write `status` to `key`'s device on `route` through the agent, after
+    /// it was saved. With no route the write is marked failed.
+    pub(super) fn write_smartshift(
+        &mut self,
+        key: DeviceKey,
+        route: Option<DeviceRoute>,
+        status: SmartShiftStatus,
+    ) {
+        let can_confirm = route.is_some();
         if let Some(route) = route {
             self.send_ipc(crate::services::ipc::SetSmartShift { route, status });
         }
@@ -271,7 +283,6 @@ impl AppState {
             self.devices.sessions.entry(key).or_default().smartshift =
                 SmartShiftDeviceState::Failed;
         }
-        events
     }
     /// Take the active device's pending SmartShift confirm, if any. Returns
     /// the `(device key, route, write_id)` for a one-shot re-read that

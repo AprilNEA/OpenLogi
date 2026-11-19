@@ -6,7 +6,9 @@
 //! [`DeviceConfig::disabled_gestures`](super::DeviceConfig::disabled_gestures),
 //! so entering it again restores what the user had.
 
-use super::Config;
+use std::collections::BTreeMap;
+
+use super::{Config, DeviceConfig};
 use crate::binding::{
     Action, Binding, ButtonId, GestureDirection, default_binding, default_binding_for,
     default_gesture_binding,
@@ -64,13 +66,10 @@ impl Config {
     /// one-gesture-button-per-device owner lock — see [`Self::set_gesture_mode`].
     #[must_use]
     pub fn is_gesture_mode(&self, device_key: &str, button: ButtonId) -> bool {
-        self.devices
-            .get(device_key)
-            .and_then(|d| d.bindings.get(&button))
-            .map_or_else(
-                || default_binding_for(button).is_gesture(),
-                Binding::is_gesture,
-            )
+        self.devices.get(device_key).map_or_else(
+            || default_binding_for(button).is_gesture(),
+            |device| device.is_gesture_mode(button),
+        )
     }
 
     /// Every button of `device_key` currently in gesture mode, in [`ButtonId`]
@@ -139,5 +138,55 @@ impl Config {
                 }
             }
         }
+    }
+}
+
+/// What [`DeviceConfig::copy_button`] changed on the button.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct ButtonCopy {
+    /// The button's binding.
+    pub binding: bool,
+    /// The directions stored for the button while its gesture mode is off.
+    pub stored_gestures: bool,
+}
+
+impl DeviceConfig {
+    /// Whether `button` dispatches a gesture map: its binding is one, or it
+    /// has no binding and its default is one.
+    #[must_use]
+    pub(super) fn is_gesture_mode(&self, button: ButtonId) -> bool {
+        self.bindings.get(&button).map_or_else(
+            || default_binding_for(button).is_gesture(),
+            Binding::is_gesture,
+        )
+    }
+
+    /// Give `button` another device's `binding` and the directions `stored`
+    /// for its gesture mode, keeping its own where the other device has
+    /// none. A button in gesture mode has no stored directions, the way
+    /// [`Config::set_gesture_mode`] leaves it, so they are dropped when the
+    /// copied binding is a gesture map and kept out when it is not copied.
+    pub(super) fn copy_button(
+        &mut self,
+        button: ButtonId,
+        binding: Option<&Binding>,
+        stored: Option<&BTreeMap<GestureDirection, Action>>,
+    ) -> ButtonCopy {
+        let mut copy = ButtonCopy::default();
+        if let Some(binding) = binding
+            && self.bindings.get(&button) != Some(binding)
+        {
+            self.bindings.insert(button, binding.clone());
+            copy.binding = true;
+        }
+        if self.is_gesture_mode(button) {
+            self.disabled_gestures.remove(&button);
+        } else if let Some(stored) = stored
+            && self.disabled_gestures.get(&button) != Some(stored)
+        {
+            self.disabled_gestures.insert(button, stored.clone());
+            copy.stored_gestures = true;
+        }
+        copy
     }
 }

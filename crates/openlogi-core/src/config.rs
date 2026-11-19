@@ -62,7 +62,8 @@ pub use settings::{
     VerticalScrollSensitivity, WheelMode,
 };
 pub use transfer::{
-    SettingsTransfer, SkipReason, SkippedItem, TransferItem, TransferTarget, transfer_settings,
+    ImportedDevice, SettingsTransfer, SkipReason, SkippedItem, TransferItem, TransferTarget,
+    transfer_settings,
 };
 
 use crate::app::AppAliases;
