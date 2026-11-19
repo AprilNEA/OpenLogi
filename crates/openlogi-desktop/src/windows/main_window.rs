@@ -6,8 +6,8 @@
 //! duplicate — and a window closed while the app kept running in the menu bar
 //! can be brought back.
 
-use gpui::{App, AppContext as _, Pixels, Size, Styled as _, WindowOptions, px};
-use gpui_component::{ActiveTheme as _, Root};
+use gpui::{App, AppContext as _, Context, Pixels, Size, Styled as _, WindowOptions, px};
+use gpui_kit::component::{ActiveTheme as _, Root};
 use openlogi_core::brand::APP_ID;
 use tracing::warn;
 
@@ -92,5 +92,22 @@ pub fn open(cx: &mut App) {
 pub fn ensure(cx: &mut App) {
     if cx.windows().is_empty() {
         open(cx);
+    }
+}
+
+/// Focus or create the main window, then let its root view move to another
+/// page.
+pub(crate) fn navigate(cx: &mut App, to: impl FnOnce(&mut AppView, &mut Context<AppView>)) {
+    open(cx);
+    let Some(handle) = cx.default_global::<WindowRegistry>().main else {
+        return;
+    };
+    let navigated = handle.update(cx, |root, _, cx| {
+        if let Ok(view) = root.view().clone().downcast::<AppView>() {
+            view.update(cx, to);
+        }
+    });
+    if let Err(error) = navigated {
+        warn!(%error, "could not navigate the main window");
     }
 }

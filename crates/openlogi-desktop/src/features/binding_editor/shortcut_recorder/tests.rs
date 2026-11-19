@@ -8,7 +8,7 @@ use super::*;
 
 actions!(shortcut_recorder_test, [CloseProbe]);
 
-fn record(keystroke: &str) -> Recording {
+fn record(keystroke: &'static str) -> Recording {
     Recording::from(&Keystroke::parse(keystroke).expect("keystroke parses"))
 }
 
@@ -81,7 +81,7 @@ fn shift_with_a_digit_or_symbol_key_is_not_recorded() {
 
 #[test]
 fn shift_that_gpui_keeps_still_records() {
-    let press = |keystroke: &str| {
+    let press = |keystroke: &'static str| {
         let keystroke = Keystroke::parse(keystroke).expect("keystroke parses");
         Recording::from_press(&keystroke, keystroke.modifiers)
     };

@@ -14,26 +14,15 @@ use gpui::{
 use openlogi_core::device::LockKey;
 use openlogi_ipc::LockKeyChange;
 use openlogi_ui::action_icons::LOCK_KEY_ICON;
+use openlogi_ui::color::{self, neutral};
 use tracing::warn;
 
 /// Wide enough for the longest translated title on one line.
 const WIDTH: f32 = 360.0;
 const HEIGHT: f32 = 72.0;
 
-/// The glyph of a key that is now on: the backlight indicator's accent.
-const ENGAGED: Hsla = Hsla {
-    h: 0.58,
-    s: 0.75,
-    l: 0.62,
-    a: 1.0,
-};
 /// The glyph of a key that is now off.
-const RELEASED: Hsla = Hsla {
-    h: 0.0,
-    s: 0.0,
-    l: 0.60,
-    a: 1.0,
-};
+const RELEASED: Hsla = neutral(0.60, 1.0);
 
 /// The catalog key for the text that announces `change`.
 pub(crate) const fn title_key(change: LockKeyChange) -> &'static str {
@@ -47,9 +36,11 @@ pub(crate) const fn title_key(change: LockKeyChange) -> &'static str {
     }
 }
 
-/// The colour of the glyph for a key that is now `engaged` or not.
-const fn glyph_colour(engaged: bool) -> Hsla {
-    if engaged { ENGAGED } else { RELEASED }
+/// The colour of the glyph for a key that is now `engaged` or not. A key that
+/// is on takes the brand accent, the same blue the backlight indicator's bar
+/// and the settings app paint with.
+fn glyph_colour(engaged: bool) -> Hsla {
+    if engaged { color::accent() } else { RELEASED }
 }
 
 /// The indicator window's view: the latest change the agent is showing.
@@ -69,8 +60,8 @@ impl Render for LockKeyView {
             .h(px(HEIGHT))
             .px(px(20.0))
             .rounded(px(12.0))
-            .bg(gpui::hsla(0.0, 0.0, 0.08, 0.94))
-            .text_color(gpui::hsla(0.0, 0.0, 0.96, 1.0))
+            .bg(neutral(0.08, 0.94))
+            .text_color(neutral(0.96, 1.0))
             .child(
                 svg()
                     .path(LOCK_KEY_ICON)
@@ -181,9 +172,9 @@ mod tests {
 
     #[test]
     fn a_key_turning_on_is_drawn_apart_from_one_turning_off() {
-        assert_eq!(glyph_colour(true), ENGAGED);
+        assert_eq!(glyph_colour(true), color::accent());
         assert_eq!(glyph_colour(false), RELEASED);
-        assert_ne!(ENGAGED, RELEASED);
+        assert_ne!(glyph_colour(true), glyph_colour(false));
     }
 
     /// The change each open indicator window shows.

@@ -16,10 +16,12 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Weak};
 
-use openlogi_core::binding::{Binding, ButtonId};
+use openlogi_core::binding::{Binding, ButtonId, GKeyProfile};
+use openlogi_core::bindings::{GamingPress, gaming_press};
+use openlogi_core::config::GamingKeyMode;
 use openlogi_hid::{
     CaptureHost, CaptureSessionOutcome, CaptureSessionStop, CapturedInput, DeviceRoute,
-    KeyboardWanted, PendingCaptureRestore, run_keyboard_capture_session,
+    GamingWanted, KeyboardWanted, PendingCaptureRestore, run_keyboard_capture_session,
 };
 use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{debug, info, warn};
@@ -61,6 +63,11 @@ pub struct KeyboardSpec {
     /// Keypad grid keys → button, keyed by the wire index, for exactly the
     /// bound keys. These change no firmware state.
     pub grid: BTreeMap<u8, ButtonId>,
+    /// The G-series gaming cluster the session takes over: the `0x8010`
+    /// G-key row and the M keys above it. Default for every other keyboard.
+    pub gaming: GamingWanted,
+    /// What M1–M3 do on a keyboard whose G-key row is taken.
+    pub gaming_mode: GamingKeyMode,
     /// Effective per-key immediate or threshold map (per-app overlay applied).
     pub bindings: BTreeMap<ButtonId, Binding>,
 }
@@ -90,8 +97,10 @@ impl KeyboardTarget {
 struct KeyboardDispatchPlan {
     config_key: String,
     bindings: BTreeMap<ButtonId, Binding>,
+    /// What M1–M3 do; see [`gaming_press`].
+    gaming_mode: GamingKeyMode,
     /// The `0x1b04` controls to divert and grid keys to observe, for exactly
-    /// the bound keys.
+    /// the bound keys, and the gaming cluster to take.
     keys: KeyboardWanted,
 }
 type RunningKeyboardSession =
@@ -123,6 +132,8 @@ struct KeyboardManagerState {
     /// The keys each route's tracked session keeps captured, as its dispatch
     /// plan names them. Written only from that plan; the session reads it.
     keys: RouteKeys,
+    /// The G-key profile each route's session last selected with M1–M3.
+    profiles: GKeyProfiles,
 }
 
 /// One captured-key publication per keyboard route.
@@ -210,6 +221,74 @@ fn dispatch_input(
     }
 }
 
+/// The G-key profile each keyboard session runs G1–G5 on, by route, with the
+/// epoch of the session that selected it. Only that session reads it back,
+/// and only until the keyboard power-cycles: a reconnected, restarted, or
+/// woken keyboard starts on M1 like its firmware does, and two keyboards
+/// never share one.
+#[derive(Debug, Default)]
+struct GKeyProfiles(HashMap<DeviceRoute, (u64, GKeyProfile)>);
+
+impl GKeyProfiles {
+    /// Put the keyboard on `route` back on M1.
+    fn forget(&mut self, route: &DeviceRoute) {
+        self.0.remove(route);
+    }
+
+    /// The profile the session `epoch` on `route` runs.
+    fn active(&self, route: &DeviceRoute, epoch: u64) -> GKeyProfile {
+        match self.0.get(route) {
+            Some(&(selected_by, profile)) if selected_by == epoch => profile,
+            _ => GKeyProfile::M1,
+        }
+    }
+
+    /// What `input` from the session `epoch` on `route` does under `mode`.
+    fn resolve(
+        &mut self,
+        route: &DeviceRoute,
+        epoch: u64,
+        mode: GamingKeyMode,
+        input: CapturedInput,
+    ) -> Resolved {
+        // A power cycle puts the keyboard back on M1 within the same session.
+        if matches!(input, CapturedInput::Interrupted) {
+            self.forget(route);
+        }
+        let active = self.active(route, epoch);
+        let (button, edge): (ButtonId, fn(ButtonId) -> CapturedInput) = match input {
+            CapturedInput::ButtonDown(button) => (button, CapturedInput::ButtonDown),
+            CapturedInput::ButtonUp(button) => (button, CapturedInput::ButtonUp),
+            CapturedInput::ButtonPulse(button) => (button, CapturedInput::ButtonPulse),
+            other => return Resolved::Dispatch(other),
+        };
+        match gaming_press(button, mode, active) {
+            GamingPress::Dispatch(button) => Resolved::Dispatch(edge(button)),
+            // The release of a profile key ends nothing it started.
+            GamingPress::SelectProfile(_) if matches!(input, CapturedInput::ButtonUp(_)) => {
+                Resolved::Ignored
+            }
+            // The profile G1–G5 already run: nothing changes.
+            GamingPress::SelectProfile(profile) if profile == active => Resolved::Ignored,
+            GamingPress::SelectProfile(profile) => {
+                self.0.insert(route.clone(), (epoch, profile));
+                Resolved::SelectedProfile
+            }
+        }
+    }
+}
+
+/// What one captured edge does once the gaming cluster's profile is applied.
+#[derive(Debug, PartialEq)]
+enum Resolved {
+    /// Dispatch this edge.
+    Dispatch(CapturedInput),
+    /// A profile key selected its profile; nothing dispatches.
+    SelectedProfile,
+    /// Nothing happens.
+    Ignored,
+}
+
 /// The capture target and dispatch plan of every published keyboard, or none
 /// while pairing owns capture.
 fn wanted_sessions(
@@ -227,9 +306,11 @@ fn wanted_sessions(
                 KeyboardDispatchPlan {
                     config_key: spec.config_key.clone(),
                     bindings: spec.bindings.clone(),
+                    gaming_mode: spec.gaming_mode,
                     keys: KeyboardWanted {
                         controls: spec.wanted.clone(),
                         grid: spec.grid.clone(),
+                        gaming: spec.gaming.clone(),
                     },
                 },
             )
@@ -250,13 +331,17 @@ fn wanted_for<'a>(
 
 /// Bring the session to `wanted`. A new plan hot-swaps, and its key set
 /// reaches the running session through `keys`, which diverts and hands back
-/// keys in place.
+/// keys in place. Answers whether the hot swap handed the G-key row over or
+/// back, or changed what M1–M3 do: the M profile the agent selected then no
+/// longer describes the keyboard, whose own M keys may have run meanwhile.
 fn reconcile_session(
     running: &mut RunningKeyboardSession,
     wanted: Option<(&KeyboardTarget, &KeyboardDispatchPlan)>,
     dispatcher: &ActionDispatcher,
     keys: &watch::Sender<KeyboardWanted>,
-) {
+) -> bool {
+    let gaming = |plan: &KeyboardDispatchPlan| (plan.keys.gaming.take_g_row, plan.gaming_mode);
+    let before = gaming(running.dispatch());
     let action = running.reconcile_with(wanted, |_, _| CaptureSessionStop::Shutdown);
     if action != ReconcileAction::None {
         dispatcher.cancel_hidpp_session(running.id());
@@ -273,6 +358,7 @@ fn reconcile_session(
             changed
         });
     }
+    action == ReconcileAction::DispatchChanged && gaming(running.dispatch()) != before
 }
 
 /// Reconcile the session at `route` directly against the latest publication.
@@ -285,9 +371,9 @@ fn reconcile_published_session(
     specs: &SharedKeyboardSpecs,
     dispatcher: &ActionDispatcher,
     keys: &watch::Sender<KeyboardWanted>,
-) {
+) -> bool {
     let wanted = wanted_sessions(*receiver_requests.borrow(), &specs.borrow());
-    reconcile_session(running, wanted_for(&wanted, route), dispatcher, keys);
+    reconcile_session(running, wanted_for(&wanted, route), dispatcher, keys)
 }
 
 /// The shared receiver lease every keyboard session holds, acquiring it when
@@ -363,6 +449,7 @@ impl KeyboardManagerState {
             dispatcher,
             lease: Weak::new(),
             keys: HashMap::new(),
+            profiles: GKeyProfiles::default(),
         }
     }
 
@@ -391,6 +478,7 @@ impl KeyboardManagerState {
     fn forget_idle_routes(&mut self) {
         let slots = &self.slots;
         self.keys.retain(|route, _| slots.contains_key(route));
+        self.profiles.0.retain(|route, _| slots.contains_key(route));
     }
 
     fn has_pending_restores(&self) -> bool {
@@ -417,13 +505,15 @@ impl KeyboardManagerState {
         let now = tokio::time::Instant::now();
         let wanted = wanted_sessions(requests, published);
         for (route, slot) in &mut self.slots {
-            if let Some(running) = slot.session_mut() {
-                reconcile_session(
+            if let Some(running) = slot.session_mut()
+                && reconcile_session(
                     running,
                     wanted_for(&wanted, route),
                     &self.dispatcher,
                     route_keys(&mut self.keys, route),
-                );
+                )
+            {
+                self.profiles.forget(route);
             }
         }
         // A keyboard no longer published needs no restart, but restoration
@@ -499,15 +589,16 @@ impl KeyboardManagerState {
                         .slots
                         .get_mut(route)
                         .and_then(KeyboardSlot::session_mut)
-                {
-                    reconcile_published_session(
+                    && reconcile_published_session(
                         route,
                         running,
                         receiver_requests,
                         specs,
                         &self.dispatcher,
                         route_keys(&mut self.keys, route),
-                    );
+                    )
+                {
+                    self.profiles.forget(route);
                 }
 
                 let Some(running) = self
@@ -523,12 +614,24 @@ impl KeyboardManagerState {
                     );
                     return false;
                 };
-                dispatch_input(
-                    running.id(),
+                let dispatch = running.dispatch();
+                match self.profiles.resolve(
+                    route,
+                    running.id().epoch(),
+                    dispatch.gaming_mode,
                     input.input,
-                    running.dispatch(),
-                    &self.dispatcher,
-                );
+                ) {
+                    Resolved::Dispatch(resolved) => {
+                        dispatch_input(running.id(), resolved, dispatch, &self.dispatcher);
+                    }
+                    // G-keys held under the old profile would release as the
+                    // new profile's: end them here instead. Other keys are
+                    // bound the same in every profile and keep running.
+                    Resolved::SelectedProfile => {
+                        self.dispatcher.cancel_hidpp_g_keys(running.id());
+                    }
+                    Resolved::Ignored => {}
+                }
                 false
             }
             KeyboardSessionEvent::Done(done) => {

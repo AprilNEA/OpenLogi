@@ -48,7 +48,7 @@ pub use manifest::{
 };
 pub use protocol_identity::{
     ProtocolExchangeIdentity, ProtocolIdentityError, ProtocolIdentityExtractor,
-    ProtocolIdentityField, is_pairing_identity_traffic,
+    ProtocolIdentityField, RecordedRequestReports, is_pairing_identity_traffic,
 };
 pub use schema::{
     CassetteExchange, DeviceProfile, FIXTURE_SCHEMA_VERSION, FixtureError, HidCassette,

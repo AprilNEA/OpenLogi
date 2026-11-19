@@ -38,6 +38,23 @@ pub fn accent_at_lightness(lightness: f32) -> Hsla {
     }
 }
 
+/// A grey: no hue, no saturation, at `lightness` with `alpha`.
+///
+/// The overlay's floating surfaces commit to fixed greys rather than follow a
+/// theme, and each window picks its own lightness — but the shape of a grey is
+/// one decision, kept here so the ring, the notices, and the key indicators
+/// stop writing it out by hand (the `ui-neutral-owner` guard holds them to it).
+/// The settings app never calls this: its greys come from the active theme.
+#[must_use]
+pub const fn neutral(lightness: f32, alpha: f32) -> Hsla {
+    Hsla {
+        h: 0.0,
+        s: 0.0,
+        l: lightness,
+        a: alpha,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

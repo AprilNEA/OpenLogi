@@ -32,15 +32,15 @@ fn same_header_msg(marker: u8, payload: u8) -> HidppMessage {
 }
 
 fn assert_pending_empty(channel: &HidppChannel) {
-    assert!(channel.pending_messages.lock().unwrap().messages.is_empty());
+    assert_eq!(pending_len(channel), 0);
 }
 
 fn pending_len(channel: &HidppChannel) -> usize {
-    channel.pending_messages.lock().unwrap().messages.len()
+    channel.pending_messages.lock().unwrap().in_flight_count()
 }
 
 fn stale_len(channel: &HidppChannel) -> usize {
-    channel.pending_messages.lock().unwrap().stale.len()
+    channel.pending_messages.lock().unwrap().stale_count()
 }
 
 async fn wait_for_event_count(events: &Arc<Mutex<Vec<(HidppMessage, bool)>>>, count: usize) {

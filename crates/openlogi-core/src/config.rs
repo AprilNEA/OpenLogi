@@ -14,6 +14,8 @@ use serde::{Deserialize, Serialize};
 mod button_map;
 mod device;
 #[cfg(feature = "fs")]
+mod edit;
+#[cfg(feature = "fs")]
 mod file;
 mod flow;
 mod function_key;
@@ -34,6 +36,8 @@ mod wheel_hold;
 mod tests;
 
 pub use device::{DeviceConfig, DeviceIdentity, DisableKey, LinkConfig, LinkOverrides};
+#[cfg(feature = "fs")]
+pub use edit::{ConfigEdit, DeviceEdit, DeviceEditError, DeviceSetting};
 #[cfg(all(test, feature = "fs", unix))]
 use file::resolve_symlinks;
 #[cfg(feature = "fs")]
@@ -51,10 +55,10 @@ pub use revision::ConfigRevision;
 pub use settings::LightSettings;
 pub use settings::{
     AppIcon, AppSettings, Appearance, AssetSourcePreference, CameraControls, CameraStreamMode,
-    DeviceViewMode, GlideShape, Lighting, MomentumParams, MomentumScrolling, MouseProfileTarget,
-    OnboardMemory, SMARTSHIFT_AUTO_DISENGAGE_DEFAULT, SMARTSHIFT_MIN_AUTO_DISENGAGE,
-    ScrollResolution, SmartShift, ThumbwheelSensitivity, UiScale, VerticalScrollSensitivity,
-    WheelMode,
+    DeviceViewMode, GKeyOwner, GamingKeyMode, GlideShape, Lighting, MomentumParams,
+    MomentumScrolling, MouseProfileTarget, OnboardMemory, SMARTSHIFT_AUTO_DISENGAGE_DEFAULT,
+    SMARTSHIFT_MIN_AUTO_DISENGAGE, ScrollResolution, SmartShift, ThumbwheelSensitivity, UiScale,
+    VerticalScrollSensitivity, WheelMode,
 };
 
 use crate::app::AppAliases;

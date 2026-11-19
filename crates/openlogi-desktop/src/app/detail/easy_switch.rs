@@ -16,7 +16,7 @@ use gpui::{
     AnyElement, App, AppContext as _, InteractiveElement as _, IntoElement, ParentElement as _,
     SharedString, Styled as _, Window, div, prelude::FluentBuilder as _, px,
 };
-use gpui_component::{
+use gpui_kit::component::{
     Disableable as _, Icon, IconName, WindowExt as _, button::Button, h_flex, input::InputState,
     v_flex,
 };
@@ -403,7 +403,7 @@ mod tests {
         hosts: EasySwitchHosts,
         refusal: Option<HostRenameRefusal>,
     ) -> &mut gpui::VisualTestContext {
-        cx.update(gpui_component::init);
+        cx.update(gpui_kit::init);
         let (_view, cx) = cx.add_window_view(|_, _| CardHost(hosts, refusal));
         cx.simulate_resize(size(px(800.), px(600.)));
         cx.update(|window, cx| window.draw(cx).clear(cx));
@@ -467,25 +467,22 @@ mod tests {
         assert!(cx.debug_bounds("easy-switch-refusal").is_some());
     }
 
-    /// Paints the dialog layer the way the app's root view does.
+    /// Empty content under the Kit root's dialog layer.
     struct DialogHost;
 
     impl Render for DialogHost {
-        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            div()
-                .size_full()
-                .children(gpui_component::Root::render_dialog_layer(window, cx))
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full()
         }
     }
 
-    /// The card of a device that is `reachable` or not, over the dialog layer,
-    /// so its renames can open their dialog.
+    /// A device card inside the Kit root, so its renames can open a dialog.
     struct RootedCard {
         reachable: bool,
     }
 
     impl Render for RootedCard {
-        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             let facts = EasySwitchFacts {
                 key: DeviceKey::from("direct:046d:b35b:unit:a393cae0"),
                 load: Load::Ready(Arc::new(hosts(true))),
@@ -495,7 +492,6 @@ mod tests {
             div()
                 .size_full()
                 .children(easy_switch_card(Some(facts), theme::palette(cx)))
-                .children(gpui_component::Root::render_dialog_layer(window, cx))
         }
     }
 
@@ -513,7 +509,7 @@ mod tests {
         view: impl FnOnce() -> V + 'static,
     ) -> &mut VisualTestContext {
         cx.update(|cx| {
-            gpui_component::init(cx);
+            gpui_kit::init(cx);
             cx.set_reduce_motion(true);
             let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
             let resolver = AssetResolver::new();
@@ -524,7 +520,7 @@ mod tests {
         });
         let (_, cx) = cx.add_window_view(|window, cx| {
             let view = cx.new(|_| view());
-            gpui_component::Root::new(view, window, cx)
+            gpui_kit::component::Root::new(view, window, cx)
         });
         cx.simulate_resize(size(px(800.), px(600.)));
         cx
@@ -611,7 +607,7 @@ mod tests {
     ) {
         let _locale = LOCALE_LOCK.lock().unwrap();
         rust_i18n::set_locale("en");
-        cx.update(gpui_component::init);
+        cx.update(gpui_kit::init);
         cx.update(|cx| {
             let pal = theme::palette(cx);
             let card = |load, reachable| {

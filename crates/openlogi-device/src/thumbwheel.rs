@@ -292,6 +292,39 @@ pub fn decode_event(
     })
 }
 
+/// Byte 0 of a diverted Gestures2 thumb-wheel (gesture 46) step report.
+const GESTURE46_STEP_MARK: u8 = 0x23;
+
+/// The signed step a diverted Gestures2 thumb-wheel (gesture 46) report
+/// carries, or `None` for any other report on that feature.
+///
+/// Reverse-engineered from an MX Master (`wpid` `0x4041`), since there is no
+/// public spec for `0x6501` event layouts: a step report is
+/// `0x23 0x00 0x03 <step>`, the step is a signed byte, and positive is a roll
+/// to the right. Reports `0x11` and `0x31` mark the start and end of a roll and
+/// carry no step.
+#[must_use]
+pub fn decode_gesture46_step(
+    msg: &v20::Message,
+    device_index: u8,
+    feature_index: u8,
+) -> Option<i16> {
+    let header = msg.header();
+    if header.device_index != device_index
+        || header.feature_index != feature_index
+        || header.software_id.to_lo() != 0
+        || header.function_id.to_lo() != 0
+    {
+        return None;
+    }
+    let p = msg.extend_payload();
+    if p[0] != GESTURE46_STEP_MARK || p[2] != 0x03 {
+        return None;
+    }
+    let step = i16::from(i8::from_be_bytes([p[3]]));
+    (step != 0).then_some(step)
+}
+
 /// `Thumbwheel` accessor bound to one device + resolved feature index.
 ///
 /// Construct with the feature index from the device's root feature
@@ -535,6 +568,73 @@ mod tests {
                 mode: ReportingMode::Native,
                 direction: WheelDirection::Default,
             }
+        );
+    }
+
+    fn gesture46_report(function_id: u8, software_id: u8, payload: [u8; 16]) -> v20::Message {
+        v20::Message::Long(
+            v20::MessageHeader {
+                device_index: 2,
+                feature_index: 13,
+                function_id: U4::from_lo(function_id),
+                software_id: U4::from_lo(software_id),
+            },
+            payload,
+        )
+    }
+
+    fn step_payload(step: u8) -> [u8; 16] {
+        let mut payload = [0; 16];
+        payload[..4].copy_from_slice(&[GESTURE46_STEP_MARK, 0x00, 0x03, step]);
+        payload
+    }
+
+    #[test]
+    fn a_gesture46_step_keeps_its_sign() {
+        let right = gesture46_report(0, 0, step_payload(0x02));
+        let left = gesture46_report(0, 0, step_payload(0xfe));
+        assert_eq!(decode_gesture46_step(&right, 2, 13), Some(2));
+        assert_eq!(decode_gesture46_step(&left, 2, 13), Some(-2));
+    }
+
+    #[test]
+    fn roll_markers_and_empty_steps_carry_no_step() {
+        let mut start = [0; 16];
+        start[0] = 0x11;
+        let mut end = [0; 16];
+        end[0] = 0x31;
+        assert_eq!(
+            decode_gesture46_step(&gesture46_report(0, 0, start), 2, 13),
+            None
+        );
+        assert_eq!(
+            decode_gesture46_step(&gesture46_report(0, 0, end), 2, 13),
+            None
+        );
+        assert_eq!(
+            decode_gesture46_step(&gesture46_report(0, 0, step_payload(0)), 2, 13),
+            None
+        );
+    }
+
+    #[test]
+    fn a_gesture46_step_must_come_from_the_wheel_feature_as_an_event() {
+        let payload = step_payload(0x02);
+        assert_eq!(
+            decode_gesture46_step(&gesture46_report(0, 1, payload), 2, 13),
+            None
+        );
+        assert_eq!(
+            decode_gesture46_step(&gesture46_report(1, 0, payload), 2, 13),
+            None
+        );
+        assert_eq!(
+            decode_gesture46_step(&gesture46_report(0, 0, payload), 3, 13),
+            None
+        );
+        assert_eq!(
+            decode_gesture46_step(&gesture46_report(0, 0, payload), 2, 14),
+            None
         );
     }
 }

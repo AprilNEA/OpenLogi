@@ -27,7 +27,7 @@ use gpui::{
     App, Entity, FontWeight, IntoElement, ParentElement, RenderOnce,
     StatefulInteractiveElement as _, Styled, Window, div, px, svg,
 };
-use gpui_component::{
+use gpui_kit::component::{
     Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants},
     h_flex,

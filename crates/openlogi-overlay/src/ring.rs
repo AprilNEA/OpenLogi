@@ -16,7 +16,7 @@ use gpui::{
 use openlogi_core::binding::{Action, ActionRingSize, ActionRingSlot};
 use openlogi_ipc::ActionRingInvocation;
 use openlogi_ui::action_icons::RING_CANCEL_ICON;
-use openlogi_ui::color;
+use openlogi_ui::color::{self, neutral};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -130,8 +130,8 @@ pub(crate) const RING_APP_ID: &str = "openlogi-action-ring";
 /// through it; only the selected slot is solid. In light the disc is a shade
 /// off white, so it still reads over a white page. The ring follows the system
 /// appearance rather than the settings app's theme, which this process does
-/// not load. Only the accent is shared (`openlogi_ui::color`); these greys are
-/// local by nature.
+/// not load. Only the accent and the shape of a grey are shared
+/// (`openlogi_ui::color`); which greys the ring picks is local by nature.
 #[derive(Clone, Copy)]
 struct RingColors {
     slot: Hsla,
@@ -166,15 +166,6 @@ impl RingColors {
             WindowAppearance::Light | WindowAppearance::VibrantLight => Self::LIGHT,
             WindowAppearance::Dark | WindowAppearance::VibrantDark => Self::DARK,
         }
-    }
-}
-
-const fn neutral(lightness: f32, alpha: f32) -> Hsla {
-    Hsla {
-        h: 0.0,
-        s: 0.0,
-        l: lightness,
-        a: alpha,
     }
 }
 

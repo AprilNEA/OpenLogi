@@ -5,7 +5,7 @@ use openlogi_hidpp_derive::Feature;
 use tracing::warn;
 
 use crate::{
-    feature::FeatureEndpoint,
+    feature::{FeatureEndpoint, decode_chunked_name},
     protocol::v20::{ErrorType, Hidpp20Error},
 };
 
@@ -49,23 +49,24 @@ impl DeviceFriendlyNameFeature {
     /// Retrieves the whole friendly name of the device by first calling
     /// [`Self::get_friendly_name_length`] once and then repeatedly calling
     /// [`Self::get_friendly_name`] until all characters were received.
+    ///
+    /// The chunks are joined before decoding: a multi-byte UTF-8 character
+    /// can straddle two of them.
     pub async fn get_whole_friendly_name(&self) -> Result<String, Hidpp20Error> {
         let count = self.get_friendly_name_length().await?.name_length;
-        let mut string = String::with_capacity(count as usize);
+        let mut bytes = Vec::with_capacity(count as usize);
 
-        let mut len = 0;
-        while len < count as usize {
+        while bytes.len() < count as usize {
             #[expect(
                 clippy::cast_possible_truncation,
-                reason = "len < count as usize and count is a u8, so len always fits in u8"
+                reason = "bytes.len() < count as usize and count is a u8, so the length always fits in u8"
             )]
-            let index = len as u8;
+            let index = bytes.len() as u8;
             let part = self.get_friendly_name(index).await?;
-            string.push_str(str::from_utf8(&part).map_err(|_| Hidpp20Error::UnsupportedResponse)?);
-            len = string.len();
+            bytes.extend_from_slice(&part);
         }
 
-        Ok(string.trim_end_matches(char::from(0)).to_string())
+        decode_chunked_name(bytes)
     }
 
     /// Retrieves a chunk of characters of the default friendly name of the
@@ -107,23 +108,24 @@ impl DeviceFriendlyNameFeature {
     /// Retrieves the whole default friendly name of the device by first calling
     /// [`Self::get_friendly_name_length`] once and then repeatedly calling
     /// [`Self::get_default_friendly_name`] until all characters were received.
+    ///
+    /// The chunks are joined before decoding, as in
+    /// [`Self::get_whole_friendly_name`].
     pub async fn get_whole_default_friendly_name(&self) -> Result<String, Hidpp20Error> {
         let count = self.get_friendly_name_length().await?.default_name_length;
-        let mut string = String::with_capacity(count as usize);
+        let mut bytes = Vec::with_capacity(count as usize);
 
-        let mut len = 0;
-        while len < count as usize {
+        while bytes.len() < count as usize {
             #[expect(
                 clippy::cast_possible_truncation,
-                reason = "len < count as usize and count is a u8, so len always fits in u8"
+                reason = "bytes.len() < count as usize and count is a u8, so the length always fits in u8"
             )]
-            let index = len as u8;
+            let index = bytes.len() as u8;
             let part = self.get_default_friendly_name(index).await?;
-            string.push_str(str::from_utf8(&part).map_err(|_| Hidpp20Error::UnsupportedResponse)?);
-            len = string.len();
+            bytes.extend_from_slice(&part);
         }
 
-        Ok(string.trim_end_matches(char::from(0)).to_string())
+        decode_chunked_name(bytes)
     }
 
     /// Sets a chunk of the friendly device name, starting at a specific index
@@ -346,6 +348,39 @@ mod tests {
         let mut head = vec![0];
         head.extend_from_slice(b"MX Keys");
         assert_eq!(read_chunk(2, 0, &head), padded(b"MX Keys").as_slice());
+    }
+
+    /// Reads a whole name with `function` (1: friendly, 2: default) after a
+    /// length reply of `len`, answering each chunk read with `chunks` in turn.
+    fn read_whole(function: u8, len: u8, chunks: &[&[u8]]) -> String {
+        futures::executor::block_on(async {
+            let (raw, handle) = MockRawHidChannel::new();
+            let channel = Arc::new(channel_with_reader(raw).await);
+            let feature = DeviceFriendlyNameFeature::new(channel, DEVICE_INDEX, FEATURE_INDEX);
+            handle.queue_response(reply(0, &[len, 32, len]).into());
+            for chunk in chunks {
+                handle.queue_response(reply(function, chunk).into());
+            }
+            if function == 1 {
+                feature.get_whole_friendly_name().await.unwrap()
+            } else {
+                feature.get_whole_default_friendly_name().await.unwrap()
+            }
+        })
+    }
+
+    #[test]
+    fn decodes_a_character_split_across_chunks() {
+        // "é" is 0xC3 0xA9: its first byte ends the first 15-byte chunk and
+        // its second opens the next. Decoding each chunk on its own used to
+        // reject the whole name.
+        let mut first = vec![0];
+        first.extend_from_slice(b"Fourteen bytes\xc3");
+        let second: &[u8] = &[15, 0xa9];
+        for function in [1, 2] {
+            let name = read_whole(function, 16, &[first.as_slice(), second]);
+            assert_eq!(name, "Fourteen bytesé");
+        }
     }
 
     #[test]

@@ -5,7 +5,7 @@ use super::*;
 const APP: &str = "com.example.Editor";
 
 fn inspector(cx: &mut gpui::TestAppContext) -> (&mut gpui::VisualTestContext, tempfile::TempDir) {
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join(openlogi_core::paths::CONFIG_FILE);
     let (mut config, mut file) = ConfigFile::load_from_path(&path).unwrap();

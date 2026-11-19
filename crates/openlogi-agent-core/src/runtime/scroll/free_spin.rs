@@ -12,6 +12,9 @@
 //! - a finger stop keeps the wheel near full speed until ~50 ms before its
 //!   last report, so it shows as a silence, a collapse of the short-window
 //!   speed, or a deceleration far beyond friction.
+//! - a finger stop leaves at most one notch of settling after it is
+//!   detected; a finger catching the wheel to flick it again keeps it
+//!   reporting a notch every ~8 ms.
 //!
 //! On the recordings these rules have no false trigger and catch every
 //! finger stop a median ~20 ms after the wheel's last report.
@@ -89,9 +92,15 @@ const SLOW_ONSET_PEAK: f64 = 80.0;
 const SLOW_ONSET_PEAK_AGE: Duration = Duration::from_millis(400);
 const COAST_SLACK: f64 = 10.0;
 
-/// After a stop, reports this soon are the wheel settling; later ones, or one
-/// turning the other way, start a new gesture.
+/// After a stop, reports this soon are the wheel settling, up to
+/// [`SETTLE_MAX_NOTCHES`]; later ones, more, or one turning the other way
+/// start a new gesture.
 const STOP_SETTLE: Duration = Duration::from_millis(40);
+/// The most the wheel settles after a stop, however many reports it arrives
+/// in. More within [`STOP_SETTLE`] is a finger turning the wheel again — the
+/// push of a repeated flick — and starts a new gesture at once rather than
+/// being swallowed.
+const SETTLE_MAX_NOTCHES: f64 = 1.0;
 
 /// Window of the speed that drives momentum output: long enough to smooth
 /// the 1–3 notch quantization of low-resolution reports.
@@ -129,6 +138,31 @@ struct Report {
     notches: f64,
 }
 
+/// A wheel a finger stopped: when, and how far it has settled since.
+#[derive(Clone, Copy)]
+struct Settle {
+    since: Instant,
+    notches: f64,
+}
+
+impl Settle {
+    const fn new(since: Instant) -> Self {
+        Self {
+            since,
+            notches: 0.0,
+        }
+    }
+
+    /// Absorb one report of unsigned `notches` at `at`, the stopped wheel's
+    /// way, as the wheel settling: `false` once [`STOP_SETTLE`] has passed or
+    /// the wheel has turned more than [`SETTLE_MAX_NOTCHES`] since the stop,
+    /// when the report is a new gesture instead.
+    fn absorb(&mut self, at: Instant, notches: f64) -> bool {
+        self.notches += notches;
+        at.saturating_duration_since(self.since) < STOP_SETTLE && self.notches <= SETTLE_MAX_NOTCHES
+    }
+}
+
 /// One wheel's detector.
 pub struct FreeSpinDetector {
     reports: VecDeque<Report>,
@@ -136,7 +170,8 @@ pub struct FreeSpinDetector {
     /// Direction of the gesture: the sign of its first report.
     direction: f64,
     free_spin_since: Option<Instant>,
-    stopped_at: Option<Instant>,
+    /// Set from a stop until the gesture ends.
+    settle: Option<Settle>,
     /// Highest [`ONSET_WINDOW`] speed reached within the last
     /// [`SLOW_ONSET_PEAK_AGE`], and when.
     peak: f64,
@@ -151,7 +186,7 @@ impl Default for FreeSpinDetector {
             gesture_start: None,
             direction: 0.0,
             free_spin_since: None,
-            stopped_at: None,
+            settle: None,
             peak: 0.0,
             peak_at: None,
             phase: WheelPhase::Ratchet,
@@ -172,7 +207,7 @@ impl FreeSpinDetector {
     pub fn resume_free_spin(&mut self, at: Instant) {
         self.phase = WheelPhase::FreeSpin;
         self.free_spin_since = Some(at);
-        self.stopped_at = None;
+        self.settle = None;
     }
 
     /// The wheel's speed in notches per second over the [`SPEED_WINDOW`]
@@ -193,10 +228,13 @@ impl FreeSpinDetector {
         // unsigned, so a reversal kept in them would read as more speed the
         // old way.
         let reversed = self.gesture_start.is_some() && notches * self.direction < 0.0;
-        let settled = self
-            .stopped_at
-            .is_some_and(|stopped_at| at.saturating_duration_since(stopped_at) >= STOP_SETTLE);
-        if reversed || settled {
+        // After a stop, a report that is no longer the wheel settling — too
+        // late, or too far — starts a new gesture too.
+        let moved_on = match &mut self.settle {
+            Some(settle) if !reversed => !settle.absorb(at, notches.abs()),
+            _ => false,
+        };
+        if reversed || moved_on {
             *self = Self::default();
         }
         if self.gesture_start.is_none() {
@@ -276,7 +314,7 @@ impl FreeSpinDetector {
                     self.peak_at = None;
                 } else if let Some(reason) = self.stop_reason(at) {
                     self.phase = WheelPhase::Stopped(reason);
-                    self.stopped_at = Some(at);
+                    self.settle = Some(Settle::new(at));
                 }
             }
             WheelPhase::Stopped(_) => {}
@@ -543,6 +581,127 @@ mod tests {
             detector.report(at + Duration::from_millis(10), -1.0),
             WheelPhase::Ratchet
         );
+    }
+
+    /// A finger catching a free spin to flick it again: the catch reads as a
+    /// stop, and the wheel turning on past one notch of settling — in one
+    /// report or several high-resolution ones — is a new gesture at once,
+    /// not more settling to swallow.
+    #[test]
+    fn a_push_right_after_a_stop_starts_a_new_gesture() {
+        let stopped = |detector: &mut FreeSpinDetector| {
+            let (next_poll, _) = spin(
+                detector,
+                Instant::now(),
+                |_| 200.0,
+                Duration::from_millis(600),
+            );
+            let mut at = next_poll;
+            while !matches!(detector.tick(at), WheelPhase::Stopped(_)) {
+                at += Duration::from_millis(1);
+            }
+            at
+        };
+        let ms = |at: Instant, n| at + Duration::from_millis(n);
+
+        let mut detector = FreeSpinDetector::default();
+        let at = stopped(&mut detector);
+        assert!(matches!(
+            detector.report(ms(at, 8), 1.0),
+            WheelPhase::Stopped(_)
+        ));
+        assert_eq!(detector.report(ms(at, 15), 1.0), WheelPhase::Ratchet);
+
+        let mut detector = FreeSpinDetector::default();
+        let at = stopped(&mut detector);
+        for t in [5, 10, 15] {
+            assert!(matches!(
+                detector.report(ms(at, t), 0.3),
+                WheelPhase::Stopped(_)
+            ));
+        }
+        assert_eq!(detector.report(ms(at, 20), 0.3), WheelPhase::Ratchet);
+    }
+
+    /// Every stop on a recorded line: how long its `Stopped` phase lasted, in
+    /// ms, and whether the wheel kept turning through it — reported at least
+    /// twice within [`STOP_SETTLE`] of it, as when a finger catches the wheel
+    /// only to push it on.
+    fn stops(line: &str) -> Vec<(usize, bool)> {
+        let (_, _, phases) = timeline(line);
+        let settle_ms = usize::try_from(STOP_SETTLE.as_millis()).expect("ms");
+        let report_ms: Vec<usize> = line
+            .split_whitespace()
+            .skip(1)
+            .map(|item| {
+                let (us, _) = item.split_once(':').expect("µs:notches");
+                usize::try_from(us.parse::<u64>().expect("µs") / 1000).expect("ms")
+            })
+            .collect();
+        let mut stops = Vec::new();
+        let mut from = 0;
+        while let Some(offset) = phases[from..]
+            .iter()
+            .position(|p| matches!(p, WheelPhase::Stopped(_)))
+        {
+            let start = from + offset;
+            let lasted = phases[start..]
+                .iter()
+                .position(|p| !matches!(p, WheelPhase::Stopped(_)))
+                .unwrap_or(phases.len() - start);
+            let kept_turning = report_ms
+                .iter()
+                .filter(|ms| (start + 1..start + settle_ms).contains(ms))
+                .count()
+                >= 2;
+            stops.push((lasted, kept_turning));
+            from = start + lasted;
+        }
+        stops
+    }
+
+    /// The recordings: no finger stop leaves more than a notch of settling,
+    /// so each one swallows its settling for the whole settle time; every
+    /// catch the finger pushes the wheel on from leaves its stop before then,
+    /// at the push.
+    #[test]
+    fn recorded_catches_resume_at_the_push_and_finger_stops_stay_stopped() {
+        let settle_ms = usize::try_from(STOP_SETTLE.as_millis()).expect("ms");
+        let mut stopped = 0;
+        for line in include_str!("free_spin_recordings.txt")
+            .lines()
+            .chain(
+                include_str!("free_spin_session.txt")
+                    .lines()
+                    .filter(|l| l.starts_with("flicks ")),
+            )
+            .filter(|l| !l.starts_with('#'))
+        {
+            for (lasted, _) in stops(line) {
+                stopped += 1;
+                assert!(
+                    lasted >= settle_ms,
+                    "a finger stop's settling scrolled after {lasted} ms"
+                );
+            }
+        }
+        assert!(stopped >= 30, "only {stopped} recorded finger stops");
+        let mut caught = 0;
+        for line in include_str!("repeat_flicks_recording.txt")
+            .lines()
+            .filter(|l| !l.starts_with('#'))
+        {
+            for (lasted, kept_turning) in stops(&format!("repeat {line}")) {
+                if kept_turning {
+                    caught += 1;
+                    assert!(
+                        lasted < settle_ms,
+                        "a push on from a catch was swallowed for {lasted} ms"
+                    );
+                }
+            }
+        }
+        assert!(caught >= 3, "only {caught} recorded catches pushed on");
     }
 
     /// A free wheel cannot turn back on its own: a report the other way

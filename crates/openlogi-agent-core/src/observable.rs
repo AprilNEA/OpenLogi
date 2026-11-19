@@ -21,12 +21,13 @@
 
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::brand::is_openlogi_foreground_id;
+use openlogi_core::config::ConfigRevision;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_hook::Hook;
 use openlogi_ipc::{
     AgentSnapshot, AgentStatus, FlowPairingPhase, FlowPeerStatus, FlowStatus, ForegroundApps,
-    FoundDevice, Generation, InventoryHealth, OBSERVE_HOLD, Observation, ObservedLight,
-    PROTOCOL_VERSION, PairingPhase, RECENT_APPS, SecureInput, VirtualKeyboardStatus,
+    Generation, InventoryHealth, OBSERVE_HOLD, Observation, ObservedLight, PROTOCOL_VERSION,
+    PairingPhase, RECENT_APPS, SecureInput, VirtualKeyboardStatus,
 };
 use tokio::sync::watch;
 
@@ -80,6 +81,7 @@ impl ObservableState {
                 foreground: ForegroundApps::default(),
                 lights: Vec::new(),
                 flow: FlowStatus::default(),
+                config_revision: ConfigRevision::default(),
             },
         });
         Self {
@@ -227,6 +229,18 @@ impl ObservableState {
         });
     }
 
+    /// Publish the revision of the `config.toml` the agent just loaded. A
+    /// reload of the same file notifies nobody.
+    pub fn set_config_revision(&self, revision: ConfigRevision) {
+        self.update(|snapshot| {
+            if snapshot.config_revision == revision {
+                return false;
+            }
+            snapshot.config_revision = revision;
+            true
+        });
+    }
+
     /// Publish the autostart state the current config asks for.
     pub fn set_launch_at_login(&self, enabled: bool) {
         self.update(|snapshot| {
@@ -293,9 +307,9 @@ impl ObservableState {
 
     /// Publish where the pairing session stands, or `None` for no session.
     ///
-    /// A terminal phase is left in place on purpose: it is the session's result,
-    /// and it has to survive until the GUI cancels or starts another one, or a
-    /// result could fall between two observations.
+    /// The value is a projection, not state of its own: the agent's pairing
+    /// session owner publishes it after every transition, under its own lock,
+    /// and decides how long a terminal result stays.
     pub fn set_pairing(&self, phase: Option<PairingPhase>) {
         self.update(|snapshot| {
             if snapshot.pairing == phase {
@@ -303,24 +317,6 @@ impl ObservableState {
             }
             snapshot.pairing = phase;
             true
-        });
-    }
-
-    /// Add a discovered device to the pairing session, moving it into
-    /// [`PairingPhase::Found`] if it isn't there yet. Re-discovering the same
-    /// address changes nothing.
-    pub fn found_pairing_device(&self, device: FoundDevice) {
-        self.update(|snapshot| {
-            let mut found = match snapshot.pairing.take() {
-                Some(PairingPhase::Found(found)) => found,
-                _ => Vec::new(),
-            };
-            let known = found.iter().any(|seen| seen.address == device.address);
-            if !known {
-                found.push(device);
-            }
-            snapshot.pairing = Some(PairingPhase::Found(found));
-            !known
         });
     }
 

@@ -236,15 +236,15 @@ fn shell(job: Job, sh: &Shell) -> Result<Plan> {
 fn clippy(job: Job, host: Host) -> Plan {
     let plan = Plan::run(job, [Step::new("cargo").args(CLIPPY_ARGS)]);
     match host {
-        Host::Linux => plan.note("matches CI job 'clippy' (ubuntu-latest)"),
+        Host::Linux => plan.note("matches CI job 'clippy' (Linux)"),
         Host::Windows => {
             plan.note("host Windows clippy; CI's 'clippy' job is ubuntu — also run clippy-windows")
         }
         Host::Macos => plan.note(
-            "host macOS clippy, the same command as CI's 'clippy (macos)'. CI's 'clippy' job is ubuntu-latest and compiles linux cfg — this is not that job",
+            "host macOS clippy, the same command as CI's 'clippy (macos)'. CI's 'clippy' job runs on Linux and compiles linux cfg — this is not that job",
         ),
         Host::Other => plan.note(format!(
-            "host {host} clippy. CI's 'clippy' job is ubuntu-latest and compiles linux cfg — this is not that job"
+            "host {host} clippy. CI's 'clippy' job runs on Linux and compiles linux cfg — this is not that job"
         )),
     }
 }
@@ -319,7 +319,7 @@ fn tests_macos(job: Job) -> Plan {
     )
     .label(format!("tests (macos, {arch})"))
     .note(format!(
-        "CI also has a macos-15-intel x86_64 leg — this host only covers {arch}"
+        "CI also has an x86_64 leg under Rosetta 2 (`--target x86_64-apple-darwin`) — this host only covers {arch}"
     ))
 }
 
@@ -431,7 +431,7 @@ fn clippy_windows(job: Job, sh: &Shell, host: Host) -> Result<Plan> {
             .args(["--all-targets", "--", "-D", "warnings"])],
     )
     .label("clippy (windows) proxy")
-    .note("CI runs the whole workspace on windows-latest; this is the ring-free cross lint, not that job");
+    .note("CI runs the whole workspace on Windows; this is the ring-free cross lint, not that job");
     Ok(match invocation.note {
         Some(note) => plan.note(note),
         None => plan,

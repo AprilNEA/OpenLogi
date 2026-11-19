@@ -231,15 +231,19 @@ async fn get_dpi_on_channel(
         .map_err(|e| classify_hidpp_error(e, HidppOperation::ReadDpi, feature.id()))
 }
 
-/// Classify a HID++ error from the DPI functions of `feature_hex`. A device
-/// that announces the feature but rejects a function (`Unsupported` /
-/// `InvalidFunctionId`) or returns a structurally invalid DPI description
-/// (`UnsupportedResponse`) will keep doing so, so these map to the permanent
-/// [`WriteError::FeatureUnsupported`]; channel/timeout and other errors are
-/// forwarded through [`classify_hidpp_error`] as transient so callers may retry.
+/// Classify a HID++ error from the DPI reads of `feature_hex`. The reads send
+/// fixed arguments (sensor 0), so a device that announces the feature but
+/// rejects a read (`Unsupported`, `InvalidFunctionId` or `InvalidArgument`) or
+/// returns a structurally invalid DPI description (`UnsupportedResponse`) will
+/// keep doing so. These map to the permanent [`WriteError::FeatureUnsupported`].
+/// The G602 (wpid `402c`) rejects `getSensorDpiList` with `InvalidArgument`.
+/// Channel, timeout, `Busy` and other errors are forwarded through
+/// [`classify_hidpp_error`] as transient so callers may retry.
 fn classify_dpi_error(feature_hex: u16, error: Hidpp20Error) -> WriteError {
     match error {
-        Hidpp20Error::Feature(ErrorType::Unsupported | ErrorType::InvalidFunctionId)
+        Hidpp20Error::Feature(
+            ErrorType::Unsupported | ErrorType::InvalidFunctionId | ErrorType::InvalidArgument,
+        )
         | Hidpp20Error::UnsupportedResponse => WriteError::FeatureUnsupported { feature_hex },
         other => classify_hidpp_error(other, HidppOperation::ReadDpiCapabilities, feature_hex),
     }

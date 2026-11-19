@@ -43,7 +43,7 @@ impl Render for CalculatorInspector {
 #[gpui::test]
 fn keyboard_native_row_click_removes_the_persisted_binding(cx: &mut gpui::TestAppContext) {
     let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join(openlogi_core::paths::CONFIG_FILE);
     let (mut config, mut file) = ConfigFile::load_from_path(&path).unwrap();

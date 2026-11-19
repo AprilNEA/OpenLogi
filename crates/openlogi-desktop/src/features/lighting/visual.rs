@@ -7,7 +7,7 @@
 use gpui::{
     BoxShadow, ParentElement, Styled, div, hsla, img, point, prelude::FluentBuilder as _, px,
 };
-use gpui_component::{Icon, IconName};
+use gpui_kit::component::{Icon, IconName};
 use openlogi_core::config::LightSettings;
 
 use crate::services::assets::ResolvedAsset;

@@ -95,8 +95,21 @@ fn load_glow_geometry(dir: &Path) -> Option<GlowGeometry> {
 /// transparency (including background reachable through open seams) is
 /// "outside" and never glows, which is what keeps the colour inside the
 /// silhouette.
+///
+/// The leading bytes pick the decoder, not the extension: the catalog names
+/// many renders by bare UUID, most of them PNG or WebP.
 fn compute_glow_geometry(image_path: &Path) -> Option<GlowGeometry> {
-    let img = image::open(image_path).ok()?.into_rgba8();
+    let decoded = image::ImageReader::open(image_path)
+        .and_then(image::ImageReader::with_guessed_format)
+        .map_err(image::ImageError::from)
+        .and_then(image::ImageReader::decode);
+    let img = match decoded {
+        Ok(img) => img.into_rgba8(),
+        Err(error) => {
+            warn!(path = %image_path.display(), %error, "glow: could not decode the render");
+            return None;
+        }
+    };
     let (src_w, src_h) = img.dimensions();
     if src_w == 0 || src_h == 0 || src_w > MAX_MASK_DIM || src_h > MAX_MASK_DIM {
         return None;
@@ -226,6 +239,8 @@ impl GlowGeometry {
 
 #[cfg(test)]
 mod tests {
+    use image::ImageFormat;
+
     use super::*;
 
     #[test]
@@ -271,9 +286,24 @@ mod tests {
         assert!(GlowGeometry::from_mask(&mask).is_none());
     }
 
-    /// Write an RGBA png where `1` cells are solid and the rest fully
-    /// transparent.
-    fn write_png(dir: &std::path::Path, name: &str, rows: &[&[u8]]) -> std::path::PathBuf {
+    /// A ring of opaque pixels around one transparent pixel (a hole), with
+    /// border-connected transparency everywhere else.
+    const RING: &[&[u8]] = &[
+        &[0, 0, 0, 0, 0],
+        &[0, 1, 1, 1, 0],
+        &[0, 1, 0, 1, 0],
+        &[0, 1, 1, 1, 0],
+        &[0, 0, 0, 0, 0],
+    ];
+
+    /// Write an RGBA render in `format` where `1` cells are solid and the rest
+    /// fully transparent. The format is explicit, so `name` needs no extension.
+    fn write_render(
+        dir: &std::path::Path,
+        name: &str,
+        format: ImageFormat,
+        rows: &[&[u8]],
+    ) -> std::path::PathBuf {
         let h = u32::try_from(rows.len()).expect("test image height fits u32");
         let w = u32::try_from(rows[0].len()).expect("test image width fits u32");
         let mut img = image::RgbaImage::new(w, h);
@@ -288,26 +318,14 @@ mod tests {
             }
         }
         let path = dir.join(name);
-        img.save(&path).expect("write png");
+        img.save_with_format(&path, format).expect("write render");
         path
     }
 
     #[test]
     fn computed_geometry_finds_only_enclosed_holes() {
         let dir = tempfile::tempdir().expect("tempdir");
-        // A ring of opaque pixels around one transparent pixel (a hole), with
-        // border-connected transparency everywhere else.
-        let path = write_png(
-            dir.path(),
-            "ring.png",
-            &[
-                &[0, 0, 0, 0, 0],
-                &[0, 1, 1, 1, 0],
-                &[0, 1, 0, 1, 0],
-                &[0, 1, 1, 1, 0],
-                &[0, 0, 0, 0, 0],
-            ],
-        );
+        let path = write_render(dir.path(), "ring.png", ImageFormat::Png, RING);
         let geom = compute_glow_geometry(&path).expect("hole found");
         assert_eq!(geom.segments.len(), 1);
         let seg = geom.segments[0];
@@ -317,12 +335,37 @@ mod tests {
     }
 
     #[test]
+    fn computed_geometry_reads_a_render_named_without_an_extension() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // The catalog names renders by bare UUID, e.g. the G316 X's WebP ones.
+        // WebP decoding reaches this crate through gpui's `image/webp`.
+        for (name, format) in [
+            ("45a9d07d-91e8-47d6-92b3-f3827d951246", ImageFormat::Png),
+            ("88c7bb4c-5dd5-4a24-b4f4-8141e3ff2972", ImageFormat::WebP),
+        ] {
+            let path = write_render(dir.path(), name, format, RING);
+            let segments = compute_glow_geometry(&path).map(|geom| geom.segments.len());
+            assert_eq!(segments, Some(1), "{format:?} render named {name}");
+        }
+    }
+
+    #[test]
+    fn computed_geometry_skips_a_render_no_decoder_reads() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // The head of a G HUB encrypted asset, under a bare UUID name.
+        let path = dir.path().join("58ee56b0-5ca6-4e7b-b764-2d1746094b78");
+        std::fs::write(&path, b"!\x05! \x82\0\0\0{\"key-id\": \"ad3e4085\"}").expect("write blob");
+        assert!(compute_glow_geometry(&path).is_none());
+    }
+
+    #[test]
     fn computed_geometry_ignores_border_connected_transparency() {
         let dir = tempfile::tempdir().expect("tempdir");
         // A C-shape: the notch opens to the border, so nothing is enclosed.
-        let path = write_png(
+        let path = write_render(
             dir.path(),
             "open.png",
+            ImageFormat::Png,
             &[&[1, 1, 1], &[1, 0, 0], &[1, 1, 1]],
         );
         assert!(compute_glow_geometry(&path).is_none());
@@ -331,7 +374,12 @@ mod tests {
     #[test]
     fn computed_geometry_skips_fully_opaque_renders() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = write_png(dir.path(), "solid.png", &[&[1, 1], &[1, 1]]);
+        let path = write_render(
+            dir.path(),
+            "solid.png",
+            ImageFormat::Png,
+            &[&[1, 1], &[1, 1]],
+        );
         assert!(compute_glow_geometry(&path).is_none());
     }
 }

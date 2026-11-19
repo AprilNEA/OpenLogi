@@ -5,8 +5,8 @@ use gpui::{
     ParentElement, RenderOnce, Role, SharedString, StatefulInteractiveElement, StyleRefinement,
     Styled, Toggled, Window, prelude::FluentBuilder as _,
 };
-use gpui_base::Button as BaseButton;
-use gpui_component::{Disableable, Selectable};
+use gpui_kit::base::Button as BaseButton;
+use gpui_kit::component::{Disableable, Selectable};
 
 type ClickHandler = std::rc::Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 
@@ -155,7 +155,7 @@ mod tests {
         }
     }
 
-    fn activate_key(cx: &mut gpui::VisualTestContext, key: &str) {
+    fn activate_key(cx: &mut gpui::VisualTestContext, key: &'static str) {
         let keystroke = Keystroke::parse(key).unwrap();
         cx.simulate_event(KeyDownEvent {
             keystroke: keystroke.clone(),
@@ -167,7 +167,7 @@ mod tests {
 
     #[gpui::test]
     fn choice_card_is_focusable_and_activates_in_both_controlled_states(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(gpui_kit::init);
         let activations = Rc::new(Cell::new(0));
         let parent_clicks = Rc::new(Cell::new(0));
         let (view, cx) = cx.add_window_view({
@@ -199,7 +199,7 @@ mod tests {
     #[gpui::test]
     fn disabled_choice_card_is_inert_and_blocks_its_parent(cx: &mut TestAppContext) {
         let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
-        cx.update(gpui_component::init);
+        cx.update(gpui_kit::init);
         let activations = Rc::new(Cell::new(0));
         let parent_clicks = Rc::new(Cell::new(0));
         let (_, cx) = cx.add_window_view({
@@ -253,7 +253,7 @@ mod tests {
     /// its label instead of above it.
     #[gpui::test]
     fn choice_card_stacks_children_top_to_bottom_at_full_width(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(gpui_kit::init);
         let first: PaintedBounds = Rc::default();
         let second: PaintedBounds = Rc::default();
         let (_, cx) = cx.add_window_view({

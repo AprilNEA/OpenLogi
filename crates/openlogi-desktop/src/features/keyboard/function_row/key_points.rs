@@ -22,14 +22,23 @@
 //! ([`DeviceRoute::keypad`](openlogi_core::hid::DeviceRoute::keypad)): a
 //! number pad that is not that keypad has none of them, and is drawn from
 //! its own markers like a keyboard.
+//!
+//! The G913 and G915 depot marks only its G-keys, on a canvas other than the
+//! render it ships, so for that render OpenLogi carries the Esc, F-row, M-key
+//! and G-key centres measured off it ([`g913_slots`]). Its G1–G5 and M keys
+//! show once the user lets OpenLogi run them ([`GamingKeys`]): until then the
+//! keyboard's onboard actions own them and there is nothing here to bind.
 
 use std::collections::HashSet;
 
-use openlogi_core::binding::{ButtonId, Cid, GridKey, GridSlot, KeypadPage};
-use openlogi_core::config::{FunctionKey, KeyModifiers, KeyTrigger};
+use openlogi_core::binding::{
+    ButtonId, Cid, GKey, GKeyProfile, GKeySlot, GridKey, GridSlot, KeypadPage, ModeKey,
+};
+use openlogi_core::config::{FunctionKey, GamingKeyMode, KeyModifiers, KeyTrigger};
 use openlogi_core::hid::KeypadDescriptor;
 
 use crate::services::assets::ResolvedAsset;
+use crate::state::GamingKeys;
 
 const FALLBACK_KEY_Y_FRAC: f32 = 0.153;
 /// Legacy pixel-marker depots (G513 family) mark F1-F12 but not Esc. Esc sits
@@ -68,6 +77,13 @@ pub(crate) enum KeyTarget {
     Grid(GridSlot),
     /// An OS-hook F-row trigger, bound globally across keyboards.
     FunctionKey(KeyTrigger),
+    /// A G-series G-key in one M profile, bound per device. Layouts place
+    /// M1 slots; the view moves them to the profile it is editing
+    /// ([`Self::on_profile`]).
+    GKey(GKeySlot),
+    /// M1–M3 or MR: keys of their own in [`GamingKeyMode::NineButtons`],
+    /// the profile switches otherwise.
+    ModeKey(ModeKey),
 }
 
 impl KeyTarget {
@@ -89,6 +105,28 @@ impl KeyTarget {
         }
     }
 
+    /// This target as the view edits it in G-key `profile`: a G-key moves to
+    /// that profile's slot; every other target stays as it is.
+    #[must_use]
+    pub(crate) fn on_profile(self, profile: GKeyProfile) -> Self {
+        match self {
+            Self::GKey(slot) => Self::GKey(GKeySlot { profile, ..slot }),
+            other => other,
+        }
+    }
+
+    /// Where this target's binding is stored: under a button of the selected
+    /// device, or as a global F-row trigger.
+    pub(crate) fn stored_as(&self) -> StoredAs<'_> {
+        match self {
+            Self::Control(button) => StoredAs::Device(*button),
+            Self::Grid(slot) => StoredAs::Device(ButtonId::Grid(*slot)),
+            Self::GKey(slot) => StoredAs::Device(ButtonId::GKey(*slot)),
+            Self::ModeKey(key) => StoredAs::Device(ButtonId::ModeKey(*key)),
+            Self::FunctionKey(trigger) => StoredAs::Global(trigger),
+        }
+    }
+
     /// The key's legend: a control's or grid key's localized catalog name,
     /// or the F-row trigger as it is written in `config.toml`.
     pub(crate) fn label(&self) -> String {
@@ -96,8 +134,31 @@ impl KeyTarget {
             Self::Control(button) => control_legend(*button),
             Self::Grid(slot) => rust_i18n::t!(slot.key.translation_key()).into_owned(),
             Self::FunctionKey(trigger) => trigger.to_string(),
+            Self::GKey(slot) => {
+                let key = rust_i18n::t!(slot.key.translation_key());
+                if slot.profile == GKeyProfile::M1 {
+                    key.into_owned()
+                } else {
+                    rust_i18n::t!(
+                        "keyboard.g_key_in_profile",
+                        key => key,
+                        profile => slot.profile.label()
+                    )
+                    .into_owned()
+                }
+            }
+            Self::ModeKey(key) => rust_i18n::t!(key.translation_key()).into_owned(),
         }
     }
+}
+
+/// Where a [`KeyTarget`]'s binding is stored.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StoredAs<'a> {
+    /// Under this button of the selected device, per open app profile.
+    Device(ButtonId),
+    /// As this OS-hook trigger, across keyboards.
+    Global(&'a KeyTrigger),
 }
 
 /// A control's localized name; one OpenLogi has no catalog row for is the
@@ -149,7 +210,11 @@ impl KeySurface {
 pub(super) fn key_surface(
     asset: Option<&ResolvedAsset>,
     keypad: Option<&KeypadDescriptor>,
+    gaming: Option<GamingKeys>,
 ) -> KeySurface {
+    if asset.is_some_and(shows_g_keys) {
+        return KeySurface::Photo(g913_slots(gaming));
+    }
     if let Some(asset) = asset {
         let marked = marker_slots(asset, keypad);
         if !marked.is_empty() {
@@ -185,7 +250,100 @@ pub(super) fn key_slots(
     asset: Option<&ResolvedAsset>,
     keypad: Option<&KeypadDescriptor>,
 ) -> Vec<KeySlotLayout> {
-    key_surface(asset, keypad).slots()
+    key_surface(asset, keypad, None).slots()
+}
+
+/// The depots that ship the render [`g913_slots`] was measured on: the
+/// G913's, and the G915's copy of it.
+const G913_DEPOTS: [&str; 2] = ["g913", "g915"];
+/// Size of the G913 render the F-row and M-key centres were measured on.
+const G913_RENDER: (f32, f32) = (3600., 1125.);
+/// Size of the canvas the depot's own G-key markers were authored on — the
+/// same render, scaled.
+const G913_MARKER_CANVAS: (f32, f32) = (3850., 1202.);
+
+/// Whether `asset` shows the G913 render: one of [`G913_DEPOTS`], or a G913
+/// or G915 that resolved to another depot of the same render. The G915 X has
+/// a depot and render of its own and is not this one. Only this render
+/// places G-keys, so only on it does the tab offer to run them.
+pub(super) fn shows_g_keys(asset: &ResolvedAsset) -> bool {
+    G913_DEPOTS
+        .iter()
+        .any(|depot| asset.depot.eq_ignore_ascii_case(depot))
+        || ["G913", "G915"]
+            .iter()
+            .any(|name| asset.display_name.eq_ignore_ascii_case(name))
+}
+
+/// The G913 render's keys: Esc and F1–F12 always, plus the gaming cluster
+/// while OpenLogi runs it — M1–M3 when the keyboard reports them, MR only as
+/// a key of its own in nine-key mode (otherwise it keeps recording macros on
+/// the keyboard), and G1–G5 down the left edge. Centres were measured on the
+/// render ([`G913_RENDER`]) and, for the G-keys, taken from the depot's own
+/// markers ([`G913_MARKER_CANVAS`]).
+fn g913_slots(gaming: Option<GamingKeys>) -> Vec<KeySlotLayout> {
+    const F_ROW_X: [f32; 13] = [
+        320., 567., 715., 864., 1013., 1240., 1388., 1535., 1683., 1914., 2063., 2211., 2359.,
+    ];
+    const F_ROW_Y: f32 = 270.;
+    const MODE_KEY_X: [f32; 4] = [576., 714., 853., 992.];
+    const MODE_KEY_Y: f32 = 97.;
+    const G_KEY_X: f32 = 154.;
+    const G_KEY_Y: [f32; 5] = [483., 637., 791., 945., 1099.];
+
+    let (w, h) = G913_RENDER;
+    let mut slots = function_key_slots(
+        F_ROW_X
+            .into_iter()
+            .map(|x| KeyPoint {
+                x_frac: x / w,
+                y_frac: F_ROW_Y / h,
+            })
+            .collect(),
+    );
+    let Some(gaming) = gaming.filter(|gaming| gaming.software_control) else {
+        return slots;
+    };
+    let nine_keys = gaming.mode == GamingKeyMode::NineButtons;
+    let mode_keys = ModeKey::ALL.into_iter().zip(MODE_KEY_X).filter(|(key, _)| {
+        if key.profile().is_some() {
+            gaming.m_keys
+        } else {
+            gaming.macro_record && nine_keys
+        }
+    });
+    let (marker_w, marker_h) = G913_MARKER_CANVAS;
+    let g_keys = GKey::ALL.into_iter().zip(G_KEY_Y).map(|(key, y)| {
+        (
+            KeyTarget::GKey(GKeySlot {
+                profile: GKeyProfile::M1,
+                key,
+            }),
+            KeyPoint {
+                x_frac: G_KEY_X / marker_w,
+                y_frac: y / marker_h,
+            },
+        )
+    });
+    slots.extend(
+        mode_keys
+            .map(|(key, x)| {
+                (
+                    KeyTarget::ModeKey(key),
+                    KeyPoint {
+                        x_frac: x / w,
+                        y_frac: MODE_KEY_Y / h,
+                    },
+                )
+            })
+            .chain(g_keys)
+            .map(|(target, point)| KeySlotLayout {
+                legend: target.label(),
+                target,
+                point,
+            }),
+    );
+    slots
 }
 
 /// Schematic keycap geometry, in CSS px. `function_row`'s `KeypadPane`
@@ -343,7 +501,10 @@ pub(super) fn photo_key_shape(target: &KeyTarget, render_w: f32) -> KeyShape {
                 PAGING_INNER_CORNER_PX,
             ],
         ),
-        KeyTarget::Control(_) | KeyTarget::FunctionKey(_) => ((GRID_KEY_PX, GRID_KEY_PX), [k; 4]),
+        KeyTarget::Control(_)
+        | KeyTarget::FunctionKey(_)
+        | KeyTarget::GKey(_)
+        | KeyTarget::ModeKey(_) => ((GRID_KEY_PX, GRID_KEY_PX), [k; 4]),
     };
     let scale = render_w / STOCK_KEYPAD_RENDER.0 as f32;
     KeyShape {

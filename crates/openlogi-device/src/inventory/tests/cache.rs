@@ -1,6 +1,6 @@
 //! The probe cache: what it keys, when an entry ages out, and when a cached answer is reused.
 use super::*;
-use crate::channel::scripted::{feature_error, ping_reply};
+use crate::channel::scripted::{feature_error, ping_reply, register_error};
 
 #[test]
 fn direct_codename_prefers_hidpp_marketing_name_over_generic_os_name() {
@@ -334,6 +334,12 @@ fn answering_only_its_ping() -> ScriptedRawHidChannel {
     .0
 }
 
+/// A wired HID++ 1.0 mouse (the G700s of #757): it reads HID++ 2.0's protocol
+/// ping as sub id `0x00` and answers with HID++ 1.0's invalid-sub-id error.
+fn answering_as_hidpp10() -> ScriptedRawHidChannel {
+    ScriptedRawHidChannel::with_responder(|request| Some(register_error(request, 0x01))).0
+}
+
 /// A due cache entry for a pointer device whose last walk completed.
 fn stale_pointer_entry() -> Cached {
     let mut last_good = cache_entry();
@@ -425,5 +431,39 @@ async fn a_direct_reprobe_answered_by_its_ping_keeps_the_channel() {
             .get(&CacheKey::Direct(node))
             .is_some_and(|entry| entry.probe.capabilities().is_some()),
         "the unfinished re-read must not replace the complete walk"
+    );
+}
+
+/// A direct node that answers as HID++ 1.0 is settled, not failed. The answer
+/// is definitive; counting it as a failure retired and reopened the channel
+/// every few passes for as long as the device stayed plugged in (#2432).
+#[tokio::test]
+async fn a_direct_hidpp10_answer_keeps_the_channel() {
+    let info = scripted_node_info("hidpp10-direct");
+    let node = info.id.clone();
+    let backend = Arc::new(DirectChannelBackend {
+        node: info,
+        open: answering_as_hidpp10,
+    });
+    let mut enumerator = Enumerator::with_backend(backend);
+
+    // Past the ledger's retirement threshold and its replay grace both.
+    for pass in 1..=4 {
+        let inventories = enumerator
+            .enumerate()
+            .await
+            .expect("a HID++ 1.0 answer settles");
+        assert!(
+            !enumerator.channels.is_retiring(&node),
+            "pass {pass}: a channel whose device answered is not dead"
+        );
+        assert!(
+            inventories.is_empty(),
+            "pass {pass}: a direct HID++ 1.0 device is not listed yet (#2161)"
+        );
+    }
+    assert!(
+        !enumerator.cache.contains_key(&CacheKey::Direct(node)),
+        "a rejected node is not cached"
     );
 }

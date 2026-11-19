@@ -15,14 +15,16 @@
 //! Unifying just opens a lock and waits for the next device to link, so it
 //! jumps straight from *searching* to *paired*.
 
+use std::mem::Discriminant;
+
 use crate::ui::theme::FocusRingStyle as _;
 use gpui::{
     App, Context, ElementId, FocusHandle, FontWeight, Global, InteractiveElement, IntoElement,
     ParentElement as _, Render, SharedString, Size, StatefulInteractiveElement as _, Styled as _,
     Subscription, Window, div, prelude::FluentBuilder as _, px, svg,
 };
-use gpui_base::Button as BaseButton;
-use gpui_component::{
+use gpui_kit::base::Button as BaseButton;
+use gpui_kit::component::{
     Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
@@ -34,11 +36,11 @@ use openlogi_core::device::ReceiverInfo;
 use openlogi_core::hid::{Click, PasskeyMethod, ReceiverSelector, find_receiver};
 use openlogi_ipc::{FoundDevice, PairingFailure, PairingPhase};
 
-use crate::app::menu::{CloseWindow, DIALOG_KEY_CONTEXT, Dismiss, Minimize, Zoom};
+use crate::app::menu::{DIALOG_KEY_CONTEXT, Dismiss};
 use crate::services::ipc::{CancelPairing, Command, PairDevice, StartPairing};
 use crate::state::{AppState, StateEvent};
 use crate::ui::components::control_button;
-use crate::ui::theme::{self, Palette, Typography as _};
+use crate::ui::theme::{self, Palette, PressableStyle as _, Typography as _};
 use crate::windows::{self, AuxWindow};
 
 /// The pairing flow as the window renders it: the agent's [`PairingPhase`]
@@ -205,6 +207,8 @@ fn cancel_search(cx: &mut App) {
 /// Standalone Add Device window root view.
 pub struct AddDeviceView {
     focus_handle: FocusHandle,
+    /// The step last shown, to tell a new step from an update within one.
+    step: Discriminant<PairingUi>,
     appearance_obs: Option<Subscription>,
     #[expect(dead_code, reason = "held to keep the PairingUi observer alive")]
     state_obs: Subscription,
@@ -219,7 +223,18 @@ impl AddDeviceView {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
-        let state_obs = cx.observe_global::<PairingUi>(|_, cx| cx.notify());
+        // A new step replaces the controls, usually including the one just
+        // clicked. Focus left on a control that is gone strands Tab, so the
+        // window takes focus back and Tab starts from the new step's first
+        // control.
+        let state_obs = cx.observe_global_in::<PairingUi>(window, |this, window, cx| {
+            let step = current_step(cx);
+            if step != this.step {
+                this.step = step;
+                this.focus_handle.focus(window, cx);
+            }
+            cx.notify();
+        });
         let inventory_obs = AppState::repaint_on(cx, |event| {
             matches!(
                 event,
@@ -228,6 +243,7 @@ impl AddDeviceView {
         });
         Self {
             focus_handle,
+            step: current_step(cx),
             appearance_obs: None,
             state_obs,
             inventory_obs,
@@ -272,6 +288,10 @@ impl AddDeviceView {
         }
         col
     }
+}
+
+fn current_step(cx: &App) -> Discriminant<PairingUi> {
+    std::mem::discriminant(cx.try_global::<PairingUi>().unwrap_or(&PairingUi::Idle))
 }
 
 fn receiver_element_id(receiver: &ReceiverInfo) -> String {
@@ -337,9 +357,6 @@ impl Render for AddDeviceView {
             .key_context(DIALOG_KEY_CONTEXT)
             .track_focus(&self.focus_handle)
             .on_action(|_: &Dismiss, window, cx| dismiss(window, cx))
-            .on_action(|_: &CloseWindow, window, _| window.remove_window())
-            .on_action(|_: &Minimize, window, _| window.minimize_window())
-            .on_action(|_: &Zoom, window, _| window.zoom_window())
             // Only where the compositor left the chrome to us; the padded
             // content sits in the flex-column below it.
             .when(windows::needs_client_titlebar(window), |this| {
@@ -451,6 +468,7 @@ fn action_bar(state: &PairingUi, target: Option<ReceiverSelector>) -> impl IntoE
         }
         PairingUi::Paired { .. } => bar.child(
             control_button("ad-done")
+                .primary()
                 .label(tr!("common.done"))
                 .on_click(|_, _, cx| cancel_search(cx)),
         ),
@@ -496,7 +514,7 @@ fn choice_row(id: impl Into<ElementId>, label: SharedString, pal: Palette) -> Ba
         .border_color(pal.border)
         .bg(pal.control)
         .cursor_pointer()
-        .hover(|s| s.bg(pal.control_hover))
+        .pressable_fill(false, pal)
         .focus_visible(move |s| s.focus_ring(pal))
         .child(div().flex_1().min_w_0().truncate().text_body().child(label))
         .child(

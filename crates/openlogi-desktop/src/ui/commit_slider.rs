@@ -11,7 +11,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui::{App, AppContext as _, Context, Entity, Subscription, Window};
-use gpui_component::slider::{SliderEvent, SliderState};
+use gpui_kit::component::slider::{SliderEvent, SliderState};
 use openlogi_core::config::{ThumbwheelSensitivity, VerticalScrollSensitivity};
 use openlogi_core::hid::{Dpi, PointerSpeed, SidetoneLevel, SmartShiftThreshold, TunableTorque};
 
@@ -332,7 +332,7 @@ mod tests {
     use std::rc::Rc;
 
     use gpui::{Context, Empty, IntoElement, Render, TestAppContext, Window};
-    use gpui_component::slider::SliderEvent;
+    use gpui_kit::component::slider::SliderEvent;
 
     use super::{CommitSlider, SliderRange, Thumb};
 

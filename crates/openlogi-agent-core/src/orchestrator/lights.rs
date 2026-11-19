@@ -13,9 +13,10 @@ use openlogi_core::hid::WriteError;
 use openlogi_hid::{DeviceRoute, LightChange, LightCommand, LightControls, litra_model_for_route};
 use openlogi_ipc::{ChosenLight, ObservedLight, SavedConfig};
 use tokio::sync::Mutex;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use super::Orchestrator;
+use crate::hardware::HardwareContext;
 use crate::watchers::light::WatchedLight;
 
 /// The change made on a light that [`Orchestrator::light_writing`] took for a
@@ -262,6 +263,32 @@ pub async fn write_light(
         }
     }
     written
+}
+
+/// Turn the camera-linked light on `route` on or off as a manual choice,
+/// which lasts until the next camera transition, as the settings app's power
+/// switch does for a light linked to the camera.
+///
+/// # Errors
+///
+/// Returns the write's error.
+pub async fn write_manual_light_power(
+    orchestrator: &Mutex<Orchestrator>,
+    hardware: &HardwareContext,
+    route: &DeviceRoute,
+    enabled: bool,
+) -> Result<(), WriteError> {
+    hardware
+        .apply_light(route, LightCommand::Power(enabled))
+        .await?;
+    if !orchestrator
+        .lock()
+        .await
+        .set_manual_light_power(route, enabled)
+    {
+        warn!(?route, "manual light power applied without camera override");
+    }
+    Ok(())
 }
 
 /// Where the config a reload loads comes from, which decides whether a

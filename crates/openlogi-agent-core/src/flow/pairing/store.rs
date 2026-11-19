@@ -1,27 +1,23 @@
 //! Saving a paired computer as a `[[flow.peers]]` entry.
 //!
-//! The agent writes `config.toml` here and nowhere else, through the same
-//! [`ConfigFile::save`] as the GUI and `openlogi api`: it refuses to overwrite
-//! a file that changed since it was read, so a conflict reads the file again
-//! and merges the peer into it.
+//! The save goes through [`ConfigEdit`], as `openlogi api --save` and the
+//! agent's own device settings do: it refuses to overwrite a file that
+//! changed since it was read, so a conflict reads the file again and merges
+//! the peer into it.
 
-use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use openlogi_core::config::{
-    ConfigError, ConfigFile, FlowConfig, FlowConfigError, FlowPeer, FlowPeerName, FlowPublicKey,
+    ConfigEdit, ConfigError, FlowConfig, FlowConfigError, FlowPeer, FlowPeerName, FlowPublicKey,
 };
 use openlogi_flow::pairing::{PeerKeyStore, PersistPeerKeyError};
 use openlogi_flow::sas::PublicKey;
 use thiserror::Error;
 
 /// How many times a save reads the file again after another writer changed
-/// it or held its lock.
+/// it.
 const SAVE_RETRIES: u32 = 5;
-/// How long a save waits for another writer to release the config lock.
-const LOCK_RETRY_DELAY: Duration = Duration::from_millis(20);
 /// The name a computer that names itself nothing is saved under.
 const UNNAMED_PEER: &str = "Computer";
 /// The longest saved peer name, in characters.
@@ -60,20 +56,15 @@ pub enum SavePeerError {
 pub fn save_peer(path: &Path, peer: &PairedPeer<'_>) -> Result<FlowPeerName, SavePeerError> {
     let mut retries = 0;
     loop {
-        let (mut config, mut file) = ConfigFile::load_from_path(path)?;
-        let (flow, name) = with_peer(config.flow.clone(), peer)?;
+        let mut edit = ConfigEdit::load(path)?;
+        let (flow, name) = with_peer(edit.config().flow.clone(), peer)?;
         let Some(flow) = flow else {
             return Ok(name);
         };
-        config.flow = flow;
-        match file.save(&config) {
-            Ok(()) => return Ok(name),
+        edit.config_mut().flow = flow;
+        match edit.commit() {
+            Ok(_) => return Ok(name),
             Err(ConfigError::Conflict { .. }) if retries < SAVE_RETRIES => {}
-            Err(ConfigError::Write { source, .. })
-                if source.kind() == io::ErrorKind::WouldBlock && retries < SAVE_RETRIES =>
-            {
-                std::thread::sleep(LOCK_RETRY_DELAY);
-            }
             Err(error) => return Err(error.into()),
         }
         retries += 1;

@@ -1,0 +1,30 @@
+# Owner: openlogi_core::config::ConfigEdit (config/edit.rs) — how a writer
+# other than the settings app saves config.toml: only at the revision it
+# read, after waiting out another writer's save. DeviceEdit adds which key a
+# device setting goes under and what a link override refuses.
+id: core-config-edit-owner
+language: rust
+severity: error
+message: Save config.toml through openlogi_core::config::ConfigEdit or DeviceEdit; they own the revision check, the wait for another writer's lock, and where a device setting goes.
+note: |
+  `openlogi api --save` and Flow pairing each loaded a ConfigFile and saved it
+  themselves, one waiting out a held lock and one not, and the agent's own
+  device settings were about to be a third. The settings app keeps its
+  ConfigFile for the whole session and is not such a writer. See "Single
+  source of truth" in AGENTS.md.
+files:
+  - crates/**/*.rs
+ignores:
+  - crates/openlogi-core/src/config/**
+  - crates/openlogi-desktop/**
+rule:
+  all:
+    - pattern: $FILE.save($CONFIG)
+    - inside:
+        kind: source_file
+        stopBy: end
+        has:
+          stopBy: end
+          any:
+            - pattern: ConfigFile::load_from_path($$$)
+            - pattern: ConfigFile::load_or_default()

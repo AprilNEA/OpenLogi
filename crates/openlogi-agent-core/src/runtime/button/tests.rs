@@ -230,6 +230,29 @@ fn cancellation_is_scoped_to_one_session() {
 }
 
 #[test]
+fn g_key_cancellation_leaves_the_sessions_other_keys_down() {
+    use openlogi_core::binding::GKey;
+    let mut state = ButtonState::default();
+    let session = ButtonSource::Hidpp(HidppSessionId::with_epoch("g915", 4));
+    let press = |id, button| ActivePress {
+        token: PressToken {
+            id: PressId(id),
+            key: PressKey::new(session.clone(), button),
+            generation: 0,
+        },
+        behavior: PressBehavior::LifecycleOnly,
+        target: ActionDispatchTarget::Keyboard,
+    };
+    let g2 = press(1, ButtonId::g_key(GKey::G2));
+    let control = press(2, ButtonId::control(0x00d4));
+    state.press(g2.clone());
+    state.press(control.clone());
+
+    assert_eq!(state.cancel_g_keys(&session), vec![g2]);
+    assert_eq!(state.release(&control.token.key), Some(control));
+}
+
+#[test]
 fn hook_cancellation_leaves_hidpp_presses_active() {
     let mut state = ButtonState::default();
     let hook = hook_press(1, ButtonId::Back);

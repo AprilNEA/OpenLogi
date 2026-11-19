@@ -5,37 +5,116 @@ use std::path::Path;
 use openlogi_assets::DepotManifest;
 use tracing::warn;
 
-/// Read width + height from a PNG's `IHDR` chunk.
+/// The leading bytes [`read_image_dimensions`] reads: a WebP `VP8X` or
+/// `VP8 ` size ends at byte 30, a PNG one at byte 24.
+const DIMENSIONS_HEADER_LEN: usize = 30;
+
+/// Read a render's width and height from its file header.
 ///
-/// PNG layout: 8-byte signature, then chunks. The first chunk is always
-/// `IHDR` per the spec, located at bytes 12–24: 4 bytes length, 4 bytes
-/// type tag, then the data. The first 8 data bytes are width + height as
-/// big-endian u32s. We only need those 24 leading bytes — much cheaper
-/// than decoding the whole image.
-pub(super) fn read_png_dimensions(path: &Path) -> std::io::Result<(u32, u32)> {
+/// The catalog ships renders as PNG and as WebP, many of them under a bare
+/// UUID name, so the leading bytes pick the format, not the extension. Only
+/// those bytes are read — much cheaper than decoding the whole image.
+pub(super) fn read_image_dimensions(path: &Path) -> std::io::Result<(u32, u32)> {
     use std::fs::File;
     use std::io::Read;
 
-    const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+    let mut header = Vec::with_capacity(DIMENSIONS_HEADER_LEN);
+    File::open(path)?
+        .take(DIMENSIONS_HEADER_LEN as u64)
+        .read_to_end(&mut header)?;
+    png_dimensions(&header)
+        .or_else(|| webp_dimensions(&header))
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "no PNG or WebP image size in the file header",
+            )
+        })
+}
 
-    let mut file = File::open(path)?;
-    let mut header = [0u8; 24];
-    file.read_exact(&mut header)?;
-    if header[0..8] != PNG_SIGNATURE {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "missing PNG signature",
-        ));
+/// PNG: the 8-byte signature, then the `IHDR` chunk, which is always first.
+/// After its 4-byte length and its tag, the data opens with the width and the
+/// height as big-endian `u32`s.
+fn png_dimensions(header: &[u8]) -> Option<(u32, u32)> {
+    const SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+
+    let ihdr = header
+        .strip_prefix(&SIGNATURE)?
+        .get(4..)?
+        .strip_prefix(b"IHDR")?;
+    let (width, rest) = ihdr.split_first_chunk::<4>()?;
+    let height = rest.first_chunk::<4>()?;
+    Some((u32::from_be_bytes(*width), u32::from_be_bytes(*height)))
+}
+
+/// WebP (RFC 9649): a `RIFF` container of form `WEBP`. Its first chunk, after
+/// a 4-byte tag and a 4-byte length, carries the size:
+/// - `VP8X` (extended format): after 4 bytes of flags, the canvas width and
+///   height minus one, each 24-bit little-endian.
+/// - `VP8 ` (lossy): after the 3-byte frame tag and the key-frame start code,
+///   the width and height as 14-bit little-endian values; the top 2 bits of
+///   each `u16` are a scale.
+/// - `VP8L` (lossless): after the `0x2f` signature, the width and height minus
+///   one, packed as the low two 14-bit fields of a little-endian `u32`.
+fn webp_dimensions(header: &[u8]) -> Option<(u32, u32)> {
+    const VP8_START_CODE: [u8; 3] = [0x9d, 0x01, 0x2a];
+    const VP8L_SIGNATURE: [u8; 1] = [0x2f];
+
+    let form = header
+        .strip_prefix(b"RIFF")?
+        .get(4..)?
+        .strip_prefix(b"WEBP")?;
+    let (tag, chunk) = form.split_first_chunk::<4>()?;
+    let data = chunk.get(4..)?;
+    match tag {
+        b"VP8X" => {
+            let (width, rest) = data.get(4..)?.split_first_chunk::<3>()?;
+            let height = rest.first_chunk::<3>()?;
+            Some((u24_le(*width) + 1, u24_le(*height) + 1))
+        }
+        b"VP8 " => {
+            let frame = data.get(3..)?.strip_prefix(&VP8_START_CODE)?;
+            let (width, rest) = frame.split_first_chunk::<2>()?;
+            let height = rest.first_chunk::<2>()?;
+            Some((u14_le(*width), u14_le(*height)))
+        }
+        b"VP8L" => {
+            let bits = data.strip_prefix(&VP8L_SIGNATURE)?.first_chunk::<4>()?;
+            let bits = u32::from_le_bytes(*bits);
+            Some((
+                (bits & FOURTEEN_BITS) + 1,
+                ((bits >> 14) & FOURTEEN_BITS) + 1,
+            ))
+        }
+        _ => None,
     }
-    if &header[12..16] != b"IHDR" {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "missing IHDR chunk",
-        ));
-    }
-    let width = u32::from_be_bytes([header[16], header[17], header[18], header[19]]);
-    let height = u32::from_be_bytes([header[20], header[21], header[22], header[23]]);
-    Ok((width, height))
+}
+
+/// The width and height fields of the WebP bitstreams are 14 bits wide.
+const FOURTEEN_BITS: u32 = 0x3fff;
+
+fn u24_le([b0, b1, b2]: [u8; 3]) -> u32 {
+    u32::from_le_bytes([b0, b1, b2, 0])
+}
+
+fn u14_le(bytes: [u8; 2]) -> u32 {
+    u32::from(u16::from_le_bytes(bytes)) & FOURTEEN_BITS
+}
+
+/// Whether the file at `path` starts like an image format, so the GUI can
+/// draw it. The extension says nothing: the catalog names many renders by
+/// bare UUID, most of them PNG or WebP. G HUB ships some colour variants
+/// encrypted under the same kind of name (the pink and purple G502
+/// LIGHTSPEED, #2375), and no decoder reads those.
+pub(super) fn is_drawable_image(path: &Path) -> bool {
+    use std::fs::File;
+    use std::io::Read;
+
+    // `RIFF????WEBP`, the longest signature `guess_format` needs.
+    let mut header = Vec::with_capacity(16);
+    File::open(path)
+        .and_then(|file| file.take(16).read_to_end(&mut header))
+        .is_ok_and(|_| image::guess_format(&header).is_ok())
 }
 
 /// Look up the colour variant matching `ext` in an already-loaded depot
@@ -75,7 +154,8 @@ where
     None
 }
 
-/// Enumerate candidate manifest bases: model IDs, the depot name, and any stripped `_ext\d+` stem.
+/// Enumerate candidate manifest bases: model IDs, the depot name, any stripped `_ext\d+` stem,
+/// and the bases of products the catalog files under the same depot (`DEPOT_SIBLINGS`).
 pub(super) fn candidate_manifest_bases(
     entry: &openlogi_assets::DeviceEntry,
     depot: &str,
@@ -104,6 +184,16 @@ pub(super) fn candidate_manifest_bases(
     {
         candidates.push(stem.to_string());
     }
+    // A sibling's variants keep their own base (`g512_ext6` in the G513
+    // depot), tried after the depot's own bases.
+    for base in super::depot_sibling_manifest_bases(&entry.display_name) {
+        if !candidates
+            .iter()
+            .any(|c: &String| c.eq_ignore_ascii_case(base))
+        {
+            candidates.push(base.to_string());
+        }
+    }
     candidates
 }
 
@@ -117,6 +207,18 @@ pub(super) fn buttons_image_for(
 ) -> Option<String> {
     manifest
         .resource_for_variant(base_model_id, ext, "device_buttons_image")
+        .map(str::to_string)
+}
+
+/// Like [`variant_image_for`] but returns the G-series side render
+/// ([`SIDE_VIEW_KEY`](super::SIDE_VIEW_KEY)).
+pub(super) fn side_image_for(
+    manifest: &DepotManifest,
+    base_model_id: &str,
+    ext: u8,
+) -> Option<String> {
+    manifest
+        .resource_for_variant(base_model_id, ext, super::SIDE_VIEW_KEY)
         .map(str::to_string)
 }
 

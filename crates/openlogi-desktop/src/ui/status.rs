@@ -7,7 +7,7 @@
 //! retry action differs, injected by the caller.
 
 use gpui::{App, ElementId, ParentElement, SharedString, Styled, div, px};
-use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 
 use crate::ui::theme::{Palette, Typography as _};
 

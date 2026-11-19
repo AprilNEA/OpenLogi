@@ -409,6 +409,7 @@ async fn pending_restore_waits_for_a_replacement_then_undiverts_through_it() {
         None,
         None,
         None,
+        None,
     )
     .expect("one diverted control should require restoration");
 
@@ -456,6 +457,7 @@ fn diverted_gesture(
                 PointerDivert::RawXy,
             )],
         ),
+        None,
         None,
         None,
         None,
@@ -665,6 +667,7 @@ async fn restore_retries_when_inventory_changes_during_an_awaited_write() {
         None,
         None,
         None,
+        None,
     )
     .expect("one diverted control should require restoration");
 
@@ -730,6 +733,7 @@ async fn failed_setup_rollback_returns_its_restore_capability() {
         None,
         None,
         None,
+        None,
     );
 
     let failure = rollback_start(
@@ -781,6 +785,7 @@ async fn an_offline_receiver_slot_restores_on_return_to_the_same_usb_channel() {
                 PointerDivert::RawXy,
             )],
         ),
+        None,
         None,
         None,
         None,

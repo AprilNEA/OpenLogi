@@ -2,7 +2,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use gpui::{Entity, TestAppContext, VisualTestContext, point, px, size};
-use gpui_component::select::SelectEvent;
+use gpui_kit::component::select::SelectEvent;
 use openlogi_camera::{Camera, CaptureError, UsbSpeed};
 use openlogi_core::config::Config;
 
@@ -115,7 +115,7 @@ impl Drop for FakeStream {
 }
 
 fn preview(cx: &mut TestAppContext) -> (Entity<CameraPreview>, Rc<FakeCapture>) {
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     cx.update(|cx| {
         let resolver = AssetResolver::new();
         let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -545,7 +545,7 @@ fn streamcam_modes() -> StreamModes {
 /// device, and over a capture that grants access and offers the StreamCam's
 /// modes. Also returns the camera's config key, where its mode is saved.
 fn camera_preview(cx: &mut TestAppContext) -> (Entity<CameraPreview>, Rc<FakeCapture>, String) {
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     let key = cx.update(|cx| {
         let resolver = AssetResolver::new();
         let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();

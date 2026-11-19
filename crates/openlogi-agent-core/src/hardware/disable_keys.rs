@@ -174,9 +174,10 @@ fn spawn_disable_keys<Log>(
 where
     Log: FnOnce(&Result<DisableKeysState, WriteError>) + Send + 'static,
 {
-    // Reject a missing route synchronously, but resolve again only after the
-    // worker owns both ordering turns and the receiver lease.
-    drop(op.resolve()?);
+    // Reject a missing route synchronously, but resolve again, and confirm
+    // the device for an op bound to one, only after the worker owns both
+    // ordering turns and the receiver lease.
+    drop(op.route_channel()?);
 
     // Published synchronously: a reread issued after reload must not overtake
     // this worker just because its OS thread has not started polling yet.
@@ -258,8 +259,19 @@ async fn run_disable_keys(
         Ok(())
     };
     check()?;
-    let shared = op.resolve()?;
     let _ = started.send(());
+    // Confirming the device is device I/O inside the requester's deadline,
+    // which starts above: it is bounded by the same budget, and it ends when
+    // the requester gives up, since it writes nothing.
+    let shared = tokio::select! {
+        biased;
+        () = cancelled.wait() => return Err(timed_out()),
+        reached = tokio::time::timeout(
+            WRITE_TIMEOUT,
+            op.reach(HidppOperation::WriteDisableKeys),
+        ) => reached.map_err(|_| timed_out())??,
+    };
+    check()?;
     // Cancellation can stop admission, but must never drop an in-flight
     // native report. The write-through checkpoints still run between reports.
     openlogi_hid::set_disable_keys_write_through_on(&shared, desired, check).await

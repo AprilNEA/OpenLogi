@@ -6,12 +6,7 @@ use nutype::nutype;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use thiserror::Error;
 
-const MOD_COMMAND: u8 = 1 << 0;
-const MOD_SHIFT: u8 = 1 << 1;
-const MOD_CONTROL: u8 = 1 << 2;
-const MOD_OPTION: u8 = 1 << 3;
-const MOD_SUPER: u8 = 1 << 4;
-const ALL_MODIFIERS: u8 = MOD_COMMAND | MOD_SHIFT | MOD_CONTROL | MOD_OPTION | MOD_SUPER;
+use super::modifiers::Modifiers;
 
 /// USB HID keyboard usage supported by custom shortcuts.
 ///
@@ -92,6 +87,15 @@ impl KeyboardUsage {
             0x50 => "Left".to_string(),
             0x51 => "Down".to_string(),
             0x52 => "Up".to_string(),
+            0x54 => "NumpadDivide".to_string(),
+            0x55 => "NumpadMultiply".to_string(),
+            0x56 => "NumpadMinus".to_string(),
+            0x57 => "NumpadPlus".to_string(),
+            0x58 => "NumpadEnter".to_string(),
+            0x59..=0x61 => format!("Numpad{}", code - 0x58),
+            0x62 => "Numpad0".to_string(),
+            0x63 => "NumpadDecimal".to_string(),
+            0x67 => "NumpadEquals".to_string(),
             0x68..=0x6f => format!("F{}", code - 0x68 + 13),
             _ => format!("Usage 0x{code:02X}"),
         }
@@ -110,7 +114,7 @@ pub struct KeyboardUsageError(pub u8);
 const fn validate_keyboard_usage(value: &u8) -> Result<(), KeyboardUsageError> {
     if matches!(
         value,
-        0x04..=0x31 | 0x33..=0x38 | 0x3a..=0x46 | 0x49..=0x52 | 0x68..=0x6f
+        0x04..=0x31 | 0x33..=0x38 | 0x3a..=0x46 | 0x49..=0x52 | 0x54..=0x63 | 0x67..=0x6f
     ) {
         Ok(())
     } else {
@@ -124,7 +128,7 @@ const fn validate_keyboard_usage(value: &u8) -> Result<(), KeyboardUsageError> {
 /// validated modifier bits and a USB HID usage.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct KeyCombo {
-    modifiers: u8,
+    modifiers: Modifiers,
     key: KeyboardUsage,
 }
 
@@ -138,11 +142,10 @@ impl TryFrom<KeyComboWire> for KeyCombo {
     type Error = KeyComboParseError;
 
     fn try_from(value: KeyComboWire) -> Result<Self, Self::Error> {
-        if value.modifiers & !ALL_MODIFIERS != 0 {
-            return Err(KeyComboParseError::InvalidModifiers(value.modifiers));
-        }
+        let modifiers = Modifiers::from_bits(value.modifiers)
+            .ok_or(KeyComboParseError::InvalidModifiers(value.modifiers))?;
         Ok(Self {
-            modifiers: value.modifiers,
+            modifiers,
             key: value.key,
         })
     }
@@ -151,7 +154,7 @@ impl TryFrom<KeyComboWire> for KeyCombo {
 impl From<KeyCombo> for KeyComboWire {
     fn from(value: KeyCombo) -> Self {
         Self {
-            modifiers: value.modifiers,
+            modifiers: value.modifiers.bits(),
             key: value.key,
         }
     }
@@ -166,7 +169,7 @@ impl Serialize for KeyCombo {
             serializer.serialize_str(&self.rendered_label())
         } else {
             KeyComboWire {
-                modifiers: self.modifiers,
+                modifiers: self.modifiers.bits(),
                 key: self.key,
             }
             .serialize(serializer)
@@ -200,25 +203,25 @@ impl KeyCombo {
     /// Command on macOS, Control on Linux and Windows.
     #[must_use]
     pub const fn has_command(&self) -> bool {
-        self.modifiers & MOD_COMMAND != 0
+        self.modifiers.contains(Modifiers::COMMAND)
     }
 
     /// Whether the chord includes Shift.
     #[must_use]
     pub const fn has_shift(&self) -> bool {
-        self.modifiers & MOD_SHIFT != 0
+        self.modifiers.contains(Modifiers::SHIFT)
     }
 
     /// Whether the chord includes Control.
     #[must_use]
     pub const fn has_control(&self) -> bool {
-        self.modifiers & MOD_CONTROL != 0
+        self.modifiers.contains(Modifiers::CONTROL)
     }
 
     /// Whether the chord includes Option/Alt.
     #[must_use]
     pub const fn has_option(&self) -> bool {
-        self.modifiers & MOD_OPTION != 0
+        self.modifiers.contains(Modifiers::OPTION)
     }
 
     /// Whether the chord includes the logo key, written `Super`, `Win`, or
@@ -226,7 +229,13 @@ impl KeyCombo {
     /// Unlike [`Self::has_command`], it never becomes Control.
     #[must_use]
     pub const fn has_super(&self) -> bool {
-        self.modifiers & MOD_SUPER != 0
+        self.modifiers.contains(Modifiers::SUPER)
+    }
+
+    /// The chord's modifiers, empty when it carries none.
+    #[must_use]
+    pub const fn modifiers(&self) -> Modifiers {
+        self.modifiers
     }
 
     /// Canonical user-facing chord label.
@@ -243,23 +252,7 @@ impl KeyCombo {
     /// ordinary key separately labels the two halves separately too.
     #[must_use]
     pub fn rendered_modifiers(&self) -> Option<String> {
-        let mut parts = Vec::new();
-        if self.has_command() {
-            parts.push("Cmd");
-        }
-        if self.has_super() {
-            parts.push("Super");
-        }
-        if self.has_control() {
-            parts.push("Ctrl");
-        }
-        if self.has_option() {
-            parts.push("Alt");
-        }
-        if self.has_shift() {
-            parts.push("Shift");
-        }
-        (!parts.is_empty()).then(|| parts.join("+"))
+        self.modifiers.rendered_label()
     }
 
     /// Canonical label for the chord's ordinary key alone.
@@ -298,14 +291,14 @@ impl FromStr for KeyCombo {
             return Err(KeyComboParseError::Empty);
         }
 
-        let mut modifiers = 0;
+        let mut modifiers = Modifiers::empty();
         let mut key = None;
         for raw in input.split('+') {
             let token = raw.trim();
             if token.is_empty() {
                 return Err(KeyComboParseError::UnknownToken(raw.to_string()));
             }
-            if let Some(modifier) = parse_modifier(token) {
+            if let Some(modifier) = Modifiers::from_token(token) {
                 modifiers |= modifier;
                 continue;
             }
@@ -318,17 +311,6 @@ impl FromStr for KeyCombo {
             return Err(KeyComboParseError::MissingKey);
         };
         Ok(Self { modifiers, key })
-    }
-}
-
-fn parse_modifier(token: &str) -> Option<u8> {
-    match token.to_ascii_lowercase().as_str() {
-        "cmd" | "command" => Some(MOD_COMMAND),
-        "super" | "win" | "meta" => Some(MOD_SUPER),
-        "shift" => Some(MOD_SHIFT),
-        "ctrl" | "control" => Some(MOD_CONTROL),
-        "alt" | "option" => Some(MOD_OPTION),
-        _ => None,
     }
 }
 
@@ -361,6 +343,23 @@ fn parse_key(token: &str) -> Result<KeyboardUsage, KeyComboParseError> {
             1..=12 => 0x3a + number - 1,
             13..=20 => 0x68 + number - 13,
             _ => return Err(KeyComboParseError::UnknownToken(token.to_string())),
+        }
+    } else if let Some(keypad) = lowercase.strip_prefix("numpad") {
+        // Keypad keys are named, not typed: `+` separates chord tokens, and
+        // a keypad digit is a different key from the top-row one.
+        match keypad {
+            "divide" => 0x54,
+            "multiply" => 0x55,
+            "minus" => 0x56,
+            "plus" => 0x57,
+            "enter" => 0x58,
+            "0" => 0x62,
+            "decimal" => 0x63,
+            "equals" => 0x67,
+            digit => match digit.parse::<u8>() {
+                Ok(n @ 1..=9) if digit.len() == 1 => 0x58 + n,
+                _ => return Err(KeyComboParseError::UnknownToken(token.to_string())),
+            },
         }
     } else {
         match lowercase.as_str() {
@@ -536,6 +535,64 @@ mod tests {
     }
 
     #[test]
+    fn keypad_tokens_round_trip_through_their_labels() {
+        let tokens = [
+            ("NumpadDivide", 0x54),
+            ("NumpadMultiply", 0x55),
+            ("NumpadMinus", 0x56),
+            ("NumpadPlus", 0x57),
+            ("NumpadEnter", 0x58),
+            ("Numpad1", 0x59),
+            ("Numpad2", 0x5a),
+            ("Numpad3", 0x5b),
+            ("Numpad4", 0x5c),
+            ("Numpad5", 0x5d),
+            ("Numpad6", 0x5e),
+            ("Numpad7", 0x5f),
+            ("Numpad8", 0x60),
+            ("Numpad9", 0x61),
+            ("Numpad0", 0x62),
+            ("NumpadDecimal", 0x63),
+            ("NumpadEquals", 0x67),
+        ];
+        for (token, usage) in tokens {
+            let combo = format!("Ctrl+Alt+Shift+{token}")
+                .parse::<KeyCombo>()
+                .expect("valid keypad shortcut");
+            assert_eq!(combo.key().code(), usage, "{token}");
+            assert_eq!(combo.key().ascii_char(), None, "{token}");
+            assert_eq!(combo.rendered_label(), format!("Ctrl+Alt+Shift+{token}"));
+        }
+        assert_eq!(
+            "numpadminus".parse::<KeyCombo>().map(|c| c.key().code()),
+            Ok(0x56)
+        );
+        for code in (0x54..=0x63).chain([0x67]) {
+            let usage = KeyboardUsage::try_new(code).expect("keypad usage is valid");
+            let label = usage.label();
+            assert_eq!(
+                label.parse::<KeyCombo>().map(|c| c.key()),
+                Ok(usage),
+                "{label}"
+            );
+        }
+        for unknown in ["Numpad", "Numpad10", "Numpad01", "NumpadClear", "NumLock"] {
+            assert!(
+                matches!(
+                    unknown.parse::<KeyCombo>(),
+                    Err(KeyComboParseError::UnknownToken(_))
+                ),
+                "{unknown}"
+            );
+        }
+        // Num Lock / Clear (0x53), Keypad Clear (0xd8), and the unsupported
+        // 0x64..=0x66 stay rejected.
+        for code in [0x53, 0x64, 0x65, 0x66, 0xd8] {
+            assert!(KeyboardUsage::try_new(code).is_err(), "{code:#04x}");
+        }
+    }
+
+    #[test]
     fn rejects_unknown_serialized_usage_and_modifier_bits() {
         // A bare `255` is not a TOML document, so the usage has to arrive in a
         // wire field — otherwise the parse fails on syntax before reaching the
@@ -565,12 +622,27 @@ mod tests {
             shortcut: KeyCombo,
         }
 
-        let combo = "Cmd+Shift+P"
-            .parse::<KeyCombo>()
-            .expect("valid shortcut failed");
-        let wrapper = Wrapper { shortcut: combo };
-        let encoded = toml::to_string(&wrapper).expect("shortcut serialization failed");
-        assert_eq!(encoded, "shortcut = \"Cmd+Shift+P\"\n");
-        assert_eq!(toml::from_str::<Wrapper>(&encoded), Ok(wrapper));
+        for label in ["Cmd+Shift+P".to_string()]
+            .into_iter()
+            .chain((0x54..=0x63).chain([0x67]).map(|code| {
+                let key = KeyboardUsage::try_new(code).expect("keypad usage");
+                format!("Ctrl+Alt+Shift+{}", key.label())
+            }))
+        {
+            let combo = label.parse::<KeyCombo>().expect("valid shortcut failed");
+            let wrapper = Wrapper { shortcut: combo };
+            let encoded = toml::to_string(&wrapper).expect("shortcut serialization failed");
+            assert_eq!(encoded, format!("shortcut = \"{label}\"\n"));
+            assert_eq!(toml::from_str::<Wrapper>(&encoded), Ok(wrapper));
+        }
+    }
+
+    #[test]
+    fn a_chord_exposes_its_modifiers_and_an_empty_set_without_any() {
+        let chord = "Shift+Ctrl+A".parse::<KeyCombo>().expect("valid chord");
+        assert_eq!(chord.modifiers(), Modifiers::CONTROL | Modifiers::SHIFT);
+
+        let bare = "A".parse::<KeyCombo>().expect("valid chord");
+        assert_eq!(bare.modifiers(), Modifiers::empty());
     }
 }

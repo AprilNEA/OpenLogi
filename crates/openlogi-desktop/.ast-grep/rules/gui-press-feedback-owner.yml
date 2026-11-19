@@ -1,0 +1,24 @@
+# Owner: openlogi-desktop's ui::theme::PressableStyle::pressable_fill — the one
+# hover-and-pressed fill pair for bespoke controls, so a press shows before it
+# is released.
+id: gui-press-feedback-owner
+language: rust
+severity: error
+message: Give a bespoke control its hover and pressed fills with ui::theme::PressableStyle::pressable_fill; it owns both, so a control never hovers without pressing.
+note: |
+  Twenty-seven bespoke controls hand-rolled `.hover(|s| s.bg(pal.control_hover))`
+  or its selected-row variant, and all but one left out the pressed fill, so a
+  press gave no feedback until release while gpui-component's own buttons
+  deepened on press. See "Single source of truth" in AGENTS.md.
+files:
+  - crates/openlogi-desktop/src/**/*.rs
+ignores:
+  - crates/openlogi-desktop/src/ui/theme.rs
+  - "**/tests.rs"
+  - "**/tests/**"
+rule:
+  any:
+    - pattern: $E.bg($P.control_hover)
+    - pattern: $E.bg($P.control_active)
+    - pattern: $E.bg(accent_tint_hover())
+    - pattern: $E.bg($T::accent_tint_hover())

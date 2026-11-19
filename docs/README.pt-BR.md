@@ -242,10 +242,24 @@ Veja [DEVELOPMENT.md](DEVELOPMENT.md), incluindo [segurança do hook de entrada 
 
 ## Agradecimentos
 
-- **Windows, câmeras e i18n** por [@davidbudnick](https://github.com/davidbudnick): RGB do teclado, suporte a Windows, suporte às webcams Logitech
-- **Port para Linux** por [@cserby](https://github.com/cserby): suporte a Linux
-- [Solaar](https://github.com/pwr-Solaar/Solaar), de [@pwr](https://github.com/pwr): implementação de HID++ de código aberto
-- [Mouser](https://github.com/TomBadash/Mouser), de [@TomBadash](https://github.com/TomBadash): alternativa local ao Options+, sem conta
+### Contribuidores
+
+<a href="https://github.com/AprilNEA/OpenLogi/graphs/contributors">
+    <img src="https://contrib.rocks/image?repo=AprilNEA/OpenLogi" alt="Contribuidores">
+</a>
+
+Logo e ícone do app por [@kubai087](https://github.com/kubai087).
+
+### Créditos
+
+- [Solaar](https://github.com/pwr-Solaar/Solaar), por documentar abertamente o protocolo HID++ e o comportamento dos dispositivos da Logitech.
+- [Mouser](https://github.com/TomBadash/Mouser), de [@TomBadash](https://github.com/TomBadash), por inspirar uma abordagem local e sem conta para substituir o Options+.
+
+### Infraestrutura
+
+<a href="https://namespace.so/github-actions?utm_source=oss&utm_campaign=openlogi" target="_blank" rel="noopener noreferrer">
+    <img src="https://namespace.so/oss/badge.svg" alt="CI powered by Namespace" height="32">
+</a>
 
 ## Licença
 
@@ -254,15 +268,9 @@ O código deste repositório é licenciado, à sua escolha, sob qualquer uma das
 - Apache License, Version 2.0 ([LICENSE-APACHE](../LICENSE-APACHE))
 - Licença MIT ([LICENSE-MIT](../LICENSE-MIT))
 
-### Código de terceiros
-
-`crates/openlogi-hidpp` é um fork vendorizado do [`hidpp`](https://crates.io/crates/hidpp),
-de [@lus](https://github.com/lus), licenciado sob 0BSD.
-
 ### Logo e ativos de marca
 
-Obrigado a [@kubai087](https://github.com/kubai087) por desenhar o logo do OpenLogi. O
-logo e o ícone do app (os ativos de marca em [`design/`](../design/)) são © 2026 AprilNEA,
+O logo e o ícone do app OpenLogi (os ativos de marca em [`design/`](../design/)) são © 2026 AprilNEA,
 todos os direitos reservados, e não são cobertos pelas licenças MIT/Apache acima; veja
 [`design/LICENSE`](../design/LICENSE). Fazer fork do código não dá direito ao nome, logo
 ou ícone do OpenLogi; por favor, não os use para representar seus próprios projetos,

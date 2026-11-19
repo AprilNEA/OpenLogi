@@ -128,7 +128,10 @@ async fn wait_for_atomic_count(count: &AtomicUsize, expected: usize) {
         futures_timer::Delay::new(Duration::from_millis(10)).await;
     }
 
-    panic!("timed out waiting for atomic count {expected}");
+    panic!(
+        "timed out waiting for atomic count {expected}, saw {}",
+        count.load(Ordering::SeqCst)
+    );
 }
 
 /// A grid-key vendor PDU of the MX Creative Keypad: report ID `0x13`, the
@@ -161,10 +164,13 @@ fn raw_listener_gets_every_report_intact_including_foreign_vendor_pdus() {
                 calls.fetch_add(1, Ordering::SeqCst);
             }
         });
+        let delivered = Arc::new(Mutex::new(Vec::<HidppMessage>::new()));
         let msg_calls = Arc::new(AtomicUsize::new(0));
         channel.add_msg_listener({
+            let delivered = Arc::clone(&delivered);
             let msg_calls = Arc::clone(&msg_calls);
-            move |_, _| {
+            move |msg, _| {
+                delivered.lock().unwrap().push(msg);
                 msg_calls.fetch_add(1, Ordering::SeqCst);
             }
         });
@@ -173,14 +179,18 @@ fn raw_listener_gets_every_report_intact_including_foreign_vendor_pdus() {
         wait_for_atomic_count(&calls, 1).await;
         handle.send_incoming(short).await;
         wait_for_atomic_count(&calls, 2).await;
+        // The reader hands each report to the raw listeners before it parses
+        // it for the message listeners, so the raw count can lead.
+        wait_for_atomic_count(&msg_calls, 1).await;
 
         assert_eq!(
             seen.lock().unwrap().as_slice(),
             &[grid_key_pdu(0x09, 0x02), raw_report_bytes(short)]
         );
         // Only the message parses as HID++: a vendor PDU is never delivered
-        // to the message path.
-        assert_eq!(msg_calls.load(Ordering::SeqCst), 1);
+        // to the message path. Reads are FIFO on the one read thread, so a PDU
+        // that leaked onto the message path would be first in `delivered`.
+        assert_eq!(delivered.lock().unwrap().as_slice(), &[short]);
     });
 }
 

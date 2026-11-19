@@ -208,7 +208,7 @@ fn current_uid() -> Option<u32> {
 /// Resolve the agent executable relative to the running GUI: a sibling in the
 /// cargo target dir (dev, and the flat Windows install layout), else the
 /// embedded `OpenLogi Agent.app` login-item helper (packaged macOS build).
-fn agent_binary_path() -> Option<PathBuf> {
+pub(crate) fn agent_binary_path() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
     // EXE_SUFFIX, or the Windows lookup misses `openlogi-agent.exe` and the

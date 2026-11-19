@@ -181,7 +181,20 @@ pub use succession::Identity;
 ///      chooses on release, so the overlay reports the pointer leaving every
 ///      slot as well as entering one. `ActionRingInvocation::size` appended,
 ///      the size the overlay draws the ring at.
-pub const PROTOCOL_VERSION: u32 = 45;
+/// v46: `Capabilities::{g_keys, m_keys, macro_record}` appended — a G-series
+///      keyboard's HID++ `0x8010` G-keys, `0x8020` M-keys and `0x8030` MR
+///      key. `ButtonId::{GKey, ModeKey}` appended — the G1–G5 slot of an M
+///      profile and M1–M3/MR. `Capabilities::change_host` appended after
+///      them — `0x1814` ChangeHost without `0x1815` HostsInfo.
+///      `Action::HoldModifier` appended for bare-modifier holds.
+///      `AgentSnapshot::config_revision` appended — the revision of
+///      `config.toml` the agent last loaded, so the settings app learns of
+///      a save another writer made.
+///      `Action::{EasySwitchChannel1, EasySwitchChannel2, EasySwitchChannel3}`
+///      and `ActionRingIcon::{Channel1, Channel2, Channel3}` appended after
+///      them — a device's move to another Easy-Switch channel, bound to a
+///      button or an Actions Ring slot.
+pub const PROTOCOL_VERSION: u32 = 46;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -281,6 +294,27 @@ pub struct AgentStatus {
     pub virtual_keyboard: VirtualKeyboardStatus,
 }
 
+impl AgentStatus {
+    /// Whether Secure Event Input is pausing key bindings right now, and if
+    /// so the app macOS attributes it to (`None` inside when it names none).
+    /// `has_key_bindings` is whether the user bound any key through the OS
+    /// hook.
+    ///
+    /// Mouse buttons, scrolling, gestures and HID++-diverted controls keep
+    /// working under Secure Event Input, so it pauses something only when
+    /// such a binding exists and the hook that would run it is installed.
+    #[must_use]
+    pub fn secure_input_pausing_keys(
+        &self,
+        has_key_bindings: bool,
+    ) -> Option<Option<&ForegroundApp>> {
+        match &self.secure_input {
+            SecureInput::On(app) if has_key_bindings && self.hook_installed => Some(app.as_ref()),
+            SecureInput::On(_) | SecureInput::Off => None,
+        }
+    }
+}
+
 /// Status and inventory as one poll result. Kept together so the GUI never
 /// pairs inventory readiness from one orchestrator state with the inventory
 /// list from another.
@@ -306,6 +340,13 @@ pub struct AgentSnapshot {
     /// Whether cross-machine Flow is enabled, and the coarse link state of
     /// each configured peer. See [`FlowStatus`].
     pub flow: FlowStatus,
+    /// The revision of the `config.toml` the agent last loaded: it moves
+    /// when the agent reloads any writer's save — the settings app's,
+    /// `openlogi api --save`, Flow pairing, or the agent's own. The default
+    /// revision until the agent first reloads the file. A client holding the
+    /// file at another revision reads the file to tell whether it is the one
+    /// behind.
+    pub config_revision: ConfigRevision,
 }
 
 /// A standalone light as it reported itself to the agent.

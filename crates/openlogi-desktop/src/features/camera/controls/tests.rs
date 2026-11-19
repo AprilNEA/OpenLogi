@@ -102,7 +102,7 @@ fn panel(
     cx: &mut TestAppContext,
     uvc: Arc<FakeUvc>,
 ) -> (Entity<CameraControlsPanel>, &mut VisualTestContext) {
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     cx.update(|cx| {
         let camera = Camera {
             name: "Logitech BRIO".to_string(),

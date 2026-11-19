@@ -15,9 +15,12 @@
 #[cfg(test)]
 use gpui::rgb;
 use gpui::{
-    App, BoxShadow, FontWeight, Hsla, Pixels, Rems, Rgba, Styled, Window, hsla, px, relative, rems,
+    App, BoxShadow, FontWeight, Hsla, Pixels, Rems, Rgba, StatefulInteractiveElement, Styled,
+    Window, hsla, px, relative, rems,
 };
-use gpui_component::{ActiveTheme as _, Theme, ThemeMode, ThemeRegistry};
+use gpui_kit::component::{
+    ActiveTheme as _, Theme, ThemeMode, ThemeRegistry, scroll::ScrollbarMode,
+};
 use openlogi_core::config::{Appearance, UiScale};
 
 use crate::state::AppState;
@@ -98,6 +101,16 @@ pub const CARD_GAP: DynamicSpacing = DynamicSpacing::Base12;
 /// Apple HIG / WCAG minimum contrast for normal text up to 17pt.
 const MIN_TEXT_CONTRAST: f32 = 4.5;
 
+/// WCAG minimum contrast for a non-text indicator, such as the fill marking a
+/// selected segment against the surface it rests on.
+const MIN_NON_TEXT_CONTRAST: f32 = 3.;
+
+/// Chroma below which a theme's `primary` is a neutral (slate, near black, near
+/// white) rather than a hue that can mark a selection. Solarized Light's
+/// `#586e75` sits at about 0.11; the palest bundled accent, Harper's lavender
+/// `#b196c6`, at about 0.19.
+const MIN_ACCENT_CHROMA: f32 = 0.15;
+
 /// Responsive bounds for a device card in the Home grid. At standard scale,
 /// two cards fit the 720 px minimum window after the screen inset and gap; at
 /// the normal wide window, three grow to [`GALLERY_CARD_MAX_W`].
@@ -126,6 +139,9 @@ pub struct Palette {
     pub control: Hsla,
     /// Hover fill for bespoke interactive controls.
     pub control_hover: Hsla,
+    /// Pressed fill for bespoke interactive controls, deeper than hover, so a
+    /// press shows before the button is released.
+    pub control_active: Hsla,
     /// Muted, non-interactive fill for tracks and disabled illustrations.
     pub muted: Hsla,
     /// Hairline border between cards and surface.
@@ -220,6 +236,13 @@ fn legible_tint(color: Hsla, background: Hsla, surface: Hsla) -> Hsla {
     tint
 }
 
+/// Repair the contrast the active theme leaves too low. Run after every
+/// `Theme::change`, which re-resolves every token from the theme file.
+fn normalize_theme_contrast(theme: &mut Theme) {
+    normalize_theme_text_contrast(theme);
+    normalize_theme_accent(theme);
+}
+
 fn normalize_theme_text_contrast(theme: &mut Theme) {
     theme.muted_foreground = accessible_muted_text(
         theme.muted_foreground,
@@ -229,13 +252,83 @@ fn normalize_theme_text_contrast(theme: &mut Theme) {
     );
 }
 
+/// Replace an `accent` that blends into the theme's surfaces.
+///
+/// `accent` is the fill a checked `Toggle` and
+/// [`SelectableStyle::selected_segment`] paint, so it must clear 3:1 against
+/// `secondary` (an unselected segment) and `background` (the page). Most
+/// bundled third-party themes ship a neutral accent at about 1:1 to both.
+///
+/// The replacement keeps the hue of the theme's `primary`, or of the brand
+/// blue when `primary` is a neutral, and searches its lightness. A candidate
+/// must clear 3:1 against both surfaces yet stand out from the page no more
+/// than `foreground` does, so it stays a tint between page and text rather
+/// than an inverted black or white block. A Select dropdown paints its
+/// highlighted row in `foreground` on `accent`, so the search takes the
+/// candidate on which `foreground` reads best, up to 4.5:1, and among equals
+/// the one nearest the base lightness. Where a theme's `foreground` sits too
+/// close to its surfaces, that row stays below 4.5:1. Only `accent` (with its
+/// `tokens.accent` mirror) and `accent_foreground` change.
+fn normalize_theme_accent(theme: &mut Theme) {
+    let stands_out = |fill: Hsla| {
+        contrast_ratio(fill, theme.secondary).min(contrast_ratio(fill, theme.background))
+            >= MIN_NON_TEXT_CONTRAST
+    };
+    if stands_out(theme.accent) {
+        return;
+    }
+
+    let primary = theme.primary;
+    let chroma = (1. - (2. * primary.l - 1.).abs()) * primary.s;
+    let base = if chroma >= MIN_ACCENT_CHROMA {
+        primary
+    } else {
+        accent()
+    };
+    let row_contrast = |fill: Hsla| contrast_ratio(theme.foreground, fill).min(MIN_TEXT_CONTRAST);
+    let text_contrast = contrast_ratio(theme.foreground, theme.background);
+    let distance = |fill: Hsla| (fill.l - base.l).abs();
+    let Some(fill) = (0..=1000u16)
+        .map(|step| Hsla {
+            l: f32::from(step) / 1000.,
+            a: 1.,
+            ..base
+        })
+        .filter(|fill| {
+            stands_out(*fill) && contrast_ratio(*fill, theme.background) <= text_contrast
+        })
+        .max_by(|a, b| {
+            row_contrast(*a)
+                .total_cmp(&row_contrast(*b))
+                .then_with(|| distance(*b).total_cmp(&distance(*a)))
+        })
+    else {
+        return;
+    };
+
+    // White or black reads at 4.5:1 on any opaque fill: where both are
+    // weakest, each still reaches about 4.58:1.
+    theme.accent_foreground = [
+        theme.accent_foreground,
+        theme.primary_foreground,
+        Hsla::white(),
+    ]
+    .into_iter()
+    .find(|label| contrast_ratio(*label, fill) >= MIN_TEXT_CONTRAST)
+    .unwrap_or(Hsla::black());
+    theme.accent = fill;
+    // The resolved mirror `Toggle` and the Select row paint from.
+    theme.tokens.accent = fill.into();
+}
+
 /// Derive the app palette from the active gpui-component theme's semantic
 /// tokens, so the hand-painted surfaces (window, cards, mouse model) re-skin
 /// with the selected theme exactly as the framework widgets do.
 ///
 /// - `page` ← `background` (window and page canvas)
 /// - `panel` ← `group_box` (content cards)
-/// - `control` / `control_hover` ← `secondary` / `secondary_hover`
+/// - `control` / `control_hover` / `control_active` ← `secondary` /
+///   `secondary_hover` / `secondary_active`
 /// - `muted` ← `muted` (non-interactive tracks and disabled illustrations)
 /// - `border`, `text_primary` ← `foreground`, `text_muted` ← `muted_foreground`.
 #[must_use]
@@ -246,6 +339,7 @@ pub fn palette(cx: &App) -> Palette {
         panel: t.group_box,
         control: t.secondary,
         control_hover: t.secondary_hover,
+        control_active: t.secondary_active,
         muted: t.muted,
         border: t.border,
         text_primary: t.foreground,
@@ -273,7 +367,7 @@ pub const OPENLOGI_LIGHT: &str = "OpenLogi Light";
 pub const OPENLOGI_DARK: &str = "OpenLogi Dark";
 
 /// Register every bundled theme into the [`ThemeRegistry`]. Call once at
-/// startup, after `gpui_component::init` (which seeds the registry global). Our
+/// startup, after `gpui_kit::init` (which seeds the registry global). Our
 /// brand theme loads first; the upstream themes follow.
 pub fn register_builtin_themes(cx: &mut App) {
     let registry = ThemeRegistry::global_mut(cx);
@@ -281,6 +375,25 @@ pub fn register_builtin_themes(cx: &mut App) {
         if let Err(error) = registry.load_themes_from_str(json) {
             tracing::warn!(%error, "failed to load a bundled theme");
         }
+    }
+}
+
+/// Show scrollbars the way the platform setting asks. Call once at startup,
+/// after `gpui_kit::init`.
+///
+/// gpui-kit maps a platform that keeps scrollbars visible to `Hover`, which
+/// still hides the bar until the pointer reaches its track. macOS "Show scroll
+/// bars: Always", Windows "Always show scrollbars" and a Linux desktop without
+/// overlay scrolling all ask for a bar that stays drawn.
+pub fn sync_scrollbar_mode(cx: &mut App) {
+    Theme::set_scrollbar_mode(scrollbar_mode(cx.should_auto_hide_scrollbars()), cx);
+}
+
+fn scrollbar_mode(platform_auto_hides: bool) -> ScrollbarMode {
+    if platform_auto_hides {
+        ScrollbarMode::Scrolling
+    } else {
+        ScrollbarMode::Always
     }
 }
 
@@ -378,7 +491,7 @@ pub fn apply_from_settings(window: Option<&mut Window>, cx: &mut App) {
     Theme::change(mode, window, cx);
 
     let theme = Theme::global_mut(cx);
-    normalize_theme_text_contrast(theme);
+    normalize_theme_contrast(theme);
     if let Some(radius) = radius {
         theme.radius = px(f32::from(radius));
     }
@@ -401,6 +514,37 @@ pub fn accent_tint() -> Hsla {
 pub fn accent_tint_hover() -> Hsla {
     hsla(0.6, 0.9, 0.6, 0.18)
 }
+
+/// [`accent_tint_hover`] deepened again while a selected row is held down.
+fn accent_tint_active() -> Hsla {
+    hsla(0.6, 0.9, 0.6, 0.24)
+}
+
+/// The feedback a bespoke pressable control gives under the pointer: a deeper
+/// fill while hovered, deeper still while held, so a press shows before it is
+/// released. A GPUI element cannot scale, so the fill is the only press
+/// feedback a control has, and the two fills are one decision: a control that
+/// hovers without pressing reads as stuck. A control marking a *selection*
+/// keeps its accent tint and deepens that instead, so the choice stays
+/// readable under the pointer. Blanket-implemented for every stateful element,
+/// like [`SelectableStyle`]; the `gui-press-feedback-owner` guard keeps the
+/// palette's hover and pressed fills out of hand-rolled `.hover()` closures.
+pub trait PressableStyle: StatefulInteractiveElement + Sized {
+    /// The hover and pressed fills of a control whose resting fill is
+    /// [`Palette::control`], or [`accent_tint`] when `selected`.
+    #[must_use]
+    fn pressable_fill(self, selected: bool, pal: Palette) -> Self {
+        let (hover, active) = if selected {
+            (accent_tint_hover(), accent_tint_active())
+        } else {
+            (pal.control_hover, pal.control_active)
+        };
+        self.hover(move |style| style.bg(hover))
+            .active(move |style| style.bg(active))
+    }
+}
+
+impl<E: StatefulInteractiveElement> PressableStyle for E {}
 
 /// Chaining helpers expressing the single "selected" decision — accent border
 /// plus a faint accent fill — instead of every pill / chip / row hand-rolling
@@ -528,14 +672,14 @@ impl<E: Styled> Typography for E {}
 
 #[cfg(test)]
 mod tests {
-    use gpui_component::button::Button;
+    use gpui_kit::component::button::Button;
 
     use super::*;
 
     #[gpui::test]
     fn bundled_theme_picker_keeps_upstream_and_openlogi_themes(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
-            gpui_component::init(cx);
+            gpui_kit::init(cx);
             register_builtin_themes(cx);
             let themes = ThemeRegistry::global(cx).themes();
             for name in [
@@ -546,6 +690,32 @@ mod tests {
             ] {
                 assert!(themes.contains_key(name), "missing bundled theme: {name}");
             }
+        });
+    }
+
+    /// A platform that keeps scrollbars visible gets a bar that stays drawn,
+    /// not one that waits for the pointer; one that hides them shows the bar
+    /// while scrolling.
+    #[test]
+    fn scrollbar_mode_follows_the_platform_setting() {
+        assert_eq!(scrollbar_mode(false), ScrollbarMode::Always);
+        assert_eq!(scrollbar_mode(true), ScrollbarMode::Scrolling);
+    }
+
+    /// The test platform keeps scrollbars visible. The synced mode reaches the
+    /// base layer that draws the bar and holds across a theme change.
+    #[gpui::test]
+    fn the_synced_scrollbar_mode_holds_across_a_theme_change(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            register_builtin_themes(cx);
+            sync_scrollbar_mode(cx);
+            Theme::change(ThemeMode::Dark, None, cx);
+            assert_eq!(cx.theme().scrollbar_mode, ScrollbarMode::Always);
+            assert_eq!(
+                gpui_kit::base::Theme::global(cx).scrollbar.mode(),
+                ScrollbarMode::Always
+            );
         });
     }
 
@@ -607,22 +777,29 @@ mod tests {
 
     /// A segment marked by [`SelectableStyle::selected_segment`] must stand out
     /// from the surfaces an unselected segment rests on by WCAG's 3:1 non-text
-    /// minimum, and keep its label readable, in both bundled OpenLogi themes.
-    /// The fill is the `accent` token gpui-component's `Toggle` paints when
-    /// checked, so this also holds the home view switcher to it (#2046).
+    /// minimum, and keep its label readable, under every bundled theme as
+    /// [`apply_from_settings`] leaves it. The fill is the `accent` token
+    /// gpui-component's `Toggle` paints when checked, so this also holds the
+    /// home view switcher and every toggle to it (#2046).
     #[gpui::test]
-    fn selected_segment_stands_out_in_both_openlogi_themes(cx: &mut gpui::TestAppContext) {
-        const MIN_NON_TEXT_CONTRAST: f32 = 3.;
+    fn selected_segment_stands_out_in_every_bundled_theme(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
-            gpui_component::init(cx);
+            gpui_kit::init(cx);
             register_builtin_themes(cx);
-            for (name, mode) in [
-                (OPENLOGI_LIGHT, ThemeMode::Light),
-                (OPENLOGI_DARK, ThemeMode::Dark),
-            ] {
-                let Some(config) = ThemeRegistry::global(cx).themes().get(name).cloned() else {
-                    panic!("missing bundled theme: {name}");
-                };
+            let mut unselected = Button::new("segment").selected_segment(false, cx);
+            assert!(
+                unselected.style().background.is_none(),
+                "an unselected segment keeps the stock fill"
+            );
+
+            let configs: Vec<_> = ThemeRegistry::global(cx)
+                .themes()
+                .values()
+                .cloned()
+                .collect();
+            let mut failures = Vec::new();
+            for config in configs {
+                let (name, mode) = (config.name.clone(), config.mode);
                 let theme = Theme::global_mut(cx);
                 if mode.is_dark() {
                     theme.dark_theme = config;
@@ -630,12 +807,7 @@ mod tests {
                     theme.light_theme = config;
                 }
                 Theme::change(mode, None, cx);
-
-                let mut unselected = Button::new("segment").selected_segment(false, cx);
-                assert!(
-                    unselected.style().background.is_none(),
-                    "{name}: an unselected segment keeps the stock fill"
-                );
+                normalize_theme_contrast(Theme::global_mut(cx));
 
                 let mut selected = Button::new("segment").selected_segment(true, cx);
                 let style = selected.style();
@@ -650,23 +822,25 @@ mod tests {
                 let Some(label) = style.text.color else {
                     panic!("{name}: a selected segment should set its label colour");
                 };
-                assert!(
-                    contrast_ratio(label, fill) >= MIN_TEXT_CONTRAST,
-                    "{name}: the selected label is below {MIN_TEXT_CONTRAST}:1 on its fill"
-                );
                 let theme = cx.theme();
-                for (surface, resting) in [
-                    ("secondary", theme.secondary),
-                    ("background", theme.background),
-                ] {
-                    let ratio = contrast_ratio(fill, resting);
-                    assert!(
-                        ratio >= MIN_NON_TEXT_CONTRAST,
-                        "{name}: the selected fill is {ratio:.2}:1 on {surface}, \
-                         below {MIN_NON_TEXT_CONTRAST}:1"
-                    );
+                let on_surfaces = contrast_ratio(fill, theme.secondary)
+                    .min(contrast_ratio(fill, theme.background));
+                let label = contrast_ratio(label, fill);
+                if on_surfaces < MIN_NON_TEXT_CONTRAST || label < MIN_TEXT_CONTRAST {
+                    failures.push(format!(
+                        "{name}: fill {on_surfaces:.2}:1 on its surfaces, label {label:.2}:1"
+                    ));
+                }
+                if gpui::Background::from(theme.tokens.accent) != fill.into() {
+                    failures.push(format!("{name}: a checked Toggle paints another fill"));
                 }
             }
+            failures.sort();
+            assert!(
+                failures.is_empty(),
+                "selected segments that do not stand out:\n{}",
+                failures.join("\n")
+            );
         });
     }
 
@@ -769,6 +943,22 @@ mod tests {
         assert!(
             th.a > accent_tint().a,
             "hover tint should sit deeper than the resting tint"
+        );
+    }
+
+    /// The pressed tint is the third hand-written `hsla`; pin that it is the
+    /// same accent, deeper than hover, so a press on a selected row reads as a
+    /// press and not as a colour change.
+    #[test]
+    fn accent_tint_active_sits_deeper_than_hover() {
+        let a = accent();
+        let ta = accent_tint_active();
+        assert!((a.h - ta.h).abs() < 0.02, "hue {} vs {}", a.h, ta.h);
+        assert!((a.s - ta.s).abs() < 0.05, "sat {} vs {}", a.s, ta.s);
+        assert!((a.l - ta.l).abs() < 0.05, "light {} vs {}", a.l, ta.l);
+        assert!(
+            ta.a > accent_tint_hover().a,
+            "pressed tint should sit deeper than the hover tint"
         );
     }
 }

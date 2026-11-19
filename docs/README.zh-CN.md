@@ -243,10 +243,24 @@ yay -S openlogi
 
 ## 致谢
 
-- **Windows、摄像头与 i18n**：[@davidbudnick](https://github.com/davidbudnick) —— 键盘 RGB 支持、Windows 支持、Logitech 摄像头支持
-- **Linux 移植**：[@cserby](https://github.com/cserby) —— Linux 支持
-- [Solaar](https://github.com/pwr-Solaar/Solaar)，作者 [@pwr](https://github.com/pwr) —— 开源 HID++ 实现
-- [Mouser](https://github.com/TomBadash/Mouser)，作者 [@TomBadash](https://github.com/TomBadash) —— 本地、无需账号的 Options+ 替代品
+### 贡献者
+
+<a href="https://github.com/AprilNEA/OpenLogi/graphs/contributors">
+    <img src="https://contrib.rocks/image?repo=AprilNEA/OpenLogi" alt="贡献者">
+</a>
+
+Logo 与应用图标由 [@kubai087](https://github.com/kubai087) 设计。
+
+### 参考与鸣谢
+
+- [Solaar](https://github.com/pwr-Solaar/Solaar)，公开整理并记录了 Logitech 的 HID++ 协议与设备行为。
+- [@TomBadash](https://github.com/TomBadash) 的 [Mouser](https://github.com/TomBadash/Mouser)，启发了本地、免账号替代 Options+ 的思路。
+
+### 基础设施
+
+<a href="https://namespace.so/github-actions?utm_source=oss&utm_campaign=openlogi" target="_blank" rel="noopener noreferrer">
+    <img src="https://namespace.so/oss/badge.svg" alt="CI powered by Namespace" height="32">
+</a>
 
 ## 许可证
 
@@ -255,13 +269,9 @@ yay -S openlogi
 - Apache License 2.0（[LICENSE-APACHE](../LICENSE-APACHE)）
 - MIT 许可证（[LICENSE-MIT](../LICENSE-MIT)）
 
-### 第三方代码
-
-`crates/openlogi-hidpp` 是 [`hidpp`](https://crates.io/crates/hidpp)（作者 [@lus](https://github.com/lus)）的 vendored fork，采用 0BSD 许可证。
-
 ### Logo 与品牌资产
 
-感谢 [@kubai087](https://github.com/kubai087) 为 OpenLogi 设计的 Logo，该 Logo —— 即 [`design/`](../design/) 下的品牌资产 —— © 2026 AprilNEA 保留所有权利，不在上述 MIT/Apache 许可范围内，许可证详见 [`design/LICENSE`](../design/LICENSE)。
+OpenLogi 的 Logo 与应用图标（即 [`design/`](../design/) 下的品牌资产）© 2026 AprilNEA 保留所有权利，不在上述 MIT/Apache 许可范围内，许可证详见 [`design/LICENSE`](../design/LICENSE)。
 Fork 代码并不授予 OpenLogi 名称、Logo 或图标的使用权，未经事先书面许可，请勿用它们代表你自己的项目、Fork 或分发版本。
 
 ---

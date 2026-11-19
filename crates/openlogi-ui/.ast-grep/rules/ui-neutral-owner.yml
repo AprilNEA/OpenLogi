@@ -1,0 +1,31 @@
+# Owner: openlogi-ui's color::neutral — the one way the overlay writes a grey,
+# so its floating surfaces share a shape of colour even though each picks its
+# own lightness.
+id: ui-neutral-owner
+language: rust
+severity: error
+message: Write a grey with openlogi_ui::color::neutral(lightness, alpha); it owns the shape of a neutral, so the overlay's surfaces stop spelling one out field by field.
+note: |
+  The ring and the notices each carried a private `const fn neutral`, and the
+  lock-key and backlight indicators wrote their card, text and track greys
+  as bare `hsla(0.0, 0.0, …)` calls. See "Single source of truth" in
+  AGENTS.md.
+files:
+  - crates/openlogi-ui/src/**/*.rs
+  - crates/openlogi-overlay/src/**/*.rs
+ignores:
+  - crates/openlogi-ui/src/color.rs
+  - "**/tests.rs"
+  - "**/tests/**"
+rule:
+  any:
+    - pattern: 'Hsla { h: $H, s: $S, l: $L, a: $A }'
+    - pattern: 'gpui::Hsla { h: $H, s: $S, l: $L, a: $A }'
+    - pattern: hsla($H, $S, $L, $A)
+    - pattern: gpui::hsla($H, $S, $L, $A)
+constraints:
+  # A hue and saturation of zero, however the literal is spelled.
+  H:
+    regex: ^0\.0*$
+  S:
+    regex: ^0\.0*$

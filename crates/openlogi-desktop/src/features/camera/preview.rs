@@ -42,8 +42,8 @@ use gpui::{
     Render, RenderImage, SharedString, Styled, Subscription, Task, Window, div, img,
     prelude::FluentBuilder as _, rems,
 };
-use gpui_base::Button as BaseButton;
-use gpui_component::v_flex;
+use gpui_kit::base::Button as BaseButton;
+use gpui_kit::component::v_flex;
 use image::{Frame as ImageFrame, RgbaImage};
 use openlogi_camera::{CameraAuthorization, CaptureError, Frame, StreamMode, StreamModes, UsbLink};
 

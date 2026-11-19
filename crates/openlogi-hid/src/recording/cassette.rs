@@ -4,8 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use hidpp::channel::RequestOutcome;
 use openlogi_fixture::{
-    CassetteExchange, FIXTURE_SCHEMA_VERSION, HidCassette, ReportSupport, SyntheticIdentityKind,
-    classify_synthetic_identity_bytes,
+    CassetteExchange, FIXTURE_SCHEMA_VERSION, HidCassette, RecordedRequestReports, ReportSupport,
+    SyntheticIdentityKind, classify_synthetic_identity_bytes,
 };
 use thiserror::Error;
 
@@ -165,7 +165,8 @@ pub enum CassetteRejectionReason {
     UnsupportedRequestOutcome,
     /// A fire-and-forget/raw channel write has no post-write success evidence.
     UnprovenFireAndForget,
-    /// An incoming report was not matched to a response-bearing request.
+    /// An incoming report matched to no request could still answer a recorded
+    /// one, so that request's recorded answer is unproven.
     UnmatchedIncomingReport,
     /// Incoming bytes failed HID++ report parsing.
     MalformedIncomingReport,
@@ -377,8 +378,10 @@ impl<'a> CassetteBuilder<'a> {
     }
 
     fn validate_unassociated(&mut self) {
-        for evidence in &self.channel.unassociated {
-            if let Some(reason) = unassociated_rejection(&evidence.observation) {
+        let channel = self.channel;
+        let requests: Vec<_> = channel.requests.iter().flat_map(request_reports).collect();
+        for evidence in &channel.unassociated {
+            if let Some(reason) = unassociated_rejection(&evidence.observation, &requests) {
                 self.reject(None, reason);
             }
         }
@@ -496,4 +499,28 @@ impl<'a> CassetteBuilder<'a> {
         self.rejections
             .push(CassetteRejection { request_id, reason });
     }
+}
+
+/// Every outgoing report of `request`, each paired with the request's single
+/// matched answer. A request with an ambiguous fact count is rejected on its
+/// own; pairing its writes with no answer keeps each of them able to claim an
+/// unmatched report.
+fn request_reports(request: &RecordedRequest) -> Vec<RecordedRequestReports<'_>> {
+    let mut outgoing = Vec::new();
+    let mut incoming = Vec::new();
+    for fact in &request.facts {
+        match fact {
+            RecordedRequestFact::OutgoingReport { report, .. } => outgoing.push(report.as_bytes()),
+            RecordedRequestFact::IncomingReport { report, .. } => incoming.push(report.as_bytes()),
+            RecordedRequestFact::Outcome { .. } => {}
+        }
+    }
+    let answer = match incoming.as_slice() {
+        [answer] => Some(*answer),
+        _ => None,
+    };
+    outgoing
+        .into_iter()
+        .map(|request| RecordedRequestReports { request, answer })
+        .collect()
 }

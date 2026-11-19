@@ -19,8 +19,9 @@ Choose evidence that proves the affected behavior, then inspect the rendered res
    Test the overlay process separately; a desktop ring preview does not verify it.
 4. Read [development setup](../../../docs/DEVELOPMENT.md) before launching.
    Check the available native display and build tools. Browser DOM automation does
-   not test GPUI. If native rendering is blocked, report the blocker and run the
-   strongest available tests instead.
+   not test GPUI. In an Amp orb, render on its Desktop as described below. If
+   native rendering is blocked, report the blocker and run the strongest available
+   tests instead.
 
 ## Run without hardware
 
@@ -53,6 +54,30 @@ OPENLOGI_PROFILE=dev OPENLOGI_DEV_AGENT=0 cargo run -p openlogi-desktop
 - For repeatable captured inventory, append `-- --fixture <profile.json>` to the
   mock command. Fixture mode freezes mock time; demo mode animates battery/pairing.
   Do not wait for demo pairing transitions in fixture mode.
+
+## Render in an Amp orb (Linux, no display)
+
+`.agents/setup` installs `grim`, `wtype`, and `wlrctl`.
+[`orb-gui.sh`](../../scripts/orb-gui.sh) runs the mock and the GUI on the orb
+Desktop and drives them:
+
+```sh
+.agents/scripts/orb-gui.sh start              # Desktop, build, mock + GUI services
+.agents/scripts/orb-gui.sh click 1058 58      # absolute 1280×720 coordinates
+.agents/scripts/orb-gui.sh shot /tmp/a.png    # then inspect it with view_media
+.agents/scripts/orb-gui.sh restart            # rebuild and relaunch after an edit
+```
+
+- GPUI must use Wayland there; an X11 window never appears in a capture.
+- The mock and the GUI need the same `XDG_RUNTIME_DIR` to share the dev IPC
+  socket. The script launches both as orb services from the Desktop's
+  environment file; keep both properties when launching by hand.
+- The first launch opens "Check for updates?". `start` answers Not now; if a
+  capture still shows the prompt, answer it before judging the main window.
+- `view_media` is rate-limited. Join captures with
+  `magick a.png b.png +append ab.png` and inspect the joined image.
+- For manual commands and pitfalls, read
+  [Headless rendering in a sandbox](../../../docs/DEVELOPMENT.md#headless-rendering-in-a-sandbox).
 
 ## Verify the affected contract
 

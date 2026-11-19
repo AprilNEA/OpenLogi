@@ -7,12 +7,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use openlogi_core::config::{Config, FlowPublicKey};
-use openlogi_flow::transport::MachineIdentity;
+use openlogi_flow::frame::FrameKind;
+use openlogi_flow::generated as proto;
+use openlogi_flow::transport::{MachineIdentity, message_envelope};
 use openlogi_ipc::{FlowPairTarget, FlowPairingCommandError, FlowPairingFailure, FlowPairingPhase};
 use tempfile::TempDir;
 use tokio::time::timeout;
 
-use super::{FlowPairing, Setup, flow_key};
+use super::{FlowPairing, Setup, bind_pairing, flow_key};
 use crate::observable::ObservableState;
 
 const WAIT: Duration = Duration::from_secs(10);
@@ -262,6 +264,55 @@ async fn busy_and_unreachable_computers_fail_the_attempt() {
         .await
         .expect("a new attempt after a failed one");
     assert_eq!(third.failure().await, FlowPairingFailure::Unreachable);
+}
+
+/// An attempt that ended before its ceremony started refuses what the
+/// peer asks while its connection lingers: a late `PairStart` no longer
+/// brings back an attempt its user could neither confirm nor cancel, and
+/// the linger, not a code's validity, closes the connection.
+#[tokio::test]
+async fn an_ended_attempt_refuses_a_late_pair_start() {
+    let responder = Computer::started(None).await;
+    let identity = MachineIdentity::generate().expect("identity");
+    let endpoint =
+        bind_pairing(SocketAddr::from(([127, 0, 0, 1], 0)), identity).expect("a pairing endpoint");
+    let address = responder.address.parse().expect("a socket address");
+    let peer = endpoint
+        .dial(address)
+        .await
+        .expect("dial")
+        .establish()
+        .await
+        .expect("handshake");
+
+    // A reveal before any `PairStart` ends the responder's attempt.
+    let reveal = proto::PairReveal {
+        nonce: vec![0; 16],
+        ..Default::default()
+    };
+    let reveal = message_envelope(FrameKind::PairReveal, &reveal).expect("PairReveal");
+    let refused = peer.call(reveal).await.expect("an answer");
+    assert_eq!(refused.kind, FrameKind::Error);
+
+    let start = proto::PairStart {
+        nonce_commitment: vec![0; 32],
+        ..Default::default()
+    };
+    let start = message_envelope(FrameKind::PairStart, &start).expect("PairStart");
+    let late = peer.call(start).await.expect("an answer");
+    assert_eq!(late.kind, FrameKind::Error);
+
+    let closed = timeout(WAIT, peer.accept_rpc_stream())
+        .await
+        .expect("the linger closes the connection");
+    let Err(_) = closed else {
+        panic!("the responder opened a request stream");
+    };
+    assert_eq!(
+        responder.observable.snapshot().flow.pairing,
+        Some(FlowPairingPhase::Searching)
+    );
+    assert!(responder.saved().is_empty());
 }
 
 #[tokio::test]

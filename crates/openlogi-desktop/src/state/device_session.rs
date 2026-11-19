@@ -20,19 +20,18 @@ pub(crate) enum ObservedConnection {
 /// the swr-backed DPI/SmartShift reads: the per-device counterpart of
 /// [`AgentSession`](super::agent::AgentSession), gone with the process.
 ///
-/// Replaces six parallel `BTreeMap<String, _>` fields that all shared the
-/// same device-key domain — manual camera-light override, volatile light
-/// settings, an in-flight light command, the inventory-miss counter, a
-/// SmartShift write lifecycle, and its confirmation status — with one row per
-/// device. The row also keeps light-command status scoped to the device that
-/// produced it. A device absent from the owning map is equivalent to every
-/// field here at its default.
+/// Replaces parallel `BTreeMap<String, _>` fields that all shared the same
+/// device-key domain — manual camera-light override, volatile light
+/// settings, an in-flight light command, a SmartShift write lifecycle, and
+/// its confirmation status — with one row per device. The row also keeps
+/// light-command status scoped to the device that produced it. A device
+/// absent from the owning map is equivalent to every field here at its
+/// default. How many snapshots in a row omitted a device is not here: it is
+/// the record's own [`Presence`](super::devices::Presence).
 #[derive(Debug, Default)]
 pub(super) struct DeviceSession {
     /// Last observed connection mode, for offline presentation only.
     pub(super) last_connection: Option<ObservedConnection>,
-    /// Consecutive inventory snapshots that omitted this device.
-    pub(super) inventory_misses: u8,
     pub(super) smartshift: SmartShiftDeviceState,
     pub(super) light: LightDeviceState,
     pub(super) disable_keys: DisableKeysDeviceState,

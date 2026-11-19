@@ -131,6 +131,38 @@ pub(crate) fn enumerate() -> Vec<RawCamera> {
     })
 }
 
+/// The `uniqueID` of every video `AVCaptureDevice` another process captures
+/// from. `isInUseByAnotherApplication` is metadata, like everything
+/// [`enumerate`] reads: no capture session, so no Camera permission.
+pub(crate) fn in_use() -> Vec<String> {
+    let Some(device_cls) = AnyClass::get(c"AVCaptureDevice") else {
+        return Vec::new();
+    };
+    autoreleasepool(|_| {
+        // SAFETY: as in `enumerate`: documented selectors with matching
+        // types on the `devicesWithMediaType:` array and its devices, which
+        // the enclosing pool keeps alive; every string is copied out.
+        unsafe {
+            let devices: *mut AnyObject =
+                msg_send![device_cls, devicesWithMediaType: AVMediaTypeVideo];
+            if devices.is_null() {
+                return Vec::new();
+            }
+            let count: usize = msg_send![devices, count];
+            (0..count)
+                .filter_map(|i| {
+                    let device: *mut AnyObject = msg_send![devices, objectAtIndex: i];
+                    if device.is_null() {
+                        return None;
+                    }
+                    let in_use: bool = msg_send![device, isInUseByAnotherApplication];
+                    in_use.then(|| nsstring(msg_send![device, uniqueID]))?
+                })
+                .collect()
+        }
+    })
+}
+
 /// Largest `(width, height, max_fps)` among the device's supported formats, or
 /// `(0, 0, 0)` when none are reported. Reads format metadata only — no capture
 /// session, so no Camera permission is needed.

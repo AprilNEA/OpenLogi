@@ -61,6 +61,8 @@ mod link;
 mod reflex;
 mod request;
 
+#[cfg(target_os = "macos")]
+pub(crate) use launch::agent_binary_path;
 pub use launch::mark_suite_quitting;
 use launch::spawn_agent;
 use link::Link;
@@ -1313,6 +1315,7 @@ mod tests {
             foreground: ForegroundApps::default(),
             lights: Vec::new(),
             flow: openlogi_ipc::FlowStatus::default(),
+            config_revision: openlogi_core::config::ConfigRevision::default(),
         }
     }
 

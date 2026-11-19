@@ -4,12 +4,14 @@
 //! a key down the board's right or left edge gets its card beside it. Band
 //! cards alternate between two lanes so each can be about two key pitches
 //! wide; a leader from the upper lane drops through the gap between two lower
-//! cards. Cards that would overlap are pushed apart as little as possible
-//! without changing their order (see [`spread_in_order`]), so no two leaders
-//! cross.
+//! cards. Where keys of two rows sit almost on top of each other — a G-series
+//! keyboard's M keys over F1–F4 — the lanes follow the rows instead, so each
+//! row's cards read as a group. Cards that would overlap are pushed apart as
+//! little as possible without changing their order (see
+//! [`spread_at_offsets`]), so no two leaders cross.
 
 use super::{CALLOUT_BAND_H, KEY_CALLOUT_H, KEY_CALLOUT_TOP_LOWER, KEY_CALLOUT_TOP_UPPER};
-use crate::ui::callouts::spread_in_order;
+use crate::ui::callouts::{spread_at_offsets, spread_in_order};
 
 /// Narrowest a band card gets on a crowded row.
 const KEY_CALLOUT_MIN_W: f32 = 44.;
@@ -103,7 +105,7 @@ pub(super) fn callout_layout(markers: &[(f32, f32)], img_w: f32, img_h: f32) -> 
     };
     let in_band =
         |band: Band| -> Vec<usize> { (0..markers.len()).filter(|&i| bands[i] == band).collect() };
-    place_band_cards(&mut layout, in_band(Band::Top), &keys);
+    place_band_cards(&mut layout, in_band(Band::Top), &keys, img_h);
     for column in [Column::Right, Column::Left] {
         let beside = in_band(Band::Beside(column));
         place_side_cards(&mut layout, beside, &keys, column, img_w, img_h);
@@ -123,16 +125,24 @@ pub(super) fn side_bands_width(markers: &[(f32, f32)]) -> f32 {
 }
 
 /// Which band each marker's card goes to: the top row and anything away from
-/// the edges above the board, a key down an edge beside it.
+/// the edges above the board, a key down an edge beside it. A key near an
+/// edge whose own row reaches into the middle of the board — Esc on a row
+/// under a G-series keyboard's M keys — is part of that row, not of a column
+/// down the edge, and stays above too.
 fn bands(markers: &[(f32, f32)]) -> Vec<Band> {
     let top_row = markers
         .iter()
         .map(|&(_, y)| y)
         .fold(f32::INFINITY, f32::min);
+    let row_reaches_middle = |y: f32| {
+        markers.iter().any(|&(other_x, other_y)| {
+            (other_y - y).abs() < ROW_BAND && other_x > SIDE_COLUMN && other_x < 1. - SIDE_COLUMN
+        })
+    };
     markers
         .iter()
         .map(|&(x, y)| {
-            if y - top_row < ROW_BAND {
+            if y - top_row < ROW_BAND || row_reaches_middle(y) {
                 Band::Top
             } else if x >= 1. - SIDE_COLUMN {
                 Band::Beside(Column::Right)
@@ -145,26 +155,47 @@ fn bands(markers: &[(f32, f32)]) -> Vec<Band> {
         .collect()
 }
 
-/// The band above the board: each card centred over its key, the lanes
-/// alternating left to right, every leader straight down when the card sits
-/// over its key and with one 45° run below the lower lane when it was pushed
-/// aside.
-fn place_band_cards(layout: &mut CalloutLayout, mut top: Vec<usize>, keys: &[(f32, f32)]) {
+/// The band above the board: each card centred over its key, every leader
+/// straight down when the card sits over its key and with one 45° run below
+/// the lower lane when it was pushed aside. Lanes come from [`band_lanes`].
+/// Neighbours in different lanes stay far enough apart for an upper leader
+/// to pass the lower card; neighbours in one lane, a whole card plus that
+/// room.
+fn place_band_cards(
+    layout: &mut CalloutLayout,
+    mut top: Vec<usize>,
+    keys: &[(f32, f32)],
+    img_h: f32,
+) {
     top.sort_by(|&a, &b| keys[a].0.total_cmp(&keys[b].0));
     let xs: Vec<f32> = top.iter().map(|&i| keys[i].0).collect();
     let width = band_card_width(&xs, layout.pane_w);
-    let centres = spread_in_order(
-        &xs,
-        width / 2. + LEADER_CLEARANCE,
-        width / 2.,
-        layout.pane_w - width / 2.,
-    );
+    let apart = width / 2. + LEADER_CLEARANCE;
+    let ordered: Vec<(f32, f32)> = top.iter().map(|&i| keys[i]).collect();
+    let lanes = band_lanes(&ordered, apart, ROW_BAND * img_h);
+    let (lo, hi) = (width / 2., layout.pane_w - width / 2.);
+    // Strictly alternating lanes — every single row — spread exactly as
+    // they always have.
+    let centres = if lanes.windows(2).all(|pair| pair[0] != pair[1]) {
+        spread_in_order(&xs, apart, lo, hi)
+    } else {
+        let offsets: Vec<f32> = std::iter::once(0.)
+            .chain(lanes.windows(2).scan(0., |offset, pair| {
+                *offset += if pair[0] == pair[1] {
+                    2. * apart
+                } else {
+                    apart
+                };
+                Some(*offset)
+            }))
+            .collect();
+        spread_at_offsets(&xs, &offsets, lo, hi)
+    };
     let run_y = KEY_CALLOUT_TOP_LOWER + KEY_CALLOUT_H + RUN_GAP;
-    for (rank, (&i, cx)) in top.iter().zip(centres).enumerate() {
-        let card_top = if rank % 2 == 0 {
-            KEY_CALLOUT_TOP_LOWER
-        } else {
-            KEY_CALLOUT_TOP_UPPER
+    for ((&i, cx), lane) in top.iter().zip(centres).zip(lanes) {
+        let card_top = match lane {
+            Lane::Lower => KEY_CALLOUT_TOP_LOWER,
+            Lane::Upper => KEY_CALLOUT_TOP_UPPER,
         };
         layout.cards[i] = CardRect {
             left: cx - width / 2.,
@@ -185,6 +216,52 @@ fn place_band_cards(layout: &mut CalloutLayout, mut top: Vec<usize>, keys: &[(f3
             leader
         };
     }
+}
+
+/// Which of the band's two lanes a card sits in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Lane {
+    /// Nearer the board; leaders from the upper lane pass between its cards.
+    Lower,
+    Upper,
+}
+
+/// The lane of each band card, for `keys` in x order. A key of one row that
+/// another row's key nearly touches — closer than two cards in different
+/// lanes may sit — takes the lane of its row: the upper lane for the higher
+/// row, the lower lane for the lower one, so neither row's cards interleave
+/// with the other's. Keys of one row lie less than `row_gap` apart
+/// vertically. Every other card takes the lane its left neighbour does not;
+/// the first card takes the lower lane, or the lane its right neighbour's
+/// row does not. A single row of keys alternates exactly as it always has.
+fn band_lanes(keys: &[(f32, f32)], apart: f32, row_gap: f32) -> Vec<Lane> {
+    let row_lane = |&(x, y): &(f32, f32)| {
+        let (mut above, mut below) = (false, false);
+        for &(other_x, other_y) in keys {
+            if (other_x - x).abs() < apart && (other_y - y).abs() >= row_gap {
+                above |= other_y < y;
+                below |= other_y > y;
+            }
+        }
+        match (above, below) {
+            (false, true) => Some(Lane::Upper),
+            (true, _) => Some(Lane::Lower),
+            (false, false) => None,
+        }
+    };
+    let fixed: Vec<Option<Lane>> = keys.iter().map(row_lane).collect();
+    let mut lanes: Vec<Lane> = Vec::with_capacity(keys.len());
+    for (i, lane) in fixed.iter().enumerate() {
+        let neighbour = match i.checked_sub(1) {
+            Some(left) => Some(lanes[left]),
+            None => fixed.get(1).copied().flatten(),
+        };
+        lanes.push(lane.unwrap_or(match neighbour {
+            Some(Lane::Lower) => Lane::Upper,
+            Some(Lane::Upper) | None => Lane::Lower,
+        }));
+    }
+    lanes
 }
 
 /// A column of cards beside the board's `column` edge, each level with its

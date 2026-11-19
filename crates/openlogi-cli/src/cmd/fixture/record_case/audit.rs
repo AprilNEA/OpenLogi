@@ -102,7 +102,7 @@ fn rejection_label(reason: &CassetteRejectionReason) -> String {
             "fire-and-forget write has no success evidence".to_string()
         }
         CassetteRejectionReason::UnmatchedIncomingReport => {
-            "incoming report was not associated with a request".to_string()
+            "incoming report matched no request but could answer a recorded one".to_string()
         }
         CassetteRejectionReason::MalformedIncomingReport => {
             "incoming report was malformed".to_string()

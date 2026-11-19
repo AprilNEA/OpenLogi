@@ -11,10 +11,10 @@ use gpui::{
     SharedString, StatefulInteractiveElement as _, Styled, Window, div, hsla,
     prelude::FluentBuilder as _, px, rgb, svg,
 };
-use gpui_component::button::{Button, ButtonGroup, ButtonVariant, ButtonVariants as _};
-use gpui_component::dialog::DialogButtonProps;
-use gpui_component::tooltip::Tooltip;
-use gpui_component::{
+use gpui_kit::component::button::{Button, ButtonGroup, ButtonVariant, ButtonVariants as _};
+use gpui_kit::component::dialog::DialogButtonProps;
+use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::{
     Disableable as _, Icon, IconName, Selectable as _, Sizable as _, WindowExt as _, h_flex, v_flex,
 };
 use openlogi_core::binding::{Cid, GridKey, KeypadPage};
@@ -30,7 +30,9 @@ use super::{
 use crate::features::mouse::geometry::asset_dimensions_for_png;
 use crate::services::assets::ResolvedAsset;
 use crate::state::AppState;
-use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
+use crate::ui::theme::{
+    self, ACCENT_BLUE, Palette, PressableStyle as _, SelectableStyle as _, Typography as _,
+};
 
 /// A keypad's last binding page — the one the page bar can remove.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +51,7 @@ pub(super) fn keypad_page_bar(
     last_page: LastPage,
     view: &Entity<FunctionRowView>,
     pal: &Palette,
+    cx: &App,
 ) -> impl IntoElement {
     let last = last_page.page;
     let pages: Vec<KeypadPage> = last.through().collect();
@@ -68,6 +71,7 @@ pub(super) fn keypad_page_bar(
             Button::new(("keypad-page", usize::from(candidate.number())))
                 .label(candidate.to_string())
                 .selected(*candidate == page)
+                .selected_segment(*candidate == page, cx)
         }))
         .on_click(select);
     let added = KeypadPage::new(last.number().saturating_add(1));
@@ -490,13 +494,7 @@ impl RenderOnce for KeyCap {
                 pal.control
             })
             .cursor_pointer()
-            .hover(move |s| {
-                s.bg(if highlighted {
-                    theme::accent_tint_hover()
-                } else {
-                    pal.control_hover
-                })
-            })
+            .pressable_fill(highlighted, pal)
             .child(
                 div()
                     .max_w(px(cap_w - 8.))
@@ -539,7 +537,11 @@ impl RenderOnce for KeyCap {
 fn keycap_height(target: &KeyTarget) -> f32 {
     match target {
         KeyTarget::Control(button) if button.cid().is_some_and(is_paging_cid) => KEYCAP_PAGING_H,
-        KeyTarget::Control(_) | KeyTarget::Grid(_) | KeyTarget::FunctionKey(_) => KEYCAP_H,
+        KeyTarget::Control(_)
+        | KeyTarget::Grid(_)
+        | KeyTarget::FunctionKey(_)
+        | KeyTarget::GKey(_)
+        | KeyTarget::ModeKey(_) => KEYCAP_H,
     }
 }
 
@@ -548,7 +550,7 @@ fn keycap_glyph(target: &KeyTarget) -> Option<&'static str> {
     match target {
         KeyTarget::Grid(slot) => Some(grid_glyph(slot.key)),
         KeyTarget::Control(button) => button.cid().and_then(paging_glyph),
-        KeyTarget::FunctionKey(_) => None,
+        KeyTarget::FunctionKey(_) | KeyTarget::GKey(_) | KeyTarget::ModeKey(_) => None,
     }
 }
 

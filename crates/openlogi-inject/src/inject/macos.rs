@@ -385,7 +385,7 @@ fn post_cg_key_phase(vk: u16, flags: CGEventFlags, phase: KeyPhase) {
 
 /// One keyboard edge for `vk` with `flags` set, tagged as OpenLogi's own so
 /// the hook lets it through.
-fn key_event(vk: u16, flags: CGEventFlags, phase: KeyPhase) -> Option<CGEvent> {
+fn key_event(vk: u16, mut flags: CGEventFlags, phase: KeyPhase) -> Option<CGEvent> {
     let Ok(src) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
         tracing::warn!("CGEventSource::new failed");
         return None;
@@ -395,6 +395,11 @@ fn key_event(vk: u16, flags: CGEventFlags, phase: KeyPhase) -> Option<CGEvent> {
         tracing::warn!(?phase, "CGEvent::new_keyboard_event failed");
         return None;
     };
+    // Include keypad identity in the explicit flag mask for taps, held
+    // edges, and virtual-HID failure recovery alike.
+    if matches!(keycode::macos_to_hid_usage(vk), Some(0x54..=0x63 | 0x67)) {
+        flags |= CGEventFlags::CGEventFlagNumericPad;
+    }
     event.set_flags(flags);
     tag_synthetic(&event);
     Some(event)

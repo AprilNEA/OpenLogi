@@ -41,13 +41,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          # 32 GB: the baseline clippy run once used 15.3 of 16 GB and failed.
+          - os: linux
+            runner: nscloud-ubuntu-24.04-amd64-8x32
             cache: linux-stable-debug
-          - os: windows-latest
+          - os: windows
+            runner: nscloud-windows-2022-amd64-8x16
             cache: windows-stable-debug
-          - os: macos-latest
+          - os: macos
+            runner: nscloud-macos-tahoe-arm64-6x14
             cache: macos-stable-debug
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
@@ -72,6 +76,14 @@ jobs:
             libxkbcommon-x11-dev libx11-xcb-dev \
             libssl-dev libzstd-dev pkg-config
       - run: cargo xtask lint sweep-allows --out stale-allows.json
+      # Re-run a failed lane with "Enable debug logging" to hold it open for
+      # SSH as whoever started the re-run; an ordinary failure fails at once.
+      - name: Breakpoint for SSH debugging
+        if: ${{ failure() && runner.debug == '1' }}
+        uses: namespacelabs/breakpoint-action@18b8b1dc6ac651288cfffb20bee1a447632997a1 # v0.0.16
+        with:
+          duration: 30m
+          authorized-users: ${{ github.triggering_actor }}
       - uses: actions/upload-artifact@v7
         with:
           name: stale-allows-${{ matrix.os }}
@@ -83,7 +95,7 @@ jobs:
     # platform is silent on the other two, so a partial merge would call it
     # stale; the failed lane already fails the run.
     needs: sweep
-    runs-on: ubuntu-latest
+    runs-on: nscloud-ubuntu-24.04-amd64-8x16
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7

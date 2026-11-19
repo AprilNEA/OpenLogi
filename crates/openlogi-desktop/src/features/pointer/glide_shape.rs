@@ -11,7 +11,7 @@ use gpui::{
     Bounds, Hsla, IntoElement, ParentElement, PathBuilder, Pixels, SharedString, Styled, Window,
     canvas, div, point, px, rgb,
 };
-use gpui_component::{Selectable as _, h_flex, v_flex};
+use gpui_kit::component::{Selectable as _, h_flex, v_flex};
 use openlogi_core::config::{GlideShape, MomentumParams, MomentumScrolling as M};
 use openlogi_core::scroll::GlideCurve;
 

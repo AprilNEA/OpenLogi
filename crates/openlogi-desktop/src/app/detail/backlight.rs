@@ -11,7 +11,7 @@ use gpui::{
     AnyElement, App, InteractiveElement as _, IntoElement, ParentElement as _, Styled as _, div,
     prelude::FluentBuilder as _,
 };
-use gpui_component::{Disableable as _, Icon, IconName, Selectable as _, h_flex, v_flex};
+use gpui_kit::component::{Disableable as _, Icon, IconName, Selectable as _, h_flex, v_flex};
 use openlogi_core::hid::{
     BacklightChange, BacklightControls, BacklightDuration, BacklightState, BacklightStatus,
 };
@@ -352,7 +352,7 @@ mod tests {
     }
 
     fn draw(cx: &mut TestAppContext, state: BacklightState) -> &mut gpui::VisualTestContext {
-        cx.update(gpui_component::init);
+        cx.update(gpui_kit::init);
         let (_view, cx) = cx.add_window_view(|_, _| CardHost(state));
         cx.simulate_resize(size(px(800.), px(600.)));
         cx.update(|window, cx| window.draw(cx).clear(cx));

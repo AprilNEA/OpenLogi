@@ -16,7 +16,7 @@ use gpui::{
     AnyElement, App, Context, IntoElement, ParentElement, Render, SharedString, Styled,
     Subscription, Window,
 };
-use gpui_component::{Disableable as _, Selectable as _, h_flex, slider::Slider, v_flex};
+use gpui_kit::component::{Disableable as _, Selectable as _, h_flex, slider::Slider, v_flex};
 use openlogi_core::config::{
     SMARTSHIFT_AUTO_DISENGAGE_DEFAULT, SMARTSHIFT_MIN_AUTO_DISENGAGE, ThumbwheelSensitivity,
 };

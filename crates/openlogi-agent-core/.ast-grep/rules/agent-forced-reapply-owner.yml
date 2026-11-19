@@ -1,0 +1,45 @@
+# Owner: orchestrator::ForcedReapply — what the next inventory refresh forces
+# after a system wake or an unobserved reconnect. Its transitions
+# (settings_reset, device_reconnected, system_resumed) coalesce requests, and
+# the refresh reads budget() and rearms_every_capture() off the one drained
+# value.
+id: agent-forced-reapply-owner
+language: rust
+severity: error
+message: Change and read the forced re-apply through orchestrator::ForcedReapply's transitions and its budget / rearms_every_capture decisions; do not name its variants here.
+note: |
+  The latch was two fields, a confirm budget and a capture-rearm flag, that
+  every request and the refresh had to keep in step: a rearm without a budget
+  was representable. Writing or matching a variant outside its impl skips the
+  coalescing (largest budget wins, a pending resume keeps its rearm) or splits
+  the refresh's two decisions again. See "Single source of truth" in AGENTS.md.
+files:
+  - crates/openlogi-agent-core/src/orchestrator.rs
+  - crates/openlogi-agent-core/src/orchestrator/**/*.rs
+rule:
+  all:
+    - any:
+        - all:
+            - any:
+                - kind: scoped_identifier
+                - kind: scoped_type_identifier
+            - regex: '(^|::)ForcedReapply::(Quiet|ReapplyPending|ResumePending)$'
+        # Inside a macro such as `matches!` the path is loose tokens.
+        - all:
+            - kind: identifier
+            - regex: '^(Quiet|ReapplyPending|ResumePending)$'
+            - inside:
+                kind: token_tree
+                stopBy: end
+            - follows:
+                pattern: '::'
+                follows:
+                  kind: identifier
+                  regex: '^ForcedReapply$'
+    - not:
+        inside:
+          kind: impl_item
+          stopBy: end
+          has:
+            field: type
+            regex: '^ForcedReapply$'

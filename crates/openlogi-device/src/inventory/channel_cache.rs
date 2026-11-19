@@ -1,6 +1,8 @@
 //! The enumerator's open channels and their retirement: a node's channel
 //! serves until it is retired, then drains until nothing else holds it, and
-//! only a later pass may open the node again.
+//! only a later pass may open the node again. A channel retired because it
+//! failed keeps that cause through its drain, so the node's next open is
+//! known to replace it.
 
 use std::{
     collections::{HashMap, HashSet, hash_map::Entry},
@@ -9,11 +11,52 @@ use std::{
 
 use tracing::warn;
 
-/// One channel's place in its lifecycle: serving, or retired and draining
-/// toward quiescence so its node may reopen.
+/// One node's place in the channel lifecycle.
 enum ChannelState<Channel> {
+    /// Serving.
     Active(Channel),
-    Retiring(Channel),
+    /// Serving the channel the latest pass opened in place of a failed one
+    /// while the node was still replayed online: a reconnect no published
+    /// snapshot showed. The next pass serves it as [`Self::Active`].
+    Replaced(Channel),
+    /// Retired, draining toward quiescence so the node may reopen.
+    Retiring(Channel, Retirement),
+    /// A failed channel drained while the OS kept listing its node; the
+    /// node's next open replaces it.
+    AwaitingReopen,
+}
+
+/// Why a channel was retired, which decides what reopening its node is.
+#[derive(Clone, Copy)]
+enum Retirement {
+    /// The node left the listing. It comes back as a new arrival, which the
+    /// agent's offline→online transition already reconfigures.
+    Absent,
+    /// Its probes kept failing, or capture reported it dead, while the OS
+    /// kept listing the node.
+    Failed,
+}
+
+impl<Channel> ChannelState<Channel> {
+    fn serving(&self) -> Option<&Channel> {
+        match self {
+            Self::Active(channel) | Self::Replaced(channel) => Some(channel),
+            Self::Retiring(..) | Self::AwaitingReopen => None,
+        }
+    }
+
+    /// Move to the state `step` makes of this one.
+    fn advance(&mut self, step: impl FnOnce(Self) -> Self) {
+        *self = step(std::mem::replace(self, Self::AwaitingReopen));
+    }
+
+    /// A replacement serves on as an ordinary active channel.
+    fn settle_replacement(self) -> Self {
+        match self {
+            Self::Replaced(channel) => Self::Active(channel),
+            state => state,
+        }
+    }
 }
 
 /// Per-node channel lifecycle, generic so ownership transitions can be tested
@@ -21,7 +64,10 @@ enum ChannelState<Channel> {
 /// holding an active *and* a retiring channel — two live opens of one OS
 /// node, the state the macOS dead-delivery hazard rides on — used to be
 /// representable across two maps and guarded only by a release-silent
-/// `debug_assert`; keyed by node in a single map, it cannot exist.
+/// `debug_assert`; keyed by node in a single map, it cannot exist. The
+/// failed-channel retirement and the replacement it leads to live here for
+/// the same reason: kept as node sets beside the map, they could mark a node
+/// whose channel still served, or one both evicted and just replaced.
 pub(super) struct ChannelCache<Node, Channel> {
     channels: HashMap<Node, ChannelState<Channel>>,
 }
@@ -36,106 +82,167 @@ impl<Node, Channel> Default for ChannelCache<Node, Channel> {
 
 impl<Node: Eq + Hash + Clone, Channel> ChannelCache<Node, Channel> {
     pub(super) fn get(&self, node: &Node) -> Option<&Channel> {
-        match self.channels.get(node)? {
-            ChannelState::Active(channel) => Some(channel),
-            ChannelState::Retiring(_) => None,
-        }
+        self.channels.get(node)?.serving()
     }
 
-    /// The active channels, for callers that sweep what is currently serving.
+    /// The serving channels, for callers that sweep what is currently open.
     pub(super) fn active_iter(&self) -> impl Iterator<Item = (&Node, &Channel)> {
         self.channels
             .iter()
-            .filter_map(|(node, state)| match state {
-                ChannelState::Active(channel) => Some((node, channel)),
-                ChannelState::Retiring(_) => None,
-            })
+            .filter_map(|(node, state)| Some((node, state.serving()?)))
     }
 
-    pub(super) fn insert(&mut self, node: Node, channel: Channel) {
-        match self.channels.entry(node) {
-            Entry::Occupied(mut entry) => match entry.get_mut() {
-                state @ ChannelState::Active(_) => *state = ChannelState::Active(channel),
-                // A retiring channel is still draining toward quiescence, and
-                // `prepare_open` refuses the node until it has — so this arm
-                // is unreachable through current callers. Keeping the
-                // draining channel (and dropping the newcomer, which closes
-                // its OS handle promptly) preserves the one-channel-per-node
-                // invariant either way.
-                ChannelState::Retiring(_) => {
-                    warn!("refusing to replace a retiring channel — dropping the fresh open");
-                    drop(channel);
-                }
-            },
+    /// Start a pass: the previous pass's replacements serve on as ordinary
+    /// active channels.
+    pub(super) fn begin_pass(&mut self) {
+        for state in self.channels.values_mut() {
+            state.advance(ChannelState::settle_replacement);
+        }
+    }
+
+    /// Serve a freshly opened channel for `node`. Reopening a node whose
+    /// failed channel drained replaces that channel, unobserved only while
+    /// `replayed_online` — the ledger still replays the node's last-good
+    /// inventory, so no published snapshot showed it offline.
+    pub(super) fn open(
+        &mut self,
+        node: Node,
+        channel: Channel,
+        replayed_online: impl FnOnce() -> bool,
+    ) {
+        let state = match self.channels.entry(node) {
             Entry::Vacant(entry) => {
                 entry.insert(ChannelState::Active(channel));
+                return;
+            }
+            Entry::Occupied(entry) => entry.into_mut(),
+        };
+        match state {
+            // A retiring channel is still draining toward quiescence, and
+            // `prepare_open` refuses the node until it has — so this arm is
+            // unreachable through current callers. Keeping the draining
+            // channel (and dropping the newcomer, which closes its OS handle
+            // promptly) preserves the one-channel-per-node invariant either
+            // way.
+            ChannelState::Retiring(..) => {
+                warn!("refusing to replace a retiring channel — dropping the fresh open");
+                drop(channel);
+            }
+            ChannelState::AwaitingReopen if replayed_online() => {
+                *state = ChannelState::Replaced(channel);
+            }
+            ChannelState::Active(_) | ChannelState::Replaced(_) | ChannelState::AwaitingReopen => {
+                *state = ChannelState::Active(channel);
             }
         }
     }
 
-    /// Move an active channel into the retiring state. `false` when the node
-    /// is unknown or already retiring (the original retirement keeps its
-    /// place — and its drain clock).
-    pub(super) fn retire_node(&mut self, node: &Node) -> bool {
-        let Some(state) = self.channels.get_mut(node) else {
-            return false;
-        };
-        if matches!(state, ChannelState::Retiring(_)) {
-            return false;
-        }
-        let Some(ChannelState::Active(channel) | ChannelState::Retiring(channel)) =
-            self.channels.remove(node)
-        else {
-            return false;
-        };
-        self.channels
-            .insert(node.clone(), ChannelState::Retiring(channel));
-        true
+    /// Retire `node`'s channel because its probes kept failing or capture
+    /// reported it dead, so the node's next open replaces it. `false` when
+    /// no channel was serving: an earlier retirement keeps its place and its
+    /// drain clock, and a node without a channel still awaits the
+    /// replacement.
+    pub(super) fn evict(&mut self, node: &Node) -> bool {
+        let state = self
+            .channels
+            .entry(node.clone())
+            .or_insert(ChannelState::AwaitingReopen);
+        let retired = state.serving().is_some();
+        state.advance(|state| match state {
+            ChannelState::Active(channel)
+            | ChannelState::Replaced(channel)
+            | ChannelState::Retiring(channel, _) => {
+                ChannelState::Retiring(channel, Retirement::Failed)
+            }
+            ChannelState::AwaitingReopen => ChannelState::AwaitingReopen,
+        });
+        retired
     }
 
-    /// Whether this node may be opened during the current tick. A quiescent
-    /// retirement is dropped here, but opening remains deferred to a later tick.
+    /// The pass's snapshot shows `node` offline, so the agent observes its
+    /// return: a replacement this pass opened for it is an ordinary
+    /// reconnect.
+    pub(super) fn surfaced_offline(&mut self, node: &Node) {
+        if let Some(state) = self.channels.get_mut(node) {
+            state.advance(ChannelState::settle_replacement);
+        }
+    }
+
+    /// Whether the latest pass opened a replacement no published snapshot
+    /// observed.
+    pub(super) fn has_replacement(&self) -> bool {
+        self.channels
+            .values()
+            .any(|state| matches!(state, ChannelState::Replaced(_)))
+    }
+
+    /// Whether this node may be opened during the current pass. A quiescent
+    /// retirement is dropped here — a failed one leaves the node awaiting
+    /// its replacement — but opening remains deferred to a later pass.
     pub(super) fn prepare_open(
         &mut self,
         node: &Node,
         is_quiescent: impl FnOnce(&Channel) -> bool,
     ) -> bool {
-        let Some(ChannelState::Retiring(channel)) = self.channels.get(node) else {
+        let Some(state) = self.channels.get_mut(node) else {
+            return true;
+        };
+        let ChannelState::Retiring(channel, retirement) = state else {
             return true;
         };
         if is_quiescent(channel) {
-            self.channels.remove(node);
+            match *retirement {
+                Retirement::Failed => *state = ChannelState::AwaitingReopen,
+                Retirement::Absent => {
+                    self.channels.remove(node);
+                }
+            }
         }
         false
     }
 
-    /// Retire every active node not in `seen`; returns how many retired.
+    /// Retire every serving node not in `seen`; returns how many retired.
     pub(super) fn retire_absent(&mut self, seen: &HashSet<Node>) -> usize {
-        let absent = self
-            .active_iter()
-            .map(|(node, _)| node)
-            .filter(|node| !seen.contains(*node))
-            .cloned()
-            .collect::<Vec<_>>();
-        absent
-            .into_iter()
-            .filter(|node| self.retire_node(node))
-            .count()
+        let mut retired = 0;
+        for (node, state) in &mut self.channels {
+            if seen.contains(node) || state.serving().is_none() {
+                continue;
+            }
+            retired += 1;
+            state.advance(|state| match state {
+                ChannelState::Active(channel) | ChannelState::Replaced(channel) => {
+                    ChannelState::Retiring(channel, Retirement::Absent)
+                }
+                state => state,
+            });
+        }
+        retired
     }
 
+    /// Forget what the listing no longer shows: a quiescent retirement is
+    /// dropped, and a node that left keeps no failed-channel cause.
     pub(super) fn reap_absent(
         &mut self,
         seen: &HashSet<Node>,
         is_quiescent: impl Fn(&Channel) -> bool,
     ) {
-        self.channels.retain(|node, state| match state {
-            ChannelState::Active(_) => true,
-            ChannelState::Retiring(channel) => seen.contains(node) || !is_quiescent(channel),
+        self.channels.retain(|node, state| {
+            if seen.contains(node) {
+                return true;
+            }
+            match state {
+                ChannelState::Active(_) | ChannelState::Replaced(_) => true,
+                ChannelState::Retiring(channel, retirement) => {
+                    *retirement = Retirement::Absent;
+                    !is_quiescent(channel)
+                }
+                ChannelState::AwaitingReopen => false,
+            }
         });
     }
 
     #[cfg(test)]
     pub(super) fn is_retiring(&self, node: &Node) -> bool {
-        matches!(self.channels.get(node), Some(ChannelState::Retiring(_)))
+        matches!(self.channels.get(node), Some(ChannelState::Retiring(..)))
     }
 }

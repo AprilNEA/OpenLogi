@@ -2,7 +2,8 @@ use super::*;
 
 use openlogi_agent_core::orchestrator::Orchestrator;
 use openlogi_core::config::Config;
-use openlogi_hid::PairingError;
+use openlogi_hid::{DiscoveredDevice, PairingError, PairingEvent};
+use openlogi_ipc::{FoundDevice, PairingPhase};
 
 fn shared_handles() -> SharedHandles {
     Orchestrator::new(
@@ -17,10 +18,17 @@ fn manager_with_ctrl(ctrl: mpsc::UnboundedSender<PairingControl>) -> PairingMana
     PairingManager {
         ctrl,
         updates: Mutex::new(upd_rx),
-        session: Arc::new(StdMutex::new(SessionOwner::default())),
+        session: Arc::new(published_session()),
         shared: shared_handles(),
-        observable: Arc::new(ObservableState::new("test".to_string())),
     }
+}
+
+fn published_session() -> PublishedSession {
+    PublishedSession::new(Arc::new(ObservableState::new("test".to_string())))
+}
+
+fn published(manager: &PairingManager) -> Option<PairingPhase> {
+    manager.session.observable.snapshot().pairing
 }
 
 async fn start_session(
@@ -46,12 +54,6 @@ fn discovered_device() -> DiscoveredDevice {
     }
 }
 
-fn is_idle(manager: &PairingManager) -> bool {
-    with_session_owner(&manager.session, |owner| {
-        matches!(owner.state, SessionState::Idle)
-    })
-}
-
 #[tokio::test]
 async fn cancellation_acknowledges_only_after_terminal_cleanup() {
     let (ctrl_tx, mut ctrl_rx) = mpsc::unbounded_channel();
@@ -72,7 +74,6 @@ async fn cancellation_acknowledges_only_after_terminal_cleanup() {
             event: PairingEvent::Failed(PairingError::Cancelled),
         },
         &manager.session,
-        &manager.observable,
     );
     cancel.await.unwrap();
     assert!(!manager.shared.receiver_access.exclusive_requested());
@@ -99,11 +100,10 @@ async fn cancellation_dismisses_a_result_that_won_the_terminal_race() {
             event: PairingEvent::Paired { slot: 1 },
         },
         &manager.session,
-        &manager.observable,
     );
     cancel.await.unwrap();
     assert_eq!(
-        manager.observable.snapshot().pairing,
+        published(&manager),
         None,
         "cancellation must also dismiss a simultaneous terminal result"
     );
@@ -126,7 +126,6 @@ async fn late_cancellation_completion_does_not_dismiss_a_replacement_result() {
             event: PairingEvent::Failed(PairingError::Cancelled),
         },
         &manager.session,
-        &manager.observable,
     );
     let second = start_session(&manager, &mut ctrl_rx).await;
     apply_session_event(
@@ -135,13 +134,9 @@ async fn late_cancellation_completion_does_not_dismiss_a_replacement_result() {
             event: PairingEvent::Paired { slot: 2 },
         },
         &manager.session,
-        &manager.observable,
     );
     cancel.await.unwrap();
-    assert_eq!(
-        manager.observable.snapshot().pairing,
-        Some(PairingPhase::Paired { slot: 2 })
-    );
+    assert_eq!(published(&manager), Some(PairingPhase::Paired { slot: 2 }));
 }
 
 #[tokio::test]
@@ -153,8 +148,7 @@ async fn start_rolls_back_pause_when_watcher_send_fails() {
     let result = manager.start(ReceiverSelector::First).await;
 
     assert_eq!(result, Err(PairingCommandError::WatcherUnavailable));
-    assert!(is_idle(&manager));
-    assert_eq!(manager.observable.snapshot().pairing, None);
+    assert_eq!(published(&manager), None);
     assert!(!manager.shared.receiver_access.exclusive_requested());
     assert!(
         manager
@@ -163,11 +157,16 @@ async fn start_rolls_back_pause_when_watcher_send_fails() {
             .try_acquire_for_session()
             .is_some()
     );
+    assert_eq!(
+        manager.start(ReceiverSelector::First).await,
+        Err(PairingCommandError::WatcherUnavailable),
+        "a failed start must not leave the owner admitting"
+    );
 }
 
 #[test]
 fn admission_is_owned_and_rolled_back_by_session_identity() {
-    let sessions = Arc::new(StdMutex::new(SessionOwner::default()));
+    let sessions = Arc::new(published_session());
     let first =
         SessionAdmission::new(Arc::clone(&sessions)).expect("idle owner should admit a session");
 
@@ -181,10 +180,14 @@ fn admission_is_owned_and_rolled_back_by_session_identity() {
     let second = SessionAdmission::new(Arc::clone(&sessions))
         .expect("dropping an admission should reopen the owner");
     assert_ne!(second.id, first_id);
-    with_session_owner(&sessions, |owner| owner.roll_back_admission(first_id));
-    assert!(with_session_owner(&sessions, |owner| {
-        matches!(owner.state, SessionState::Admitting(id) if id == second.id)
-    }));
+    sessions.transition(|owner| owner.roll_back_admission(first_id));
+    assert!(
+        matches!(
+            SessionAdmission::new(Arc::clone(&sessions)),
+            Err(PairingCommandError::AlreadyActive)
+        ),
+        "a stale rollback must leave the newer admission in place"
+    );
 }
 
 #[tokio::test]
@@ -202,21 +205,23 @@ async fn cancel_without_active_session_is_a_noop_success() {
     );
 }
 
-#[test]
-fn pair_without_active_session_does_not_publish_pairing() {
+#[tokio::test]
+async fn pair_without_active_session_does_not_publish_pairing() {
     let (ctrl_tx, mut ctrl_rx) = mpsc::unbounded_channel();
     let manager = manager_with_ctrl(ctrl_tx);
-    manager
-        .observable
-        .set_pairing(Some(PairingPhase::Paired { slot: 3 }));
+    let session = start_session(&manager, &mut ctrl_rx).await;
+    apply_session_event(
+        PairingSessionEvent {
+            session,
+            event: PairingEvent::Paired { slot: 3 },
+        },
+        &manager.session,
+    );
 
     let result = manager.pair(discovered_device().address);
 
     assert_eq!(result, Err(PairingCommandError::NoActiveSession));
-    assert_eq!(
-        manager.observable.snapshot().pairing,
-        Some(PairingPhase::Paired { slot: 3 })
-    );
+    assert_eq!(published(&manager), Some(PairingPhase::Paired { slot: 3 }));
     assert!(
         ctrl_rx.try_recv().is_err(),
         "pair without a session must not reach the watcher"
@@ -235,7 +240,6 @@ async fn audit_queued_device_found_cannot_revert_selected_phase() {
             event: PairingEvent::DeviceFound(selected.clone()),
         },
         &manager.session,
-        &manager.observable,
     );
     let queued = DiscoveredDevice {
         address: [6, 5, 4, 3, 2, 1],
@@ -251,20 +255,10 @@ async fn audit_queued_device_found_cannot_revert_selected_phase() {
         .unwrap();
 
     manager.pair(selected.address).unwrap();
-    assert_eq!(
-        manager.observable.snapshot().pairing,
-        Some(PairingPhase::Pairing)
-    );
-    let update = apply_session_event(
-        raw_rx.recv().await.unwrap(),
-        &manager.session,
-        &manager.observable,
-    );
+    assert_eq!(published(&manager), Some(PairingPhase::Pairing));
+    let update = apply_session_event(raw_rx.recv().await.unwrap(), &manager.session);
 
-    assert_eq!(
-        manager.observable.snapshot().pairing,
-        Some(PairingPhase::Pairing)
-    );
+    assert_eq!(published(&manager), Some(PairingPhase::Pairing));
     assert!(
         update.is_none(),
         "stale discovery must not reach IPC clients"
@@ -279,13 +273,9 @@ async fn audit_queued_device_found_cannot_revert_selected_phase() {
             event: PairingEvent::Searching,
         },
         &manager.session,
-        &manager.observable,
     );
     assert!(searching.is_none());
-    assert_eq!(
-        manager.observable.snapshot().pairing,
-        Some(PairingPhase::Pairing)
-    );
+    assert_eq!(published(&manager), Some(PairingPhase::Pairing));
 }
 
 #[tokio::test]
@@ -303,7 +293,6 @@ async fn queued_discovery_cannot_revert_passkey() {
                 event: PairingEvent::DeviceFound(device.clone()),
             },
             &manager.session,
-            &manager.observable,
         );
         let (raw_tx, mut raw_rx) = mpsc::unbounded_channel();
         for event in [
@@ -325,15 +314,14 @@ async fn queued_discovery_cannot_revert_passkey() {
                 event: PairingEvent::Passkey(method.clone()),
             },
             &manager.session,
-            &manager.observable,
         );
         assert!(matches!(update, Some(PairingUpdate::Passkey(value)) if value == method));
         let expected = Some(PairingPhase::Passkey(method));
-        assert_eq!(manager.observable.snapshot().pairing, expected);
+        assert_eq!(published(&manager), expected);
 
         while let Ok(event) = raw_rx.try_recv() {
-            assert!(apply_session_event(event, &manager.session, &manager.observable).is_none());
-            assert_eq!(manager.observable.snapshot().pairing, expected);
+            assert!(apply_session_event(event, &manager.session).is_none());
+            assert_eq!(published(&manager), expected);
         }
         let terminal = apply_session_event(
             PairingSessionEvent {
@@ -341,14 +329,9 @@ async fn queued_discovery_cannot_revert_passkey() {
                 event: PairingEvent::Paired { slot: 2 },
             },
             &manager.session,
-            &manager.observable,
         );
         assert!(matches!(terminal, Some(PairingUpdate::Paired { slot: 2 })));
-        assert_eq!(
-            manager.observable.snapshot().pairing,
-            Some(PairingPhase::Paired { slot: 2 })
-        );
-        assert!(is_idle(&manager));
+        assert_eq!(published(&manager), Some(PairingPhase::Paired { slot: 2 }));
         assert!(!manager.shared.receiver_access.exclusive_requested());
     }
 }
@@ -364,13 +347,9 @@ async fn initial_discovery_keeps_devices_available_for_repeat_selection() {
             event: PairingEvent::Searching,
         },
         &manager.session,
-        &manager.observable,
     );
     assert!(matches!(searching, Some(PairingUpdate::Searching)));
-    assert_eq!(
-        manager.observable.snapshot().pairing,
-        Some(PairingPhase::Searching)
-    );
+    assert_eq!(published(&manager), Some(PairingPhase::Searching));
     let first = discovered_device();
     let second = DiscoveredDevice {
         address: [6, 5, 4, 3, 2, 1],
@@ -390,12 +369,11 @@ async fn initial_discovery_keeps_devices_available_for_repeat_selection() {
                 event: PairingEvent::DeviceFound(device.clone()),
             },
             &manager.session,
-            &manager.observable,
         );
         assert!(matches!(update, Some(PairingUpdate::DeviceFound(value)) if value == expected));
         found.push(expected);
         assert_eq!(
-            manager.observable.snapshot().pairing,
+            published(&manager),
             Some(PairingPhase::Found(found.clone()))
         );
     }
@@ -407,10 +385,7 @@ async fn initial_discovery_keeps_devices_available_for_repeat_selection() {
             if id == session && sent.address == device.address
                 && sent.authentication == device.authentication && sent.name == device.name)
         );
-        assert_eq!(
-            manager.observable.snapshot().pairing,
-            Some(PairingPhase::Pairing)
-        );
+        assert_eq!(published(&manager), Some(PairingPhase::Pairing));
         apply_session_event(
             PairingSessionEvent {
                 session,
@@ -419,7 +394,6 @@ async fn initial_discovery_keeps_devices_available_for_repeat_selection() {
                 )),
             },
             &manager.session,
-            &manager.observable,
         );
     }
     let terminal = apply_session_event(
@@ -428,17 +402,15 @@ async fn initial_discovery_keeps_devices_available_for_repeat_selection() {
             event: PairingEvent::Failed(PairingError::Timeout),
         },
         &manager.session,
-        &manager.observable,
     );
     assert!(matches!(
         terminal,
         Some(PairingUpdate::Failed(PairingFailure::Timeout))
     ));
     assert_eq!(
-        manager.observable.snapshot().pairing,
+        published(&manager),
         Some(PairingPhase::Failed(PairingFailure::Timeout))
     );
-    assert!(is_idle(&manager));
     assert!(!manager.shared.receiver_access.exclusive_requested());
 }
 
@@ -462,9 +434,8 @@ async fn unsuccessful_pair_keeps_discovery_open() {
                 event: PairingEvent::DeviceFound(first.clone()),
             },
             &manager.session,
-            &manager.observable,
         );
-        let before = manager.observable.snapshot().pairing;
+        let before = published(&manager);
         let address = if error == PairingCommandError::WatcherUnavailable {
             ctrl_rx.close();
             first.address
@@ -473,7 +444,7 @@ async fn unsuccessful_pair_keeps_discovery_open() {
         };
 
         assert_eq!(manager.pair(address), Err(error));
-        assert_eq!(manager.observable.snapshot().pairing, before);
+        assert_eq!(published(&manager), before);
         assert!(
             ctrl_rx.try_recv().is_err(),
             "failed pair must not send a command"
@@ -484,12 +455,11 @@ async fn unsuccessful_pair_keeps_discovery_open() {
                 event: PairingEvent::DeviceFound(second.clone()),
             },
             &manager.session,
-            &manager.observable,
         );
         assert!(matches!(update, Some(PairingUpdate::DeviceFound(found))
             if found.address == second.address));
         assert_eq!(
-            manager.observable.snapshot().pairing,
+            published(&manager),
             Some(PairingPhase::Found(vec![
                 FoundDevice {
                     address: first.address,
@@ -515,17 +485,18 @@ async fn start_ignores_overlapping_session_without_clearing_or_sending() {
             event: PairingEvent::DeviceFound(discovered_device()),
         },
         &manager.session,
-        &manager.observable,
     );
 
     let result = manager.start(ReceiverSelector::First).await;
 
     assert_eq!(result, Err(PairingCommandError::AlreadyActive));
+    let device = discovered_device();
     assert_eq!(
-        with_session_owner(&manager.session, |owner| owner
-            .active()
-            .map(|active| active.devices.len())),
-        Some(1)
+        published(&manager),
+        Some(PairingPhase::Found(vec![FoundDevice {
+            address: device.address,
+            name: device.name,
+        }]))
     );
     let sent = ctrl_rx.try_recv();
     assert!(
@@ -545,7 +516,6 @@ async fn terminal_cleanup_is_exactly_once_and_releases_receiver_lease() {
             event: PairingEvent::DeviceFound(discovered_device()),
         },
         &manager.session,
-        &manager.observable,
     );
     manager.pair(discovered_device().address).unwrap();
     assert!(matches!(
@@ -557,10 +527,7 @@ async fn terminal_cleanup_is_exactly_once_and_releases_receiver_lease() {
     assert!(
         matches!(ctrl_rx.try_recv().unwrap(), PairingControl::Cancel { session } if session == first)
     );
-    assert_eq!(
-        manager.observable.snapshot().pairing,
-        Some(PairingPhase::Pairing)
-    );
+    assert_eq!(published(&manager), Some(PairingPhase::Pairing));
     assert!(
         manager
             .shared
@@ -575,13 +542,11 @@ async fn terminal_cleanup_is_exactly_once_and_releases_receiver_lease() {
                 event: PairingEvent::Failed(PairingError::Cancelled),
             },
             &manager.session,
-            &manager.observable,
         ),
         Some(PairingUpdate::Failed(PairingFailure::Cancelled))
     ));
     cancel.await.unwrap();
-    assert!(is_idle(&manager));
-    assert_eq!(manager.observable.snapshot().pairing, None);
+    assert_eq!(published(&manager), None);
     assert!(!manager.shared.receiver_access.exclusive_requested());
     assert!(
         manager
@@ -605,7 +570,6 @@ async fn terminal_cleanup_is_exactly_once_and_releases_receiver_lease() {
                 event,
             },
             &manager.session,
-            &manager.observable,
         );
         assert!(stale.is_none());
     }
@@ -614,16 +578,13 @@ async fn terminal_cleanup_is_exactly_once_and_releases_receiver_lease() {
         Err(PairingCommandError::UnknownDevice)
     );
     assert_eq!(
-        with_session_owner(&manager.session, |owner| owner
-            .active()
-            .map(|session| session.id)),
+        manager
+            .session
+            .transition(|owner| owner.subscribe_completion().map(|(id, _)| id)),
         Some(second)
     );
     assert!(manager.shared.receiver_access.exclusive_requested());
-    assert_eq!(
-        manager.observable.snapshot().pairing,
-        Some(PairingPhase::Searching)
-    );
+    assert_eq!(published(&manager), Some(PairingPhase::Searching));
 
     let second_terminal = apply_session_event(
         PairingSessionEvent {
@@ -631,13 +592,11 @@ async fn terminal_cleanup_is_exactly_once_and_releases_receiver_lease() {
             event: PairingEvent::Paired { slot: 4 },
         },
         &manager.session,
-        &manager.observable,
     );
     assert!(matches!(
         second_terminal,
         Some(PairingUpdate::Paired { slot: 4 })
     ));
-    assert!(is_idle(&manager));
     assert!(!manager.shared.receiver_access.exclusive_requested());
 }
 

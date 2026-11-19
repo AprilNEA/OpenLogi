@@ -102,6 +102,28 @@ fn a_tap_without_modifiers_is_one_press_and_release() {
 }
 
 #[test]
+fn keypad_enter_does_not_release_a_held_main_return() {
+    use crate::inject::macos::keycode::macos_to_hid_usage;
+
+    let recorder = Recorder::default();
+    let mut keyboard = Keyboard::new(recorder.clone());
+    let main = macos_to_hid_usage(0x24).expect("Return usage");
+    let keypad = macos_to_hid_usage(0x4c).expect("keypad Enter usage");
+    assert_eq!(keyboard.edge(main, KeyPhase::Down), Routed::Sent);
+    assert_eq!(keyboard.tap(keypad, 0), Routed::Sent);
+    assert_eq!(keyboard.edge(main, KeyPhase::Up), Routed::Sent);
+    assert_eq!(
+        recorder.reports(),
+        [
+            report(0, &[0x28]),
+            report(0, &[0x28, 0x58]),
+            report(0, &[0x28]),
+            report(0, &[]),
+        ]
+    );
+}
+
+#[test]
 fn a_tap_leaves_the_modifiers_a_held_chord_holds_down() {
     let recorder = Recorder::default();
     let mut keyboard = Keyboard::new(recorder.clone());

@@ -16,9 +16,9 @@ use gpui::{
     ParentElement as _, Render, SharedString, Size, Styled as _, Subscription, Window, div,
     prelude::FluentBuilder as _, px, rgb,
 };
-use gpui_component::Selectable as _;
-use gpui_component::{
-    Icon, IconName, Root, Sizable as _,
+use gpui_kit::component::Selectable as _;
+use gpui_kit::component::{
+    Icon, IconName, Sizable as _,
     button::Button,
     h_flex,
     radio::{Radio, RadioGroup},
@@ -27,7 +27,6 @@ use gpui_component::{
 use openlogi_core::config::{FlowConfig, FlowEdge, FlowPeerName};
 use openlogi_ipc::FlowLinkState;
 
-use crate::app::menu::{CloseWindow, Minimize, Zoom};
 use crate::state::{
     AppState, FlowDeviceRow, FlowHealth, FlowHost, FlowIssue, FlowReadiness, StateEvent,
 };
@@ -183,9 +182,6 @@ impl Render for FlowView {
             .bg(pal.page)
             .text_color(pal.text_primary)
             .track_focus(&self.focus_handle)
-            .on_action(|_: &CloseWindow, window, _| window.remove_window())
-            .on_action(|_: &Minimize, window, _| window.minimize_window())
-            .on_action(|_: &Zoom, window, _| window.zoom_window())
             .when(windows::needs_client_titlebar(window), |this| {
                 this.child(windows::aux_title_bar(window_title(), cx))
             })
@@ -205,9 +201,6 @@ impl Render for FlowView {
                         .child(inspector::panel(&model, &self.selected, pal, window, cx)),
                 )
             })
-            // Root owns the dialog state, but each window mounts its layer:
-            // without it the remove confirmation never paints.
-            .children(Root::render_dialog_layer(window, cx))
     }
 }
 
@@ -464,9 +457,9 @@ fn channel_segment(
     device: &FlowDeviceRow,
     host: &FlowHost,
     cx: &App,
-) -> gpui_component::button::ButtonGroup {
+) -> gpui_kit::component::button::ButtonGroup {
     use crate::ui::theme::SelectableStyle as _;
-    use gpui_component::Disableable as _;
+    use gpui_kit::component::Disableable as _;
     use openlogi_core::config::FlowHostSlot;
 
     let current = device.slot(host);
@@ -512,7 +505,7 @@ fn channel_segment(
                 }),
         )
     });
-    gpui_component::button::ButtonGroup::new(id("channels"))
+    gpui_kit::component::button::ButtonGroup::new(id("channels"))
         .outline()
         .xsmall()
         .child(off)

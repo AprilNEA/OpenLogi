@@ -3,8 +3,8 @@ use std::ops::Range;
 
 use hidpp::channel::ChannelObservation;
 use openlogi_fixture::{
-    CassetteExchange, ProtocolIdentityError, ProtocolIdentityExtractor, RequestMatch,
-    SyntheticIdentityKind, SyntheticIdentityOrdinal, generate_synthetic_identity,
+    CassetteExchange, ProtocolIdentityError, ProtocolIdentityExtractor, RecordedRequestReports,
+    RequestMatch, SyntheticIdentityKind, SyntheticIdentityOrdinal, generate_synthetic_identity,
     is_pairing_identity_traffic,
 };
 
@@ -61,8 +61,13 @@ impl ProtocolSanitizer {
 
 /// The rejection an unassociated observation earns, or `None` when it is
 /// evidence about no HID++ exchange at all and the cassette may ignore it.
+///
+/// `requests` are every request the channel recorded. An unmatched incoming
+/// report is rejected only when one of them could have taken it as its
+/// answer.
 pub(super) fn unassociated_rejection(
     observation: &ChannelObservation,
+    requests: &[RecordedRequestReports<'_>],
 ) -> Option<CassetteRejectionReason> {
     Some(match observation {
         ChannelObservation::OutgoingReport { report, .. } => {
@@ -73,10 +78,20 @@ pub(super) fn unassociated_rejection(
             }
         }
         ChannelObservation::IncomingReport { report, .. } => {
-            if is_pairing_identity_traffic(report.as_bytes()) {
+            let report = report.as_bytes();
+            if is_pairing_identity_traffic(report) {
                 CassetteRejectionReason::PairingTraffic
-            } else {
+            } else if requests
+                .iter()
+                .any(|request| request.may_be_answered_by(report))
+            {
                 CassetteRejectionReason::UnmatchedIncomingReport
+            } else {
+                // Input no recorded request asked for: a receiver or device
+                // notification, or a reply to another host driver sharing the
+                // node. Like a foreign report it never enters the cassette, so
+                // it cannot leak identity or break replay.
+                return None;
             }
         }
         ChannelObservation::MalformedIncomingReport { .. } => {

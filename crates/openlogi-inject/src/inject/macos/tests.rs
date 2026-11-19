@@ -133,3 +133,34 @@ fn posted_key_edges_carry_the_synthetic_tag() {
         );
     }
 }
+
+#[test]
+fn keypad_events_keep_their_identity_on_both_edges() {
+    let modifiers = CGEventFlags::CGEventFlagControl | CGEventFlags::CGEventFlagShift;
+    // Events.h's keypad keycodes, including Enter; F20 (0x5a) sits in the
+    // middle of this range but is not a keypad key.
+    for vk in [
+        0x41, 0x43, 0x45, 0x4b, 0x4c, 0x4e, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59,
+        0x5b, 0x5c,
+    ] {
+        for phase in [KeyPhase::Down, KeyPhase::Up] {
+            let event = key_event(vk, modifiers, phase).expect("a keyboard event");
+            assert_eq!(
+                event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE),
+                i64::from(vk)
+            );
+            assert_eq!(
+                event.get_flags(),
+                modifiers | CGEventFlags::CGEventFlagNumericPad,
+                "keycode {vk:#04x}, {phase:?}"
+            );
+        }
+    }
+    // Main Return, digits, punctuation, and modifiers must not acquire Pad.
+    for vk in [0x24, 0x12, 0x1d, 0x1b, 0x18, 0x2f, 0x2c, 0x38, 0x3b, 0x5a] {
+        for phase in [KeyPhase::Down, KeyPhase::Up] {
+            let event = key_event(vk, modifiers, phase).expect("a keyboard event");
+            assert_eq!(event.get_flags(), modifiers, "keycode {vk:#04x}");
+        }
+    }
+}

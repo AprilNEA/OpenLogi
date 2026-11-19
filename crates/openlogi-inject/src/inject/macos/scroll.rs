@@ -3,6 +3,10 @@
 use crate::inject::{QuantizedScroll, ScrollQuantizer, SmoothScrollPhase};
 use core_graphics::event::{CGEvent, CGEventTapLocation, EventField, ScrollEventUnit};
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+use objc2::AnyThread;
+use objc2::rc::autoreleasepool;
+use objc2_app_kit::{NSEvent, NSEventModifierFlags};
+use objc2_foundation::{NSUserDefaults, ns_string};
 use openlogi_core::scroll::ScrollDelta;
 use std::sync::{LazyLock, Mutex};
 
@@ -15,9 +19,122 @@ static SMOOTH_SCROLL_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
 static WHEEL_TICK_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
     LazyLock::new(|| Mutex::new(ScrollQuantizer::default()));
 
+const POINTS_PER_LINE: i32 = 10;
+
 // `core-graphics` 0.25 does not expose these `CGEventTypes.h` fields.
 const SCROLL_PHASE: u32 = 99; // kCGScrollWheelEventScrollPhase
 const MOMENTUM_PHASE: u32 = 123; // kCGScrollWheelEventMomentumPhase
+
+// The private window-server type field, and the type it gives a wheel event
+// that zooms the screen (WebKit's `CoreGraphicsTestSPI.h`). `core-graphics`
+// models `CGEventType` as a closed enum without it, so the type is written
+// through the field, and a stamped event is never read back with `get_type`.
+const EVENT_TYPE: u32 = 55; // kCGSEventTypeField
+const ZOOM_EVENT_TYPE: i64 = 28; // kCGSEventZoom
+
+/// What a posted wheel event is to the window server.
+///
+/// A hardware wheel zooms the screen while the keys held match Accessibility
+/// Zoom's scroll gesture; a scroll event posted at the HID tap does not, so
+/// the gesture stopped working whenever the wheel was diverted (#2383). The
+/// injector therefore posts a zoom itself, as Logi Options+ does for its own
+/// wheel output.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WheelEventKind {
+    Scroll,
+    Zoom,
+}
+
+impl WheelEventKind {
+    /// The kind the keys held right now make of a wheel event.
+    fn current() -> Self {
+        // Posting runs on worker and hook threads with no pool of their own.
+        autoreleasepool(|_| {
+            let held = NSEvent::modifierFlags_class();
+            // Plain scrolling never reads the preferences.
+            if !held.intersects(ZoomGesture::KEYS) {
+                return Self::Scroll;
+            }
+            match ZoomGesture::read() {
+                Some(gesture) if gesture.engaged_by(held) => Self::Zoom,
+                _ => Self::Scroll,
+            }
+        })
+    }
+
+    /// Write the kind into `event` once its scroll fields are set: a zoom
+    /// carries the same deltas a scroll does.
+    fn stamp(self, event: &CGEvent) {
+        if self == Self::Zoom {
+            event.set_integer_value_field(EVENT_TYPE, ZOOM_EVENT_TYPE);
+        }
+    }
+}
+
+/// Accessibility Zoom's "Use scroll gesture with modifier keys to zoom": the
+/// modifiers that make a wheel zoom the screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ZoomGesture {
+    modifiers: NSEventModifierFlags,
+}
+
+impl ZoomGesture {
+    /// The keys Zoom compares; Caps Lock and the device-dependent bits take
+    /// no part.
+    const KEYS: NSEventModifierFlags = NSEventModifierFlags::Shift
+        .union(NSEventModifierFlags::Control)
+        .union(NSEventModifierFlags::Option)
+        .union(NSEventModifierFlags::Command)
+        .union(NSEventModifierFlags::Function);
+
+    /// The gesture as `com.apple.universalaccess` saves it, `None` while it
+    /// is off. Read on each use, so a change in System Settings applies
+    /// without restarting the agent.
+    fn read() -> Option<Self> {
+        let defaults = NSUserDefaults::initWithSuiteName(
+            NSUserDefaults::alloc(),
+            Some(ns_string!("com.apple.universalaccess")),
+        )?;
+        if !defaults.boolForKey(ns_string!("closeViewScrollWheelToggle")) {
+            return None;
+        }
+        let key = ns_string!("closeViewScrollWheelModifiersInt");
+        // Zoom uses Control until another modifier is picked in Settings.
+        let saved = if defaults.objectForKey(key).is_some() {
+            NSEventModifierFlags::from_bits_truncate(
+                usize::try_from(defaults.integerForKey(key)).ok()?,
+            )
+        } else {
+            NSEventModifierFlags::Control
+        };
+        Self::with_modifiers(saved)
+    }
+
+    /// The gesture for a saved modifier set, `None` when it names no key
+    /// Zoom compares.
+    fn with_modifiers(saved: NSEventModifierFlags) -> Option<Self> {
+        let modifiers = saved.intersection(Self::KEYS);
+        (!modifiers.is_empty()).then_some(Self { modifiers })
+    }
+
+    /// Whether `held` zooms: exactly the gesture's modifiers, as with a
+    /// hardware wheel — another modifier on top scrolls instead.
+    fn engaged_by(self, held: NSEventModifierFlags) -> bool {
+        held.intersection(Self::KEYS) == self.modifiers
+    }
+}
+
+/// Post one wheel event at the HID tap.
+///
+/// A phaseless event stands in for a wheel's and zooms as one would; a
+/// phased event is a gesture whose phases an app must see, and stays a
+/// scroll.
+fn post_wheel_event(event: &CGEvent, phase: Option<SmoothScrollPhase>) {
+    if phase.is_none() {
+        WheelEventKind::current().stamp(event);
+    }
+    event.post(CGEventTapLocation::HID);
+}
 
 /// Post a synthetic scroll event for one tick in direction `(dx, dy)`. Unit
 /// direction (-1/0/1) scaled by the fixed "one tick" pixel magnitude the
@@ -34,13 +151,13 @@ pub(super) fn dispatch_scroll(dx: i8, dy: i8) {
         return;
     };
     tag_synthetic(&ev);
-    ev.post(CGEventTapLocation::HID);
+    post_wheel_event(&ev, None);
 }
 
 pub(in crate::inject) fn post_scroll(delta: ScrollDelta) {
     if let ScrollDelta::WheelTicks { x, y } = delta {
         if let Some(event) = wheel_scroll_event(x, y, wheel_ticks(x, y), None) {
-            event.post(CGEventTapLocation::HID);
+            post_wheel_event(&event, None);
         }
         return;
     }
@@ -54,19 +171,9 @@ pub(in crate::inject) fn post_scroll(delta: ScrollDelta) {
     if delta == QuantizedScroll::default() {
         return;
     }
-
-    let Ok(src) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
-        tracing::warn!("CGEventSource::new failed for precise scroll");
-        return;
-    };
-    let Ok(ev) = CGEvent::new_scroll_event(src, ScrollEventUnit::PIXEL, 2, delta.y, delta.x, 0)
-    else {
-        tracing::warn!("CGEvent::new_scroll_event failed for precise scroll");
-        return;
-    };
-    set_continuous_scroll_fields(&ev, delta);
-    tag_synthetic(&ev);
-    ev.post(CGEventTapLocation::HID);
+    if let Some(event) = continuous_scroll_event(delta, None) {
+        post_wheel_event(&event, None);
+    }
 }
 
 pub(in crate::inject) fn post_smooth_scroll(delta: ScrollDelta, _phase: SmoothScrollPhase) {
@@ -88,12 +195,13 @@ pub(in crate::inject) fn post_phased_scroll(delta: ScrollDelta, phase: SmoothScr
 /// from JS wheel handlers). A phase is stamped only where a gesture is the
 /// point, such as a horizontal swipe AppKit's recognisers must see.
 fn post_continuous_scroll(delta: ScrollDelta, phase: Option<SmoothScrollPhase>) {
+    let delta = frame_distance(delta, phase);
     if let ScrollDelta::WheelTicks { x, y } = delta {
         if phase.is_none() && x == 0.0 && y == 0.0 {
             return;
         }
         if let Some(event) = wheel_scroll_event(x, y, wheel_ticks(x, y), phase) {
-            event.post(CGEventTapLocation::HID);
+            post_wheel_event(&event, phase);
         }
         return;
     }
@@ -112,7 +220,21 @@ fn post_continuous_scroll(delta: ScrollDelta, phase: Option<SmoothScrollPhase>) 
         return;
     }
     if let Some(event) = continuous_scroll_event(delta, phase) {
-        event.post(CGEventTapLocation::HID);
+        post_wheel_event(&event, phase);
+    }
+}
+
+/// The distance a frame goes out with. AppKit completes a phased gesture (a
+/// row swipe) only from pixel events: on line ticks it starts the swipe and
+/// snaps it back. A phased frame's wheel ticks therefore become pixels at the
+/// points per line the continuous fields carry; phaseless ticks stay ticks.
+fn frame_distance(delta: ScrollDelta, phase: Option<SmoothScrollPhase>) -> ScrollDelta {
+    match delta {
+        ScrollDelta::WheelTicks { x, y } if phase.is_some() => {
+            let points = f64::from(POINTS_PER_LINE);
+            ScrollDelta::pixels(x * points, y * points)
+        }
+        _ => delta,
     }
 }
 
@@ -221,8 +343,8 @@ fn set_continuous_axis(
     fixed_field: u32,
     point_field: u32,
 ) {
-    const POINTS_PER_LINE: i64 = 10;
     const FIXED_POINT_SCALE: i64 = 1 << 16;
+    let per_line = i64::from(POINTS_PER_LINE);
     let points = i64::from(points);
     // Write order is load-bearing: a scroll CGEvent keeps one canonical
     // distance, and writing the coarse integer *line* field makes it the
@@ -230,14 +352,15 @@ fn set_continuous_axis(
     // points per line, discarding pixel precision (measured on macOS 15.7:
     // frames under 10 points arrived as zero and the rest quantized to
     // 8-point steps). Writing the point delta last keeps it authoritative.
-    event.set_integer_value_field(line_field, points / POINTS_PER_LINE);
-    event.set_integer_value_field(fixed_field, points * FIXED_POINT_SCALE / POINTS_PER_LINE);
+    event.set_integer_value_field(line_field, points / per_line);
+    event.set_integer_value_field(fixed_field, points * FIXED_POINT_SCALE / per_line);
     event.set_integer_value_field(point_field, points);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core_graphics::event::CGEventType;
 
     fn horizontal(x: i32) -> QuantizedScroll {
         QuantizedScroll { x, y: 0 }
@@ -277,6 +400,34 @@ mod tests {
                 crate::SYNTHETIC_EVENT_USER_DATA
             );
         }
+    }
+
+    /// A phased gesture's wheel ticks go out as pixels at ten points per
+    /// line, terminal zero-distance frames included: AppKit snaps a row swipe
+    /// back on line ticks. Phaseless ticks stay ticks, and pixels pass through.
+    #[test]
+    fn phased_wheel_ticks_go_out_as_pixels() {
+        let ticks = ScrollDelta::wheel_ticks(-1.5, 0.25);
+        for phase in [
+            SmoothScrollPhase::Began,
+            SmoothScrollPhase::Changed,
+            SmoothScrollPhase::Ended,
+            SmoothScrollPhase::Cancelled,
+        ] {
+            assert_eq!(
+                frame_distance(ticks, Some(phase)),
+                ScrollDelta::pixels(-15.0, 2.5),
+                "{phase:?}"
+            );
+        }
+        let ended = Some(SmoothScrollPhase::Ended);
+        assert_eq!(
+            frame_distance(ScrollDelta::wheel_ticks(0.0, 0.0), ended),
+            ScrollDelta::pixels(0.0, 0.0)
+        );
+        assert_eq!(frame_distance(ticks, None), ticks);
+        let pixels = ScrollDelta::pixels(3.0, -4.0);
+        assert_eq!(frame_distance(pixels, ended), pixels);
     }
 
     #[test]
@@ -339,5 +490,79 @@ mod tests {
             event.get_double_value_field(EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_2);
         assert!((y - 1.6).abs() < 1.0e-4, "{y}");
         assert!((x + 0.75).abs() < 1.0e-4, "{x}");
+    }
+
+    /// Zoom engages on exactly its modifiers, as with a hardware wheel: one
+    /// more modifier scrolls, and Caps Lock takes no part.
+    #[test]
+    fn zoom_gesture_engages_on_exactly_its_modifiers() {
+        use NSEventModifierFlags as M;
+        let control = ZoomGesture::with_modifiers(M::Control).expect("Control is a Zoom key");
+        for (held, zooms) in [
+            (M::Control, true),
+            (M::Control | M::CapsLock, true),
+            (M::Control | M::NumericPad, true),
+            (M::empty(), false),
+            (M::Option, false),
+            (M::Control | M::Shift, false),
+            (M::Control | M::Command, false),
+            (M::Control | M::Function, false),
+        ] {
+            assert_eq!(control.engaged_by(held), zooms, "{held:?}");
+        }
+
+        let chord =
+            ZoomGesture::with_modifiers(M::Control | M::Option).expect("both are Zoom keys");
+        assert!(chord.engaged_by(M::Control | M::Option));
+        assert!(!chord.engaged_by(M::Control));
+        assert!(!chord.engaged_by(M::Option));
+
+        assert_eq!(
+            ZoomGesture::with_modifiers(M::Command | M::CapsLock),
+            ZoomGesture::with_modifiers(M::Command)
+        );
+        assert_eq!(ZoomGesture::with_modifiers(M::CapsLock), None);
+        assert_eq!(ZoomGesture::with_modifiers(M::empty()), None);
+    }
+
+    /// A zoom is the scroll event retyped: its deltas — which Zoom reads —
+    /// and the synthetic tag survive the stamp, and a scroll stays a scroll.
+    /// Core Graphics converts a 16.16 field to a double only for a scroll's
+    /// type, so the zoom's fixed-point distance is checked as stored.
+    #[test]
+    fn zoom_stamp_retypes_wheel_events_and_keeps_their_deltas() {
+        let ticks = QuantizedScroll { x: 0, y: 2 };
+        let scroll = wheel_scroll_event(0.0, 1.5, ticks, None).expect("a wheel event");
+        WheelEventKind::Scroll.stamp(&scroll);
+        assert_eq!(
+            scroll.get_integer_value_field(EVENT_TYPE),
+            i64::from(CGEventType::ScrollWheel as u32)
+        );
+
+        let zoom = wheel_scroll_event(0.0, 1.5, ticks, None).expect("a wheel event");
+        WheelEventKind::Zoom.stamp(&zoom);
+        assert_eq!(zoom.get_integer_value_field(EVENT_TYPE), ZOOM_EVENT_TYPE);
+        assert_eq!(
+            zoom.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_1),
+            2
+        );
+        assert_eq!(
+            zoom.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_1),
+            3 << 15,
+            "1.5 lines in 16.16"
+        );
+        assert_eq!(
+            zoom.get_integer_value_field(EventField::EVENT_SOURCE_USER_DATA),
+            crate::SYNTHETIC_EVENT_USER_DATA
+        );
+
+        let pixels =
+            continuous_scroll_event(QuantizedScroll { x: 0, y: 12 }, None).expect("a scroll event");
+        WheelEventKind::Zoom.stamp(&pixels);
+        assert_eq!(pixels.get_integer_value_field(EVENT_TYPE), ZOOM_EVENT_TYPE);
+        assert_eq!(
+            pixels.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_POINT_DELTA_AXIS_1),
+            12
+        );
     }
 }

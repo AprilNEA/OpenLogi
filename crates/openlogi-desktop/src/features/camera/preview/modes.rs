@@ -15,7 +15,7 @@ use gpui::{
     AnyElement, AppContext as _, Context, Entity, IntoElement, ParentElement, Render, SharedString,
     Styled, Subscription, Window, div, px,
 };
-use gpui_component::{
+use gpui_kit::component::{
     h_flex,
     select::{SelectEvent, SelectItem, SelectState},
     v_flex,

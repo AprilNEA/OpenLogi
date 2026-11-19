@@ -1,6 +1,7 @@
 //! Which devices re-apply their volatile settings, and how many confirming passes they get.
 
 use super::*;
+use crate::orchestrator::ForcedReapply;
 use std::collections::BTreeMap;
 
 #[test]
@@ -627,6 +628,62 @@ fn forced_reapply_requests_coalesce_to_the_larger_budget() {
         assert_eq!(
             orchestrator.needs_reapply_confirmation(),
             confirmations_left > 0
+        );
+    }
+}
+
+/// Every sequence of up to three forced requests between two refreshes. The
+/// refresh drains what the sequence earned: the largest requested budget, and
+/// a rearm of every capture when a system resume arrived at any point.
+#[test]
+fn forced_reapply_holds_coalesced_requests_until_a_refresh_drains_them() {
+    type Request = fn(ForcedReapply) -> ForcedReapply;
+    let requests: [(&str, Request, u8, bool); 3] = [
+        (
+            "settings reset",
+            ForcedReapply::settings_reset,
+            VOLATILE_REAPPLY_CONFIRM_RETRIES,
+            false,
+        ),
+        (
+            "device reconnect",
+            ForcedReapply::device_reconnected,
+            RECONNECT_REAPPLY_CONFIRM_RETRIES,
+            false,
+        ),
+        (
+            "system resume",
+            ForcedReapply::system_resumed,
+            VOLATILE_REAPPLY_CONFIRM_RETRIES,
+            true,
+        ),
+    ];
+    // Each base-4 digit of `code` is one request slot; 0 leaves it empty.
+    for code in 0..4_usize.pow(3) {
+        let sequence: Vec<_> = [code % 4, code / 4 % 4, code / 16]
+            .into_iter()
+            .filter_map(|digit| digit.checked_sub(1))
+            .map(|i| requests[i])
+            .collect();
+        let names: Vec<_> = sequence.iter().map(|(name, ..)| *name).collect();
+        let mut latch = sequence
+            .iter()
+            .fold(ForcedReapply::default(), |latch, (_, request, ..)| {
+                request(latch)
+            });
+        let drained = std::mem::take(&mut latch);
+        assert_eq!(
+            (drained.budget(), drained.rearms_every_capture()),
+            (
+                sequence.iter().map(|&(_, _, budget, _)| budget).max(),
+                sequence.iter().any(|&(.., rearm)| rearm),
+            ),
+            "{names:?}"
+        );
+        assert_eq!(
+            (latch.budget(), latch.rearms_every_capture()),
+            (None, false),
+            "{names:?}: the next refresh forces nothing"
         );
     }
 }

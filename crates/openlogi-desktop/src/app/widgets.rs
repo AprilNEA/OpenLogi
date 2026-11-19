@@ -4,9 +4,9 @@
 
 use gpui::{
     App, Context, InteractiveElement as _, IntoElement, ParentElement, RenderOnce, SharedString,
-    Styled, Window, div, prelude::FluentBuilder as _, px,
+    Styled, Window, div, prelude::FluentBuilder as _, px, rgb,
 };
-use gpui_component::{
+use gpui_kit::component::{
     Disableable as _, Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
@@ -17,7 +17,7 @@ use openlogi_core::hid::{DeviceRoute, ReceiverBrand};
 use super::AppView;
 use crate::state::{AppState, DeviceRecord};
 use crate::ui::components::control_button;
-use crate::ui::theme::{Palette, Typography as _};
+use crate::ui::theme::{self, Palette, Typography as _};
 
 /// "← Devices" affordance on the detail screen; returns to the gallery without
 /// changing the active-device selection.
@@ -77,31 +77,41 @@ impl RenderOnce for FlowButton {
     }
 }
 
-/// Primary action that opens the pairing window. The empty state carries its
-/// own equivalent CTA, so this never floats alone in an empty header.
-pub(super) fn add_device_button() -> impl IntoElement {
-    AddDeviceButton
+/// Whether the agent answers right now. Pairing runs in the agent, and only a
+/// live link confirms what the window last heard about a device, so every Add
+/// Device entry and connectivity readout asks here.
+pub(super) fn agent_live(state: &AppState) -> bool {
+    state.agent_status().is_some()
+}
+
+/// Primary action that opens the pairing window, in the Home header and as
+/// the empty state's call to action; `id` tells the two apart.
+pub(super) fn add_device_button(id: &'static str) -> impl IntoElement {
+    AddDeviceButton { id }
 }
 
 /// [`add_device_button`]: pairing runs in the agent, so without a live
 /// connection the button is disabled and its tooltip says why.
 #[derive(IntoElement)]
-struct AddDeviceButton;
+struct AddDeviceButton {
+    id: &'static str,
+}
 
 impl RenderOnce for AddDeviceButton {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
-        let connected = AppState::try_read(cx).is_some_and(|state| state.agent_status().is_some());
-        Button::new("header-add-device")
+        let live = AppState::try_read(cx).is_some_and(agent_live);
+        let id = self.id;
+        Button::new(id)
             .primary()
             .icon(IconName::Plus)
             .label(tr!("pairing.add_device"))
-            .disabled(!connected)
-            .tooltip(if connected {
+            .disabled(!live)
+            .tooltip(if live {
                 tr!("pairing.add_device")
             } else {
                 tr!("pairing.pairing_agent_not_ready")
             })
-            .debug_selector(|| "header-add-device".into())
+            .debug_selector(move || id.into())
             .on_click(|_, _, cx| crate::windows::add_device::open(cx))
     }
 }
@@ -119,35 +129,82 @@ pub(super) fn main_window_title(show_device: bool, cx: &Context<AppView>) -> Sha
         )
 }
 
-pub(super) fn status_badge(online: bool, pal: Palette) -> impl IntoElement {
-    let label = if online {
-        tr!("device.connected")
-    } else {
-        tr!("device.offline")
-    };
-    h_flex()
-        .gap_1()
-        .items_center()
-        .rounded_full()
-        .border_1()
-        .border_color(pal.border)
-        .px_2()
-        .py_1()
-        .text_caption()
-        .text_color(pal.text_muted)
-        .child(connectivity_dot(online, pal))
-        .child(label)
+/// What the window may say about a device's connection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Connectivity {
+    Connected,
+    /// Connected when the agent link dropped. The last state stays on
+    /// screen, but nothing confirms it until the agent answers again.
+    Reconnecting,
+    Offline,
 }
 
-/// Neutral connectivity indicator: online is solid and offline is hollow, so
-/// the state never depends on hue alone.
-pub(super) fn connectivity_dot(online: bool, pal: Palette) -> impl IntoElement {
-    div()
-        .size_1p5()
-        .rounded_full()
-        .border_1()
-        .border_color(pal.text_muted)
-        .when(online, |dot| dot.bg(pal.text_primary))
+impl Connectivity {
+    /// A device the agent last reported `online`, while the link is
+    /// `agent_live` or not.
+    pub(super) fn new(online: bool, agent_live: bool) -> Self {
+        match (online, agent_live) {
+            (false, _) => Self::Offline,
+            (true, false) => Self::Reconnecting,
+            (true, true) => Self::Connected,
+        }
+    }
+
+    pub(super) fn label(self) -> SharedString {
+        match self {
+            Self::Connected => tr!("device.connected"),
+            Self::Reconnecting => tr!("agent.reconnecting_to_the_background_service"),
+            Self::Offline => tr!("device.offline"),
+        }
+    }
+}
+
+/// The detail screen's connectivity pill. It reads the agent link itself, so
+/// a lost agent turns "Connected" into the reconnecting state wherever the
+/// pill shows.
+pub(super) fn status_badge(online: bool, pal: Palette) -> impl IntoElement {
+    StatusBadge { online, pal }
+}
+
+#[derive(IntoElement)]
+struct StatusBadge {
+    online: bool,
+    pal: Palette,
+}
+
+impl RenderOnce for StatusBadge {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let Self { online, pal } = self;
+        let connectivity =
+            Connectivity::new(online, AppState::try_read(cx).is_some_and(agent_live));
+        h_flex()
+            .gap_1()
+            .items_center()
+            .rounded_full()
+            .border_1()
+            .border_color(pal.border)
+            .px_2()
+            .py_1()
+            .text_caption()
+            .text_color(pal.text_muted)
+            .child(connectivity_dot(connectivity, pal))
+            .child(connectivity.label())
+    }
+}
+
+/// Connectivity indicator: connected is solid and offline is hollow, so those
+/// never depend on hue alone. Reconnecting takes the connecting amber and is
+/// always named in words too, beside the dot or in its card's hover tip.
+pub(super) fn connectivity_dot(connectivity: Connectivity, pal: Palette) -> impl IntoElement {
+    let dot = div().size_1p5().rounded_full().border_1();
+    match connectivity {
+        Connectivity::Connected => dot.border_color(pal.text_muted).bg(pal.text_primary),
+        Connectivity::Reconnecting => dot
+            .border_color(rgb(theme::STATUS_CONNECTING))
+            .bg(rgb(theme::STATUS_CONNECTING))
+            .debug_selector(|| "device-reconnecting".into()),
+        Connectivity::Offline => dot.border_color(pal.text_muted),
+    }
 }
 
 pub(super) fn sidebar_action(

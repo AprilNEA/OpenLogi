@@ -306,6 +306,40 @@ fn tracked_save_respects_the_writer_lock_and_releases_it_after_errors() {
     lock.try_lock().expect("neither save leaked its lock");
 }
 
+/// A save another writer is in the middle of is not a conflict: an edit
+/// waits for it to finish, where a bare tracked save gives up at once.
+#[test]
+fn an_edit_waits_out_another_writers_save() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dir.path().join("config.toml.lock"))
+        .expect("open lock");
+    lock.try_lock().expect("hold writer lock");
+    let mut edit = ConfigEdit::load(&path).expect("load");
+    edit.config_mut().set_selected_device(Some("mouse".into()));
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        drop(lock);
+    });
+
+    let revision = edit.commit().expect("the edit waits for the lock");
+    release.join().expect("release the lock");
+
+    let text = fs::read_to_string(&path).expect("read saved");
+    assert_eq!(revision, ConfigRevision::of(&text));
+    assert_eq!(
+        Config::load_from_path(&path)
+            .expect("reload")
+            .selected_device(),
+        Some("mouse")
+    );
+}
+
 #[test]
 fn a_failed_backup_write_leaves_the_migration_backup_still_owed() {
     // The pre-migration file is the user's only recovery path from a

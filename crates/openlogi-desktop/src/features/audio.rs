@@ -10,7 +10,7 @@
 use gpui::{
     AnyElement, App, Context, IntoElement, ParentElement, Render, Styled, Subscription, Window, div,
 };
-use gpui_component::{h_flex, slider::Slider, v_flex};
+use gpui_kit::component::{h_flex, slider::Slider, v_flex};
 use openlogi_core::hid::SidetoneLevel;
 
 use crate::state::{AppState, DeviceKey, SidetoneLoad, StateEvent};

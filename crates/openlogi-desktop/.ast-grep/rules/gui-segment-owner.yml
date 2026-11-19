@@ -1,0 +1,46 @@
+# Owner: openlogi-desktop's ui::theme::SelectableStyle::selected_segment — the
+# one selected look for a ButtonGroup segment, since the stock selected fill
+# barely differs from the resting one.
+id: gui-segment-owner
+language: rust
+severity: error
+message: Mark a ButtonGroup segment's choice with SelectableStyle::selected_segment beside .selected(); the stock selected fill is about 1.07:1 from the resting one, so the choice is invisible.
+note: |
+  Six segmented controls (update channel, G-Shift layer, onboard memory,
+  keypad pages, G-key mode and G-key profile) called only `.selected()`, so
+  on the light theme "Stable / Beta" read as two identical buttons while the
+  other eight groups marked their choice with the accent fill. See "Single
+  source of truth" in AGENTS.md.
+files:
+  - crates/openlogi-desktop/src/**/*.rs
+ignores:
+  - "**/tests.rs"
+  - "**/tests/**"
+rule:
+  pattern: $SEGMENT.selected($SELECTED)
+  # A segment is whatever `.child(...)` / `.children(...)` of a chain that
+  # starts at `ButtonGroup::new` receives, however deeply a closure nests it.
+  inside:
+    stopBy: end
+    kind: call_expression
+    has:
+      field: function
+      kind: field_expression
+      # Walk the receiver chain only; a group passed as an *argument* to some
+      # other container does not make that container's children segments.
+      has:
+        stopBy:
+          kind: arguments
+        pattern: ButtonGroup::new($$$)
+  not:
+    any:
+      # `.selected_segment` later in the same chain …
+      - inside:
+          stopBy:
+            kind: arguments
+          pattern: $S.selected_segment($A, $CX)
+      # … or earlier in it.
+      - has:
+          stopBy:
+            kind: arguments
+          pattern: $S.selected_segment($A, $CX)

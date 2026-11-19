@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::binding::ButtonId;
 use crate::color::Rgb;
 use crate::device::ChangedOnLight;
-use crate::hid::{SmartShiftAutoDisengage, SmartShiftThreshold, TunableTorque};
+use crate::hid::{LightCommand, SmartShiftAutoDisengage, SmartShiftThreshold, TunableTorque};
 use crate::update_feed::UpdateChannel;
 
 /// Light/dark appearance preference. `System` follows the OS appearance (the
@@ -793,6 +793,18 @@ impl LightSettings {
         }
     }
 
+    /// The settings once a light has taken `command`. A brightness in the
+    /// light's native unit changes nothing saved: settings keep brightness as
+    /// a percentage of the light's range, which the command does not name.
+    pub fn apply(&mut self, command: LightCommand) {
+        match command {
+            LightCommand::Power(enabled) => self.enabled = enabled,
+            LightCommand::BrightnessPercent(percent) => self.brightness_percent = percent.min(100),
+            LightCommand::TemperatureKelvin(kelvin) => self.temperature_kelvin = Some(kelvin),
+            LightCommand::BrightnessNative(_) => {}
+        }
+    }
+
     /// Take the values changed on the light itself in place of these.
     pub fn apply_changes_on_light(&mut self, changed: ChangedOnLight) {
         if let Some(enabled) = changed.enabled {
@@ -905,6 +917,35 @@ pub enum OnboardMemory {
     Off,
     /// An onboard profile.
     Profile(crate::hid::ProfileIndex),
+}
+
+/// Who runs a G-series keyboard's G1–G5 (HID++ `0x8010`). The keyboard has
+/// no per-key ownership: OpenLogi takes the whole row or none of it, so
+/// taking it silences every G-key without a binding. Only this explicit
+/// choice takes it, never a saved G-key binding.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GKeyOwner {
+    /// The keyboard's onboard actions.
+    #[default]
+    Keyboard,
+    /// OpenLogi: every G-key runs its binding.
+    #[serde(rename = "openlogi")]
+    OpenLogi,
+}
+
+/// What M1–M3 and MR do while OpenLogi runs a G-series keyboard's G-keys
+/// ([`GKeyOwner::OpenLogi`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GamingKeyMode {
+    /// M1–M3 switch G1–G5 between three profiles, starting on M1 each time
+    /// capture starts. MR keeps its onboard function.
+    #[default]
+    Profiles,
+    /// G1–G5, M1–M3 and MR are nine keys with a binding each. G1–G5 run their
+    /// M1 profile.
+    NineButtons,
 }
 
 /// Vertical wheel reporting resolution for HID++ `0x2121 HiResWheel`.

@@ -168,9 +168,15 @@ impl StateEvents {
     pub(crate) fn emit(self, cx: &mut Context<AppState>) {
         for event in self.0 {
             let language_changed = event == StateEvent::LanguageChanged;
+            let agent_changed = event == StateEvent::AgentChanged;
             cx.emit(event);
             if language_changed {
                 relocalize_windows(cx);
+            } else if agent_changed {
+                // The menu bar's Add Device follows the agent link. Deferred
+                // like `relocalize_windows`: the menu reads this entity,
+                // whose lease is still held here.
+                cx.defer(crate::app::menu::rebuild);
             }
         }
     }

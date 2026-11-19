@@ -187,6 +187,52 @@ fn superseded_light_write_keeps_prior_successes_for_reconciliation() {
 }
 
 #[test]
+fn a_change_made_while_the_light_is_offline_replaces_a_write_still_in_flight() {
+    let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = AppState::new(Sources {
+        standalone: &[superseded_litra_light()],
+        ..Sources::in_memory(Config::default(), &AssetResolver::new(), commands)
+    });
+    let key = state.current_record().expect("light record").device_key();
+    let _ = state.commit_light(LightSettings::new(false, 40, None));
+    let in_flight = [
+        next_light_command(&mut receiver),
+        next_light_command(&mut receiver),
+    ];
+
+    for record in &mut state.devices.records {
+        record.presence = Presence::Listed(Link::Offline);
+    }
+    let offline_choice = LightSettings::new(true, 70, None);
+    let _ = state.commit_light(offline_choice);
+    assert_eq!(
+        state.light_command_status(),
+        Some(LightCommandStatus::Offline)
+    );
+
+    // The older write's answers arrive after all. They belong to no live
+    // request, so neither its rejection nor its rollback replaces the newer
+    // change.
+    for (command, request_id) in in_flight {
+        assert_eq!(
+            state.apply_light_command_result(
+                key.clone(),
+                request_id,
+                command,
+                Err(WriteError::AmbiguousRawDevice),
+            ),
+            []
+        );
+    }
+    assert_eq!(
+        state.light_command_status(),
+        Some(LightCommandStatus::Offline)
+    );
+    assert_eq!(state.light(), offline_choice);
+    assert_eq!(state.config.light(key.as_str()), Some(offline_choice));
+}
+
+#[test]
 fn transient_light_state_is_kept_in_memory_and_only_supported_commands_are_sent() {
     let light = StandaloneDevice {
         address: RawDeviceAddress {

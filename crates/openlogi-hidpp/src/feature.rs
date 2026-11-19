@@ -33,6 +33,8 @@ pub mod extended_report_rate;
 pub mod feature_set;
 pub mod fn_inversion;
 pub mod force_sensing_button;
+pub mod gaming_g_keys;
+pub mod gaming_m_keys;
 pub mod gestures2;
 pub mod haptic_feedback;
 pub mod hires_wheel;
@@ -40,6 +42,7 @@ pub mod hosts_info;
 pub mod illumination;
 pub mod led_control;
 pub mod lock_key_state;
+pub mod macro_record;
 pub mod mode_status;
 pub mod mouse_button_spy;
 pub mod mouse_pointer;
@@ -395,6 +398,16 @@ pub(crate) fn inbound_report(
     } else {
         Some(InboundReport::ForeignResponse(msg))
     }
+}
+
+/// Decodes a name read in chunks (`0x0005`, `0x0007`), dropping the zero
+/// padding of the last chunk.
+///
+/// Takes the chunks already joined: a multi-byte UTF-8 character can straddle
+/// two of them, so decoding each chunk on its own would reject a valid name.
+pub(crate) fn decode_chunked_name(bytes: Vec<u8>) -> Result<String, Hidpp20Error> {
+    let string = String::from_utf8(bytes).map_err(|_| Hidpp20Error::UnsupportedResponse)?;
+    Ok(string.trim_end_matches(char::from(0)).to_string())
 }
 
 bitflags::bitflags! {

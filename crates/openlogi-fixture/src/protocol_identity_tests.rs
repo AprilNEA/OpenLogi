@@ -250,6 +250,37 @@ fn request_targets_distinguish_receiver_selectors_from_direct_feature_indices() 
     );
 }
 
+#[test]
+fn unmatched_reports_claim_only_requests_they_could_answer() {
+    let ping = short(DEVICE, 0, 0x10 | SW_ID, [0, 0, 0]);
+    let answer = long(DEVICE, 0, 0x10 | SW_ID, &[4, 2, 0]);
+    let recorded = RecordedRequestReports {
+        request: &ping,
+        answer: Some(&answer),
+    };
+
+    // Another header, a byte-for-byte repeat, and another ping's echo cannot
+    // have answered this ping.
+    assert!(!recorded.may_be_answered_by(&long(DEVICE, 1, 0x10 | SW_ID, &[4, 2, 0])));
+    assert!(!recorded.may_be_answered_by(&long(DEVICE, 0, 0x10, &[4, 2, 0])));
+    assert!(!recorded.may_be_answered_by(&answer));
+    assert!(!recorded.may_be_answered_by(&long(DEVICE, 0, 0x10 | SW_ID, &[4, 2, 0x5a])));
+
+    // A different reply echoing this ping's own data, or an error of either
+    // protocol version echoing its header, could have.
+    assert!(recorded.may_be_answered_by(&long(DEVICE, 0, 0x10 | SW_ID, &[4, 5, 0])));
+    assert!(recorded.may_be_answered_by(&short(DEVICE, 0xff, 0, [0x10 | SW_ID, 5, 0])));
+    assert!(recorded.may_be_answered_by(&short(DEVICE, 0x8f, 0, [0x10 | SW_ID, 1, 0])));
+
+    // Framing this module cannot read fails closed.
+    assert!(recorded.may_be_answered_by(&[0x10, DEVICE, 0]));
+    let unreadable = RecordedRequestReports {
+        request: &[0x12, DEVICE, 0, 0x10 | SW_ID],
+        answer: None,
+    };
+    assert!(unreadable.may_be_answered_by(&answer));
+}
+
 fn ordinal(value: u16) -> SyntheticIdentityOrdinal {
     SyntheticIdentityOrdinal::new(value).expect("test ordinal is valid")
 }

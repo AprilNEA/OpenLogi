@@ -6,8 +6,6 @@ use std::sync::Arc;
 
 use hidpp::channel::{ChannelError, HidppChannel};
 use hidpp::device::Device;
-use hidpp::feature::CreatableFeature;
-use hidpp::feature::device_information::DeviceInformationFeature;
 use hidpp::feature::rgb_effects::{
     CLUSTER_EFFECT_PARAM_COUNT, EventsNotificationFlags, PowerModeTarget, RgbEffectsFeature,
     RgbPersistence, SwControlFlags,
@@ -19,6 +17,7 @@ use tracing::{debug, warn};
 use super::{
     FRAME_GAP, HidppOperation, WriteError, WriteScope, classify_hidpp_error, open_feature,
 };
+use crate::write::unit_id::unit_id;
 
 const FEATURE: u16 = 0x8071;
 // The effect ID is stable; each cluster's index for it is discovered separately.
@@ -94,7 +93,9 @@ pub(super) async fn probe(
         }) => return Ok(None),
         Err(error) => return Err(error),
     };
-    let unit = scope.read(unit_id(&mut device)).await?;
+    let unit = scope
+        .read(unit_id(&mut device, HidppOperation::Lighting))
+        .await?;
     let (statics, complete) = discover(&feature, scope).await?;
     Ok(Some(RgbEngine {
         feature,
@@ -148,6 +149,23 @@ impl RgbEngine {
                 paint().await?;
             }
             Ok(())
+        })
+        .await
+    }
+
+    /// Run `body` under software control, with every cluster that offers
+    /// Static set to `base` first, for host frames that outlive one paint.
+    /// The returned lease is the caller's to hand back with [`release`].
+    pub(super) async fn under_per_key_control(
+        &self,
+        index: u8,
+        base: Rgb,
+        scope: &WriteScope<impl Fn() -> bool, impl Fn() -> bool>,
+        body: impl AsyncFnOnce() -> Result<(), WriteError>,
+    ) -> Result<RgbControlLease, WriteError> {
+        self.under_control(index, scope, async |_| {
+            self.paint_statics(base, scope).await?;
+            body().await
         })
         .await
     }
@@ -258,7 +276,11 @@ pub(super) async fn release(
     scope: &WriteScope<impl Fn() -> bool, impl Fn() -> bool>,
 ) -> Result<(), WriteError> {
     let mut device = scope.read(device(channel, index)).await?;
-    if scope.read(unit_id(&mut device)).await? != lease.device {
+    if scope
+        .read(unit_id(&mut device, HidppOperation::Lighting))
+        .await?
+        != lease.device
+    {
         debug!(
             index,
             "another device answers on the route; leaving its RGB control"
@@ -285,31 +307,6 @@ async fn device(channel: &Arc<HidppChannel>, index: u8) -> Result<Device, WriteE
     Device::new(Arc::clone(channel), index)
         .await
         .map_err(|_| WriteError::DeviceUnreachable { index })
-}
-
-/// The unit ID `device` reports through `0x0003`, which tells two devices
-/// on one receiver slot apart. `None` when the device has no
-/// `DeviceInformation` feature.
-async fn unit_id(device: &mut Device) -> Result<Option<[u8; 4]>, WriteError> {
-    let feature = match open_feature::<DeviceInformationFeature>(device).await {
-        Ok(feature) => feature,
-        Err(WriteError::FeatureUnsupported { .. }) => return Ok(None),
-        Err(error) => return Err(error),
-    };
-    let info = feature
-        .get_device_info()
-        .await
-        .map_err(|error| match error {
-            Hidpp20Error::Channel(ChannelError::Timeout) => WriteError::RequestTimedOut {
-                operation: HidppOperation::Lighting,
-            },
-            other => classify_hidpp_error(
-                other,
-                HidppOperation::Lighting,
-                DeviceInformationFeature::ID,
-            ),
-        })?;
-    Ok(Some(info.unit_id))
 }
 
 /// Each cluster's Static effect `(cluster, effect index)`, and whether every

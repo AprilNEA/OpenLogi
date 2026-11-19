@@ -24,12 +24,16 @@
 //! Access is device-file permissions rather than consent dialogs: write to
 //! `/dev/uinput` (the evdev/uinput hook's virtual devices) and read/write to
 //! `/dev/hidraw*` (HID++ to the Bolt receiver or a direct connection). Both
-//! come from the OpenLogi udev rules.
+//! come from the OpenLogi udev rules, which the `udev` module installs on
+//! request — the one remedy here that changes the system, and only when the
+//! user asks.
 
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "linux")]
+pub mod udev;
 
 #[cfg(test)]
 #[cfg(target_os = "linux")]

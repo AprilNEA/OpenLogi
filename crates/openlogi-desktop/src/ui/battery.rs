@@ -8,8 +8,8 @@ use gpui::{
     App, BorderStyle, Bounds, Corners, FontWeight, Hsla, IntoElement, ParentElement, PathBuilder,
     RenderOnce, Styled, Window, canvas, point, prelude::FluentBuilder as _, px, quad, rgb, size,
 };
-use gpui_component::h_flex;
-use openlogi_core::device::{BatteryInfo, BatteryLevel, BatteryStatus};
+use gpui_kit::component::h_flex;
+use openlogi_core::device::{BatteryAttention, BatteryInfo, BatteryLevel, BatteryStatus};
 
 use super::theme::{self, Palette, Typography as _};
 
@@ -313,15 +313,11 @@ fn battery_tone(battery: &BatteryInfo) -> BatteryTone {
         BatteryStatus::Charging | BatteryStatus::ChargingSlow => BatteryTone::Charging,
         BatteryStatus::Error => BatteryTone::Error,
         BatteryStatus::Full => BatteryTone::Full,
-        BatteryStatus::Discharging | BatteryStatus::Unknown => {
-            if battery.level == BatteryLevel::Critical {
-                BatteryTone::Critical
-            } else if battery.needs_attention() {
-                BatteryTone::Low
-            } else {
-                BatteryTone::Normal
-            }
-        }
+        BatteryStatus::Discharging | BatteryStatus::Unknown => match battery.attention() {
+            Some(BatteryAttention::Critical) => BatteryTone::Critical,
+            Some(BatteryAttention::Low) => BatteryTone::Low,
+            None => BatteryTone::Normal,
+        },
     }
 }
 
@@ -589,7 +585,7 @@ mod tests {
 
     impl gpui::Render for InlineReadouts {
         fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
-            gpui_component::v_flex()
+            gpui_kit::component::v_flex()
                 .items_start()
                 .children([9, 74, 100].map(|percentage| {
                     gpui::div()
@@ -607,7 +603,7 @@ mod tests {
     /// beside it jumps whenever the digit count changes.
     #[gpui::test]
     fn the_inline_readout_keeps_its_width_as_the_charge_falls(cx: &mut gpui::TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(gpui_kit::init);
         let (_, cx) = cx.add_window_view(|_, _| InlineReadouts);
         cx.update(|window, cx| window.draw(cx).clear(cx));
         let width = |cx: &mut gpui::VisualTestContext, selector| {
