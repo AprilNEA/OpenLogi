@@ -112,3 +112,19 @@ fn czech_pairing_translations_resolve() {
         "Spárováno na pozici 2."
     );
 }
+
+/// Hebrew must resolve in the actual desktop backend, with its right-to-left
+/// embedding intact and a placeholder interpolated inside it.
+#[test]
+fn hebrew_pairing_translations_resolve() {
+    assert_eq!(
+        rust_i18n::t!("pairing.add_device", locale = "he"),
+        "\u{202B}הוספת מכשיר\u{202C}"
+    );
+    assert_eq!(
+        rust_i18n::t!("pairing.paired_receiver_slot", locale = "he", slot = 2),
+        "\u{202B}הותאם לחריץ 2.\u{202C}"
+    );
+    // A Latin-only value carries no direction marks.
+    assert_eq!(rust_i18n::t!("app.openlogi", locale = "he"), "OpenLogi");
+}
