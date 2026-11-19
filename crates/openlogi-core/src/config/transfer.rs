@@ -131,6 +131,14 @@ impl SettingsTransfer {
     pub fn is_empty(&self) -> bool {
         self.changed.is_empty()
     }
+
+    /// Whether a preview of `other` shows what a preview of this transfer
+    /// shows: the same settings changed and the same ones left out, for the
+    /// same reasons.
+    #[must_use]
+    pub fn previews_like(&self, other: &Self) -> bool {
+        self.changed == other.changed && self.skipped == other.skipped
+    }
 }
 
 /// Transfer `source`'s buttons, scrolling and pointer settings onto

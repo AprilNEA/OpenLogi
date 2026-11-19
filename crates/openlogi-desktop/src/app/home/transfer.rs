@@ -101,34 +101,94 @@ fn open_transfer_preview(
     }) else {
         return;
     };
-    let record_key = record_key.to_owned();
-    let source = source.clone();
+    show_transfer_preview(
+        window,
+        cx,
+        Preview {
+            record_key: record_key.to_owned(),
+            source: source.clone(),
+            target,
+            transfer,
+            notice: None,
+        },
+    );
+}
+
+/// A copy of `source` onto the card `record_key`'s device `target`, as
+/// previewed.
+#[derive(Clone)]
+struct Preview {
+    record_key: String,
+    source: TransferSource,
+    target: String,
+    transfer: SettingsTransfer,
+    /// Why the preview is shown again, above the list.
+    notice: Option<SharedString>,
+}
+
+/// Show `shown` and copy it on confirmation. A copy that changed while the
+/// preview was open is not saved: the preview is shown again with it.
+fn show_transfer_preview(window: &mut Window, cx: &mut App, shown: Preview) {
     window.open_alert_dialog(cx, move |alert, _, cx| {
-        let alert = alert.width(px(480.)).title(tr!(
-            "device.copy_settings_title",
-            source => source.name.clone(),
-            target => target.clone()
-        ));
+        let Preview {
+            source,
+            target,
+            transfer,
+            notice,
+            ..
+        } = &shown;
+        let pal = theme::palette(cx);
+        let alert = alert
+            .width(px(480.))
+            .title(tr!(
+                "device.copy_settings_title",
+                source => source.name.clone(),
+                target => target.clone()
+            ))
+            .when_some(notice.clone(), |alert, notice| {
+                alert.child(
+                    div()
+                        .debug_selector(|| "copy-settings-changed".into())
+                        .text_body()
+                        .child(notice),
+                )
+            });
         if transfer.is_empty() {
             let alert =
                 alert.description(tr!("device.copy_settings_nothing", target => target.clone()));
             if transfer.skipped.is_empty() {
                 return alert;
             }
-            return alert.child(preview(&transfer, theme::palette(cx)));
+            return alert.child(preview(transfer, pal));
         }
         alert
-            .child(preview(&transfer, theme::palette(cx)))
+            .child(preview(transfer, pal))
             .footer(confirm_cancel_footer(
                 "copy-settings-confirm",
                 tr!("device.copy_settings"),
             ))
             .on_ok({
-                let record_key = record_key.clone();
-                let source = source.clone();
-                move |_event, _window, cx| {
-                    AppState::copy_settings(cx, &record_key, &source);
-                    true
+                let shown = shown.clone();
+                move |_event, window, cx| {
+                    let Some(transfer) = AppState::copy_settings(
+                        cx,
+                        &shown.record_key,
+                        &shown.source,
+                        &shown.transfer,
+                    ) else {
+                        return true;
+                    };
+                    window.close_dialog(cx);
+                    show_transfer_preview(
+                        window,
+                        cx,
+                        Preview {
+                            transfer,
+                            notice: Some(tr!("device.copy_settings_changed")),
+                            ..shown.clone()
+                        },
+                    );
+                    false
                 }
             })
     });
