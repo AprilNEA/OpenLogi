@@ -8,7 +8,7 @@
 //! the editor shows the DPI the device reports, or the last one it reported.
 
 use gpui::Context;
-use openlogi_core::hid::{Dpi, DpiCapabilities, WriteError};
+use openlogi_core::hid::{DeviceRoute, Dpi, DpiCapabilities, WriteError};
 use tracing::{debug, warn};
 
 use crate::state::devices::DeviceRecord;
@@ -112,15 +112,16 @@ impl AppState {
     /// DPI capabilities for the active device, if discovery succeeded.
     #[must_use]
     pub fn active_dpi_capabilities(&self) -> Option<&DpiCapabilities> {
-        self.current_record()
-            .and_then(|record| self.pointer.reads.dpi_load(&record.device_key()))
-            .and_then(|status| match status {
-                DpiLoad::Ready(info) => Some(&info.capabilities),
-                DpiLoad::Unknown
-                | DpiLoad::Loading
-                | DpiLoad::Failed(_)
-                | DpiLoad::Unsupported(_) => None,
-            })
+        self.dpi_capabilities_for(&self.current_record()?.device_key())
+    }
+    /// The DPI values `key`'s device was last read to support.
+    pub(super) fn dpi_capabilities_for(&self, key: &DeviceKey) -> Option<&DpiCapabilities> {
+        match self.pointer.reads.dpi_load(key)? {
+            DpiLoad::Ready(info) => Some(&info.capabilities),
+            DpiLoad::Unknown | DpiLoad::Loading | DpiLoad::Failed(_) | DpiLoad::Unsupported(_) => {
+                None
+            }
+        }
     }
     /// Snap `dpi` to the active device's supported list when known.
     #[must_use]
@@ -144,6 +145,18 @@ impl AppState {
             debug!(key = %key, "device unreachable — DPI change kept in memory only");
             return events;
         };
+        self.write_dpi(key, route, dpi);
+        events
+    }
+
+    /// Write `dpi` to `key`'s device on `route` through the agent. The answer
+    /// arrives as [`Self::apply_dpi_written`], which saves `dpi` only if the
+    /// device took it; the editor shows it meanwhile when the device is the
+    /// active one.
+    pub(super) fn write_dpi(&mut self, key: DeviceKey, route: DeviceRoute, dpi: Dpi) {
+        if self.is_current_device(&key) {
+            self.pointer.dpi = dpi;
+        }
         let write = self.pointer.next_dpi_write;
         self.pointer.next_dpi_write = write.saturating_add(1);
         self.pointer.pending_dpi_writes.insert(key.clone(), write);
@@ -153,7 +166,6 @@ impl AppState {
             key,
             write,
         });
-        events
     }
 
     /// The device's answer to a [`Self::commit_dpi`] write of `dpi`.

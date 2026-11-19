@@ -3,10 +3,14 @@
 //! `openlogi_core::config::transfer`; this module picks the devices,
 //! previews, and saves.
 
-use openlogi_core::config::{Config, DeviceConfig, SettingsTransfer, TransferTarget};
+use openlogi_core::config::{
+    Config, ImportedDevice, SettingsTransfer, TransferItem, TransferTarget,
+};
+use openlogi_core::hid::SmartShiftStatus;
 
 use super::devices::DeviceRecord;
 use super::events::StateEvents;
+use super::scroll::scroll_inversion_available;
 use super::{AppState, StateEvent};
 
 /// Settings a device can take: another device's, or a device's read from a
@@ -22,8 +26,8 @@ pub struct TransferSource {
 enum Origin {
     /// A device in this config, by key. Read when the transfer runs.
     Device(String),
-    /// A device's settings read from a file.
-    File(Box<DeviceConfig>),
+    /// A device read from a file.
+    File(Box<ImportedDevice>),
 }
 
 impl AppState {
@@ -64,13 +68,15 @@ impl AppState {
                     .as_ref()
                     .is_none_or(|identity| identity.kind == target.kind)
             })
-            .map(|(key, device)| TransferSource {
-                name: device
-                    .custom_name
-                    .clone()
-                    .or_else(|| device.identity.as_ref().map(|i| i.display_name.clone()))
-                    .unwrap_or_else(|| key.clone()),
-                origin: Origin::File(Box::new(device.clone())),
+            .filter_map(|(key, device)| {
+                Some(TransferSource {
+                    name: device
+                        .custom_name
+                        .clone()
+                        .or_else(|| device.identity.as_ref().map(|i| i.display_name.clone()))
+                        .unwrap_or_else(|| key.clone()),
+                    origin: Origin::File(Box::new(file.imported_device(key)?)),
+                })
             })
             .collect()
     }
@@ -87,12 +93,13 @@ impl AppState {
         let facts = TransferTarget {
             kind: Some(target.kind),
             capabilities: target.capabilities,
+            invertible_wheel: scroll_inversion_available(target),
         };
         match &source.origin {
             Origin::Device(key) => self.config.settings_transfer(key, target_key, facts),
-            Origin::File(settings) => Some(
+            Origin::File(device) => Some(
                 self.config
-                    .settings_transfer_from_file(settings, target_key, facts),
+                    .settings_transfer_from_file(device, target_key, facts),
             ),
         }
     }
@@ -100,12 +107,19 @@ impl AppState {
     /// Copy `source` onto the card `record_key`'s device and save. The
     /// transfer is computed again here, so what is saved matches the config
     /// as it is now, not as it was when the preview opened.
+    ///
+    /// A reload applies most settings to a connected device but not its DPI
+    /// or SmartShift, so those are written to it here, the way their panels
+    /// write them. The DPI goes through [`Self::write_dpi`], which saves it
+    /// once the device takes it, snapped to the values the device was read
+    /// to support; until then the device keeps its own saved DPI. An offline
+    /// device gets both from the agent when it connects.
     pub fn commit_settings_transfer(
         &mut self,
         record_key: &str,
         source: &TransferSource,
     ) -> StateEvents {
-        let Some(transfer) = self.settings_transfer_preview(record_key, source) else {
+        let Some(mut transfer) = self.settings_transfer_preview(record_key, source) else {
             return StateEvents::none();
         };
         if transfer.is_empty() {
@@ -115,11 +129,40 @@ impl AppState {
             return StateEvents::none();
         };
         let device = target.device_key();
+        let route = target.addressable_route().cloned();
         let target_key = target_key.to_owned();
+        let copied = |item: TransferItem| transfer.changed.contains(&item);
+        let dpi = transfer.settings.dpi.filter(|_| copied(TransferItem::Dpi));
+        let smartshift = transfer
+            .settings
+            .smartshift
+            .filter(|_| copied(TransferItem::SmartShift));
+        if route.is_some() && dpi.is_some() {
+            transfer.settings.dpi = self
+                .config
+                .devices
+                .get(&target_key)
+                .and_then(|settings| settings.dpi);
+        }
         self.config
             .edit(|config| config.apply_settings_transfer(&target_key, transfer));
-        self.persist_and_reload("settings copied onto a device");
+        let saved = self.persist_and_reload("settings copied onto a device");
         self.restore_config_projections();
+        if saved && let Some(route) = route {
+            if let Some(dpi) = dpi {
+                let dpi = self
+                    .dpi_capabilities_for(&device)
+                    .map_or(dpi, |supported| supported.nearest(dpi));
+                self.write_dpi(device.clone(), route.clone(), dpi);
+            }
+            if let Some(smartshift) = smartshift {
+                self.write_smartshift(
+                    device.clone(),
+                    Some(route),
+                    SmartShiftStatus::from(smartshift),
+                );
+            }
+        }
         StateEvents::from(StateEvent::SettingsChanged)
             .and(StateEvent::DeviceConfigChanged(device.clone()))
             .and(StateEvent::BindingsChanged(device.clone()))

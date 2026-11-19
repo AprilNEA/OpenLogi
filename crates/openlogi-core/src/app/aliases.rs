@@ -367,6 +367,29 @@ impl AppAliases {
         key.starts_with(PROFILE_KEY_PREFIX) && self.for_profile_key(key).is_none()
     }
 
+    /// The aliases the profile keys `keys` name, for a config that carries
+    /// only some of this table's profiles. A part of a valid table is valid.
+    pub(crate) fn named_by<'a>(&self, keys: impl IntoIterator<Item = &'a str>) -> Self {
+        Self(
+            keys.into_iter()
+                .filter_map(|key| self.for_profile_key(key))
+                .map(|(name, alias)| (name.clone(), alias.clone()))
+                .collect(),
+        )
+    }
+
+    /// This table with `alias` defined as `name`, checked the way a loaded
+    /// table is checked. `None` when this table defines `name` differently,
+    /// or another alias here already lists one of `alias`'s identifiers.
+    pub(crate) fn defining(&self, name: &AppAliasName, alias: &AppAlias) -> Option<Self> {
+        if let Some(defined) = self.0.get(name) {
+            return (defined == alias).then(|| self.clone());
+        }
+        let mut aliases = self.0.clone();
+        aliases.insert(name.clone(), alias.clone());
+        Self::try_from(aliases).ok()
+    }
+
     /// The alias that lists `identifier` for `platform`. Validation makes it
     /// unique.
     pub(crate) fn claiming(

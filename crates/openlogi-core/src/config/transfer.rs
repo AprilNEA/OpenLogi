@@ -4,13 +4,17 @@
 //! A transfer is computed first and applied second, so the UI can show what
 //! it will change and what it leaves out before anything is written. Buttons
 //! merge: the source's bindings land on the target, and the target's other
-//! buttons keep theirs. Controls the target does not have are left out and
-//! reported, never written. From a file, bindings whose payload decides
-//! what they do (a command, a script, typed text, an app, file or URL to
-//! open) are left out too: a shared file must not put one on a button
-//! without the user seeing it.
+//! buttons keep theirs. Controls the target does not have, or that were
+//! never measured on it, are left out and reported, never written. From a
+//! file, bindings whose payload decides what they do (a command, a script,
+//! typed text, an app, file or URL to open) are left out too: a shared file
+//! must not put one on a button without the user seeing it. A file's
+//! profiles bring the application aliases they name.
+
+use std::collections::BTreeSet;
 
 use super::{Config, DeviceConfig};
+use crate::app::AppAliases;
 use crate::binding::{Action, ActionRingConfig, ActionRingEntry, Binding, ButtonId};
 use crate::device::{Capabilities, DeviceKind};
 
@@ -73,6 +77,12 @@ pub enum SkipReason {
     /// From a file, a binding that runs a shell command, an AppleScript or a
     /// workflow, types text, or opens an app, file or URL.
     NotFromAFile,
+    /// The target's controls were never measured, so nothing shows it has
+    /// the one this setting needs.
+    NotMeasured,
+    /// From a file, a profile for an application alias this config defines
+    /// differently, or whose identifiers another alias here already lists.
+    AppAliasConflict,
 }
 
 /// A setting a transfer leaves out, and why.
@@ -86,13 +96,18 @@ pub struct SkippedItem {
 
 /// What a transfer needs to know about its target besides its settings:
 /// its kind and the capabilities last measured on it. `None` capabilities
-/// mean nothing is known, and nothing is left out for want of a control.
+/// mean nothing was measured, so every setting that needs a control is left
+/// out.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TransferTarget {
     /// The target's kind.
     pub kind: Option<DeviceKind>,
     /// The target's capabilities.
     pub capabilities: Option<Capabilities>,
+    /// Whether OpenLogi can reverse the target's wheel, through its firmware
+    /// or in software. [`Capabilities::scroll_inversion`] covers only the
+    /// firmware, so the caller decides this the way its scroll settings do.
+    pub invertible_wheel: bool,
 }
 
 /// The outcome of a transfer: the target's settings afterwards, what
@@ -101,6 +116,9 @@ pub struct TransferTarget {
 pub struct SettingsTransfer {
     /// The target's settings with the transfer applied.
     pub settings: DeviceConfig,
+    /// The application aliases of the target's config afterwards, when the
+    /// profiles a file brings name aliases the config does not define yet.
+    pub apps: Option<AppAliases>,
     /// The settings that change, in the order the UI lists them.
     pub changed: Vec<TransferItem>,
     /// The settings left out, in the same order.
@@ -128,13 +146,34 @@ pub fn transfer_settings(
     run_transfer(source, target, facts, Origin::ThisMachine)
 }
 
+/// One device's settings read from a file, with the application aliases its
+/// per-app profiles name.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImportedDevice {
+    settings: DeviceConfig,
+    apps: AppAliases,
+}
+
+impl ImportedDevice {
+    /// The device's settings.
+    #[must_use]
+    pub fn settings(&self) -> &DeviceConfig {
+        &self.settings
+    }
+}
+
 /// Where a transfer's source comes from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Origin {
+#[derive(Debug, Clone, Copy)]
+enum Origin<'a> {
     /// A device in this machine's config.
     ThisMachine,
     /// A file, which may come from someone else.
-    File,
+    File {
+        /// The aliases the file defines for the device's profiles.
+        source: &'a AppAliases,
+        /// The aliases this machine's config defines.
+        here: &'a AppAliases,
+    },
 }
 
 /// The key an export stores its one device under, in place of the key that
@@ -145,12 +184,13 @@ fn run_transfer(
     source: &DeviceConfig,
     target: &DeviceConfig,
     facts: TransferTarget,
-    origin: Origin,
+    origin: Origin<'_>,
 ) -> SettingsTransfer {
     let mut run = Transfer {
         facts,
         origin,
         settings: target.clone(),
+        apps: None,
         changed: Vec::new(),
         skipped: Vec::new(),
     };
@@ -159,6 +199,7 @@ fn run_transfer(
     run.pointer(source);
     SettingsTransfer {
         settings: run.settings,
+        apps: run.apps,
         changed: run.changed,
         skipped: run.skipped,
     }
@@ -180,23 +221,46 @@ impl Config {
         Some(transfer_settings(source, &target, facts))
     }
 
-    /// A transfer from `source`, a device's settings read from a file, onto
-    /// the device `target_key`. Bindings that run a command, a script or a
-    /// workflow, type text, or open an app, file or URL are left out and
-    /// reported as [`SkipReason::NotFromAFile`].
+    /// The device `key` of this config, read as a file to import from.
+    /// `None` when the config has no such device.
+    #[must_use]
+    pub fn imported_device(&self, key: &str) -> Option<ImportedDevice> {
+        let settings = self.devices.get(key)?;
+        Some(ImportedDevice {
+            apps: self.apps.named_by(settings.profile_keys()),
+            settings: settings.clone(),
+        })
+    }
+
+    /// A transfer from `source`, a device read from a file, onto the device
+    /// `target_key`. Bindings that run a command, a script or a workflow,
+    /// type text, or open an app, file or URL are left out and reported as
+    /// [`SkipReason::NotFromAFile`]. A profile keyed by an application alias
+    /// brings the file's definition of it, and is left out as
+    /// [`SkipReason::AppAliasConflict`] when that definition cannot join this
+    /// config's.
     #[must_use]
     pub fn settings_transfer_from_file(
         &self,
-        source: &DeviceConfig,
+        source: &ImportedDevice,
         target_key: &str,
         facts: TransferTarget,
     ) -> SettingsTransfer {
         let target = self.devices.get(target_key).cloned().unwrap_or_default();
-        run_transfer(source, &target, facts, Origin::File)
+        let origin = Origin::File {
+            source: &source.apps,
+            here: &self.apps,
+        };
+        run_transfer(&source.settings, &target, facts, origin)
     }
 
-    /// Store `transfer`'s settings as the device `target_key`'s.
+    /// Store `transfer`'s settings as the device `target_key`'s, with the
+    /// application aliases it brings. `transfer` is one this config computed
+    /// as it is now, so those aliases still fit its own.
     pub fn apply_settings_transfer(&mut self, target_key: &str, transfer: SettingsTransfer) {
+        if let Some(apps) = transfer.apps {
+            self.apps = apps;
+        }
         self.devices
             .insert(target_key.to_owned(), transfer.settings);
     }
@@ -206,32 +270,63 @@ impl Config {
     /// host-switch partners belong to this machine and stay out, and the
     /// entry is keyed by a neutral key instead of one naming the device's
     /// serial number or unit id, so a shared file carries no hardware
-    /// identifier. Its identity stays in, so the importing side can name it.
-    /// App settings are left at their defaults. `None` when the device has
-    /// no entry.
+    /// identifier. Its identity stays in, so the importing side can name it,
+    /// and so do the application aliases its profiles name, so the file
+    /// loads. Other app settings are left at their defaults. `None` when the
+    /// device has no entry.
     #[must_use]
     pub fn device_export(&self, key: &str) -> Option<Self> {
         let mut device = self.devices.get(key)?.clone();
         device.links.clear();
         device.host_switch_targets.clear();
-        let mut export = Self::default();
+        let mut export = Self {
+            apps: self.apps.named_by(device.profile_keys()),
+            ..Self::default()
+        };
         export.devices.insert(EXPORT_KEY.to_owned(), device);
         Some(export)
     }
 }
 
-struct Transfer {
+struct Transfer<'a> {
     facts: TransferTarget,
-    origin: Origin,
+    origin: Origin<'a>,
     settings: DeviceConfig,
+    /// The target config's aliases once the transfer defines one.
+    apps: Option<AppAliases>,
     changed: Vec<TransferItem>,
     skipped: Vec<SkippedItem>,
 }
 
-impl Transfer {
-    /// Whether the target has a control, or nothing is known about it.
-    fn has(&self, control: impl Fn(&Capabilities) -> bool) -> bool {
-        self.facts.capabilities.as_ref().is_none_or(control)
+impl Transfer<'_> {
+    /// Why a setting cannot come along when the target's controls were never
+    /// measured.
+    fn measured(&self) -> Option<SkipReason> {
+        self.facts
+            .capabilities
+            .is_none()
+            .then_some(SkipReason::NotMeasured)
+    }
+
+    /// Why the target cannot take a setting that needs `control`, if it
+    /// cannot: it lacks the control, reported as `missing`, or its controls
+    /// were never measured.
+    fn gap(
+        &self,
+        control: impl Fn(&Capabilities) -> bool,
+        missing: SkipReason,
+    ) -> Option<SkipReason> {
+        match &self.facts.capabilities {
+            None => Some(SkipReason::NotMeasured),
+            Some(capabilities) if !control(capabilities) => Some(missing),
+            Some(_) => None,
+        }
+    }
+
+    /// Why the target's wheel cannot be reversed, if it cannot.
+    fn inversion_gap(&self) -> Option<SkipReason> {
+        self.measured()
+            .or_else(|| (!self.facts.invertible_wheel).then_some(SkipReason::NoScrollInversion))
     }
 
     fn skip(&mut self, item: TransferItem, reason: SkipReason) {
@@ -240,8 +335,60 @@ impl Transfer {
 
     /// Whether `actions` must stay out because the source is a file and one
     /// of them does what its payload says.
-    fn refuses<'a>(&self, mut actions: impl Iterator<Item = &'a Action>) -> bool {
-        self.origin == Origin::File && actions.any(acts_on_its_payload)
+    fn refuses<'s>(&self, mut actions: impl Iterator<Item = &'s Action>) -> bool {
+        matches!(self.origin, Origin::File { .. }) && actions.any(acts_on_its_payload)
+    }
+
+    /// Whether `item` may come along: `gap` is `None` and none of `actions`
+    /// is one a file must not bring. Otherwise it is reported as skipped.
+    fn admit<'s>(
+        &mut self,
+        item: TransferItem,
+        gap: Option<SkipReason>,
+        actions: impl Iterator<Item = &'s Action>,
+    ) -> bool {
+        let reason = gap.or_else(|| self.refuses(actions).then_some(SkipReason::NotFromAFile));
+        match reason {
+            Some(reason) => {
+                self.skip(item, reason);
+                false
+            }
+            None => true,
+        }
+    }
+
+    /// Whether `item`, which stores the per-app profiles `keys`, may come
+    /// along. From a file, each `app:` key brings the file's alias, which
+    /// must join this config's aliases the way a loaded table is checked;
+    /// otherwise the item is reported as skipped.
+    fn bring_profiles<'k>(
+        &mut self,
+        item: &TransferItem,
+        keys: impl IntoIterator<Item = &'k str>,
+    ) -> bool {
+        let Origin::File { source, here } = self.origin else {
+            return true;
+        };
+        let mut defined: Option<AppAliases> = None;
+        for key in keys {
+            let current = defined.as_ref().or(self.apps.as_ref()).unwrap_or(here);
+            let next = match source.for_profile_key(key) {
+                Some((name, alias)) => current.defining(name, alias),
+                None if current.is_undefined_reference(key) => None,
+                None => continue,
+            };
+            let Some(next) = next else {
+                self.skip(item.clone(), SkipReason::AppAliasConflict);
+                return false;
+            };
+            if next != *current {
+                defined = Some(next);
+            }
+        }
+        if defined.is_some() {
+            self.apps = defined;
+        }
+        true
     }
 
     /// Why the target cannot take `binding` on `button`, if it cannot.
@@ -251,50 +398,26 @@ impl Transfer {
             return Some(SkipReason::NotOnAMouse);
         }
         match button {
-            ButtonId::HapticPanel if !self.has(|c| c.haptic_panel) => {
-                Some(SkipReason::NoHapticPanel)
-            }
+            ButtonId::HapticPanel => self.gap(|c| c.haptic_panel, SkipReason::NoHapticPanel),
             ButtonId::Thumbwheel
             | ButtonId::ThumbwheelScrollUp
-            | ButtonId::ThumbwheelScrollDown
-                if !self.has(has_thumbwheel) =>
-            {
-                Some(SkipReason::NoThumbwheel)
-            }
-            ButtonId::DpiToggle
-                if matches!(binding, None | Some(Binding::Gesture(_)))
-                    && !self.has(|c| c.dpi_gestures) =>
-            {
-                Some(SkipReason::NoDpiGestures)
+            | ButtonId::ThumbwheelScrollDown => self.gap(has_thumbwheel, SkipReason::NoThumbwheel),
+            ButtonId::DpiToggle if matches!(binding, None | Some(Binding::Gesture(_))) => {
+                self.gap(|c| c.dpi_gestures, SkipReason::NoDpiGestures)
             }
             _ => None,
         }
     }
 
     fn buttons(&mut self, source: &DeviceConfig) {
-        for (&button, binding) in &source.bindings {
-            let item = TransferItem::Button(button);
-            if let Some(reason) = self.button_gap(button, Some(binding)) {
-                self.skip(item, reason);
-            } else if self.refuses(binding_actions(binding)) {
-                self.skip(item, SkipReason::NotFromAFile);
-            } else if self.settings.bindings.get(&button) != Some(binding) {
-                self.settings.bindings.insert(button, binding.clone());
-                self.changed.push(item);
-            }
-        }
-        for (&button, directions) in &source.disabled_gestures {
-            let item = TransferItem::StoredGestures(button);
-            if let Some(reason) = self.button_gap(button, None) {
-                self.skip(item, reason);
-            } else if self.refuses(directions.values()) {
-                self.skip(item, SkipReason::NotFromAFile);
-            } else if self.settings.disabled_gestures.get(&button) != Some(directions) {
-                self.settings
-                    .disabled_gestures
-                    .insert(button, directions.clone());
-                self.changed.push(item);
-            }
+        let buttons: BTreeSet<ButtonId> = source
+            .bindings
+            .keys()
+            .chain(source.disabled_gestures.keys())
+            .copied()
+            .collect();
+        for button in buttons {
+            self.button(source, button);
         }
         for (app, overrides) in &source.per_app_bindings {
             for (&button, action) in overrides {
@@ -302,13 +425,10 @@ impl Transfer {
                     app: app.clone(),
                     button,
                 };
-                let binding = Binding::Single(action.clone());
-                if let Some(reason) = self.button_gap(button, Some(&binding)) {
-                    self.skip(item, reason);
-                    continue;
-                }
-                if self.refuses(std::iter::once(action)) {
-                    self.skip(item, SkipReason::NotFromAFile);
+                let gap = self.button_gap(button, Some(&Binding::Single(action.clone())));
+                if !self.admit(item.clone(), gap, std::iter::once(action))
+                    || !self.bring_profiles(&item, [app.as_str()])
+                {
                     continue;
                 }
                 let current = self
@@ -326,55 +446,88 @@ impl Transfer {
                 }
             }
         }
-        if source.action_ring.is_default() {
+        let ring = &source.action_ring;
+        if ring.is_default()
+            || !self.admit(TransferItem::ActionRing, None, ring_actions(ring))
+            || !self.bring_profiles(
+                &TransferItem::ActionRing,
+                ring.per_app.keys().map(String::as_str),
+            )
+        {
             return;
         }
-        if self.refuses(ring_actions(&source.action_ring)) {
-            self.skip(TransferItem::ActionRing, SkipReason::NotFromAFile);
-        } else if self.settings.action_ring != source.action_ring {
-            self.settings.action_ring = source.action_ring.clone();
+        if self.settings.action_ring != *ring {
+            self.settings.action_ring = ring.clone();
             self.changed.push(TransferItem::ActionRing);
+        }
+    }
+
+    /// Copy `button` from `source`: its binding and the directions stored
+    /// for its gesture mode, each as far as the target can take it.
+    fn button(&mut self, source: &DeviceConfig, button: ButtonId) {
+        let binding = source.bindings.get(&button).filter(|binding| {
+            let gap = self.button_gap(button, Some(binding));
+            self.admit(TransferItem::Button(button), gap, binding_actions(binding))
+        });
+        let stored = source.disabled_gestures.get(&button).filter(|directions| {
+            let gap = self.button_gap(button, None);
+            self.admit(
+                TransferItem::StoredGestures(button),
+                gap,
+                directions.values(),
+            )
+        });
+        let copy = self.settings.copy_button(button, binding, stored);
+        if copy.binding {
+            self.changed.push(TransferItem::Button(button));
+        }
+        if copy.stored_gestures {
+            self.changed.push(TransferItem::StoredGestures(button));
         }
     }
 
     fn scrolling(&mut self, source: &DeviceConfig) {
         if let Some(sensitivity) = source.thumbwheel_sensitivity {
             let item = TransferItem::ThumbwheelSensitivity;
-            if !self.has(has_thumbwheel) {
-                self.skip(item, SkipReason::NoThumbwheel);
+            if let Some(reason) = self.gap(has_thumbwheel, SkipReason::NoThumbwheel) {
+                self.skip(item, reason);
             } else if self.settings.thumbwheel_sensitivity != Some(sensitivity) {
                 self.settings.thumbwheel_sensitivity = Some(sensitivity);
                 self.changed.push(item);
             }
         }
-        if self.has(|c| c.scroll_inversion) {
-            let overridden = self.clear_overrides(|o| o.invert_scroll.take().is_some());
-            if overridden || self.settings.invert_scroll != source.invert_scroll {
-                self.settings.invert_scroll = source.invert_scroll;
-                self.changed.push(TransferItem::InvertScroll);
+        // `invert_scroll` and `smooth_wheel` default to off and the file
+        // omits them then, so a source with one off never set it.
+        if source.invert_scroll {
+            if let Some(reason) = self.inversion_gap() {
+                self.skip(TransferItem::InvertScroll, reason);
+            } else {
+                let overridden = self.clear_overrides(|o| o.invert_scroll.take().is_some());
+                if overridden || !self.settings.invert_scroll {
+                    self.settings.invert_scroll = true;
+                    self.changed.push(TransferItem::InvertScroll);
+                }
             }
-        } else if source.invert_scroll {
-            self.skip(TransferItem::InvertScroll, SkipReason::NoScrollInversion);
         }
         if let Some(resolution) = source.scroll_resolution {
             let item = TransferItem::ScrollResolution;
-            if self.has(|c| c.hires_wheel) {
+            if let Some(reason) = self.gap(|c| c.hires_wheel, SkipReason::NoHiresWheel) {
+                self.skip(item, reason);
+            } else {
                 let overridden = self.clear_overrides(|o| o.scroll_resolution.take().is_some());
                 if overridden || self.settings.scroll_resolution != Some(resolution) {
                     self.settings.scroll_resolution = Some(resolution);
                     self.changed.push(item);
                 }
-            } else {
-                self.skip(item, SkipReason::NoHiresWheel);
             }
         }
-        if self.has(|c| c.hires_wheel) {
-            if self.settings.smooth_wheel != source.smooth_wheel {
-                self.settings.smooth_wheel = source.smooth_wheel;
+        if source.smooth_wheel {
+            if let Some(reason) = self.gap(|c| c.hires_wheel, SkipReason::NoHiresWheel) {
+                self.skip(TransferItem::SmoothWheel, reason);
+            } else if !self.settings.smooth_wheel {
+                self.settings.smooth_wheel = true;
                 self.changed.push(TransferItem::SmoothWheel);
             }
-        } else if source.smooth_wheel {
-            self.skip(TransferItem::SmoothWheel, SkipReason::NoHiresWheel);
         }
         if let Some(momentum) = source.momentum_scrolling
             && self.settings.momentum_scrolling != Some(momentum)
@@ -383,37 +536,41 @@ impl Transfer {
             self.changed.push(TransferItem::MomentumScrolling);
         }
         if let Some(smartshift) = source.smartshift {
-            let overridden = self.clear_overrides(|o| o.smartshift.take().is_some());
-            if overridden || self.settings.smartshift != Some(smartshift) {
-                self.settings.smartshift = Some(smartshift);
-                self.changed.push(TransferItem::SmartShift);
+            if let Some(reason) = self.measured() {
+                self.skip(TransferItem::SmartShift, reason);
+            } else {
+                let overridden = self.clear_overrides(|o| o.smartshift.take().is_some());
+                if overridden || self.settings.smartshift != Some(smartshift) {
+                    self.settings.smartshift = Some(smartshift);
+                    self.changed.push(TransferItem::SmartShift);
+                }
             }
         }
     }
 
     fn pointer(&mut self, source: &DeviceConfig) {
         if let Some(dpi) = source.dpi {
-            if self.has(|c| c.pointer) {
+            if let Some(reason) = self.gap(|c| c.pointer, SkipReason::NoDpi) {
+                self.skip(TransferItem::Dpi, reason);
+            } else {
                 let overridden = self.clear_overrides(|o| o.dpi.take().is_some());
                 if overridden || self.settings.dpi != Some(dpi) {
                     self.settings.dpi = Some(dpi);
                     self.changed.push(TransferItem::Dpi);
                 }
-            } else {
-                self.skip(TransferItem::Dpi, SkipReason::NoDpi);
             }
         }
         if !source.dpi_presets.is_empty() {
-            if !self.has(|c| c.pointer) {
-                self.skip(TransferItem::DpiPresets, SkipReason::NoDpi);
+            if let Some(reason) = self.gap(|c| c.pointer, SkipReason::NoDpi) {
+                self.skip(TransferItem::DpiPresets, reason);
             } else if self.settings.dpi_presets != source.dpi_presets {
                 self.settings.dpi_presets.clone_from(&source.dpi_presets);
                 self.changed.push(TransferItem::DpiPresets);
             }
         }
         if let Some(speed) = source.pointer_speed {
-            if !self.has(|c| c.pointer_scaling) {
-                self.skip(TransferItem::PointerSpeed, SkipReason::NoPointerSpeed);
+            if let Some(reason) = self.gap(|c| c.pointer_scaling, SkipReason::NoPointerSpeed) {
+                self.skip(TransferItem::PointerSpeed, reason);
             } else if self.settings.pointer_speed != Some(speed) {
                 self.settings.pointer_speed = Some(speed);
                 self.changed.push(TransferItem::PointerSpeed);

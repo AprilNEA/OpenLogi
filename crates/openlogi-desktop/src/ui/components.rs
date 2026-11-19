@@ -55,6 +55,13 @@ pub(crate) fn control_input(state: &Entity<InputState>) -> Input {
 /// nothing but the Enter key. Save confirms the dialog, so its `on_ok` still
 /// decides whether it closes; Cancel dismisses it.
 pub(crate) fn save_cancel_footer() -> DialogFooter {
+    confirm_cancel_footer("dialog-save", tr!("common.save"))
+}
+
+/// Cancel and a primary `label` button that confirms the dialog the way
+/// [`save_cancel_footer`]'s Save does, for a dialog whose confirmation is
+/// not a save. `id` names the button and is its debug selector.
+pub(crate) fn confirm_cancel_footer(id: &'static str, label: SharedString) -> DialogFooter {
     DialogFooter::new()
         .child(
             control_button("dialog-cancel")
@@ -63,10 +70,10 @@ pub(crate) fn save_cancel_footer() -> DialogFooter {
                 .on_click(|_, window, cx| window.dispatch_action(Box::new(Cancel), cx)),
         )
         .child(
-            control_button("dialog-save")
-                .debug_selector(|| "dialog-save".into())
+            control_button(id)
+                .debug_selector(move || id.into())
                 .primary()
-                .label(tr!("common.save"))
+                .label(label)
                 .on_click(|_, window, cx| {
                     window.dispatch_action(Box::new(Confirm { secondary: false }), cx);
                 }),
