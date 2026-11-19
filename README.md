@@ -163,6 +163,7 @@ Feature coverage depends on what each device reports; the app shows only the con
 | Mouse button remapping and gestures | ✓ | ✓ | ✓ |
 | Keyboard F-key remapping | ✓ | ✓ | — |
 | Per-application profiles | ✓ | ✓ | X11, wlroots (sway, Hyprland), GNOME with the [companion extension](crates/openlogi-hook/gnome-shell-extension/README.md) |
+| Copy, import and export a device's settings | ✓ | ✓ | ✓ |
 | Mouse profile follows the window under the pointer | ✓ | ✓ | X11 only |
 | Media keys | Native | Native | D-Bus MPRIS |
 | Window-manager actions (desktops, Mission Control, …) | Native | Native equivalents | GNOME, KDE (KWin), Hyprland; some macOS-only actions do nothing |

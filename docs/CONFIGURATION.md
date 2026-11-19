@@ -147,6 +147,30 @@ optional physical device key.
 `receiver:<receiver-id>:slot:<number>`; direct, raw-HID, and camera devices use
 other generated keys. Do not substitute a model id such as `2b042`.
 
+A device's settings can be copied onto another device of the same kind from the
+device card's menu: **Copy settings from** lists the other devices with
+settings, offline ones included. **Export settings** saves one device to a
+config file of its own, under a neutral key instead of its serial number,
+without the routes it was seen on, and with the `[apps]` aliases its per-app
+profiles name; other app settings stay at their defaults. The file is written
+atomically, so a failed export leaves an earlier file at that path intact.
+**Import settings** reads such a file, or a whole `config.toml`, and asks which
+device to copy from when it holds several. From a file, bindings that run a
+shell command, an AppleScript or a workflow, type text, or open an app, file or
+URL are left out, the Actions Ring included. A profile keyed `app:<alias>`
+brings the file's alias along, and is left out when this config defines that
+alias differently or another alias here lists the same application.
+Buttons merge: the source's bindings land on the target and the target's other
+buttons keep theirs, each button with the gesture directions saved for it. A
+setting the source never set leaves the target's alone; scroll inversion and
+smooth wheel count as set when they are on. A copied value replaces the
+target's per-link override of it. Settings for controls the target lacks, such
+as a haptic panel or a thumb wheel, are left out, and so is every setting that
+needs a control while the target's controls have not been read yet. The app
+lists what changes and what is left out before anything is written. A connected
+target gets its new DPI and SmartShift at once, and the DPI is saved when the
+device takes it; an offline target gets both from the agent when it connects.
+
 A camera without a USB serial has no unique port-stable identity. Its
 `custom_name` key therefore follows the OS capture id so two same-model cameras
 remain distinguishable; moving it to another USB port may require naming it

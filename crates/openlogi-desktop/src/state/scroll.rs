@@ -28,19 +28,12 @@ impl AppState {
             .and_then(|record| record.capabilities)
             .is_some_and(|capabilities| capabilities.scroll_inversion)
     }
-    /// Whether the toggle should be offered at all — natively, or through the
-    /// capture layer for a device whose firmware has no invert bit (#694,
-    /// #776). Requires a device with resolved capabilities either way, so an
-    /// unprobed device still reads as unavailable rather than silently
-    /// offering a control that would do nothing.
+    /// Whether the toggle should be offered at all for the active device
+    /// ([`scroll_inversion_available`]).
     #[must_use]
     pub fn current_scroll_inversion_available(&self) -> bool {
-        self.current_scroll_inversion_supported()
-            || (openlogi_hook::SOFTWARE_SCROLL_INVERSION
-                && self
-                    .current_record()
-                    .and_then(|record| record.capabilities)
-                    .is_some())
+        self.current_record()
+            .is_some_and(scroll_inversion_available)
     }
     /// Whether inverting the active device's wheel goes through the capture
     /// layer rather than the firmware — the case the GUI labels as a software
@@ -267,6 +260,17 @@ pub(crate) fn set_scroll_resolution_if_supported(
     }
     config.set_scroll_resolution(key, resolution);
     true
+}
+
+/// Whether OpenLogi can reverse `record`'s wheel: natively, or through the
+/// capture layer for a device whose firmware has no invert bit (#694, #776).
+/// Requires a device with resolved capabilities either way, so an unprobed
+/// device still reads as unavailable rather than silently offering a control
+/// that would do nothing.
+pub(super) fn scroll_inversion_available(record: &DeviceRecord) -> bool {
+    record.capabilities.is_some_and(|capabilities| {
+        capabilities.scroll_inversion || openlogi_hook::SOFTWARE_SCROLL_INVERSION
+    })
 }
 
 #[cfg(test)]

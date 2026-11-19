@@ -8,7 +8,8 @@
 //! the editor shows the DPI the device reports, or the last one it reported.
 
 use gpui::Context;
-use openlogi_core::hid::{Dpi, DpiCapabilities, WriteError};
+use openlogi_core::config::Config;
+use openlogi_core::hid::{DeviceRoute, Dpi, DpiCapabilities, WriteError};
 use tracing::{debug, warn};
 
 use crate::state::devices::DeviceRecord;
@@ -16,6 +17,7 @@ use crate::state::devices::DeviceRecord;
 use super::device_key::DeviceKey;
 use super::events::StateEvents;
 use super::load::DpiLoad;
+use super::pointer::{AnsweredDpiWrite, DpiWrite};
 use super::{AppState, DEFAULT_DPI, StateEvent};
 
 impl AppState {
@@ -112,15 +114,16 @@ impl AppState {
     /// DPI capabilities for the active device, if discovery succeeded.
     #[must_use]
     pub fn active_dpi_capabilities(&self) -> Option<&DpiCapabilities> {
-        self.current_record()
-            .and_then(|record| self.pointer.reads.dpi_load(&record.device_key()))
-            .and_then(|status| match status {
-                DpiLoad::Ready(info) => Some(&info.capabilities),
-                DpiLoad::Unknown
-                | DpiLoad::Loading
-                | DpiLoad::Failed(_)
-                | DpiLoad::Unsupported(_) => None,
-            })
+        self.dpi_capabilities_for(&self.current_record()?.device_key())
+    }
+    /// The DPI values `key`'s device was last read to support.
+    pub(super) fn dpi_capabilities_for(&self, key: &DeviceKey) -> Option<&DpiCapabilities> {
+        match self.pointer.reads.dpi_load(key)? {
+            DpiLoad::Ready(info) => Some(&info.capabilities),
+            DpiLoad::Unknown | DpiLoad::Loading | DpiLoad::Failed(_) | DpiLoad::Unsupported(_) => {
+                None
+            }
+        }
     }
     /// Snap `dpi` to the active device's supported list when known.
     #[must_use]
@@ -144,16 +147,31 @@ impl AppState {
             debug!(key = %key, "device unreachable — DPI change kept in memory only");
             return events;
         };
-        let write = self.pointer.next_dpi_write;
-        self.pointer.next_dpi_write = write.saturating_add(1);
-        self.pointer.pending_dpi_writes.insert(key.clone(), write);
+        self.write_dpi(key, route, dpi, DpiWrite::Ordinary);
+        events
+    }
+
+    /// Write `dpi` to `key`'s device on `route` through the agent. The answer
+    /// arrives as [`Self::apply_dpi_written`], which saves `dpi` the way
+    /// `kind` says only if the device took it; the editor shows it meanwhile
+    /// when the device is the active one.
+    pub(super) fn write_dpi(
+        &mut self,
+        key: DeviceKey,
+        route: DeviceRoute,
+        dpi: Dpi,
+        kind: DpiWrite,
+    ) {
+        if self.is_current_device(&key) {
+            self.pointer.dpi = dpi;
+        }
+        let write = self.pointer.dpi_writes.start(key.clone(), kind);
         self.send_ipc(crate::services::ipc::SetDpi {
             route,
             dpi,
             key,
             write,
         });
-        events
     }
 
     /// The device's answer to a [`Self::commit_dpi`] write of `dpi`.
@@ -174,7 +192,8 @@ impl AppState {
     /// A write that a newer one at the mouse, such as a precision-mode press,
     /// superseded before its turn answers [`WriteError::WriteSuperseded`]. It
     /// wrote nothing, so it is not saved, and the device is read again for
-    /// the DPI the newer write left.
+    /// the DPI the newer write left. An answer to no write in flight, or a
+    /// second answer to one, changes nothing.
     pub fn apply_dpi_written(
         &mut self,
         key: &DeviceKey,
@@ -182,15 +201,20 @@ impl AppState {
         dpi: Dpi,
         result: Result<(), WriteError>,
     ) -> StateEvents {
-        let newest = self.pointer.pending_dpi_writes.get(key) == Some(&write);
-        if newest {
-            self.pointer.pending_dpi_writes.remove(key);
-        }
+        let Some(AnsweredDpiWrite { kind, newest }) = self.pointer.dpi_writes.finish(key, write)
+        else {
+            warn!(key = %key, write, "answer to a DPI write that is not in flight — ignored");
+            return StateEvents::none();
+        };
         // `None` shows the DPI the device is known to run at.
         let reported = match result {
             Ok(()) => {
                 self.pointer.reads.set_dpi_current(key, dpi);
-                self.persist_dpi(key, dpi);
+                let save: fn(&mut Config, &str, Dpi) = match kind {
+                    DpiWrite::Ordinary => Config::set_dpi,
+                    DpiWrite::Copied => Config::set_dpi_on_every_link,
+                };
+                self.persist_dpi(key, dpi, save);
                 Some(dpi)
             }
             Err(WriteError::DpiNotApplied { actual, .. }) => {
@@ -214,10 +238,11 @@ impl AppState {
         StateEvent::DpiChanged(key.clone()).into()
     }
 
-    /// Save `dpi` for `key`'s device after the device took it. A device with
-    /// a transient identity, or one forgotten while the write was in flight,
-    /// has nothing to save under.
-    fn persist_dpi(&mut self, key: &DeviceKey, dpi: Dpi) {
+    /// Save `dpi` for `key`'s device after the device took it, the way `save`
+    /// stores it under the device's persistent key. A device with a transient
+    /// identity, or one forgotten while the write was in flight, has nothing
+    /// to save under.
+    fn persist_dpi(&mut self, key: &DeviceKey, dpi: Dpi, save: fn(&mut Config, &str, Dpi)) {
         let Some(persistent_key) = self
             .devices
             .records
@@ -230,7 +255,7 @@ impl AppState {
             return;
         };
         self.config
-            .edit(|config| config.set_dpi(&persistent_key, dpi));
+            .edit(|config| save(config, &persistent_key, dpi));
         self.persist_and_reload("DPI");
     }
 

@@ -26,7 +26,7 @@ pub(super) const PREFERRED_SIZE: Size<Pixels> = Size {
 /// reserve) so its side labels never overlap; below this the model can't
 /// shrink further without crowding. [`WindowFit`] lowers it only on a work
 /// area too small to hold it.
-pub(super) const MIN_SIZE: Size<Pixels> = Size {
+pub(crate) const MIN_SIZE: Size<Pixels> = Size {
     width: px(720.),
     height: px(680.),
 };

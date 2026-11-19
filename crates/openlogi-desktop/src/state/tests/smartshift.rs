@@ -136,7 +136,7 @@ fn status(mode: SmartShiftMode) -> SmartShiftStatus {
 }
 
 /// The SmartShift reads the state has queued. Every other read is dropped.
-fn smartshift_reads(
+pub(super) fn smartshift_reads(
     receiver: &mut tokio::sync::mpsc::UnboundedReceiver<Command>,
 ) -> Vec<ReadSmartShift> {
     drain(receiver)
@@ -150,7 +150,7 @@ fn smartshift_reads(
 
 /// Answer the SmartShift read the state has queued, returning the route it
 /// was asked on. Every other read is left unanswered.
-fn answer_smartshift_read(
+pub(super) fn answer_smartshift_read(
     receiver: &mut tokio::sync::mpsc::UnboundedReceiver<Command>,
     status: SmartShiftStatus,
 ) -> DeviceRoute {
@@ -165,7 +165,7 @@ fn answer_smartshift_read(
 
 /// Install `state` with live swr-backed reads, as the app does, and have it
 /// read the selected mouse.
-fn install(state: AppState, cx: &mut gpui::TestAppContext) {
+pub(super) fn install(state: AppState, cx: &mut gpui::TestAppContext) {
     cx.update(|cx| {
         let runtime: Arc<dyn swr_core::Runtime> = Arc::new(swr_gpui::GpuiRuntime::new(cx));
         let client = swr_core::SwrClient::builder().build(runtime.clone());
