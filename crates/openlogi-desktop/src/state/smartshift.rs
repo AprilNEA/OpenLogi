@@ -105,6 +105,36 @@ impl AppState {
         let Some((key, route, write_id)) = self.take_active_smartshift_confirm() else {
             return;
         };
+        self.start_smartshift_confirm(&key, route, write_id, cx);
+    }
+
+    /// Start the read that confirms `key`'s queued SmartShift write on
+    /// `route`, for a device that need not be the active one. Nothing to do
+    /// when no write is queued.
+    pub(super) fn confirm_smartshift(
+        &mut self,
+        key: &DeviceKey,
+        route: DeviceRoute,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(write_id) = self
+            .devices
+            .sessions
+            .get_mut(key)
+            .and_then(|entry| entry.smartshift.begin_confirmation())
+        else {
+            return;
+        };
+        self.start_smartshift_confirm(key, route, write_id, cx);
+    }
+
+    fn start_smartshift_confirm(
+        &mut self,
+        key: &DeviceKey,
+        route: DeviceRoute,
+        write_id: u64,
+        cx: &mut Context<Self>,
+    ) {
         if !self.pointer.reads.confirm_smartshift(
             key.clone(),
             route,
@@ -112,7 +142,7 @@ impl AppState {
             self.ipc_sender(),
             cx,
         ) {
-            self.fail_smartshift_confirm(&key, write_id);
+            self.fail_smartshift_confirm(key, write_id);
         }
     }
 

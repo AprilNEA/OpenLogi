@@ -3,6 +3,7 @@
 //! `openlogi_core::config::transfer`; this module picks the devices,
 //! previews, and saves.
 
+use gpui::App;
 use openlogi_core::config::{
     Config, ImportedDevice, SettingsTransfer, TransferItem, TransferTarget,
 };
@@ -110,10 +111,10 @@ impl AppState {
     ///
     /// A reload applies most settings to a connected device but not its DPI
     /// or SmartShift, so those are written to it here, the way their panels
-    /// write them. The DPI goes through [`Self::write_dpi`], which saves it
-    /// once the device takes it, snapped to the values the device was read
-    /// to support; until then the device keeps its own saved DPI. An offline
-    /// device gets both from the agent when it connects.
+    /// write them. Until the device takes the DPI, which is snapped to the
+    /// values it was read to support, the file keeps the target's own DPI
+    /// and its per-link overrides; taking it saves it on every link. An
+    /// offline device gets both from the agent when it connects.
     pub fn commit_settings_transfer(
         &mut self,
         record_key: &str,
@@ -138,11 +139,13 @@ impl AppState {
             .smartshift
             .filter(|_| copied(TransferItem::SmartShift));
         if route.is_some() && dpi.is_some() {
-            transfer.settings.dpi = self
-                .config
-                .devices
-                .get(&target_key)
-                .and_then(|settings| settings.dpi);
+            let before = self.config.devices.get(&target_key);
+            transfer.settings.dpi = before.and_then(|settings| settings.dpi);
+            for (route_key, link) in &mut transfer.settings.links {
+                link.overrides.dpi = before
+                    .and_then(|settings| settings.links.get(route_key))
+                    .and_then(|link| link.overrides.dpi);
+            }
         }
         self.config
             .edit(|config| config.apply_settings_transfer(&target_key, transfer));
@@ -153,7 +156,8 @@ impl AppState {
                 let dpi = self
                     .dpi_capabilities_for(&device)
                     .map_or(dpi, |supported| supported.nearest(dpi));
-                self.write_dpi(device.clone(), route.clone(), dpi);
+                let write = self.write_dpi(device.clone(), route.clone(), dpi);
+                self.pointer.copied_dpi_writes.insert(write);
             }
             if let Some(smartshift) = smartshift {
                 self.write_smartshift(
@@ -168,6 +172,24 @@ impl AppState {
             .and(StateEvent::BindingsChanged(device.clone()))
             .and(StateEvent::DpiChanged(device.clone()))
             .and(StateEvent::SmartShiftChanged(device))
+    }
+
+    /// Copy `source` onto the card `record_key`'s device
+    /// ([`Self::commit_settings_transfer`]) and start the read that confirms
+    /// a SmartShift written to it. Not an [`AppState::apply`] call because
+    /// the confirming read is a query subscription, which only the entity's
+    /// own context can open.
+    pub(crate) fn copy_settings(cx: &mut App, record_key: &str, source: &TransferSource) {
+        Self::update(cx, |state, cx| {
+            let events = state.commit_settings_transfer(record_key, source);
+            let target = state.transfer_record(record_key).and_then(|(record, _)| {
+                Some((record.device_key(), record.addressable_route()?.clone()))
+            });
+            if let Some((key, route)) = target {
+                state.confirm_smartshift(&key, route, cx);
+            }
+            events.emit(cx);
+        });
     }
 
     /// The card `record_key`'s device settings as a config file of their
