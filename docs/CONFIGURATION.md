@@ -64,7 +64,14 @@ optional physical device key.
 
 - startup, update, menu-bar / tray, input-capture, and asset-download toggles
 - `asset_source`: `automatic`, `openlogi`, `cloudflare`, or `fastly`
-- `language`, `appearance`, `device_view_mode` (`grid`, `list`, or `carousel`),
+- `language`: the interface language, as the name of a catalog in
+  `crates/openlogi-ui/locales/` without `.toml` (`de`, `pt-BR`, `he`, …).
+  Omitted, it follows the system language, and a code with no catalog does the
+  same. A regional system code resolves to its language (`he-IL` → `he`), and
+  the withdrawn Hebrew code `iw` still reported by some systems resolves to
+  `he`. Hebrew is right to left; [its limits](DECISIONS.md#2026-11-hebrew-catalog-values-carry-a-right-to-left-embedding)
+  are in the decision log
+- `appearance`, `device_view_mode` (`grid`, `list`, or `carousel`),
   optional theme names, and optional UI radius
 - `smooth_scroll` toggles finite animation for traditional mouse-wheel input. With it
   off, a diverted horizontal thumb wheel still scrolls as a phased gesture (ended after
