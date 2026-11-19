@@ -32,6 +32,20 @@ enum Origin {
     File(Box<ImportedDevice>),
 }
 
+/// What confirming a copy did.
+#[derive(Debug)]
+#[must_use]
+pub(super) enum TransferCommit {
+    /// The copy was saved, and these events follow from it.
+    Saved(StateEvents),
+    /// Nothing was saved: the copy now changes or leaves out something the
+    /// confirmed preview did not show. This is the copy as it stands, to
+    /// preview and confirm again.
+    Changed(Box<SettingsTransfer>),
+    /// Nothing was saved: the device or its source is gone.
+    Gone,
+}
+
 impl AppState {
     /// The devices of the card `record_key`'s kind that have settings of
     /// their own, offline ones included, in device-list order.
@@ -106,9 +120,12 @@ impl AppState {
         }
     }
 
-    /// Copy `source` onto the card `record_key`'s device and save. The
-    /// transfer is computed again here, so what is saved matches the config
-    /// as it is now, not as it was when the preview opened.
+    /// Copy `source` onto the card `record_key`'s device and save, once the
+    /// user confirmed the preview `shown`. The transfer is computed again
+    /// here, so what is saved matches the config as it is now, not as it was
+    /// when the preview opened. A copy that no longer previews like `shown`
+    /// (a device read since, a setting changed elsewhere) is not saved but
+    /// handed back to be confirmed again.
     ///
     /// A reload applies most settings to a connected device but not its DPI
     /// or SmartShift, so those are written to it here, the way their panels
@@ -116,19 +133,23 @@ impl AppState {
     /// values it was read to support, the file keeps the target's own DPI
     /// and its per-link overrides; taking it saves it on every link. An
     /// offline device gets both from the agent when it connects.
-    pub fn commit_settings_transfer(
+    pub(super) fn commit_settings_transfer(
         &mut self,
         record_key: &str,
         source: &TransferSource,
-    ) -> StateEvents {
+        shown: &SettingsTransfer,
+    ) -> TransferCommit {
         let Some(mut transfer) = self.settings_transfer_preview(record_key, source) else {
-            return StateEvents::none();
+            return TransferCommit::Gone;
         };
+        if !transfer.previews_like(shown) {
+            return TransferCommit::Changed(Box::new(transfer));
+        }
         if transfer.is_empty() {
-            return StateEvents::none();
+            return TransferCommit::Saved(StateEvents::none());
         }
         let Some((target, target_key)) = self.transfer_record(record_key) else {
-            return StateEvents::none();
+            return TransferCommit::Gone;
         };
         let device = target.device_key();
         let route = target.addressable_route().cloned();
@@ -167,21 +188,35 @@ impl AppState {
                 );
             }
         }
-        StateEvents::from(StateEvent::SettingsChanged)
-            .and(StateEvent::DeviceConfigChanged(device.clone()))
-            .and(StateEvent::BindingsChanged(device.clone()))
-            .and(StateEvent::DpiChanged(device.clone()))
-            .and(StateEvent::SmartShiftChanged(device))
+        TransferCommit::Saved(
+            StateEvents::from(StateEvent::SettingsChanged)
+                .and(StateEvent::DeviceConfigChanged(device.clone()))
+                .and(StateEvent::BindingsChanged(device.clone()))
+                .and(StateEvent::DpiChanged(device.clone()))
+                .and(StateEvent::SmartShiftChanged(device)),
+        )
     }
 
-    /// Copy `source` onto the card `record_key`'s device
-    /// ([`Self::commit_settings_transfer`]) and start the read that confirms
-    /// a SmartShift written to it. Not an [`AppState::apply`] call because
-    /// the confirming read is a query subscription, which only the entity's
-    /// own context can open.
-    pub(crate) fn copy_settings(cx: &mut App, record_key: &str, source: &TransferSource) {
+    /// Copy `source` onto the card `record_key`'s device once the preview
+    /// `shown` is confirmed ([`Self::commit_settings_transfer`]), and start
+    /// the read that confirms a SmartShift written to it. Not an
+    /// [`AppState::apply`] call because the confirming read is a query
+    /// subscription, which only the entity's own context can open.
+    ///
+    /// Returns the copy as it now stands when it no longer previews like
+    /// `shown` and nothing was saved.
+    pub(crate) fn copy_settings(
+        cx: &mut App,
+        record_key: &str,
+        source: &TransferSource,
+        shown: &SettingsTransfer,
+    ) -> Option<SettingsTransfer> {
         Self::update(cx, |state, cx| {
-            let events = state.commit_settings_transfer(record_key, source);
+            let events = match state.commit_settings_transfer(record_key, source, shown) {
+                TransferCommit::Saved(events) => events,
+                TransferCommit::Changed(transfer) => return Some(*transfer),
+                TransferCommit::Gone => return None,
+            };
             let target = state.transfer_record(record_key).and_then(|(record, _)| {
                 Some((record.device_key(), record.addressable_route()?.clone()))
             });
@@ -189,7 +224,8 @@ impl AppState {
                 state.confirm_smartshift(&key, route, cx);
             }
             events.emit(cx);
-        });
+            None
+        })
     }
 
     /// The card `record_key`'s device settings as a config file of their

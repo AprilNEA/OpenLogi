@@ -1,12 +1,13 @@
 //! Copying settings onto a device from another device or from a file.
 
-use openlogi_core::config::SmartShift;
+use openlogi_core::config::{SettingsTransfer, SkipReason, SkippedItem, SmartShift, TransferItem};
 
 use super::fn_lock::drain;
 use super::smartshift::{answer_smartshift_read, install};
 use super::*;
 use crate::services::ipc::{Command, SetDpi, SetSmartShift};
-use crate::state::SmartShiftWriteStatus;
+use crate::state::transfer::TransferCommit;
+use crate::state::{SmartShiftWriteStatus, TransferSource};
 
 const OLD_MOUSE_KEY: &str = "serial:old-mouse";
 
@@ -40,12 +41,30 @@ fn state_with_an_old_mouse() -> AppState {
     })
 }
 
-fn back_binding(state: &AppState) -> Option<&Binding> {
+fn back_binding<'a>(state: &'a AppState, key: &str) -> Option<&'a Binding> {
     state
         .config
         .devices
-        .get(KNOWN_MOUSE_KEY)
+        .get(key)
         .and_then(|device| device.bindings.get(&ButtonId::Back))
+}
+
+/// Confirm the copy of `source` onto the card `target` as `shown`,
+/// expecting it to be saved.
+fn confirm(state: &mut AppState, target: &str, source: &TransferSource, shown: &SettingsTransfer) {
+    let commit = state.commit_settings_transfer(target, source, shown);
+    assert!(
+        matches!(commit, TransferCommit::Saved(_)),
+        "the copy previews as it did: {commit:?}"
+    );
+}
+
+/// Preview the copy of `source` onto the card `target` and confirm it.
+fn copy(state: &mut AppState, target: &str, source: &TransferSource) {
+    let shown = state
+        .settings_transfer_preview(target, source)
+        .expect("both devices are known");
+    confirm(state, target, source, &shown);
 }
 
 #[test]
@@ -63,11 +82,18 @@ fn a_device_copies_another_devices_settings_once() {
         .settings_transfer_preview(KNOWN_MOUSE_KEY, &sources[0])
         .expect("both devices are known");
     assert!(!preview.is_empty());
-    assert_eq!(back_binding(&state), None, "a preview writes nothing");
+    assert_eq!(
+        back_binding(&state, KNOWN_MOUSE_KEY),
+        None,
+        "a preview writes nothing"
+    );
 
-    let _ = state.commit_settings_transfer(KNOWN_MOUSE_KEY, &sources[0]);
+    confirm(&mut state, KNOWN_MOUSE_KEY, &sources[0], &preview);
 
-    assert_eq!(back_binding(&state), Some(&Binding::Single(Action::Copy)));
+    assert_eq!(
+        back_binding(&state, KNOWN_MOUSE_KEY),
+        Some(&Binding::Single(Action::Copy))
+    );
     let again = state
         .settings_transfer_preview(KNOWN_MOUSE_KEY, &sources[0])
         .expect("both devices are known");
@@ -87,9 +113,12 @@ fn a_device_copies_settings_from_an_exported_file() {
     assert_eq!(sources.len(), 1);
     assert_eq!(sources[0].name, "MX Master 2S");
 
-    let _ = state.commit_settings_transfer(KNOWN_MOUSE_KEY, &sources[0]);
+    copy(&mut state, KNOWN_MOUSE_KEY, &sources[0]);
 
-    assert_eq!(back_binding(&state), Some(&Binding::Single(Action::Copy)));
+    assert_eq!(
+        back_binding(&state, KNOWN_MOUSE_KEY),
+        Some(&Binding::Single(Action::Copy))
+    );
     assert!(
         state
             .device_export(KNOWN_MOUSE_KEY)
@@ -205,7 +234,7 @@ fn copy_onto_the_online_mouse(
     let route = record.route.clone().expect("the mouse is reachable");
     let sources = state.transfer_sources(&target);
 
-    let _ = state.commit_settings_transfer(&target, &sources[0]);
+    copy(state, &target, &sources[0]);
 
     let mut dpi_writes = Vec::new();
     let mut smartshift_writes = Vec::new();
@@ -300,7 +329,13 @@ fn copying_smartshift_onto_an_online_mouse_reads_it_back(cx: &mut gpui::TestAppC
     let route = answer_smartshift_read(&mut receiver, own);
     cx.run_until_parked();
 
-    cx.update(|cx| AppState::copy_settings(cx, &target, &sources[0]));
+    let changed = cx.update(|cx| {
+        let shown = AppState::try_read(cx)
+            .and_then(|state| state.settings_transfer_preview(&target, &sources[0]))
+            .expect("both devices are known");
+        AppState::copy_settings(cx, &target, &sources[0], &shown)
+    });
+    assert_eq!(changed, None, "the copy previews as it did");
     cx.run_until_parked();
 
     assert_eq!(
@@ -324,7 +359,7 @@ fn copying_onto_an_offline_mouse_saves_its_dpi_for_the_next_connection() {
     assert!(!record.is_online());
     let sources = state.transfer_sources(&target);
 
-    let _ = state.commit_settings_transfer(&target, &sources[0]);
+    copy(&mut state, &target, &sources[0]);
 
     let writes: Vec<Command> = drain(&mut receiver)
         .into_iter()
@@ -337,4 +372,71 @@ fn copying_onto_an_offline_mouse_saves_its_dpi_for_the_next_connection() {
     );
     assert_eq!(state.config.dpi(&target), Some(COPIED_DPI));
     assert_eq!(state.config.smartshift(&target), Some(copied_smartshift()));
+}
+
+/// A preview opened before the mouse was read leaves its DPI out. Once the
+/// mouse is read, confirming that preview saves nothing and hands back the
+/// copy with the DPI in, which is saved when confirmed in turn.
+#[test]
+fn transfer_requires_reconfirmation_after_capabilities_change() {
+    let resolver = AssetResolver::new();
+    let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut config = Config::ephemeral();
+    let mut old = old_mouse();
+    old.dpi = Some(COPIED_DPI);
+    config.devices.insert(OLD_MOUSE_KEY.to_owned(), old);
+    let read = direct_inventory([0xa3, 0x93, 0xca, 0xe0]);
+    let mut unread = read.clone();
+    unread.paired[0].capabilities = None;
+    let mut state = AppState::new(Sources {
+        inventories: &[unread],
+        ..Sources::in_memory(config, &resolver, commands)
+    });
+    drain(&mut receiver);
+    let (_, target) = listed_mouse(&state);
+    let sources = state.transfer_sources(&target);
+    let shown = state
+        .settings_transfer_preview(&target, &sources[0])
+        .expect("both devices are known");
+    assert!(
+        shown
+            .changed
+            .contains(&TransferItem::Button(ButtonId::Back)),
+        "{shown:?}"
+    );
+    assert!(
+        shown.skipped.contains(&SkippedItem {
+            item: TransferItem::Dpi,
+            reason: SkipReason::NotMeasured,
+        }),
+        "{shown:?}"
+    );
+
+    let _ = state.refresh_inventories(&[read], &[], &resolver, &[]);
+    drain(&mut receiver);
+    let TransferCommit::Changed(again) =
+        state.commit_settings_transfer(&target, &sources[0], &shown)
+    else {
+        panic!("the mouse was read after the preview opened");
+    };
+
+    assert!(again.changed.contains(&TransferItem::Dpi), "{again:?}");
+    assert_eq!(back_binding(&state, &target), None, "nothing is saved");
+    let writes = drain(&mut receiver)
+        .into_iter()
+        .filter(|command| matches!(command, Command::SetDpi(_)))
+        .count();
+    assert_eq!(writes, 0, "nothing is written");
+
+    confirm(&mut state, &target, &sources[0], &again);
+
+    assert_eq!(
+        back_binding(&state, &target),
+        Some(&Binding::Single(Action::Copy))
+    );
+    let writes = drain(&mut receiver)
+        .into_iter()
+        .filter(|command| matches!(command, Command::SetDpi(_)))
+        .count();
+    assert_eq!(writes, 1, "the confirmed DPI is written");
 }
