@@ -296,3 +296,43 @@ async fn a_change_while_arming_continues_is_answered_once_capture_runs() {
 
     session.stop().await;
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_diversion_the_firmware_drops_silently_is_restored_by_the_audit() {
+    // Some firmware hands a control back with no `0x1b04` echo and no
+    // reconnect broadcast. Only the periodic read-back can see it.
+    let state = native_controls();
+    let (raw, handle) = mouse(Arc::clone(&state), OtherClient::default());
+    let session = Session::start(raw).await;
+
+    written_until(&handle, "the wireless lookup", |reports| {
+        reports
+            .iter()
+            .any(|report| report[2] == 0 && report[3] >> 4 == 0 && report[4..6] == [0x1d, 0x4b])
+    })
+    .await;
+    assert_eq!(requests(&handle.written_reports(), 3, MIDDLE_CID).len(), 1);
+
+    state.lock().unwrap().insert(MIDDLE_CID, (0x00, [0, 0]));
+    tokio::time::advance(Duration::from_secs(61)).await;
+
+    written_until(&handle, "the middle button's re-divert", |reports| {
+        requests(reports, 3, MIDDLE_CID).len() == 2
+    })
+    .await;
+    assert_eq!(
+        state.lock().unwrap()[&MIDDLE_CID].0 & 0x01,
+        0x01,
+        "the audit diverts the dropped control again"
+    );
+    assert_eq!(
+        requests(&handle.written_reports(), 3, GESTURE_CID).len(),
+        1,
+        "a control that kept its diversion is not written"
+    );
+
+    // Teardown waits on the scripted channel's I/O, which a paused clock
+    // would time out on.
+    tokio::time::resume();
+    session.stop().await;
+}

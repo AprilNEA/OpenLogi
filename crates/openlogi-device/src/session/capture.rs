@@ -402,8 +402,8 @@ async fn idle_deadline(watchdog: Option<&Watchdog<'_>>) {
 }
 
 /// Keep a capture session alive and reapply its volatile diversions whenever
-/// the device announces a reconnect or another client hands a control back,
-/// and change the diverted controls in place when the owner asks for a
+/// the device announces a reconnect, another client hands a control back, or
+/// a periodic read-back finds one lost, and change the diverted controls in place when the owner asks for a
 /// different set. Returns only the typed reason capture stopped; restoration
 /// performs a fresh registry lookup after monitoring.
 async fn monitor<A: ArmedCapture>(
@@ -480,9 +480,9 @@ async fn monitor<A: ArmedCapture>(
                     return stop_for_current_publication(context.registry, context.shared);
                 }
             }
-            echo = changes.next() => {
+            cause = changes.next() => {
                 if device_io.allows_io() {
-                    changes.answer(&*context.armed, echo).await;
+                    changes.answer(&*context.armed, cause).await;
                 }
             }
             () = context.armed.retarget_requested() => {
