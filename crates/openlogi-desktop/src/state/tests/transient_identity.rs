@@ -62,7 +62,10 @@ fn transient_probe_folds_into_its_known_card() {
     assert_eq!(merged.len(), 1, "no second card for the half-read probe");
     assert_eq!(merged[0].config_key, stable_key);
     assert!(merged[0].is_persistent());
-    assert!(merged[0].online, "the live probe supplies volatile state");
+    assert!(
+        merged[0].is_online(),
+        "the live probe supplies volatile state"
+    );
     assert!(merged[0].route.is_some(), "the live route is kept usable");
 }
 
@@ -92,7 +95,7 @@ fn transient_record_beside_its_live_device_is_dropped() {
 
     assert_eq!(merged.len(), 1);
     assert_eq!(merged[0].config_key, "unit:a393cae0");
-    assert!(merged[0].online);
+    assert!(merged[0].is_online());
 }
 
 #[test]
@@ -127,7 +130,7 @@ fn transient_probe_adopts_the_absent_sibling_of_a_live_twin() {
         panic!("the sibling card must survive under its physical key");
     };
     assert!(
-        sibling.online,
+        sibling.is_online(),
         "the half-read probe keeps the sibling online"
     );
     assert!(sibling.route.is_some(), "the live route stays usable");

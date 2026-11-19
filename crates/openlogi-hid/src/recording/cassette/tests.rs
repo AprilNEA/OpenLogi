@@ -15,7 +15,7 @@ use tokio::sync::{Mutex as AsyncMutex, mpsc};
 
 use super::*;
 use crate::recording::{
-    NativeRecorder, RecordedChannel, RecordedChannelOpenOutcome, RecordedRequestFact,
+    NativeRecorder, RecordedChannel, RecordedChannelOpenOutcome, RecordedRequestFact, RecorderState,
 };
 
 const DEVICE: u8 = 1;
@@ -846,14 +846,10 @@ fn ping_reply(data: u8) -> [u8; 16] {
 async fn wait_for_accepted(recorder: &NativeRecorder, expected: usize) {
     let started = Instant::now();
     while started.elapsed() < Duration::from_secs(1) {
-        if recorder
-            .shared
-            .state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .accepted
-            >= expected
-        {
+        if matches!(
+            &*recorder.shared.lock_state(),
+            RecorderState::Open(open) if open.accepted >= expected
+        ) {
             return;
         }
         tokio::time::sleep(Duration::from_millis(5)).await;
@@ -864,14 +860,10 @@ async fn wait_for_accepted(recorder: &NativeRecorder, expected: usize) {
 async fn wait_for_closed(recorder: &NativeRecorder) {
     let started = Instant::now();
     while started.elapsed() < Duration::from_secs(1) {
-        if recorder
-            .shared
-            .state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .active_producers
-            == 0
-        {
+        if matches!(
+            &*recorder.shared.lock_state(),
+            RecorderState::Open(open) if open.producers == 0
+        ) {
             return;
         }
         tokio::time::sleep(Duration::from_millis(5)).await;

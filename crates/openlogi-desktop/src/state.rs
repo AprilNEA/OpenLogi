@@ -29,6 +29,9 @@ pub use config::ConfigPersistence;
 pub(crate) use device_key::DeviceKey;
 pub(crate) use device_session::ObservedConnection;
 pub use devices::DeviceRecord;
+/// For test fixtures that build a record by hand.
+#[cfg(test)]
+pub(crate) use devices::{Link, Presence};
 pub(crate) use easy_switch::HostRenameRefusal;
 pub(crate) use events::{StateEvent, StateEvents};
 pub(crate) use flow::{
@@ -186,12 +189,6 @@ pub enum AgentLink {
     /// Connected and current: the agent's latest status snapshot.
     Ready(openlogi_ipc::AgentStatus),
 }
-
-/// Inventory snapshots can briefly miss a real device while another HID++
-/// request is in flight. Keep the previous record through this many
-/// consecutive misses so a transient probe timeout does not make the device card
-/// disappear mid-interaction.
-const INVENTORY_MISS_GRACE: u8 = 2;
 
 pub struct AppState {
     /// Live configuration and its last persisted rollback point.
@@ -404,12 +401,23 @@ impl AppState {
 
     fn restore_config_projections(&mut self) {
         self.restore_binding_projections();
-        if let Some(dpi) = self.current_record().and_then(|record| {
-            record
-                .persistent_config_key()
-                .and_then(|key| self.config.devices.get(key))
-                .and_then(|device| device.effective_dpi(&record.route_key))
-        }) {
+        // A DPI the mouse has not answered yet keeps showing; its answer
+        // decides what shows next (`apply_dpi_written`).
+        if let Some(dpi) = self
+            .current_record()
+            .filter(|record| {
+                !self
+                    .pointer
+                    .pending_dpi_writes
+                    .contains_key(&record.device_key())
+            })
+            .and_then(|record| {
+                record
+                    .persistent_config_key()
+                    .and_then(|key| self.config.devices.get(key))
+                    .and_then(|device| device.effective_dpi(&record.route_key))
+            })
+        {
             self.pointer.dpi = dpi;
         }
     }

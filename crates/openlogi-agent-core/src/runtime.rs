@@ -82,6 +82,14 @@ pub enum ActionRequest {
         /// Which way.
         turn: PageTurn,
     },
+    /// Move the pressing device to Easy-Switch `slot`
+    /// ([`Action::easy_switch_host`]).
+    SwitchHost {
+        /// The pressing device.
+        device_key: Option<String>,
+        /// The zero-based channel.
+        slot: u8,
+    },
     /// A DPI or pointer-speed write an action made to the mouse at `route`
     /// settled. The mouse broadcasts nothing for a host write, so the agent
     /// announces it and clients read the mouse's settings again instead of
@@ -152,6 +160,17 @@ struct HeldShortcuts {
 
 impl HeldShortcuts {
     fn start(&mut self, press: &PressToken, action: &Action) -> bool {
+        if let Some(mods) = action.held_modifier() {
+            match self.by_press.entry(press.clone()) {
+                std::collections::hash_map::Entry::Occupied(mut held) => {
+                    held.get_mut().replace_modifier(mods);
+                }
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(openlogi_inject::press_hold_modifier(mods));
+                }
+            }
+            return true;
+        }
         let Some((combo, keys)) = action.held_chord() else {
             return false;
         };
@@ -200,7 +219,9 @@ fn agent_request(action: &Action, device_key: Option<&str>) -> Option<ActionRequ
             device_key,
             turn: PageTurn::Next,
         }),
-        _ => None,
+        _ => action
+            .easy_switch_host()
+            .map(|slot| ActionRequest::SwitchHost { device_key, slot }),
     }
 }
 
@@ -731,7 +752,9 @@ impl ButtonEventHandler {
         device_key: Option<&str>,
         target: ActionDispatchTarget,
     ) {
-        if action.held_chord().is_some() && target.resolve(action).is_none() {
+        if (action.held_chord().is_some() || action.held_modifier().is_some())
+            && target.resolve(action).is_none()
+        {
             return;
         }
         if matches!(action, Action::DpiShift) {

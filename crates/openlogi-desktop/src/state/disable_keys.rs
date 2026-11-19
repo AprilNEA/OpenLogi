@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 
 use gpui::{App, Context};
 use openlogi_core::config::DisableKey;
-use openlogi_core::hid::{DisableKeysMask, DisableKeysState, WriteError};
+use openlogi_core::hid::{DeviceRoute, DisableKeysMask, DisableKeysState, WriteError};
 use tracing::warn;
 
 use crate::services::ipc::{
@@ -12,7 +12,8 @@ use crate::services::ipc::{
 };
 
 use super::{
-    AppState, ConfigReconciliation, DeviceKey, DisableKeysLoad, Load, StateEvent, StateEvents,
+    AppState, ConfigReconciliation, DeviceKey, DeviceRecord, DisableKeysLoad, Load, StateEvent,
+    StateEvents,
 };
 
 /// Route-independent identity retained across disconnects during recovery.
@@ -22,29 +23,254 @@ pub(crate) struct DisableKeysRecoveryToken {
     pub(crate) transaction_id: u64,
 }
 
+impl From<DisableKeysRequestContext> for DisableKeysRecoveryToken {
+    fn from(context: DisableKeysRequestContext) -> Self {
+        Self {
+            key: context.key,
+            transaction_id: context.request_id,
+        }
+    }
+}
+
 /// Persistence phase for one device's confirmed Disable Keys transaction.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+///
+/// A recoverable failure travels inside the phase that reports it. The phases
+/// that wait on the agent have no room for one, and a recovery phase keeps
+/// the failure that led to it until a retry replaces it. Only the transitions
+/// below change a phase.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum DisableKeysPersistenceStatus {
-    #[default]
-    Idle,
+    /// No transaction is outstanding. `error` says how the last one ended,
+    /// until the next write starts or a reload is accepted.
+    Idle {
+        error: Option<DisableKeysError>,
+    },
     Applying(DisableKeysRequestContext),
     AppliedNotSaved {
         recovery: DisableKeysRecoveryToken,
         confirmed: DisableKeysState,
+        error: DisableKeysError,
     },
     AwaitingReload(DisableKeysRequestContext),
-    SavedNotReloaded(DisableKeysRequestContext),
-    SavedNotReloadedDetached(DisableKeysRecoveryToken),
+    SavedNotReloaded {
+        context: DisableKeysRequestContext,
+        error: DisableKeysError,
+    },
+    SavedNotReloadedDetached {
+        recovery: DisableKeysRecoveryToken,
+        error: Option<DisableKeysError>,
+    },
     /// The agent loaded another revision, but the GUI could not refresh it.
-    ReconcileRequired(DisableKeysRecoveryToken),
+    ReconcileRequired {
+        recovery: DisableKeysRecoveryToken,
+        error: Option<DisableKeysError>,
+    },
     /// A refreshed external file needs an agent receipt and a subsequent read.
     AwaitingReconciliationReload(DisableKeysRequestContext),
 }
 
-#[derive(Clone, Copy)]
+impl Default for DisableKeysPersistenceStatus {
+    fn default() -> Self {
+        Self::Idle { error: None }
+    }
+}
+
+impl DisableKeysPersistenceStatus {
+    /// The failure this phase reports, if any.
+    fn error(&self) -> Option<DisableKeysError> {
+        match self {
+            Self::Idle { error }
+            | Self::SavedNotReloadedDetached { error, .. }
+            | Self::ReconcileRequired { error, .. } => *error,
+            Self::AppliedNotSaved { error, .. } | Self::SavedNotReloaded { error, .. } => {
+                Some(*error)
+            }
+            Self::Applying(_) | Self::AwaitingReload(_) | Self::AwaitingReconciliationReload(_) => {
+                None
+            }
+        }
+    }
+
+    /// Whether `receipt` answers the write this phase is waiting on.
+    fn awaits_write(&self, fence: RouteFence<'_>, receipt: &DisableKeysRequestContext) -> bool {
+        matches!(self, Self::Applying(active) if fence.admits(active, receipt))
+    }
+
+    /// Why the reload `receipt` answers was sent, when this phase waits on it.
+    fn awaited_reload(
+        &self,
+        fence: RouteFence<'_>,
+        receipt: &DisableKeysRequestContext,
+    ) -> Option<ReloadPurpose> {
+        match self {
+            Self::AwaitingReload(active) if fence.admits(active, receipt) => {
+                Some(ReloadPurpose::Saved)
+            }
+            Self::AwaitingReconciliationReload(active) if fence.admits(active, receipt) => {
+                Some(ReloadPurpose::Reconciled)
+            }
+            _ => None,
+        }
+    }
+
+    /// The agent has the write.
+    fn write_sent(&mut self, context: DisableKeysRequestContext) {
+        *self = Self::Applying(context);
+    }
+
+    /// The write ended without a confirmed device state.
+    fn write_failed(&mut self, error: DisableKeysError) {
+        *self = Self::Idle { error: Some(error) };
+    }
+
+    /// The device holds `confirmed`, but the config file does not.
+    fn save_failed(
+        &mut self,
+        recovery: DisableKeysRecoveryToken,
+        confirmed: DisableKeysState,
+        error: DisableKeysError,
+    ) {
+        *self = Self::AppliedNotSaved {
+            recovery,
+            confirmed,
+            error,
+        };
+    }
+
+    /// The saved file is on its way to the agent.
+    fn reload_sent(&mut self, context: DisableKeysRequestContext, purpose: ReloadPurpose) {
+        *self = match purpose {
+            ReloadPurpose::Saved => Self::AwaitingReload(context),
+            ReloadPurpose::Reconciled => Self::AwaitingReconciliationReload(context),
+        };
+    }
+
+    /// The agent did not adopt the saved file: the request never left, or
+    /// the agent refused it.
+    fn reload_failed(
+        &mut self,
+        context: DisableKeysRequestContext,
+        purpose: ReloadPurpose,
+        error: DisableKeysError,
+    ) {
+        *self = match purpose {
+            ReloadPurpose::Saved => Self::SavedNotReloaded { context, error },
+            ReloadPurpose::Reconciled => Self::ReconcileRequired {
+                recovery: context.into(),
+                error: Some(error),
+            },
+        };
+    }
+
+    /// The agent adopted the exact revision the transaction saved.
+    fn reload_accepted(&mut self) {
+        *self = Self::default();
+    }
+
+    /// The file is saved, but no connection can carry its reload now.
+    fn reload_detached(
+        &mut self,
+        recovery: DisableKeysRecoveryToken,
+        error: Option<DisableKeysError>,
+    ) {
+        *self = Self::SavedNotReloadedDetached { recovery, error };
+    }
+
+    /// The externally changed file still has to be refreshed and confirmed.
+    fn reconcile_required(
+        &mut self,
+        recovery: DisableKeysRecoveryToken,
+        error: Option<DisableKeysError>,
+    ) {
+        *self = Self::ReconcileRequired { recovery, error };
+    }
+
+    /// The connection an in-flight request went out on is gone. A write can
+    /// no longer be confirmed; a saved file still needs its reload.
+    fn connection_changed(&mut self) {
+        *self = match std::mem::take(self) {
+            Self::Applying(_) => Self::Idle {
+                error: Some(DisableKeysError::ConnectionChanged),
+            },
+            Self::AwaitingReload(context) => Self::SavedNotReloadedDetached {
+                recovery: context.into(),
+                error: None,
+            },
+            Self::SavedNotReloaded { context, error } => Self::SavedNotReloadedDetached {
+                recovery: context.into(),
+                error: Some(error),
+            },
+            Self::AwaitingReconciliationReload(context) => Self::ReconcileRequired {
+                recovery: context.into(),
+                error: None,
+            },
+            settled @ (Self::Idle { .. }
+            | Self::AppliedNotSaved { .. }
+            | Self::SavedNotReloadedDetached { .. }
+            | Self::ReconcileRequired { .. }) => settled,
+        };
+    }
+}
+
+/// Why a saved file goes back to the agent.
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum ReloadPurpose {
+    /// This transaction saved the confirmed keys.
     Saved,
+    /// This transaction refreshed an externally changed file.
     Reconciled,
+}
+
+/// The connection a receipt must still be on: the device's current route and
+/// the generation of its Disable Keys read subscription.
+#[derive(Clone, Copy)]
+struct RouteFence<'a> {
+    route: Option<&'a DeviceRoute>,
+    route_generation: Option<u64>,
+}
+
+impl RouteFence<'_> {
+    /// `receipt` answers `active`, the request a phase waits on, over the
+    /// connection that request went out on.
+    fn admits(
+        self,
+        active: &DisableKeysRequestContext,
+        receipt: &DisableKeysRequestContext,
+    ) -> bool {
+        self.route == Some(&receipt.route)
+            && self.route_generation == Some(receipt.route_generation)
+            && active == receipt
+    }
+}
+
+/// Every fact the Disable Keys switches depend on, derived in
+/// [`AppState::disable_keys_controls_enabled`] and nowhere else.
+///
+/// This is where a device's own phase meets the shared
+/// [`ConfigReconciliation`]: a device writes only while its transaction is
+/// idle *and* no adopted file waits for an agent receipt. A receipt pending
+/// for any device therefore closes every device's switches.
+#[derive(Clone, Copy)]
+struct WriteGate<'a> {
+    reconciliation: &'a ConfigReconciliation,
+    config_writable: bool,
+    online: bool,
+    persistent: bool,
+    load: &'a DisableKeysLoad,
+    phase: Option<&'a DisableKeysPersistenceStatus>,
+}
+
+impl WriteGate<'_> {
+    fn is_open(self) -> bool {
+        *self.reconciliation == ConfigReconciliation::Confirmed
+            && self.config_writable
+            && self.online
+            && self.persistent
+            && matches!(self.load, Load::Ready(_))
+            && self
+                .phase
+                .is_none_or(|phase| matches!(phase, DisableKeysPersistenceStatus::Idle { .. }))
+    }
 }
 
 /// Recoverable failure category; the panel localizes it at render time.
@@ -58,11 +284,11 @@ pub(crate) enum DisableKeysError {
     ReloadFailed,
 }
 
-/// Per-device Disable Keys transaction state.
+/// Per-device Disable Keys transaction state. The field stays private to this
+/// module so its transitions are the only writer.
 #[derive(Debug, Default)]
 pub(super) struct DisableKeysDeviceState {
-    pub(super) persistence: DisableKeysPersistenceStatus,
-    pub(super) error: Option<DisableKeysError>,
+    persistence: DisableKeysPersistenceStatus,
 }
 
 impl AppState {
@@ -84,14 +310,8 @@ impl AppState {
     pub(super) fn load_current_disable_keys(&mut self, cx: &mut Context<Self>) {
         let Some((key, route)) = self.current_record().and_then(|record| {
             let supported = record.capabilities.unwrap_or_default().disable_keys;
-            (record.online && supported)
-                .then(|| {
-                    record
-                        .route
-                        .clone()
-                        .map(|route| (record.device_key(), route))
-                })
-                .flatten()
+            let route = record.addressable_route().filter(|_| supported)?;
+            Some((record.device_key(), route.clone()))
         }) else {
             return;
         };
@@ -129,13 +349,14 @@ impl AppState {
             return None;
         }
         let context = self.allocate_disable_keys_context(&key)?;
-        let state = self.devices.sessions.entry(key.clone()).or_default();
-        state.disable_keys.persistence = DisableKeysPersistenceStatus::Applying(context.clone());
-        state.disable_keys.error = None;
-        if !self.send_ipc(SetDisableKeys { context, desired }) {
-            let state = self.devices.sessions.entry(key.clone()).or_default();
-            state.disable_keys.persistence = DisableKeysPersistenceStatus::Idle;
-            state.disable_keys.error = Some(DisableKeysError::AgentUnavailable);
+        if self.send_ipc(SetDisableKeys {
+            context: context.clone(),
+            desired,
+        }) {
+            self.disable_keys_phase(&key).write_sent(context);
+        } else {
+            self.disable_keys_phase(&key)
+                .write_failed(DisableKeysError::AgentUnavailable);
         }
         Some(key)
     }
@@ -145,47 +366,37 @@ impl AppState {
         context: DisableKeysRequestContext,
         result: Result<DisableKeysState, WriteError>,
     ) -> StateEvents {
-        let events = StateEvents::from(StateEvent::DisableKeysChanged(context.key.clone()));
-        let current = match self.disable_keys_status(&context.key) {
-            Some(DisableKeysPersistenceStatus::Applying(current)) => Some(current),
-            _ => None,
-        };
-        if !transaction_fences_match(
-            self.record_route(&context.key),
-            self.disable_keys_reads.generation(&context.key),
-            current,
-            &context,
-        ) {
+        let key = context.key.clone();
+        let fence = self.disable_keys_fence(&key);
+        if !self
+            .disable_keys_status(&key)
+            .is_some_and(|phase| phase.awaits_write(fence, &context))
+        {
             return StateEvents::none();
         }
-        let key = context.key.clone();
-        let result = match result {
+        let events = StateEvents::from(StateEvent::DisableKeysChanged(key.clone()));
+        let confirmed = match result {
             Ok(confirmed) => confirmed,
             Err(error) => {
                 warn!(%error, %key, "disabled keys write was not confirmed");
                 self.disable_keys_reads.reconcile_after_write(&key);
-                let state = self.devices.sessions.entry(key).or_default();
-                state.disable_keys.persistence = DisableKeysPersistenceStatus::Idle;
-                state.disable_keys.error = Some(DisableKeysError::WriteFailed);
+                self.disable_keys_phase(&key)
+                    .write_failed(DisableKeysError::WriteFailed);
                 return events;
             }
         };
 
-        self.disable_keys_reads.set_confirmed(&key, result);
-        let known = confirmed_known_set(result);
+        self.disable_keys_reads.set_confirmed(&key, confirmed);
+        let known = confirmed_known_set(confirmed);
         self.config
             .edit(|config| config.set_disabled_keys(key.as_str(), known));
         if let Err(error) = self.config.persist_feature("disabled keys") {
             warn!(%error, %key, "could not save disabled keys");
-            let state = self.devices.sessions.entry(key.clone()).or_default();
-            state.disable_keys.persistence = DisableKeysPersistenceStatus::AppliedNotSaved {
-                recovery: DisableKeysRecoveryToken {
-                    key,
-                    transaction_id: context.request_id,
-                },
-                confirmed: result,
-            };
-            state.disable_keys.error = Some(DisableKeysError::SaveFailed);
+            self.disable_keys_phase(&key).save_failed(
+                context.into(),
+                confirmed,
+                DisableKeysError::SaveFailed,
+            );
             return events;
         }
 
@@ -201,34 +412,22 @@ impl AppState {
         purpose: ReloadPurpose,
     ) {
         let key = context.key.clone();
-        let state = self.devices.sessions.entry(key.clone()).or_default();
-        state.disable_keys.persistence = match purpose {
-            ReloadPurpose::Saved => DisableKeysPersistenceStatus::AwaitingReload(context.clone()),
-            ReloadPurpose::Reconciled => {
-                DisableKeysPersistenceStatus::AwaitingReconciliationReload(context.clone())
-            }
-        };
-        state.disable_keys.error = None;
         let reload_context = ConfigReloadContext::DisableKeys(context.clone());
         self.disable_keys_reads
             .track_config_reload(reload_context.clone());
-        if !self.send_ipc(ReloadConfig::disable_keys(
+        if self.send_ipc(ReloadConfig::disable_keys(
             context.clone(),
             self.config.revision(),
         )) {
+            self.disable_keys_phase(&key).reload_sent(context, purpose);
+        } else {
             self.disable_keys_reads
                 .fail_config_reload(&reload_context, DisableKeysError::AgentUnavailable);
-            let state = self.devices.sessions.entry(key).or_default();
-            state.disable_keys.persistence = match purpose {
-                ReloadPurpose::Saved => DisableKeysPersistenceStatus::SavedNotReloaded(context),
-                ReloadPurpose::Reconciled => {
-                    DisableKeysPersistenceStatus::ReconcileRequired(DisableKeysRecoveryToken {
-                        key: context.key,
-                        transaction_id: context.request_id,
-                    })
-                }
-            };
-            state.disable_keys.error = Some(DisableKeysError::AgentUnavailable);
+            self.disable_keys_phase(&key).reload_failed(
+                context,
+                purpose,
+                DisableKeysError::AgentUnavailable,
+            );
         }
     }
 
@@ -237,22 +436,15 @@ impl AppState {
         context: DisableKeysRequestContext,
         result: Result<openlogi_ipc::SavedConfigVerdict, openlogi_ipc::ConfigReloadError>,
     ) -> StateEvents {
-        let mut events = StateEvents::from(StateEvent::DisableKeysChanged(context.key.clone()));
-        let current = match self.disable_keys_status(&context.key) {
-            Some(
-                DisableKeysPersistenceStatus::AwaitingReload(current)
-                | DisableKeysPersistenceStatus::AwaitingReconciliationReload(current),
-            ) => Some(current),
-            _ => None,
-        };
-        if !transaction_fences_match(
-            self.record_route(&context.key),
-            self.disable_keys_reads.generation(&context.key),
-            current,
-            &context,
-        ) {
+        let key = context.key.clone();
+        let fence = self.disable_keys_fence(&key);
+        let Some(purpose) = self
+            .disable_keys_status(&key)
+            .and_then(|phase| phase.awaited_reload(fence, &context))
+        else {
             return StateEvents::none();
-        }
+        };
+        let mut events = StateEvents::from(StateEvent::DisableKeysChanged(key.clone()));
         let reload_context = ConfigReloadContext::DisableKeys(context.clone());
         match result {
             Ok(openlogi_ipc::SavedConfigVerdict::Accepted) => {
@@ -261,53 +453,27 @@ impl AppState {
                     .config_reload_matches(&reload_context)
                 {
                     events = events.and(self.confirm_external_config_reload(&reload_context));
-                } else if matches!(
-                    self.disable_keys_status(&context.key),
-                    Some(DisableKeysPersistenceStatus::AwaitingReconciliationReload(
-                        _
-                    ))
-                ) {
+                } else if purpose == ReloadPurpose::Reconciled {
                     // A read started while refreshing the local file may have
                     // preceded the agent reload. Only a post-receipt read is current.
-                    self.disable_keys_reads.reconcile_after_write(&context.key);
+                    self.disable_keys_reads.reconcile_after_write(&key);
                 }
-                let state = self
-                    .devices
-                    .sessions
-                    .entry(context.key.clone())
-                    .or_default();
-                state.disable_keys.persistence = DisableKeysPersistenceStatus::Idle;
-                state.disable_keys.error = None;
+                self.disable_keys_phase(&key).reload_accepted();
             }
             Ok(openlogi_ipc::SavedConfigVerdict::FileChangedAfterSave) => {
                 let _ = self.config.apply_reload_result(Ok(()));
-                return self.reconcile_disable_keys_config(DisableKeysRecoveryToken {
-                    key: context.key,
-                    transaction_id: context.request_id,
-                });
+                return self.reconcile_disable_keys_config(context.into(), None);
             }
             Err(error) => {
-                warn!(error = %error.message, key = %context.key, "could not reload disabled keys");
+                warn!(error = %error.message, %key, "could not reload disabled keys");
                 self.disable_keys_reads
                     .fail_config_reload(&reload_context, DisableKeysError::ReloadFailed);
                 events = events.and(self.disable_keys_config_events());
-                let state = self
-                    .devices
-                    .sessions
-                    .entry(context.key.clone())
-                    .or_default();
-                state.disable_keys.persistence = if matches!(
-                    state.disable_keys.persistence,
-                    DisableKeysPersistenceStatus::AwaitingReconciliationReload(_)
-                ) {
-                    DisableKeysPersistenceStatus::ReconcileRequired(DisableKeysRecoveryToken {
-                        key: context.key,
-                        transaction_id: context.request_id,
-                    })
-                } else {
-                    DisableKeysPersistenceStatus::SavedNotReloaded(context)
-                };
-                state.disable_keys.error = Some(DisableKeysError::ReloadFailed);
+                self.disable_keys_phase(&key).reload_failed(
+                    context,
+                    purpose,
+                    DisableKeysError::ReloadFailed,
+                );
             }
         }
         events
@@ -317,6 +483,7 @@ impl AppState {
         let Some(DisableKeysPersistenceStatus::AppliedNotSaved {
             recovery,
             confirmed,
+            ..
         }) = self.disable_keys_status(key).cloned()
         else {
             return StateEvents::none();
@@ -325,12 +492,11 @@ impl AppState {
         let config_events = match self.reconcile_external_config() {
             Ok(events) => events,
             Err(config_events) => {
-                self.devices
-                    .sessions
-                    .entry(key.clone())
-                    .or_default()
-                    .disable_keys
-                    .error = Some(DisableKeysError::RefreshFailed);
+                self.disable_keys_phase(key).save_failed(
+                    recovery,
+                    confirmed,
+                    DisableKeysError::RefreshFailed,
+                );
                 return events.and(config_events);
             }
         };
@@ -340,42 +506,33 @@ impl AppState {
             .edit(|config| config.set_disabled_keys(recovery.key.as_str(), known));
         if let Err(error) = self.config.persist_feature("disabled keys recovery") {
             warn!(%error, %key, "could not save disabled keys recovery");
-            self.devices
-                .sessions
-                .entry(key.clone())
-                .or_default()
-                .disable_keys
-                .error = Some(DisableKeysError::SaveFailed);
+            self.disable_keys_phase(key).save_failed(
+                recovery,
+                confirmed,
+                DisableKeysError::SaveFailed,
+            );
             return events;
         }
 
-        let next = self.allocate_disable_keys_context(key);
-        if let Some(context) = next {
-            self.request_disable_keys_reload(context, ReloadPurpose::Saved);
-        } else {
-            let state = self.devices.sessions.entry(key.clone()).or_default();
-            state.disable_keys.error = None;
-            state.disable_keys.persistence =
-                DisableKeysPersistenceStatus::SavedNotReloadedDetached(recovery);
+        match self.allocate_disable_keys_context(key) {
+            Some(context) => self.request_disable_keys_reload(context, ReloadPurpose::Saved),
+            None => self.disable_keys_phase(key).reload_detached(recovery, None),
         }
         events
     }
 
     fn retry_disable_keys_reload_inner(&mut self, key: &DeviceKey) -> StateEvents {
-        let recovery = match self.disable_keys_status(key) {
-            Some(DisableKeysPersistenceStatus::SavedNotReloaded(context)) => {
-                DisableKeysRecoveryToken {
-                    key: context.key.clone(),
-                    transaction_id: context.request_id,
-                }
+        let (recovery, error) = match self.disable_keys_status(key) {
+            Some(DisableKeysPersistenceStatus::SavedNotReloaded { context, error }) => {
+                (context.clone().into(), Some(*error))
             }
-            Some(DisableKeysPersistenceStatus::SavedNotReloadedDetached(recovery)) => {
-                recovery.clone()
+            Some(DisableKeysPersistenceStatus::SavedNotReloadedDetached { recovery, error }) => {
+                (recovery.clone(), *error)
             }
-            Some(DisableKeysPersistenceStatus::ReconcileRequired(recovery)) => {
-                return self.reconcile_disable_keys_config(recovery.clone());
+            Some(DisableKeysPersistenceStatus::ReconcileRequired { recovery, error }) => {
+                return self.reconcile_disable_keys_config(recovery.clone(), *error);
             }
-            None | Some(DisableKeysPersistenceStatus::Idle)
+            None | Some(DisableKeysPersistenceStatus::Idle { .. })
                 if matches!(
                     self.disable_keys_config_reconciliation(),
                     ConfigReconciliation::Required(_)
@@ -387,9 +544,8 @@ impl AppState {
         };
         let events = StateEvents::from(StateEvent::DisableKeysChanged(key.clone()));
         let Some(context) = self.allocate_disable_keys_context(&recovery.key) else {
-            let state = self.devices.sessions.entry(key.clone()).or_default();
-            state.disable_keys.persistence =
-                DisableKeysPersistenceStatus::SavedNotReloadedDetached(recovery);
+            self.disable_keys_phase(key)
+                .reload_detached(recovery, error);
             return events;
         };
         self.request_disable_keys_reload(context, ReloadPurpose::Saved);
@@ -399,31 +555,27 @@ impl AppState {
     /// A mismatch identifies neither the file's present revision nor the one
     /// the GUI will refresh. Confirm that refreshed revision before accepting
     /// a subsequent hardware read; never persist the superseded choice here.
-    fn reconcile_disable_keys_config(&mut self, recovery: DisableKeysRecoveryToken) -> StateEvents {
-        let events = StateEvents::from(StateEvent::DisableKeysChanged(recovery.key.clone()));
+    /// `error` is the failure the device already reports; it stays when no
+    /// connection can carry the reload.
+    fn reconcile_disable_keys_config(
+        &mut self,
+        recovery: DisableKeysRecoveryToken,
+        error: Option<DisableKeysError>,
+    ) -> StateEvents {
+        let key = recovery.key.clone();
+        let events = StateEvents::from(StateEvent::DisableKeysChanged(key.clone()));
         let config_events = match self.reconcile_external_config() {
             Ok(events) => events,
             Err(config_events) => {
-                let state = self
-                    .devices
-                    .sessions
-                    .entry(recovery.key.clone())
-                    .or_default();
-                state.disable_keys.persistence =
-                    DisableKeysPersistenceStatus::ReconcileRequired(recovery);
-                state.disable_keys.error = Some(DisableKeysError::RefreshFailed);
+                self.disable_keys_phase(&key)
+                    .reconcile_required(recovery, Some(DisableKeysError::RefreshFailed));
                 return events.and(config_events);
             }
         };
         let events = events.and(config_events);
-        let Some(context) = self.allocate_disable_keys_context(&recovery.key) else {
-            let state = self
-                .devices
-                .sessions
-                .entry(recovery.key.clone())
-                .or_default();
-            state.disable_keys.persistence =
-                DisableKeysPersistenceStatus::ReconcileRequired(recovery);
+        let Some(context) = self.allocate_disable_keys_context(&key) else {
+            self.disable_keys_phase(&key)
+                .reconcile_required(recovery, error);
             return events;
         };
         self.request_disable_keys_reload(context, ReloadPurpose::Reconciled);
@@ -434,8 +586,7 @@ impl AppState {
         &mut self,
         key: &DeviceKey,
     ) -> Option<DisableKeysRequestContext> {
-        let record = self.devices.record(key).filter(|record| record.online)?;
-        let route = record.route.clone()?;
+        let route = self.devices.record(key)?.addressable_route()?.clone();
         let route_generation = self.disable_keys_reads.generation(key)?;
         let request_id = self.next_disable_keys_request_id;
         self.next_disable_keys_request_id = self.next_disable_keys_request_id.saturating_add(1);
@@ -447,43 +598,34 @@ impl AppState {
         })
     }
 
-    fn record_route(&self, key: &DeviceKey) -> Option<&openlogi_core::hid::DeviceRoute> {
+    fn record_route(&self, key: &DeviceKey) -> Option<&DeviceRoute> {
         self.devices
             .record(key)
             .and_then(|record| record.route.as_ref())
     }
 
+    fn disable_keys_fence(&self, key: &DeviceKey) -> RouteFence<'_> {
+        RouteFence {
+            route: self.record_route(key),
+            route_generation: self.disable_keys_reads.generation(key),
+        }
+    }
+
+    /// The device's phase, for its transitions to advance.
+    fn disable_keys_phase(&mut self, key: &DeviceKey) -> &mut DisableKeysPersistenceStatus {
+        &mut self
+            .devices
+            .sessions
+            .entry(key.clone())
+            .or_default()
+            .disable_keys
+            .persistence
+    }
+
     pub(crate) fn invalidate_disable_keys(&mut self, key: &DeviceKey) {
         self.disable_keys_reads.remove(key);
-        let Some(state) = self.devices.sessions.get_mut(key) else {
-            return;
-        };
-        match state.disable_keys.persistence.clone() {
-            DisableKeysPersistenceStatus::Applying(_) => {
-                state.disable_keys.persistence = DisableKeysPersistenceStatus::Idle;
-                state.disable_keys.error = Some(DisableKeysError::ConnectionChanged);
-            }
-            DisableKeysPersistenceStatus::AwaitingReload(context)
-            | DisableKeysPersistenceStatus::SavedNotReloaded(context) => {
-                state.disable_keys.persistence =
-                    DisableKeysPersistenceStatus::SavedNotReloadedDetached(
-                        DisableKeysRecoveryToken {
-                            key: context.key,
-                            transaction_id: context.request_id,
-                        },
-                    );
-            }
-            DisableKeysPersistenceStatus::Idle
-            | DisableKeysPersistenceStatus::AppliedNotSaved { .. }
-            | DisableKeysPersistenceStatus::SavedNotReloadedDetached(_)
-            | DisableKeysPersistenceStatus::ReconcileRequired(_) => {}
-            DisableKeysPersistenceStatus::AwaitingReconciliationReload(context) => {
-                state.disable_keys.persistence =
-                    DisableKeysPersistenceStatus::ReconcileRequired(DisableKeysRecoveryToken {
-                        key: context.key,
-                        transaction_id: context.request_id,
-                    });
-            }
+        if let Some(session) = self.devices.sessions.get_mut(key) {
+            session.disable_keys.persistence.connection_changed();
         }
     }
 
@@ -498,50 +640,30 @@ impl AppState {
         self.devices
             .sessions
             .get(key)
-            .map(|state| &state.disable_keys.persistence)
+            .map(|session| &session.disable_keys.persistence)
     }
 
     pub(crate) fn disable_keys_error(&self, key: &DeviceKey) -> Option<DisableKeysError> {
-        self.devices
-            .sessions
-            .get(key)
-            .and_then(|state| state.disable_keys.error)
+        self.disable_keys_status(key)
+            .and_then(DisableKeysPersistenceStatus::error)
     }
 
     pub(crate) fn disable_keys_controls_enabled(&self, key: &DeviceKey) -> bool {
-        self.disable_keys_config_reconciliation() == &ConfigReconciliation::Confirmed
-            && self.config.is_writable()
-            && self
-                .devices
-                .record(key)
-                .is_some_and(|record| record.online && record.is_persistent())
-            && matches!(self.disable_keys_reads.load(key), Load::Ready(_))
-            && matches!(
-                self.disable_keys_status(key),
-                None | Some(DisableKeysPersistenceStatus::Idle)
-            )
+        let record = self.devices.record(key);
+        WriteGate {
+            reconciliation: self.disable_keys_config_reconciliation(),
+            config_writable: self.config.is_writable(),
+            online: record.is_some_and(DeviceRecord::is_online),
+            persistent: record.is_some_and(DeviceRecord::is_persistent),
+            load: &self.disable_keys_reads.load(key),
+            phase: self.disable_keys_status(key),
+        }
+        .is_open()
     }
 }
 
 fn confirmed_known_set(state: DisableKeysState) -> BTreeSet<DisableKey> {
-    DisableKey::ALL
-        .into_iter()
-        .filter(|key| {
-            let bit = key.mask();
-            state.supported.contains(bit) && state.disabled.contains(bit)
-        })
-        .collect()
-}
-
-fn transaction_fences_match(
-    record_route: Option<&openlogi_core::hid::DeviceRoute>,
-    active_generation: Option<u64>,
-    active_request: Option<&DisableKeysRequestContext>,
-    context: &DisableKeysRequestContext,
-) -> bool {
-    record_route == Some(&context.route)
-        && active_generation == Some(context.route_generation)
-        && active_request == Some(context)
+    DisableKey::disabled_in(state.disabled & state.supported)
 }
 
 #[cfg(test)]
@@ -553,7 +675,7 @@ mod tests {
         Capabilities, DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports, PairedDevice,
         ReceiverInfo,
     };
-    use openlogi_core::hid::{DIRECT_DEVICE_INDEX, DeviceRoute};
+    use openlogi_core::hid::DIRECT_DEVICE_INDEX;
 
     use crate::services::assets::AssetResolver;
     use crate::services::ipc::Command;
@@ -846,44 +968,24 @@ mod tests {
             route_generation: 7,
             request_id: 9,
         };
-        assert!(transaction_fences_match(
-            Some(&route),
-            Some(7),
-            Some(&context),
-            &context
-        ));
-        assert!(!transaction_fences_match(
-            None,
-            Some(7),
-            Some(&context),
-            &context
-        ));
+        let fence = |route, route_generation| RouteFence {
+            route,
+            route_generation,
+        };
+        assert!(fence(Some(&route), Some(7)).admits(&context, &context));
+        assert!(!fence(None, Some(7)).admits(&context, &context));
         let other_route = DeviceRoute::Direct {
             vendor_id: 0x046d,
             product_id: 0xb35c,
         };
-        assert!(!transaction_fences_match(
-            Some(&other_route),
-            Some(7),
-            Some(&context),
-            &context
-        ));
-        assert!(!transaction_fences_match(
-            Some(&route),
-            Some(8),
-            Some(&context),
-            &context
-        ));
+        assert!(!fence(Some(&other_route), Some(7)).admits(&context, &context));
+        assert!(!fence(Some(&route), Some(8)).admits(&context, &context));
+        assert!(!fence(Some(&route), None).admits(&context, &context));
         let newer = DisableKeysRequestContext {
             request_id: 10,
             ..context.clone()
         };
-        assert!(!transaction_fences_match(
-            Some(&route),
-            Some(7),
-            Some(&newer),
-            &context
-        ));
+        assert!(!fence(Some(&route), Some(7)).admits(&newer, &context));
     }
 
     #[test]
@@ -2056,7 +2158,7 @@ mod tests {
         );
         assert!(matches!(
             state.disable_keys_status(&key),
-            Some(DisableKeysPersistenceStatus::SavedNotReloaded(_))
+            Some(DisableKeysPersistenceStatus::SavedNotReloaded { .. })
         ));
 
         assert!(!state.retry_disable_keys_reload_inner(&key).is_empty());
@@ -2100,7 +2202,7 @@ mod tests {
         state.invalidate_disable_keys(&key);
         assert!(matches!(
             state.disable_keys_status(&key),
-            Some(DisableKeysPersistenceStatus::ReconcileRequired(_))
+            Some(DisableKeysPersistenceStatus::ReconcileRequired { .. })
         ));
         assert!(
             state
@@ -2126,7 +2228,7 @@ mod tests {
         );
         assert!(matches!(
             state.disable_keys_status(&key),
-            Some(DisableKeysPersistenceStatus::ReconcileRequired(_))
+            Some(DisableKeysPersistenceStatus::ReconcileRequired { .. })
         ));
         assert_eq!(
             state.disable_keys_error(&key),
@@ -2137,7 +2239,7 @@ mod tests {
         assert!(!state.retry_disable_keys_reload_inner(&key).is_empty());
         assert!(matches!(
             state.disable_keys_status(&key),
-            Some(DisableKeysPersistenceStatus::ReconcileRequired(_))
+            Some(DisableKeysPersistenceStatus::ReconcileRequired { .. })
         ));
         assert_eq!(
             state.disable_keys_error(&key),
@@ -2171,7 +2273,7 @@ mod tests {
         assert!(!state.retry_disable_keys_reload_inner(&key).is_empty());
         assert!(matches!(
             state.disable_keys_status(&key),
-            Some(DisableKeysPersistenceStatus::SavedNotReloaded(_))
+            Some(DisableKeysPersistenceStatus::SavedNotReloaded { .. })
         ));
         assert_eq!(
             state.disable_keys_error(&key),
@@ -2218,7 +2320,7 @@ mod tests {
         );
         assert!(matches!(
             state.disable_keys_status(&key),
-            Some(DisableKeysPersistenceStatus::SavedNotReloaded(_))
+            Some(DisableKeysPersistenceStatus::SavedNotReloaded { .. })
         ));
         assert_eq!(
             state.disable_keys_error(&key),
@@ -2408,23 +2510,215 @@ mod tests {
         state.invalidate_disable_keys(&key);
         assert!(matches!(
             state.disable_keys_status(&key),
-            Some(DisableKeysPersistenceStatus::Idle)
+            Some(DisableKeysPersistenceStatus::Idle { .. })
         ));
 
         state
             .disable_keys_reads
             .install_generation_for_test(key.clone(), context.route_generation + 1);
         state
-            .devices
-            .sessions
-            .entry(key.clone())
-            .or_default()
-            .disable_keys
-            .persistence = DisableKeysPersistenceStatus::AwaitingReload(context.clone());
+            .disable_keys_phase(&key)
+            .reload_sent(context.clone(), ReloadPurpose::Saved);
         state.invalidate_disable_keys(&key);
         assert!(matches!(
             state.disable_keys_status(&key),
-            Some(DisableKeysPersistenceStatus::SavedNotReloadedDetached(_))
+            Some(DisableKeysPersistenceStatus::SavedNotReloadedDetached { .. })
         ));
+    }
+
+    /// One value per fact the write gate reads, every one of them open.
+    struct GateFacts {
+        reconciliation: ConfigReconciliation,
+        config_writable: bool,
+        online: bool,
+        persistent: bool,
+        load: DisableKeysLoad,
+        phase: Option<DisableKeysPersistenceStatus>,
+    }
+
+    impl GateFacts {
+        fn open() -> Self {
+            Self {
+                reconciliation: ConfigReconciliation::Confirmed,
+                config_writable: true,
+                online: true,
+                persistent: true,
+                load: Load::Ready(std::sync::Arc::new(DisableKeysState::default())),
+                phase: None,
+            }
+        }
+
+        fn is_open(&self) -> bool {
+            WriteGate {
+                reconciliation: &self.reconciliation,
+                config_writable: self.config_writable,
+                online: self.online,
+                persistent: self.persistent,
+                load: &self.load,
+                phase: self.phase.as_ref(),
+            }
+            .is_open()
+        }
+    }
+
+    fn gate_context() -> DisableKeysRequestContext {
+        DisableKeysRequestContext {
+            key: DeviceKey::from("keyboard"),
+            route: DeviceRoute::Direct {
+                vendor_id: 0x046d,
+                product_id: 0xb35b,
+            },
+            route_generation: 7,
+            request_id: 9,
+        }
+    }
+
+    #[test]
+    fn write_gate_opens_for_an_untouched_or_idle_device() {
+        assert!(GateFacts::open().is_open());
+        for phase in [
+            DisableKeysPersistenceStatus::default(),
+            DisableKeysPersistenceStatus::Idle {
+                error: Some(DisableKeysError::WriteFailed),
+            },
+        ] {
+            let facts = GateFacts {
+                phase: Some(phase),
+                ..GateFacts::open()
+            };
+            assert!(facts.is_open(), "{:?}", facts.phase);
+        }
+    }
+
+    #[test]
+    fn write_gate_needs_a_confirmed_config_reconciliation() {
+        for reconciliation in [
+            ConfigReconciliation::Required(DisableKeysError::ReloadFailed),
+            ConfigReconciliation::Awaiting(ConfigReloadContext::Reconciled(1)),
+            ConfigReconciliation::Awaiting(ConfigReloadContext::DisableKeys(gate_context())),
+        ] {
+            let facts = GateFacts {
+                reconciliation,
+                ..GateFacts::open()
+            };
+            assert!(!facts.is_open(), "{:?}", facts.reconciliation);
+        }
+    }
+
+    #[test]
+    fn write_gate_needs_a_writable_config() {
+        let facts = GateFacts {
+            config_writable: false,
+            ..GateFacts::open()
+        };
+        assert!(!facts.is_open());
+    }
+
+    #[test]
+    fn write_gate_needs_an_online_record() {
+        let facts = GateFacts {
+            online: false,
+            ..GateFacts::open()
+        };
+        assert!(!facts.is_open());
+    }
+
+    #[test]
+    fn write_gate_needs_a_persistent_record() {
+        let facts = GateFacts {
+            persistent: false,
+            ..GateFacts::open()
+        };
+        assert!(!facts.is_open());
+    }
+
+    #[test]
+    fn write_gate_needs_a_ready_snapshot() {
+        for load in [
+            Load::Unknown,
+            Load::Loading,
+            Load::Failed("read failed".into()),
+            Load::Unsupported("unsupported".into()),
+        ] {
+            let facts = GateFacts {
+                load,
+                ..GateFacts::open()
+            };
+            assert!(!facts.is_open(), "{:?}", facts.load);
+        }
+    }
+
+    #[test]
+    fn write_gate_needs_an_idle_transaction() {
+        let context = gate_context();
+        let recovery = DisableKeysRecoveryToken::from(context.clone());
+        for phase in [
+            DisableKeysPersistenceStatus::Applying(context.clone()),
+            DisableKeysPersistenceStatus::AppliedNotSaved {
+                recovery: recovery.clone(),
+                confirmed: DisableKeysState::default(),
+                error: DisableKeysError::SaveFailed,
+            },
+            DisableKeysPersistenceStatus::AwaitingReload(context.clone()),
+            DisableKeysPersistenceStatus::SavedNotReloaded {
+                context: context.clone(),
+                error: DisableKeysError::ReloadFailed,
+            },
+            DisableKeysPersistenceStatus::SavedNotReloadedDetached {
+                recovery: recovery.clone(),
+                error: None,
+            },
+            DisableKeysPersistenceStatus::ReconcileRequired {
+                recovery,
+                error: None,
+            },
+            DisableKeysPersistenceStatus::AwaitingReconciliationReload(context),
+        ] {
+            let facts = GateFacts {
+                phase: Some(phase),
+                ..GateFacts::open()
+            };
+            assert!(!facts.is_open(), "{:?}", facts.phase);
+        }
+    }
+
+    /// An agent restart re-enumerates the keyboard, but the IPC client still
+    /// holds the reload and delivers it to the successor. The pending
+    /// confirmation therefore waits for that answer instead of failing.
+    #[test]
+    fn agent_restart_leaves_a_pending_reconciliation_to_the_successors_receipt() {
+        let mut inventory = keyboard_inventory(0xb35b, [1, 2, 3, 4]);
+        let (mut state, mut receiver, key) = test_state(
+            ConfigPersistence::MemoryOnly,
+            std::slice::from_ref(&inventory),
+        );
+        let _ = state.apply_saved_config_reload_result(Ok(
+            openlogi_ipc::SavedConfigVerdict::FileChangedAfterSave,
+        ));
+        let (request_id, _) = take_config_reconciliation(&mut receiver);
+
+        for online in [false, true] {
+            inventory.paired[0].online = online;
+            let _ = state.refresh_inventories(
+                std::slice::from_ref(&inventory),
+                &[],
+                &AssetResolver::new(),
+                &[],
+            );
+            assert_eq!(
+                state.disable_keys_config_reconciliation(),
+                &ConfigReconciliation::Awaiting(ConfigReloadContext::Reconciled(request_id))
+            );
+            assert!(!state.disable_keys_controls_enabled(&key));
+        }
+
+        let _ = state.apply_reconciled_config_reload_result(
+            request_id,
+            Ok(openlogi_ipc::SavedConfigVerdict::Accepted),
+        );
+        assert_eq!(
+            state.disable_keys_config_reconciliation(),
+            &ConfigReconciliation::Confirmed
+        );
     }
 }

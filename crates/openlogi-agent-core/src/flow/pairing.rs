@@ -19,6 +19,7 @@
 //! ended is ignored. The confirmation step that saves the peer runs on a
 //! blocking thread, and the task waits for it.
 
+mod stage;
 mod store;
 #[cfg(test)]
 mod tests;
@@ -56,6 +57,7 @@ use tracing::{debug, info, warn};
 use super::identity;
 use super::runtime::{PROTOCOL_MAX, PROTOCOL_MIN, bind, hello, machine_name, platform};
 use crate::observable::ObservableState;
+use stage::{Deadline, Ending, Stage};
 use store::ConfigPeerStore;
 pub use store::{PairedPeer, SavePeerError, save_peer};
 
@@ -289,13 +291,44 @@ struct Session {
     /// The computers found with pairing open, this one left out.
     nearby: Vec<PairingCandidate>,
     attempt: Option<Attempt>,
-    /// The last attempt's result, shown until the user dismisses it or
-    /// another attempt shows.
-    result: Option<FlowPairingPhase>,
     next_attempt: u64,
-    /// When pairing closes itself, unless an attempt runs.
-    expires: Instant,
-    stopping: bool,
+    lifecycle: Lifecycle,
+}
+
+/// Whether pairing takes commands.
+enum Lifecycle {
+    /// Pairing closes itself at `expires` unless an attempt runs. `result`
+    /// is the last attempt's result, shown until the user dismisses it or
+    /// another attempt shows.
+    Open {
+        expires: Instant,
+        result: Option<FlowPairingPhase>,
+    },
+    /// Pairing closes once its attempt, ended, has let its last frames go.
+    /// It takes no commands, starts no attempt, and shows nothing.
+    Stopping,
+}
+
+impl Lifecycle {
+    /// Keep pairing open for [`OPEN_FOR`] from `now`.
+    fn renew(&mut self, now: Instant) {
+        if let Self::Open { expires, .. } = self {
+            *expires = now + OPEN_FOR;
+        }
+    }
+
+    /// Show `result` until the user dismisses it.
+    fn show(&mut self, result: FlowPairingPhase) {
+        if let Self::Open { result: shown, .. } = self {
+            *shown = Some(result);
+        }
+    }
+
+    fn dismiss(&mut self) {
+        if let Self::Open { result, .. } = self {
+            *result = None;
+        }
+    }
 }
 
 /// An event from a task of attempt `attempt`.
@@ -334,32 +367,23 @@ enum Role {
 /// One pairing attempt: a dial or an inbound connection, then its ceremony.
 struct Attempt {
     id: u64,
-    role: Role,
-    /// The other computer, once known.
-    peer: Option<FlowPairingPeer>,
-    /// Whether the user sees this attempt. An inbound connection shows only
-    /// once its `PairStart` arrives.
-    shown: bool,
     /// The address the user typed, saved with the peer.
     address: Option<String>,
-    /// The connection and its ceremony, once connected.
-    link: Option<Link>,
-    /// When the attempt times out, or when its ending stops waiting.
-    deadline: Instant,
-    ending: Option<Ending>,
+    stage: Stage<Arc<FlowConnection>>,
     /// Dials, reads, requests, and responses. Dropped with the attempt,
     /// which aborts what is still running.
     tasks: JoinSet<()>,
 }
 
-struct Link {
-    connection: Arc<FlowConnection>,
+/// A connection and the ceremony on it. `C` is the connection,
+/// `Arc<FlowConnection>` in the agent.
+#[derive(Clone)]
+struct Link<C> {
+    connection: C,
     session: PairingSession,
-    /// This side's `PairConfirm` is out and unanswered.
-    confirming: bool,
 }
 
-impl Link {
+impl<C> Link<C> {
     /// Run a confirmation `step` of the ceremony on a blocking thread and
     /// keep the session it leaves. The step that sees both users confirmed
     /// saves the peer through `store`, which reads and writes `config.toml`;
@@ -392,16 +416,6 @@ impl Link {
     }
 }
 
-/// Why an ended attempt still holds its connection.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Ending {
-    /// Its last frames are on their way to the peer.
-    Flushing,
-    /// The peer is saved; this side's `PairConfirm`, which the peer needs to
-    /// save this side, is on its way.
-    Paired,
-}
-
 /// What ending an attempt does with its connection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Close {
@@ -414,50 +428,12 @@ enum Close {
 }
 
 impl Attempt {
-    fn new(id: u64, role: Role, timeout: Duration) -> Self {
+    fn new(id: u64, address: Option<String>, stage: Stage<Arc<FlowConnection>>) -> Self {
         Self {
             id,
-            role,
-            peer: None,
-            shown: role == Role::Initiator,
-            address: None,
-            link: None,
-            deadline: Instant::now() + timeout,
-            ending: None,
+            address,
+            stage,
             tasks: JoinSet::new(),
-        }
-    }
-
-    /// The name the peer gave itself, to save it under.
-    fn peer_name(&self) -> String {
-        self.peer
-            .as_ref()
-            .map_or_else(String::new, |peer| peer.name.clone())
-    }
-
-    /// What the user sees of this attempt while it runs.
-    fn phase(&self) -> FlowPairingPhase {
-        let (Some(peer), Some(link)) = (&self.peer, &self.link) else {
-            return FlowPairingPhase::Connecting {
-                peer: self.peer.clone(),
-            };
-        };
-        let peer = peer.clone();
-        match (link.session.state(), link.session.sas_code()) {
-            (
-                PairingState::Prompted {
-                    local_confirmed, ..
-                },
-                Some(code),
-            ) => {
-                let code = code.to_string();
-                if local_confirmed {
-                    FlowPairingPhase::WaitingForPeer { peer, code }
-                } else {
-                    FlowPairingPhase::ShowingCode { peer, code }
-                }
-            }
-            _ => FlowPairingPhase::Connecting { peer: Some(peer) },
         }
     }
 
@@ -468,13 +444,13 @@ impl Attempt {
         call: Call,
         request: Result<Envelope, TransportError>,
     ) {
-        let Some(link) = &mut self.link else {
+        let Some(live) = self.stage.live() else {
             return;
         };
-        if call == Call::Confirm {
-            link.confirming = true;
+        let connection = Arc::clone(&live.link.connection);
+        if call == Call::Confirm && self.stage.confirm_sent().is_err() {
+            return;
         }
-        let connection = Arc::clone(&link.connection);
         let (attempt, events) = (self.id, events.clone());
         self.tasks.spawn(async move {
             let answer = match request {
@@ -507,9 +483,10 @@ impl Attempt {
     /// session still ran it, or when the session ended itself for that
     /// reason, as on a commitment mismatch or an expired deadline.
     fn abort(&mut self, reason: PairingAbortReason) {
-        let Some(link) = &mut self.link else {
+        let Some(live) = self.stage.live_mut() else {
             return;
         };
+        let link = &mut live.link;
         let ended_for_reason = match link.session.state() {
             PairingState::Aborted(ended) => ended == reason,
             PairingState::TimedOut => reason == PairingAbortReason::Timeout,
@@ -537,20 +514,12 @@ impl Attempt {
             }
         });
     }
-
-    /// Keep the connection open until the peer closes it or `wait` passes,
-    /// so the frames already sent reach it.
-    fn end(&mut self, ending: Ending, wait: Duration) {
-        self.shown = false;
-        self.ending = Some(ending);
-        self.deadline = Instant::now() + wait;
-    }
 }
 
 impl Drop for Attempt {
     fn drop(&mut self) {
-        if let Some(link) = &self.link {
-            link.connection.close();
+        if let Some(connection) = self.stage.connection() {
+            connection.close();
         }
     }
 }
@@ -585,10 +554,11 @@ impl Session {
             event_queue,
             nearby: Vec::new(),
             attempt: None,
-            result: None,
             next_attempt: 0,
-            expires: Instant::now() + OPEN_FOR,
-            stopping: false,
+            lifecycle: Lifecycle::Open {
+                expires: Instant::now() + OPEN_FOR,
+                result: None,
+            },
         };
         Ok((session, commands_tx))
     }
@@ -598,12 +568,19 @@ impl Session {
         let endpoint = Arc::clone(&self.endpoint);
         loop {
             let idle = self.attempt.is_none();
-            if self.stopping && idle {
-                break;
-            }
-            let deadline = self.attempt.as_ref().map(|attempt| attempt.deadline);
+            // Open pairing closes itself once idle past `expires`; stopping
+            // pairing closes once its last attempt is gone.
+            let (open, expires) = match &self.lifecycle {
+                Lifecycle::Open { expires, .. } => (true, idle.then_some(*expires)),
+                Lifecycle::Stopping if idle => break,
+                Lifecycle::Stopping => (false, None),
+            };
+            let deadline = self
+                .attempt
+                .as_ref()
+                .map(|attempt| attempt.stage.deadline().at());
             tokio::select! {
-                command = self.commands.recv(), if !self.stopping => match command {
+                command = self.commands.recv(), if open => match command {
                     Some(command) => self.command(command).await,
                     None => self.stop(),
                 },
@@ -619,14 +596,10 @@ impl Session {
                         nearby = None;
                     }
                 }
-                () = sleep_until(deadline.unwrap_or(self.expires)), if deadline.is_some() => {
-                    self.deadline();
-                }
-                () = sleep_until(self.expires), if idle => break,
+                () = until(deadline) => self.deadline(),
+                () = until(expires) => break,
             }
-            if !self.stopping {
-                self.publish();
-            }
+            self.publish();
         }
         if let Some(mut attempt) = self.attempt.take() {
             // Its dials hold the endpoint; wait until they let go.
@@ -648,19 +621,25 @@ impl Session {
     }
 
     fn publish(&self) {
-        self.inner.observable.set_flow_pairing(Some(self.phase()));
+        self.inner.observable.set_flow_pairing(self.phase());
     }
 
-    fn phase(&self) -> FlowPairingPhase {
-        if let Some(attempt) = &self.attempt
-            && attempt.shown
+    /// What pairing shows, `None` once it is stopping.
+    fn phase(&self) -> Option<FlowPairingPhase> {
+        let Lifecycle::Open { result, .. } = &self.lifecycle else {
+            return None;
+        };
+        if let Some(shown) = self
+            .attempt
+            .as_ref()
+            .and_then(|attempt| attempt.stage.phase())
         {
-            return attempt.phase();
+            return Some(shown);
         }
-        if let Some(result) = &self.result {
-            return result.clone();
+        if let Some(result) = result {
+            return Some(result.clone());
         }
-        if self.nearby.is_empty() {
+        let phase = if self.nearby.is_empty() {
             FlowPairingPhase::Searching
         } else {
             FlowPairingPhase::Found(
@@ -669,13 +648,14 @@ impl Session {
                     .map(|candidate| advertised_peer(&candidate.advert))
                     .collect(),
             )
-        }
+        };
+        Some(phase)
     }
 
     async fn command(&mut self, command: Command) {
         let (reply, answer) = match command {
             Command::Renew(reply) => {
-                self.expires = Instant::now() + OPEN_FOR;
+                self.lifecycle.renew(Instant::now());
                 (reply, Ok(()))
             }
             Command::Pair(target, reply) => {
@@ -700,7 +680,7 @@ impl Session {
 
     fn next_id(&mut self) -> u64 {
         self.next_attempt += 1;
-        self.expires = Instant::now() + OPEN_FOR;
+        self.lifecycle.renew(Instant::now());
         self.next_attempt
     }
 
@@ -710,7 +690,7 @@ impl Session {
         if self
             .attempt
             .as_ref()
-            .is_some_and(|attempt| attempt.ending != Some(Ending::Flushing))
+            .is_some_and(|attempt| attempt.stage.ending() != Some(Ending::Flushing))
         {
             return Err(FlowPairingCommandError::Busy);
         }
@@ -731,13 +711,13 @@ impl Session {
         };
         // Dropping it also frees the pairing slot for this attempt.
         self.attempt = None;
-        self.result = None;
+        self.lifecycle.dismiss();
         let id = self.next_id();
-        let mut attempt = Attempt::new(id, Role::Initiator, SETUP_TIMEOUT);
-        attempt.peer = peer;
-        if let Dial::Address(address) = &dial {
-            attempt.address = Some(address.clone());
-        }
+        let address = match &dial {
+            Dial::Address(address) => Some(address.clone()),
+            Dial::Found { .. } => None,
+        };
+        let mut attempt = Attempt::new(id, address, Stage::dialing(peer, Instant::now()));
         let (endpoint, local_key, events) = (
             Arc::clone(&self.endpoint),
             self.local_key,
@@ -753,12 +733,12 @@ impl Session {
     }
 
     fn incoming(&mut self, incoming: IncomingConnection) {
-        if self.attempt.is_some() || self.stopping {
+        if self.attempt.is_some() || matches!(self.lifecycle, Lifecycle::Stopping) {
             incoming.refuse();
             return;
         }
         let id = self.next_id();
-        let mut attempt = Attempt::new(id, Role::Responder, SETUP_TIMEOUT);
+        let mut attempt = Attempt::new(id, None, Stage::accepting(Instant::now()));
         let events = self.events.clone();
         attempt.tasks.spawn(async move {
             let connected = incoming.establish().await.map(Arc::new).map_err(|error| {
@@ -773,22 +753,13 @@ impl Session {
 
     async fn confirm(&mut self) -> Result<(), FlowPairingCommandError> {
         let path = self.inner.setup.config.clone();
-        let Some(attempt) = self
-            .attempt
-            .as_mut()
-            .filter(|attempt| attempt.ending.is_none())
-        else {
+        let Some(attempt) = &mut self.attempt else {
             return Err(FlowPairingCommandError::NothingToConfirm);
         };
-        let store = ConfigPeerStore {
-            path,
-            name: attempt.peer_name(),
-            address: attempt.address.clone(),
-            saved: None,
-        };
-        let Some(link) = attempt.link.as_mut().filter(|link| {
+        let address = attempt.address.clone();
+        let Some(live) = attempt.stage.live_mut().filter(|live| {
             matches!(
-                link.session.state(),
+                live.link.session.state(),
                 PairingState::Prompted {
                     local_confirmed: false,
                     ..
@@ -797,8 +768,15 @@ impl Session {
         }) else {
             return Err(FlowPairingCommandError::NothingToConfirm);
         };
+        let store = ConfigPeerStore {
+            path,
+            name: live.peer().name.clone(),
+            address,
+            saved: None,
+        };
         let now = std::time::Instant::now();
-        let (confirmed, saved) = link
+        let (confirmed, saved) = live
+            .link
             .confirm(store, move |session, store| {
                 session.confirm_local(now, store)
             })
@@ -806,7 +784,7 @@ impl Session {
         // An expired code confirms nothing, so the peer hears no
         // confirmation.
         let tell_peer = matches!(
-            link.session.state(),
+            live.link.session.state(),
             PairingState::Prompted {
                 local_confirmed: true,
                 ..
@@ -826,11 +804,11 @@ impl Session {
     }
 
     fn cancel(&mut self) {
-        self.result = None;
+        self.lifecycle.dismiss();
         if self
             .attempt
             .as_ref()
-            .is_some_and(|attempt| attempt.shown && attempt.ending.is_none())
+            .is_some_and(|attempt| attempt.stage.shown())
         {
             self.fail_with(None, Close::Abort(PairingAbortReason::UserCancelled));
         }
@@ -839,12 +817,14 @@ impl Session {
     /// Close pairing once the current attempt, cancelled, has told its peer.
     fn stop(&mut self) {
         self.cancel();
-        if let Some(attempt) = &self.attempt
-            && attempt.ending.is_none()
+        if self
+            .attempt
+            .as_ref()
+            .is_some_and(|attempt| attempt.stage.ending().is_none())
         {
             self.attempt = None;
         }
-        self.stopping = true;
+        self.lifecycle = Lifecycle::Stopping;
         self.inner.observable.set_flow_pairing(None);
     }
 
@@ -862,21 +842,16 @@ impl Session {
     }
 
     fn deadline(&mut self) {
-        let Some(attempt) = &mut self.attempt else {
+        let Some(attempt) = &self.attempt else {
             return;
         };
-        if attempt.ending.is_some() {
-            self.attempt = None;
-            return;
+        match attempt.stage.deadline() {
+            Deadline::Linger(_) => self.attempt = None,
+            Deadline::Timeout { failure, .. } => {
+                info!("a Flow pairing attempt timed out");
+                self.fail(failure, Close::Abort(PairingAbortReason::Timeout));
+            }
         }
-        info!("a Flow pairing attempt timed out");
-        // A dial that never connected found nobody to pair with.
-        let failure = if attempt.link.is_none() && attempt.role == Role::Initiator {
-            FlowPairingFailure::Unreachable
-        } else {
-            FlowPairingFailure::TimedOut
-        };
-        self.fail(failure, Close::Abort(PairingAbortReason::Timeout));
     }
 
     async fn event(&mut self, tagged: Tagged) {
@@ -894,13 +869,13 @@ impl Session {
             Event::Notification(notification) => self.notification(&notification),
             Event::Answered(call, answer) => self.answered(call, answer),
             Event::Closed => {
-                if attempt.ending.is_some() {
+                if attempt.stage.ending().is_some() {
                     self.attempt = None;
                 } else {
                     let busy = attempt
-                        .link
-                        .as_ref()
-                        .is_some_and(|link| link.connection.closed_as_pairing_busy());
+                        .stage
+                        .connection()
+                        .is_some_and(|connection| connection.closed_as_pairing_busy());
                     let failure = if busy {
                         FlowPairingFailure::PeerBusy
                     } else {
@@ -917,31 +892,30 @@ impl Session {
         let Some(attempt) = &mut self.attempt else {
             return;
         };
-        attempt.peer = Some(hello_peer(&connection));
+        let link = Link {
+            connection: Arc::clone(&connection),
+            session: connection.pairing_session(),
+        };
+        let Ok(role) = attempt.stage.connect(hello_peer(&connection), link) else {
+            return;
+        };
         attempt
             .tasks
-            .spawn(read(Arc::clone(&connection), events.clone(), attempt.id));
-        let mut session = connection.pairing_session();
-        let start = match attempt.role {
-            Role::Initiator => Some(PairingNonce::random().map(|nonce| session.start(nonce))),
-            Role::Responder => None,
-        };
-        attempt.link = Some(Link {
-            connection,
-            session,
-            confirming: false,
-        });
-        match start {
-            Some(Ok(Ok(start))) => {
-                let start = message_envelope(FrameKind::PairStart, &start);
-                attempt.call(&events, Call::Start, start);
-            }
-            Some(_) => {
-                warn!("could not begin a Flow pairing ceremony");
-                self.fail(FlowPairingFailure::ConnectionLost, Close::Now);
-            }
-            None => {}
+            .spawn(read(connection, events.clone(), attempt.id));
+        if role == Role::Responder {
+            return;
         }
+        let start = attempt.stage.live_mut().and_then(|live| {
+            let nonce = PairingNonce::random().ok()?;
+            live.link.session.start(nonce).ok()
+        });
+        let Some(start) = start else {
+            warn!("could not begin a Flow pairing ceremony");
+            self.fail(FlowPairingFailure::ConnectionLost, Close::Now);
+            return;
+        };
+        let start = message_envelope(FrameKind::PairStart, &start);
+        attempt.call(&events, Call::Start, start);
     }
 
     async fn request(&mut self, rpc: IncomingRpc) {
@@ -952,16 +926,21 @@ impl Session {
         let Some(attempt) = &mut self.attempt else {
             return;
         };
-        let name = attempt.peer_name();
-        let Some(link) = &mut attempt.link else {
+        let Some(live) = attempt.stage.live_mut() else {
+            // The ceremony ended with the attempt, and nothing the peer
+            // asks now starts it again.
+            let refused = error_envelope(proto::ErrorCode::Invalid, "the pairing attempt ended");
+            attempt.respond(rpc, refused);
             return;
         };
+        let (role, name) = (live.role(), live.peer().name.clone());
+        let link = &mut live.link;
         let now = std::time::Instant::now();
         let request = rpc.request();
         let mut failure = None;
         let mut saved = None;
         let response = match request.kind {
-            FrameKind::PairStart if attempt.role == Role::Responder => {
+            FrameKind::PairStart if role == Role::Responder => {
                 let prompted = request
                     .decode::<proto::PairStart>(InboundRole::Request)
                     .ok()
@@ -970,12 +949,15 @@ impl Session {
                         link.session
                             .receive_start(&start, nonce, now, code_timeout_for_peer)
                             .ok()
+                    })
+                    .and_then(|prompted| {
+                        let valid_for = code_timeout(prompted.timeout_ms);
+                        attempt.stage.prompted(valid_for, Instant::now()).ok()?;
+                        Some(prompted)
                     });
                 match prompted {
                     Some(prompted) => {
-                        attempt.deadline = Instant::now() + code_timeout(prompted.timeout_ms);
-                        attempt.shown = true;
-                        self.result = None;
+                        self.lifecycle.dismiss();
                         message_envelope(FrameKind::PairPrompted, &prompted)
                     }
                     None => error_envelope(proto::ErrorCode::Invalid, "invalid PairStart"),
@@ -1036,8 +1018,8 @@ impl Session {
         let Some(link) = self
             .attempt
             .as_mut()
-            .filter(|attempt| attempt.ending.is_none())
-            .and_then(|attempt| attempt.link.as_mut())
+            .and_then(|attempt| attempt.stage.live_mut())
+            .map(|live| &mut live.link)
         else {
             return;
         };
@@ -1065,19 +1047,22 @@ impl Session {
         let Some(attempt) = &mut self.attempt else {
             return;
         };
-        let Some(link) = &mut attempt.link else {
-            return;
-        };
         if call == Call::Confirm {
-            link.confirming = false;
-            if attempt.ending == Some(Ending::Paired) {
+            if attempt.stage.ending() == Some(Ending::Paired) {
                 // The peer has this side's confirmation, so it saved this
                 // side too.
                 self.attempt = None;
                 return;
             }
+            // Only an attempt showing its code waits for this answer.
+            if attempt.stage.confirm_answered().is_err() {
+                return;
+            }
         }
-        if attempt.ending.is_some() || link.session.state() == PairingState::Paired {
+        let Some(link) = attempt.stage.live_mut().map(|live| &mut live.link) else {
+            return;
+        };
+        if link.session.state() == PairingState::Paired {
             return;
         }
         let answer = match answer {
@@ -1103,10 +1088,11 @@ impl Session {
         let progressed = match call {
             Call::Start => match answer.decode::<proto::PairPrompted>(InboundRole::Request) {
                 Ok(prompted) => match link.session.receive_prompted(&prompted, now) {
-                    Ok(reveal) => {
-                        attempt.deadline = Instant::now() + code_timeout(prompted.timeout_ms);
-                        Ok(Some(reveal))
-                    }
+                    Ok(reveal) => attempt
+                        .stage
+                        .prompted(code_timeout(prompted.timeout_ms), Instant::now())
+                        .map(|()| Some(reveal))
+                        .map_err(drop),
                     Err(_) => Err(()),
                 },
                 Err(_) => Err(()),
@@ -1133,8 +1119,9 @@ impl Session {
             Ok(None) => self.settle(None),
             Err(()) => {
                 debug!(?call, "the Flow pairing peer answered out of turn");
-                let failure = match link.session.state() {
-                    PairingState::TimedOut => FlowPairingFailure::TimedOut,
+                let state = attempt.stage.live().map(|live| live.link.session.state());
+                let failure = match state {
+                    Some(PairingState::TimedOut) => FlowPairingFailure::TimedOut,
                     _ => FlowPairingFailure::ConnectionLost,
                 };
                 self.fail(failure, Close::Abort(PairingAbortReason::UserCancelled));
@@ -1148,30 +1135,28 @@ impl Session {
         let Some(attempt) = &mut self.attempt else {
             return;
         };
-        let Some(link) = &attempt.link else {
+        let Some(state) = attempt.stage.live().map(|live| live.link.session.state()) else {
             return;
         };
-        match link.session.state() {
+        match state {
             PairingState::Paired => {
                 let Some(name) = saved else {
                     return;
                 };
-                if let Err(error) = link.connection.promote_after_pairing(&link.session) {
+                let Ok(live) = attempt.stage.paired(Instant::now()) else {
+                    return;
+                };
+                if let Err(error) = live
+                    .link
+                    .connection
+                    .promote_after_pairing(&live.link.session)
+                {
                     debug!(%error, "the Flow pairing connection was not promoted");
                 }
-                let peer = attempt
-                    .peer
-                    .clone()
-                    .unwrap_or_else(|| hello_peer(&link.connection));
                 info!(peer = %name, "Flow peer paired and saved");
-                self.result = Some(FlowPairingPhase::Paired { peer, name });
+                let peer = live.peer().clone();
+                self.lifecycle.show(FlowPairingPhase::Paired { peer, name });
                 self.inner.saved.send_modify(|saved| *saved += 1);
-                let wait = if link.confirming {
-                    CALL_TIMEOUT
-                } else {
-                    LINGER
-                };
-                attempt.end(Ending::Paired, wait);
             }
             PairingState::Rejected => self.fail(FlowPairingFailure::PeerCancelled, Close::Now),
             PairingState::TimedOut => self.fail(
@@ -1193,19 +1178,18 @@ impl Session {
         let Some(attempt) = &mut self.attempt else {
             return;
         };
-        if let Some(reason) = failure.filter(|_| attempt.shown) {
+        if let Some(reason) = failure.filter(|_| attempt.stage.shown()) {
             info!(?reason, "a Flow pairing attempt failed");
-            self.result = Some(FlowPairingPhase::Failed {
-                peer: attempt.peer.clone(),
+            self.lifecycle.show(FlowPairingPhase::Failed {
+                peer: attempt.stage.peer().cloned(),
                 reason,
             });
         }
         if let Close::Abort(reason) = close {
             attempt.abort(reason);
         }
-        if close != Close::Now && attempt.link.is_some() {
-            attempt.end(Ending::Flushing, LINGER);
-        } else {
+        // Only a connected attempt has frames on their way to the peer.
+        if close == Close::Now || attempt.stage.flush(Instant::now()).is_err() {
             self.attempt = None;
         }
     }
@@ -1318,6 +1302,14 @@ async fn read(connection: Arc<FlowConnection>, events: mpsc::Sender<Tagged>, att
             event: Event::Closed,
         })
         .await;
+}
+
+/// Sleep until `at`, or forever without one.
+async fn until(at: Option<Instant>) {
+    match at {
+        Some(at) => sleep_until(at).await,
+        None => std::future::pending().await,
+    }
 }
 
 /// The next value of `nearby`, or `false` once its browser is gone.

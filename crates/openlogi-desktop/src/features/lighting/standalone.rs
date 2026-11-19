@@ -160,7 +160,7 @@ impl Render for LightPanel {
             || tr!("device.lighting").to_string(),
             |record| record.display_name.clone(),
         );
-        let online = record.as_ref().is_some_and(|record| record.online);
+        let online = record.as_ref().is_some_and(DeviceRecord::is_online);
         let effective_enabled = AppState::try_read(cx).is_some_and(AppState::light_enabled);
         let power = capabilities.is_some_and(|caps| caps.power);
 

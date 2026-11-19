@@ -52,10 +52,7 @@ pub use observation::{ChannelObservation, ChannelObserver, ObservedReport, Reque
 pub use raw::RawHidChannel;
 
 use observation::{RequestObservation, emit_report};
-use pending::{
-    PendingMessage, PendingQueue, PendingRequest, PendingRequestCompletion, StaleKey,
-    finish_request,
-};
+use pending::{PendingQueue, PendingRequest, PendingRequestCompletion, Resolution, finish_request};
 use raw::supports_short_long_hidpp;
 
 /// Largest *input* report on any node the channel opens. Logitech's
@@ -585,6 +582,9 @@ impl HidppChannel {
                     )
                     .await;
                     if let Err(error) = self.write_hidpp_report(msg, Some(pending_id)).await {
+                        // Dropping the request abandons it as a timeout would;
+                        // `PendingQueue::abandon` says why a failed write still
+                        // leaves its header reserved.
                         return PendingRequestCompletion::WriteFailed(error);
                     }
                     pending_request.receive().await.map_or(
@@ -859,47 +859,16 @@ async fn read_loop(
             continue;
         };
 
-        let mut matched_id = None;
-        let mut stale = false;
-        let pending_count;
-        {
+        let (resolution, pending_count) = {
             let mut queue = lock(pending_messages);
-            pending_count = queue.messages.len();
-            if let Some(answered) = queue
-                .messages
-                .iter()
-                .position(|elem| (elem.response_predicate)(&msg))
-                .and_then(|pos| queue.messages.remove(pos))
-            {
-                matched_id = Some(answered.id);
-                let PendingMessage {
-                    key,
-                    request,
-                    response_predicate,
-                    sender,
-                    extra_replies,
-                    ..
-                } = answered;
-                let _ = sender.send(msg);
-                if extra_replies > 0 {
-                    // Answered by one of several replies it was owed: the
-                    // others are still coming and must not answer the next
-                    // request with this header.
-                    queue.stale.push(StaleKey {
-                        key,
-                        request,
-                        response_predicate,
-                        outstanding: extra_replies,
-                        expires: Instant::now() + STALE_REPLY_GRACE,
-                    });
-                }
-                queue.wake_key_waiters();
-            } else {
-                // The reply of a request nobody waits for any more. Discarding
-                // it here is what frees its header for the next request.
-                stale = queue.discard_stale_reply(&msg);
-            }
-        }
+            let pending_count = queue.in_flight_count();
+            (queue.resolve(msg, Instant::now()), pending_count)
+        };
+        let matched_id = match resolution {
+            Resolution::Answered(id) => Some(id),
+            Resolution::Discarded | Resolution::Unmatched => None,
+        };
+        let stale = resolution == Resolution::Discarded;
 
         emit_report(observer, &buf[..len], |report| {
             ChannelObservation::IncomingReport {

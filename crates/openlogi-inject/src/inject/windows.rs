@@ -67,6 +67,7 @@ const VK_END: u16 = 0x23;
 const VK_HOME: u16 = 0x24;
 const VK_INSERT: u16 = 0x2D;
 const VK_DELETE: u16 = 0x2E;
+const VK_DIVIDE: u16 = 0x6F;
 
 /// One key as [`key_input`] posts it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -75,6 +76,9 @@ struct Key {
     /// The hardware scan code a physical press of the key carries, or 0 to
     /// post the virtual key alone.
     scan: u16,
+    /// The E0 prefix belongs to the physical key, not just its virtual key:
+    /// both Enter keys use VK_RETURN and scan code 1C.
+    extended: bool,
 }
 
 impl Key {
@@ -82,24 +86,29 @@ impl Key {
     ///
     /// Only for a key [`posts_virtual_key_alone`] names, which
     /// [`Self::for_vk`] builds this way. It is never right for an extended
-    /// key: [`key_input`] derives the extended flag from the virtual key
-    /// alone, so an extended key built this way would go out flagged with no
-    /// scan code, a form no keyboard sends.
+    /// key, which needs both a scan code and its E0 prefix.
     fn plain(vk: u16) -> Self {
         debug_assert!(
             !is_extended_key(vk),
             "an extended key needs its scan code: build it with Key::for_vk or Key::for_usage"
         );
-        Self { vk, scan: 0 }
+        Self {
+            vk,
+            scan: 0,
+            extended: false,
+        }
     }
 
     /// The key for `usage` under `layout`, or `None` when the usage has no
     /// Windows virtual key.
     ///
-    /// The usage resolves to its virtual key, which then gets its scan code
-    /// the way [`Self::for_vk`] gives it one.
+    /// Preserve keypad Enter's E0 prefix before the usage is lost: its
+    /// virtual key and scan code alone identify the main Return key.
     fn for_usage(usage: KeyboardUsage, layout: ForegroundLayout) -> Option<Self> {
-        super::hid_usage_to_windows(usage.code()).map(|vk| Self::for_vk(vk, layout))
+        let vk = super::hid_usage_to_windows(usage.code())?;
+        let mut key = Self::for_vk(vk, layout);
+        key.extended |= usage.code() == 0x58;
+        Some(key)
     }
 
     /// The key for the virtual key `vk` under `layout`.
@@ -116,6 +125,7 @@ impl Key {
         Self {
             vk,
             scan: layout.scan_code(vk),
+            extended: is_extended_key(vk),
         }
     }
 }
@@ -130,10 +140,10 @@ impl Key {
 ///
 /// The set is the extended keys this backend can actually produce: the
 /// navigation and editing cluster (the HID usage table maps `0x49..=0x52` onto
-/// them) and the left Windows key (`NativeAction::LaunchpadShow`, and the
-/// `Super` modifier of a custom shortcut). Keys the backend cannot reach are
-/// left out on purpose — flagging a key nobody injects only widens the blast
-/// radius.
+/// them), keypad Divide, and the left Windows key (`NativeAction::LaunchpadShow`,
+/// and the `Super` modifier of a custom shortcut). Keypad Enter is handled
+/// by [`Key::for_usage`] because VK_RETURN also names the main Enter key.
+/// Keys the backend cannot reach are left out on purpose.
 ///
 /// `VK_SNAPSHOT` is deliberately absent. A physical Print Screen key sends
 /// `E0 37`, but `MapVirtualKeyW` answers `0x54` for it, a scan code no keyboard
@@ -160,6 +170,7 @@ fn is_extended_key(vk: u16) -> bool {
             | VK_INSERT
             | VK_DELETE
             | VK_LWIN
+            | VK_DIVIDE
     )
 }
 
@@ -614,7 +625,7 @@ fn key_input(key: Key, key_up: bool) -> INPUT {
     if key_up {
         flags |= KEYEVENTF_KEYUP;
     }
-    if is_extended_key(key.vk) {
+    if key.extended {
         flags |= KEYEVENTF_EXTENDEDKEY;
     }
     // Without `KEYEVENTF_SCANCODE`, Windows posts `wVk` and hands `wScan` to
@@ -678,6 +689,50 @@ mod tests {
             .parse::<KeyCombo>()
             .expect("test key must be valid")
             .key()
+    }
+
+    #[test]
+    fn keypad_inputs_keep_their_identity_on_both_edges() {
+        let layout = ForegroundLayout::current();
+        // Set-1 scan codes: Enter shares 1C, slash shares 35, and keypad 1
+        // shares 4F with End. Only the E0 bit distinguishes those pairs.
+        for (label, vk, scan, extended) in [
+            ("Enter", 0x0d, 0x1c, 0),
+            ("NumpadEnter", 0x0d, 0x1c, KEYEVENTF_EXTENDEDKEY),
+            ("NumpadDivide", 0x6f, 0x35, KEYEVENTF_EXTENDEDKEY),
+            ("NumpadMultiply", 0x6a, 0x37, 0),
+            ("NumpadMinus", 0x6d, 0x4a, 0),
+            ("NumpadPlus", 0x6b, 0x4e, 0),
+            ("Numpad1", 0x61, 0x4f, 0),
+            ("End", 0x23, 0x4f, KEYEVENTF_EXTENDEDKEY),
+            ("Numpad0", 0x60, 0x52, 0),
+            ("NumpadDecimal", 0x6e, 0x53, 0),
+        ] {
+            let combo = label.parse::<KeyCombo>().expect("valid shortcut");
+            let inputs =
+                combo_inputs(&combo, layout, &ModifiersDown::default()).expect("shortcut inputs");
+            assert_eq!(inputs.len(), 2, "{label}");
+            for (input, key_up) in inputs.iter().zip([0, KEYEVENTF_KEYUP]) {
+                // SAFETY: combo_inputs initialises the keyboard arm of each INPUT.
+                let ki = unsafe { input.Anonymous.ki };
+                assert_eq!(
+                    (ki.wVk, ki.wScan, ki.dwFlags),
+                    (vk, scan, extended | key_up),
+                    "{label}"
+                );
+            }
+            let held = held_key(HeldKey::Key(combo.key()), layout).expect("held key");
+            for key_up in [false, true] {
+                // SAFETY: key_input constructs a keyboard INPUT.
+                let ki = unsafe { key_input(held, key_up).Anonymous.ki };
+                assert_eq!((ki.wVk, ki.wScan), (vk, scan), "held {label}");
+                assert_eq!(
+                    ki.dwFlags,
+                    extended | if key_up { KEYEVENTF_KEYUP } else { 0 },
+                    "held {label}"
+                );
+            }
+        }
     }
 
     /// Quotes must reach `cmd.exe` as written. `Command::args` escapes them and
@@ -783,7 +838,11 @@ mod tests {
     fn modifiers_carry_their_hardware_scan_code() {
         let layout = ForegroundLayout::current();
         for &(vk, held, scan) in MODIFIERS_AND_THEIR_SCAN_CODES {
-            let expected = Key { vk, scan };
+            let expected = Key {
+                vk,
+                scan,
+                extended: false,
+            };
             assert_eq!(
                 Key::for_vk(vk, layout),
                 expected,
@@ -943,7 +1002,11 @@ mod tests {
         ] {
             assert_eq!(
                 Key::for_vk(vk, layout),
-                Key { vk, scan: 0 },
+                Key {
+                    vk,
+                    scan: 0,
+                    extended: false
+                },
                 "virtual key {vk:#x} must be posted alone"
             );
         }
@@ -951,7 +1014,8 @@ mod tests {
             Key::for_usage(usage("PrintScreen"), layout),
             Some(Key {
                 vk: VK_SNAPSHOT,
-                scan: 0
+                scan: 0,
+                extended: false,
             }),
             "Print Screen in a shortcut must be posted alone"
         );
@@ -964,6 +1028,7 @@ mod tests {
         let key = Key {
             vk: u16::from(b'V'),
             scan: 0x2F,
+            extended: false,
         };
         // SAFETY: `key_input` initialises the `ki` arm of the union it
         // returns, so reading that arm is well-defined.
@@ -1144,7 +1209,11 @@ mod tests {
                 .copied()
                 .find(|&(extended, _)| extended == vk)
                 .expect("every navigation key is an extended key");
-            let expected = Key { vk, scan };
+            let expected = Key {
+                vk,
+                scan,
+                extended: true,
+            };
             let key = Key::for_usage(usage(label), layout)
                 .expect("navigation keys have a Windows virtual key");
             assert_eq!(
@@ -1182,9 +1251,8 @@ mod tests {
     }
 
     /// Every production path that posts an extended key has to build it with
-    /// [`Key::for_vk`] or [`Key::for_usage`], because [`key_input`] takes the
-    /// flag from the virtual key but the scan code from the `Key`. Otherwise
-    /// the key goes out flagged with no scan code, a form no keyboard sends.
+    /// [`Key::for_vk`] or [`Key::for_usage`], which retain both its scan code
+    /// and its extended prefix.
     ///
     /// `Key::plain` refuses that shape in a debug build, so a call site that
     /// skips `for_vk` trips this assertion before it can ship. It is a
@@ -1339,9 +1407,9 @@ mod tests {
     /// The pre-fix form: the keyboard `INPUT` this backend built before #1895 —
     /// the virtual key, scan code 0, and no extended flag.
     ///
-    /// `key_input` cannot produce it, because it derives the extended flag from
-    /// the virtual key alone. The regression test injects this form as the
-    /// control, so the assertion below is not vacuous.
+    /// The production key constructors cannot produce it. The regression
+    /// test injects this form as the control, so the assertion below is not
+    /// vacuous.
     fn pre_fix_input(vk: u16, key_up: bool) -> INPUT {
         INPUT {
             r#type: INPUT_KEYBOARD,

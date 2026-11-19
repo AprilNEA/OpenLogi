@@ -70,7 +70,7 @@ pub(super) fn detail_header(
         || tr!("device.device").to_string(),
         |r| r.display_name.clone(),
     );
-    let online = record.map(|r| r.online);
+    let online = record.map(DeviceRecord::is_online);
     let battery = record
         .and_then(|r| r.battery.as_ref())
         .map(BatteryIndicator::inline);
@@ -128,7 +128,7 @@ pub(super) fn detail_content(
     let pal = theme::palette(cx);
     let online = AppState::try_read(cx)
         .and_then(AppState::current_record)
-        .is_some_and(|record| record.online);
+        .is_some_and(DeviceRecord::is_online);
     let content = match active {
         DetailTab::Buttons => {
             buttons_tab(panels.mouse_model, profile_icons, app_catalog, cx).into_any_element()
@@ -356,24 +356,23 @@ fn tab_body(
         .child(div().w_full().max_w(width.rems()).child(content))
 }
 
-/// Keys tab: the function-row remapper for a keyboard. A keypad's keys all
-/// bind per app profile, so it gets the Buttons tab's profile selector; a
-/// keyboard's F-row binds globally and a selector there would mislead.
+/// Keys tab: the function-row remapper for a keyboard, with the Buttons tab's
+/// profile selector when [`DetailTab::edits_app_profiles`] says a keypad's
+/// keys bind per app.
 fn keys_tab(
     keyboard_model: &gpui::Entity<FunctionRowView>,
     profile_icons: &ProfileIconCache,
     app_catalog: &gpui::Entity<AppCatalogPicker>,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
-    let keypad = AppState::try_read(cx)
-        .and_then(AppState::current_keypad)
-        .is_some();
+    let profiles =
+        AppState::try_read(cx).is_some_and(|state| DetailTab::Keys.edits_app_profiles(state));
     v_flex()
         .flex_1()
         .w_full()
         .min_w_0()
         .min_h_0()
-        .when(keypad, |tab| {
+        .when(profiles, |tab| {
             tab.children(button_profile_scope_bar(profile_icons, app_catalog, cx))
         })
         .child(
@@ -908,7 +907,7 @@ fn light_tab(
             let record = state.current_record();
             (
                 record.and_then(|record| record.asset.as_ref()),
-                record.is_some_and(|record| record.online),
+                record.is_some_and(DeviceRecord::is_online),
                 state.light_enabled(),
                 state.light(),
             )
@@ -1075,7 +1074,7 @@ fn device_details_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElem
                         &record.display_name,
                         &record.model_name,
                         record.kind,
-                        record.online,
+                        record.is_online(),
                         pal,
                     ))
                     .when_some(record.battery.as_ref(), |this, battery| {

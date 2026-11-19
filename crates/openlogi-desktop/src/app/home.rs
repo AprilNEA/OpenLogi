@@ -206,7 +206,7 @@ fn device_card(
                         // truthful treatment available for an offline card
                         // without generating a second asset that edits the
                         // manufacturer's artwork.
-                        .opacity(if record.online { 1. } else { 0.38 })
+                        .opacity(if record.is_online() { 1. } else { 0.38 })
                         .when_some(glow, |this, (geom, color)| {
                             this.child(glow_canvas(geom, color))
                         })
@@ -403,7 +403,7 @@ pub(super) fn device_menu(
     let display_name = record.display_name.clone();
     // A live device would simply re-register on the next inventory snapshot,
     // so deletion is only offered once it is offline.
-    let deletable = record.persistent && !record.online;
+    let deletable = record.persistent && !record.is_online();
     let has_stale_pairings = !record.stale_pairings.is_empty();
     move |menu, _window, _cx| {
         let menu = menu.item(
@@ -655,7 +655,7 @@ fn device_image(
         return light_visual::gallery(
             record.asset.as_ref(),
             light_visual::LightView {
-                online: record.online,
+                online: record.is_online(),
                 enabled: light_enabled,
             },
             light_settings,

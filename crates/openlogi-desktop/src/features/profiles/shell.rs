@@ -99,10 +99,12 @@ fn profile_scope_content(shell: ProfileScopeShell, pal: Palette) -> impl IntoEle
         })
         .collect::<Vec<_>>();
     let default_actions = shell.actions.clone();
+    let id_base = shell.id_base;
 
     h_flex()
         .flex_shrink_0()
         .w_full()
+        .debug_selector(move || format!("{id_base}:bar"))
         .items_center()
         .gap_2()
         .border_b_1()
@@ -120,6 +122,7 @@ fn profile_scope_content(shell: ProfileScopeShell, pal: Palette) -> impl IntoEle
         .child(
             h_flex()
                 .id(format!("{}:tabs-scroll", shell.id_base))
+                .debug_selector(move || format!("{id_base}:tabs-scroll"))
                 .flex_1()
                 .min_w_0()
                 .items_center()

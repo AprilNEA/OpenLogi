@@ -50,8 +50,8 @@ use super::editors::{
 };
 use crate::app::{glow_canvas, keyboard_glow};
 use crate::features::binding_editor::{
-    PickFn, action_icon_path, action_rows, compact_panel, divider, editor_scroll_list,
-    editor_section,
+    ActionOffer, PickFn, action_icon_path, action_rows_with, compact_panel, divider,
+    editor_scroll_list, editor_section,
 };
 use crate::features::mouse::geometry::asset_dimensions_for_png;
 use crate::features::profiles::profile_name;
@@ -1596,7 +1596,13 @@ impl FunctionRowView {
                     }),
             ),
         );
-        rows.extend(panel_action_rows(current.as_ref(), &on_pick, view, &pal));
+        rows.extend(panel_action_rows(
+            &target,
+            current.as_ref(),
+            &on_pick,
+            view,
+            &pal,
+        ));
 
         compact_panel(pal)
             .max_h_full()
@@ -1685,12 +1691,29 @@ fn inspector_title(title: SharedString, pal: &Palette) -> impl IntoElement {
 /// The action rows + a Power User section, mirroring the picker's list but
 /// adapted for the panel context (no popover dismissal).
 fn panel_action_rows(
+    target: &KeyTarget,
     current: Option<&Action>,
     on_pick: &PickFn,
     view: &Entity<FunctionRowView>,
     pal: &Palette,
 ) -> Vec<gpui::Div> {
-    let mut children = action_rows("panel-action", current, on_pick, *pal);
+    // A function key binds globally, so the agent cannot tell which keyboard
+    // pressed it; every other target belongs to its device.
+    let hidden: &[Action] = match target {
+        KeyTarget::FunctionKey(_) => &Action::NEEDS_FIRING_DEVICE,
+        _ => &[],
+    };
+    let mut children = action_rows_with(
+        "panel-action",
+        current,
+        "",
+        ActionOffer {
+            hidden,
+            ..ActionOffer::default()
+        },
+        on_pick,
+        *pal,
+    );
 
     let power_user_actions: &[(PowerUserKind, SharedString, &'static str)] = &[
         (

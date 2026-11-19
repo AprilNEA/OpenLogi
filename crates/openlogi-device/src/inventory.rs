@@ -82,7 +82,9 @@ pub struct Enumerator {
     /// Opening (and tearing down) a device every pass is the churn issue #99 is about —
     /// each open also leaks an `io_service_t` in async-hid's macOS backend — so a
     /// steadily-connected node is opened once here and reused until it
-    /// disconnects.
+    /// disconnects. A channel retired for failing probes stays marked through
+    /// its drain, so the node's reopen can report the replacement (see
+    /// [`Self::replaced_channels_last_tick`]).
     channels: ChannelCache<NodeId, CachedChannel>,
     /// Per-node last-good inventory + consecutive-failure counts: replays a
     /// node's snapshot through transient probe failures and decides when its
@@ -104,11 +106,6 @@ pub struct Enumerator {
     /// Whether the most recent pass needs a bounded fast follow-up to advance
     /// ledger/channel/cache grace or retry a failed open.
     retry_needed_last_tick: bool,
-    /// Nodes whose channel was retired for failing probes and not yet reopened.
-    evicted_nodes: HashSet<NodeId>,
-    /// Nodes the most recent pass reopened after retiring their channel for
-    /// failing probes, while the ledger replayed them as online throughout.
-    replaced_last_tick: Vec<NodeId>,
     /// Coalesced lifecycle-event sink installed on newly opened channels.
     event_notifier: Option<EventNotifier>,
     /// The timeouts every pass's probes run under.
@@ -131,8 +128,6 @@ struct PreparedNodes {
     active: Vec<ActiveNode>,
     open_failures: Vec<NodeId>,
     retiring: Vec<NodeId>,
-    /// Nodes whose open replaced a channel retired for failing probes.
-    replaced: Vec<NodeId>,
 }
 
 fn routes_for_inventories(inventories: &[DeviceInventory]) -> Vec<DeviceRoute> {
@@ -370,7 +365,7 @@ impl Enumerator {
     /// device on each retire/reopen cycle of a node that never answers again.
     #[must_use]
     pub fn replaced_channels_last_tick(&self) -> bool {
-        !self.replaced_last_tick.is_empty()
+        self.channels.has_replacement()
     }
 
     /// An enumerator that walks `backend` — this host's HID stack, a scripted
@@ -390,8 +385,6 @@ impl Enumerator {
             cache_dirty: false,
             open_failures_last_tick: false,
             retry_needed_last_tick: false,
-            evicted_nodes: HashSet::new(),
-            replaced_last_tick: Vec::new(),
             event_notifier: None,
             timeouts: ProbeTimeouts::DEFAULT,
         }
@@ -466,10 +459,9 @@ impl Enumerator {
             .collect();
         for node in nodes {
             registry.remove_node(&node);
-            if self.channels.retire_node(&node) {
+            if self.channels.evict(&node) {
                 warn!("capture reported the channel dead — retiring it before reopen");
             }
-            self.evicted_nodes.insert(node);
         }
     }
 
@@ -478,12 +470,12 @@ impl Enumerator {
         backend: &dyn HidBackend,
         candidates: Vec<NodeInfo>,
     ) -> PreparedNodes {
+        self.channels.begin_pass();
         self.retire_reported_channels();
         let mut active = Vec::new();
         let mut seen_nodes = HashSet::new();
         let mut open_failures = Vec::new();
         let mut retiring = Vec::new();
-        let mut replaced = Vec::new();
         let mut to_open = Vec::new();
         let mut queued_to_open = HashSet::new();
         for info in candidates {
@@ -539,11 +531,6 @@ impl Enumerator {
                     // Inventory replay remains bounded until a probe produces
                     // a new authoritative snapshot.
                     self.ledger.reset_channel_failures_after_open(&node);
-                    // Only a node still replayed as online can come back
-                    // unobserved; the pass's own settle confirms it below.
-                    if self.evicted_nodes.remove(&node) && self.ledger.contains_last_good(&node) {
-                        replaced.push(node.clone());
-                    }
                     // Attach before the first feature/register check. Receiver
                     // events are recognizable immediately; per-device feature
                     // indexes are registered during the ensuing table walk.
@@ -553,13 +540,17 @@ impl Enumerator {
                         ChannelEventSubscriptions::attach(&channel, protocol, notifier.clone())
                     });
                     let event_handle = events.as_ref().map(ChannelEventSubscriptions::handle);
-                    self.channels.insert(
+                    // A reopen that replaces a failed channel asks the ledger
+                    // whether the node was still replayed online; the pass's
+                    // own settle confirms it below.
+                    self.channels.open(
                         node,
                         CachedChannel {
                             info: info.clone(),
                             channel: Arc::clone(&channel),
                             events,
                         },
+                        || self.ledger.contains_last_good(&info.id),
                     );
                     active.push((info, channel, event_handle));
                 }
@@ -590,15 +581,11 @@ impl Enumerator {
         self.ledger.retain_nodes(&seen_nodes);
         self.node_cache_keys
             .retain(|node, _| seen_nodes.contains(node));
-        // A node that left the listing comes back as a new arrival, which the
-        // offline→online transition already reconfigures.
-        self.evicted_nodes.retain(|node| seen_nodes.contains(node));
 
         PreparedNodes {
             active,
             open_failures,
             retiring,
-            replaced,
         }
     }
 
@@ -656,7 +643,6 @@ impl Enumerator {
             active,
             open_failures,
             retiring: retiring_nodes,
-            mut replaced,
         } = self.prepare_nodes(&*backend, candidates).await;
         self.open_failures_last_tick = !open_failures.is_empty();
 
@@ -709,7 +695,9 @@ impl Enumerator {
             // return is an ordinary offline→online transition. A partial live
             // result still publishes the node's online devices, so it keeps
             // the wake.
-            replaced.retain(|reopened| reopened != &node || settled.inventory.is_some());
+            if settled.inventory.is_none() {
+                self.channels.surfaced_offline(&node);
+            }
             // Every node waits for the ledger's consecutive-failure threshold,
             // receivers included. One full-budget timeout is not evidence of
             // dead delivery: [`RECEIVER_PROBE_TIMEOUT`] leaves barely a second
@@ -725,10 +713,9 @@ impl Enumerator {
                 if let Some(registry) = &self.registry {
                     registry.remove_node(&node);
                 }
-                if self.channels.retire_node(&node) {
+                if self.channels.evict(&node) {
                     warn!("node probe keeps failing — retiring its channel before reopen");
                 }
-                self.evicted_nodes.insert(node.clone());
             } else if let Some(registry) = &self.registry {
                 let routes = settled
                     .inventory
@@ -766,7 +753,6 @@ impl Enumerator {
                 &mut all_healthy,
             ));
         }
-        self.replaced_last_tick = replaced;
 
         let seen_keys = self.apply_outcomes(outcomes);
         self.evict_unseen(&seen_keys, &frozen_keys);

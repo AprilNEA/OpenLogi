@@ -111,6 +111,7 @@ rustPlatform.buildRustPackage {
     # `nix-prefetch-git <url> --rev <rev>`.
     outputHashes = {
       "appicon-0.1.0" = "sha256-XY8NS2qrpPbUXZ3xCPGjZbbT0tSVpapbcTbgA2H5+/I=";
+      "gpui-tcc-0.1.1" = "sha256-UvEzrdEkW1G59WmQcBdFWmiYbPUiVC2vSkjIyuYCuco=";
       "gpui-kit-0.8.1" = gpuiComponentHash;
     };
   };
@@ -160,6 +161,8 @@ rustPlatform.buildRustPackage {
     "--workspace"
     "--exclude=openlogi-desktop"
   ];
+  # GPUI's debug_bounds needs debug_assertions.
+  checkType = "debug";
 
   installPhase = ''
     runHook preInstall

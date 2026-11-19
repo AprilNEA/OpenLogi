@@ -55,6 +55,16 @@ impl DisableKey {
             Self::WindowsCommand => DisableKeysMask::WINDOWS_COMMAND,
         }
     }
+
+    /// The known keys `mask` disables, as `config.toml` saves them. Bits for
+    /// keys this version does not know are left out.
+    #[must_use]
+    pub fn disabled_in(mask: DisableKeysMask) -> BTreeSet<Self> {
+        Self::ALL
+            .into_iter()
+            .filter(|key| mask.contains(key.mask()))
+            .collect()
+    }
 }
 
 /// Last-known identity of a device, captured while it was online so the UI can

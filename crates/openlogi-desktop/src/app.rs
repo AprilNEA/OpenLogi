@@ -1,8 +1,8 @@
 use crate::ui::theme::FocusRingStyle as _;
 use gpui::{
-    App, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
-    MouseButton, NavigationDirection, ParentElement, Render, Styled, Subscription, Window, div,
-    prelude::FluentBuilder as _, rgb,
+    App, AppContext as _, ClickEvent, Context, Entity, FocusHandle, Focusable, InteractiveElement,
+    IntoElement, MouseButton, NavigationDirection, ParentElement, Render, Styled, Subscription,
+    Window, div, prelude::FluentBuilder as _, rgb,
 };
 use gpui_kit::base::Button as BaseButton;
 use gpui_kit::component::{
@@ -201,6 +201,23 @@ impl DetailTab {
             .first()
             .copied()
             .unwrap_or(Self::Device)
+    }
+
+    /// Whether this tab, on `state`'s selected device, edits per-application
+    /// profiles.
+    fn edits_app_profiles(self, state: &AppState) -> bool {
+        match self {
+            Self::Buttons | Self::ActionsRing => true,
+            // A keypad's keys all bind per app profile; a keyboard's F-row
+            // binds globally, and a profile selector there would mislead.
+            Self::Keys => state.current_keypad().is_some(),
+            Self::Pointer
+            | Self::Lighting
+            | Self::Camera
+            | Self::Light
+            | Self::Audio
+            | Self::Device => false,
+        }
     }
 
     fn label(self) -> gpui::SharedString {
@@ -523,7 +540,7 @@ impl AppView {
                     .primary()
                     .icon(IconName::Settings)
                     .label(tr!("permissions.open_system_settings_to_grant_access"))
-                    .on_click(|_, _, cx| request_accessibility(cx)),
+                    .on_click(request_accessibility),
             )
             .child(
                 div()
@@ -548,16 +565,25 @@ impl AppView {
     }
 }
 
-fn request_accessibility(cx: &mut App) {
-    use openlogi_permissions::{self as permissions, Permission};
+fn request_accessibility(origin: &ClickEvent, window: &mut Window, cx: &mut App) {
     // Ask the *agent* to fire the prompt (it owns the hook, so the system dialog
     // must name and authorize openlogi-agent — prompting in the GUI would grant
     // the wrong binary), then open the System Settings pane so the user can flip
-    // the switch. Shared by the gate button, the footer, and the Settings window.
+    // the switch, or drag the agent in when its row is missing. Shared by the
+    // gate button, the footer, and the Settings window.
     if let Some(state) = AppState::try_global(cx) {
         state.read(cx).request_accessibility_prompt();
     }
-    permissions::open_pane(Permission::Accessibility);
+    #[cfg(target_os = "macos")]
+    crate::platform::permission_guide::open(
+        openlogi_permissions::Permission::Accessibility,
+        origin,
+        window,
+        cx,
+    );
+    // No other platform has a pane to open.
+    #[cfg(not(target_os = "macos"))]
+    let _ = (origin, window);
 }
 
 /// Client-side main-window titlebar: window controls (minimize / maximize /

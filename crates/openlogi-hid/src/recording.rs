@@ -4,6 +4,7 @@
 //! sanitization, serialization, file I/O, or semantic expectation generation;
 //! a later CLI layer owns those decisions.
 
+use std::mem;
 use std::sync::mpsc::{SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
@@ -73,24 +74,7 @@ impl NativeRecorder {
     /// first. Finalizing with a live channel observer or raw writer fails so a
     /// caller cannot mistake an incomplete channel lifetime for a full capture.
     pub fn finish(&self) -> Result<NativeRecording, NativeRecordingError> {
-        let failure = {
-            let mut state = self
-                .shared
-                .state
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            if state.finalized {
-                return Err(NativeRecordingError::AlreadyFinalized);
-            }
-            state.finalized = true;
-            state.closed = true;
-            state.failure.clone().or_else(|| {
-                (state.active_producers != 0).then_some(NativeRecordingError::ActiveProducers {
-                    count: state.active_producers,
-                })
-            })
-        };
-
+        let failure = self.shared.lock_state().close()?;
         let recording = self.stop_worker()?;
         match failure {
             Some(error) => Err(error),
@@ -134,15 +118,7 @@ impl Drop for NativeRecorder {
         if !has_worker {
             return;
         }
-        {
-            let mut state = self
-                .shared
-                .state
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            state.closed = true;
-            state.finalized = true;
-        }
+        let _ = self.shared.lock_state().close();
         let _ = self.stop_worker();
     }
 }
@@ -160,13 +136,10 @@ impl RecordingSink {
         let id =
             {
                 let mut state = self.lock_state();
-                state.ensure_open()?;
-                let id = RecordedChannelId(state.next_channel_id);
-                state.next_channel_id = state.next_channel_id.saturating_add(1);
+                let id = state.begin_channel()?;
                 self.shared.enqueue_locked(&mut state, |sequence| {
                     RecorderCommand::ChannelStarted { sequence, id, node }
                 })?;
-                state.active_producers = state.active_producers.saturating_add(1);
                 id
             };
         Ok(ChannelCapture {
@@ -184,13 +157,10 @@ impl RecordingSink {
     ) -> Result<RawWriterCapture, NativeRecordingError> {
         let id = {
             let mut state = self.lock_state();
-            state.ensure_open()?;
-            let id = RecordedRawWriterId(state.next_raw_writer_id);
-            state.next_raw_writer_id = state.next_raw_writer_id.saturating_add(1);
+            let id = state.begin_raw_writer()?;
             self.shared.enqueue_locked(&mut state, |sequence| {
                 RecorderCommand::RawWriterStarted { sequence, id, node }
             })?;
-            state.active_producers = state.active_producers.saturating_add(1);
             id
         };
         Ok(RawWriterCapture {
@@ -352,23 +322,12 @@ impl RecorderShared {
         state: &mut RecorderState,
         command: impl FnOnce(RecordingSequence) -> RecorderCommand,
     ) -> Result<(), NativeRecordingError> {
-        state.ensure_open()?;
-        if state.accepted == state.capacity {
-            let error = NativeRecordingError::Overflow {
-                capacity: state.capacity,
-            };
-            state.failure = Some(error.clone());
-            return Err(error);
-        }
-        let sequence = RecordingSequence(state.accepted.saturating_add(1) as u64);
+        let sequence = state.admit()?;
         match self.sender.try_send(command(sequence)) {
-            Ok(()) => {
-                state.accepted = state.accepted.saturating_add(1);
-                Ok(())
-            }
+            Ok(()) => Ok(()),
             Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => {
                 let error = NativeRecordingError::WorkerUnavailable;
-                state.failure = Some(error.clone());
+                state.fail(error.clone());
                 Err(error)
             }
         }
@@ -398,7 +357,7 @@ impl RecorderShared {
             sequence,
             id,
         });
-        state.active_producers = state.active_producers.saturating_sub(1);
+        state.end_producer();
     }
 
     fn raw_writer_outcome(&self, id: RecordedRawWriterId, outcome: RecordedRawWriterOpenOutcome) {
@@ -431,14 +390,11 @@ impl RecorderShared {
             sequence,
             id,
         });
-        state.active_producers = state.active_producers.saturating_sub(1);
+        state.end_producer();
     }
 
     fn fail(&self, error: NativeRecordingError) {
-        let mut state = self.lock_state();
-        if !state.closed && state.failure.is_none() {
-            state.failure = Some(error);
-        }
+        self.lock_state().fail(error);
     }
 
     fn lock_state(&self) -> std::sync::MutexGuard<'_, RecorderState> {
@@ -446,38 +402,115 @@ impl RecorderShared {
     }
 }
 
-struct RecorderState {
+/// The recorder lifecycle. Every mutation is one of the named transitions
+/// below.
+///
+/// `finish` and `Drop` share the one [`Self::close`] transition, so nothing can
+/// leave a finalized recorder still accepting evidence. What an open recorder
+/// counts is read by nothing once it fails or closes, so it lives only in
+/// [`OpenRecorder`].
+enum RecorderState {
+    /// Accepting evidence.
+    Open(OpenRecorder),
+    /// A capture failure refused further evidence; `finish` reports it.
+    Failed(NativeRecordingError),
+    /// `finish` or `Drop` began finalization; nothing may record any more.
+    Closed,
+}
+
+struct OpenRecorder {
     capacity: usize,
     accepted: usize,
+    /// Live channel observers and raw writers.
+    producers: usize,
     next_channel_id: u64,
     next_raw_writer_id: u64,
-    active_producers: usize,
-    failure: Option<NativeRecordingError>,
-    closed: bool,
-    finalized: bool,
 }
 
 impl RecorderState {
     fn new(capacity: usize) -> Self {
-        Self {
+        Self::Open(OpenRecorder {
             capacity,
             accepted: 0,
+            producers: 0,
             next_channel_id: 1,
             next_raw_writer_id: 1,
-            active_producers: 0,
-            failure: None,
-            closed: false,
-            finalized: false,
+        })
+    }
+
+    /// The open recorder, or why it refuses evidence: its failure, or
+    /// `Closed` once closed, whether or not it had failed first.
+    fn ensure_open(&mut self) -> Result<&mut OpenRecorder, NativeRecordingError> {
+        match self {
+            Self::Open(open) => Ok(open),
+            Self::Failed(error) => Err(error.clone()),
+            Self::Closed => Err(NativeRecordingError::Closed),
         }
     }
 
-    fn ensure_open(&self) -> Result<(), NativeRecordingError> {
-        if self.closed {
-            return Err(NativeRecordingError::Closed);
+    /// Start a channel lifetime and count it as a live producer.
+    ///
+    /// The caller admits its start event afterwards. Counting first is sound:
+    /// a failed admission fails the recorder, which then counts no producers.
+    fn begin_channel(&mut self) -> Result<RecordedChannelId, NativeRecordingError> {
+        let open = self.ensure_open()?;
+        let id = RecordedChannelId(open.next_channel_id);
+        open.next_channel_id = open.next_channel_id.saturating_add(1);
+        open.producers = open.producers.saturating_add(1);
+        Ok(id)
+    }
+
+    /// Start a raw-writer lifetime; see [`Self::begin_channel`].
+    fn begin_raw_writer(&mut self) -> Result<RecordedRawWriterId, NativeRecordingError> {
+        let open = self.ensure_open()?;
+        let id = RecordedRawWriterId(open.next_raw_writer_id);
+        open.next_raw_writer_id = open.next_raw_writer_id.saturating_add(1);
+        open.producers = open.producers.saturating_add(1);
+        Ok(id)
+    }
+
+    /// A channel observer or raw writer ended.
+    fn end_producer(&mut self) {
+        if let Self::Open(open) = self {
+            open.producers = open.producers.saturating_sub(1);
         }
-        match &self.failure {
-            Some(error) => Err(error.clone()),
-            None => Ok(()),
+    }
+
+    /// Admit one event and return its sequence, or fail the recorder once
+    /// `capacity` events have been admitted.
+    fn admit(&mut self) -> Result<RecordingSequence, NativeRecordingError> {
+        let open = self.ensure_open()?;
+        if open.accepted < open.capacity {
+            open.accepted = open.accepted.saturating_add(1);
+            return Ok(RecordingSequence(open.accepted as u64));
+        }
+        let error = NativeRecordingError::Overflow {
+            capacity: open.capacity,
+        };
+        self.fail(error.clone());
+        Err(error)
+    }
+
+    /// Fail an open recorder. The first failure wins, and one after close is
+    /// ignored because close already fixed the verdict.
+    fn fail(&mut self, error: NativeRecordingError) {
+        if let Self::Open(_) = self {
+            *self = Self::Failed(error);
+        }
+    }
+
+    /// Close the recorder for finalization and return the failure the
+    /// recording must report: the capture failure, else any live producer.
+    /// A second close is refused with `AlreadyFinalized`.
+    fn close(&mut self) -> Result<Option<NativeRecordingError>, NativeRecordingError> {
+        match mem::replace(self, Self::Closed) {
+            Self::Open(open) => Ok((open.producers != 0).then_some(
+                NativeRecordingError::ActiveProducers {
+                    count: open.producers,
+                },
+            )),
+            Self::Failed(error) => Ok(Some(error)),
+            Self::Closed => Err(NativeRecordingError::AlreadyFinalized),
         }
     }
 }

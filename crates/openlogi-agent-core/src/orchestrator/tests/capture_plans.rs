@@ -69,13 +69,19 @@ fn a_device_wake_does_not_rearm_other_routes_but_system_resume_does() {
             orch.reapply_after_system_resume();
         }
         orch.refresh_inventory(&devices, &[], false);
-        let resumed = orch.shared.capture_plans.borrow();
+        let resumed = orch.shared.capture_plans.borrow().clone();
         for (old, new) in before.plans().iter().zip(resumed.plans()) {
             assert_ne!(
                 old.target.rearm_generation, new.target.rearm_generation,
                 "a system wake must retain its request to rearm every online route"
             );
         }
+        orch.refresh_inventory(&devices, &[], false);
+        assert_eq!(
+            orch.shared.capture_plans.borrow().as_ref(),
+            resumed.as_ref(),
+            "the refresh that rearmed every route drains the wake's request"
+        );
     }
 }
 

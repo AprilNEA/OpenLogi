@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use openlogi_core::config::{Config, ConfigError, ConfigFile, SmartShift};
+use openlogi_core::config::{ConfigError, DeviceEdit, DeviceEditError, DeviceSetting};
 use openlogi_core::device_order::{DeviceIdentity, DeviceStableId};
 use openlogi_core::hid::{DeviceRoute, Dpi, ReportRate, SmartShiftStatus};
 use openlogi_ipc::{AgentClient, AgentSnapshot};
@@ -11,11 +11,7 @@ use tarpc::context;
 use super::{ApiCommand, ApiError, select_device};
 use crate::agent;
 
-pub(super) struct Save {
-    config: Config,
-    file: ConfigFile,
-    key: String,
-}
+pub(super) struct Save(DeviceEdit);
 
 impl Save {
     pub(super) fn prepare(
@@ -56,8 +52,6 @@ impl Save {
             }
         };
         let route = select_device(snapshot, device)?;
-        let (config, file) = ConfigFile::load_from_path(path)
-            .map_err(|error| ApiError::new("config_error", error.to_string()))?;
         let (slot, model) = snapshot
             .inventory
             .iter()
@@ -89,68 +83,41 @@ impl Save {
             model.serial_number.as_deref(),
             model.unit_id,
         );
-        let key = config
-            .resolve_device_key(&stable, Some(&identity))
-            .ok_or_else(|| {
-                ApiError::new(
-                    "identity_unavailable",
-                    "device has no persistent configuration key",
-                )
-            })?;
-        // Do not report a saved device default that an existing route override
-        // would silently supersede on reconnect. Leave those preferences intact.
-        if let Some(link) = config
-            .devices
-            .get(key.as_str())
-            .and_then(|device| device.links.get(&stable.route_key()))
+        let mut edit = DeviceEdit::load(path, &stable, Some(&identity)).map_err(refused)?;
+        // Stage the DPI the command names now, so a per-link override refuses
+        // it before any hardware I/O.
+        if let ApiCommand::Dpi {
+            set: Some(value), ..
+        } = command
         {
-            let overridden = match command {
-                ApiCommand::Dpi { .. } => link.overrides.dpi.is_some(),
-                ApiCommand::Smartshift(_) => link.overrides.smartshift.is_some(),
-                _ => false,
-            };
-            if overridden {
-                return Err(ApiError::new(
-                    "link_override",
-                    "this setting has a per-link override; edit it in configuration before saving a device default",
-                ));
-            }
+            edit.set(DeviceSetting::Dpi(Dpi::from(*value)))
+                .map_err(refused)?;
         }
-        Ok(Self {
-            config,
-            file,
-            key: key.into_string(),
-        })
+        Ok(Self(edit))
     }
 
-    pub(super) fn dpi(&mut self, value: Dpi) {
-        self.config.set_dpi(&self.key, value);
+    pub(super) fn fn_lock(&mut self, value: bool) -> Result<(), ApiError> {
+        self.0.set(DeviceSetting::FnLock(value)).map_err(refused)
     }
 
-    pub(super) fn fn_lock(&mut self, value: bool) {
-        self.config.set_fn_lock(&self.key, value);
+    pub(super) fn keep_os_layout(&mut self, keep: bool) -> Result<(), ApiError> {
+        self.0
+            .set(DeviceSetting::KeepOsLayout(keep))
+            .map_err(refused)
     }
 
-    pub(super) fn keep_os_layout(&mut self, keep: bool) {
-        self.config.set_keep_os_layout(&self.key, keep);
-    }
-    pub(super) fn report_rate(&mut self, rate: ReportRate) {
-        self.config.set_report_rate(&self.key, rate);
+    pub(super) fn report_rate(&mut self, rate: ReportRate) -> Result<(), ApiError> {
+        self.0.set(DeviceSetting::ReportRate(rate)).map_err(refused)
     }
 
     pub(super) fn smartshift(&mut self, state: SmartShiftStatus) -> Result<(), ApiError> {
-        if !SmartShift::accepts_auto_disengage(state.auto_disengage) {
-            return Err(ApiError::new(
-                "invalid_value",
-                "SmartShift threshold is below the supported configuration floor; specify --auto-disengage",
-            ));
-        }
-        self.config.set_smartshift(&self.key, state.into());
-        Ok(())
+        self.0
+            .set(DeviceSetting::SmartShift(state.into()))
+            .map_err(refused)
     }
 
-    pub(super) async fn commit(mut self, client: &AgentClient) -> Result<(), ApiError> {
-        self.file.save(&self.config).map_err(|error| {
+    pub(super) async fn commit(self, client: &AgentClient) -> Result<(), ApiError> {
+        self.0.commit().map_err(|error| {
             let code = match &error {
                 ConfigError::Conflict { .. } => "config_conflict",
                 ConfigError::Write { source, .. }
@@ -182,5 +149,18 @@ impl Save {
             )
             .after_write("saved")),
         }
+    }
+}
+
+/// The JSON error for a setting the configuration cannot take.
+fn refused(error: DeviceEditError) -> ApiError {
+    match error {
+        DeviceEditError::Config(error) => ApiError::new("config_error", error.to_string()),
+        DeviceEditError::NoConfigKey => ApiError::new("identity_unavailable", error.to_string()),
+        DeviceEditError::LinkOverride => ApiError::new("link_override", error.to_string()),
+        DeviceEditError::SmartShiftThreshold => ApiError::new(
+            "invalid_value",
+            "SmartShift threshold is below the supported configuration floor; specify --auto-disengage",
+        ),
     }
 }

@@ -9,7 +9,7 @@ use gpui::{
     RenderOnce, Styled, Window, canvas, point, prelude::FluentBuilder as _, px, quad, rgb, size,
 };
 use gpui_kit::component::h_flex;
-use openlogi_core::device::{BatteryInfo, BatteryLevel, BatteryStatus};
+use openlogi_core::device::{BatteryAttention, BatteryInfo, BatteryLevel, BatteryStatus};
 
 use super::theme::{self, Palette, Typography as _};
 
@@ -313,15 +313,11 @@ fn battery_tone(battery: &BatteryInfo) -> BatteryTone {
         BatteryStatus::Charging | BatteryStatus::ChargingSlow => BatteryTone::Charging,
         BatteryStatus::Error => BatteryTone::Error,
         BatteryStatus::Full => BatteryTone::Full,
-        BatteryStatus::Discharging | BatteryStatus::Unknown => {
-            if battery.level == BatteryLevel::Critical {
-                BatteryTone::Critical
-            } else if battery.needs_attention() {
-                BatteryTone::Low
-            } else {
-                BatteryTone::Normal
-            }
-        }
+        BatteryStatus::Discharging | BatteryStatus::Unknown => match battery.attention() {
+            Some(BatteryAttention::Critical) => BatteryTone::Critical,
+            Some(BatteryAttention::Low) => BatteryTone::Low,
+            None => BatteryTone::Normal,
+        },
     }
 }
 
