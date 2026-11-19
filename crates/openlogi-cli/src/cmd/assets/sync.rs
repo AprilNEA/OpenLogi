@@ -33,7 +33,17 @@ use openlogi_assets::{AssetRegistry, FRONT_RENDER_FILES, FetchOutcome, METADATA_
 ///
 /// (`back_*` renders stay remote until an easyswitch view needs them.)
 fn is_optional_asset(name: &str) -> bool {
-    if name == "side_core.png" || name == "side.png" {
+    // A side render may live at a nested path in newer depots
+    // (`images/device/side_hero.png`); match on the basename so those are
+    // fetched too.
+    let basename = name.rsplit('/').next().unwrap_or(name);
+    let is_png = std::path::Path::new(basename)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("png"));
+    if basename == "side_core.png"
+        || basename == "side.png"
+        || (basename.starts_with("side_") && is_png)
+    {
         return true;
     }
     if (name.starts_with("core_metadata_") || name.starts_with("metadata_"))
@@ -159,6 +169,15 @@ mod is_optional_asset_tests {
     fn side_render_names_are_optional() {
         assert!(is_optional_asset("side_core.png"));
         assert!(is_optional_asset("side.png"));
+    }
+
+    #[test]
+    fn nested_side_render_is_optional() {
+        // Regression: depots that store the side render under a nested path
+        // (e.g. `images/device/side_hero.png`) must still be treated as
+        // optional side renders, otherwise they are never fetched.
+        assert!(is_optional_asset("images/device/side_hero.png"));
+        assert!(is_optional_asset("images/device/side_riot.png"));
     }
 
     #[test]

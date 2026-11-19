@@ -516,6 +516,13 @@ that mouse has no adjustable DPI; DPI presets saved for it are ignored. This
 makes the MX Ergo's precision button work with its default binding. On a mouse
 with adjustable DPI, `CycleDpiPresets` keeps cycling the DPI presets.
 
+G502 HERO (wired, `046d:c08b`) ships no stock DPI presets in OpenLogi, so
+its `PreviousDpiPreset` / `NextDpiPreset` buttons do nothing until you save at
+least two DPI presets in `config.toml` (or use `CycleDpiPresets`'s default).
+Its remappable buttons (wheel click, back, forward, G6–G9, both wheel tilts)
+work in host mode; primary clicks are not reassignable. The G6 (sniper) button
+is DPI Shift by default.
+
 A mouse with a DPI LED (HID++ `0x1300`), such as the MX Ergo, shows the mode
 on that LED, as in Logi Options+. The LED lights when precision mode starts
 and goes dark when it ends. OpenLogi takes control of the LED from the

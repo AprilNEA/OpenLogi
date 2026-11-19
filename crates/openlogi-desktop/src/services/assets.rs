@@ -167,6 +167,7 @@ fn main_view(path: PathBuf, side: Option<&SideView>, front: Option<&PathBuf>) ->
 
 fn resolve_side_view(
     dir: &Path,
+    depot: &str,
     entry: &DeviceEntry,
     manifest: Option<&DepotManifest>,
     extended_model_id: u8,
@@ -175,12 +176,12 @@ fn resolve_side_view(
     metadata
         .image(SIDE_VIEW_KEY)
         .filter(|image| !image.assignments.is_empty())?;
-    let variant = manifest.and_then(|m| {
-        entry.model_id_candidates().find_map(|base| {
-            m.resource_for_variant(base, extended_model_id, SIDE_VIEW_KEY)
-                .map(str::to_string)
-        })
-    });
+    // Resolve the side render through the same candidate bases the front
+    // render uses (which include the depot name), so depots that key their
+    // manifest variants on the depot name rather than a registry model id
+    // still resolve.
+    let variant = manifest
+        .and_then(|m| find_variant_in_manifest(m, entry, depot, extended_model_id, side_image_for));
     let (image_path, (png_width, png_height)) = variant
         .into_iter()
         .chain(["side.png".to_string()])
@@ -429,7 +430,8 @@ impl AssetResolver {
                 debug!(depot, root = %root.display(), "depot ships no hotspot metadata — rendering image without hotspots");
                 Metadata::default()
             };
-            let side_view = resolve_side_view(&dir, entry, manifest.as_ref(), ext, &metadata);
+            let side_view =
+                resolve_side_view(&dir, depot, entry, manifest.as_ref(), ext, &metadata);
             let image_path = main_view(image_path, side_view.as_ref(), hero_image_path.as_ref());
             let (png_width, png_height) = match read_image_dimensions(&image_path) {
                 Ok(dims) => dims,
