@@ -410,8 +410,8 @@ impl AppState {
             .filter(|record| {
                 !self
                     .pointer
-                    .pending_dpi_writes
-                    .contains_key(&record.device_key())
+                    .dpi_writes
+                    .newest_awaits_answer(&record.device_key())
             })
             .and_then(|record| {
                 record

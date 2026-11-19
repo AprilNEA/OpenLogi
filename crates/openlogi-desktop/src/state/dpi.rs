@@ -17,6 +17,7 @@ use crate::state::devices::DeviceRecord;
 use super::device_key::DeviceKey;
 use super::events::StateEvents;
 use super::load::DpiLoad;
+use super::pointer::{AnsweredDpiWrite, DpiWrite};
 use super::{AppState, DEFAULT_DPI, StateEvent};
 
 impl AppState {
@@ -145,28 +146,31 @@ impl AppState {
             debug!(key = %key, "device unreachable — DPI change kept in memory only");
             return events;
         };
-        self.write_dpi(key, route, dpi);
+        self.write_dpi(key, route, dpi, DpiWrite::Ordinary);
         events
     }
 
-    /// Write `dpi` to `key`'s device on `route` through the agent and return
-    /// the write's number. The answer arrives as [`Self::apply_dpi_written`],
-    /// which saves `dpi` only if the device took it; the editor shows it
-    /// meanwhile when the device is the active one.
-    pub(super) fn write_dpi(&mut self, key: DeviceKey, route: DeviceRoute, dpi: Dpi) -> u64 {
+    /// Write `dpi` to `key`'s device on `route` through the agent. The answer
+    /// arrives as [`Self::apply_dpi_written`], which saves `dpi` the way
+    /// `kind` says only if the device took it; the editor shows it meanwhile
+    /// when the device is the active one.
+    pub(super) fn write_dpi(
+        &mut self,
+        key: DeviceKey,
+        route: DeviceRoute,
+        dpi: Dpi,
+        kind: DpiWrite,
+    ) {
         if self.is_current_device(&key) {
             self.pointer.dpi = dpi;
         }
-        let write = self.pointer.next_dpi_write;
-        self.pointer.next_dpi_write = write.saturating_add(1);
-        self.pointer.pending_dpi_writes.insert(key.clone(), write);
+        let write = self.pointer.dpi_writes.start(key.clone(), kind);
         self.send_ipc(crate::services::ipc::SetDpi {
             route,
             dpi,
             key,
             write,
         });
-        write
     }
 
     /// The device's answer to a [`Self::commit_dpi`] write of `dpi`.
@@ -187,7 +191,8 @@ impl AppState {
     /// A write that a newer one at the mouse, such as a precision-mode press,
     /// superseded before its turn answers [`WriteError::WriteSuperseded`]. It
     /// wrote nothing, so it is not saved, and the device is read again for
-    /// the DPI the newer write left.
+    /// the DPI the newer write left. An answer to no write in flight, or a
+    /// second answer to one, changes nothing.
     pub fn apply_dpi_written(
         &mut self,
         key: &DeviceKey,
@@ -195,19 +200,18 @@ impl AppState {
         dpi: Dpi,
         result: Result<(), WriteError>,
     ) -> StateEvents {
-        let newest = self.pointer.pending_dpi_writes.get(key) == Some(&write);
-        if newest {
-            self.pointer.pending_dpi_writes.remove(key);
-        }
-        let copied = self.pointer.copied_dpi_writes.remove(&write);
+        let Some(AnsweredDpiWrite { kind, newest }) = self.pointer.dpi_writes.finish(key, write)
+        else {
+            warn!(key = %key, write, "answer to a DPI write that is not in flight — ignored");
+            return StateEvents::none();
+        };
         // `None` shows the DPI the device is known to run at.
         let reported = match result {
             Ok(()) => {
                 self.pointer.reads.set_dpi_current(key, dpi);
-                let save: fn(&mut Config, &str, Dpi) = if copied {
-                    Config::set_dpi_on_every_link
-                } else {
-                    Config::set_dpi
+                let save: fn(&mut Config, &str, Dpi) = match kind {
+                    DpiWrite::Ordinary => Config::set_dpi,
+                    DpiWrite::Copied => Config::set_dpi_on_every_link,
                 };
                 self.persist_dpi(key, dpi, save);
                 Some(dpi)
