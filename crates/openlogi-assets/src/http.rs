@@ -408,6 +408,18 @@ mod tests {
         assert_eq!(std::fs::read(&dst).expect("read back"), b"two");
     }
 
+    #[test]
+    fn write_replace_creates_nested_parents() {
+        // Regression: nested asset paths (e.g. `images/device/side_hero.png`)
+        // must have their parent directories created on write.
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let dst = dir.path().join("images/device/side_hero.png");
+
+        write_replace(&dst, b"payload").expect("nested write");
+
+        assert_eq!(std::fs::read(&dst).expect("read back"), b"payload");
+    }
+
     #[cfg(unix)]
     #[test]
     fn write_replace_replaces_a_planted_symlink_instead_of_following_it() {

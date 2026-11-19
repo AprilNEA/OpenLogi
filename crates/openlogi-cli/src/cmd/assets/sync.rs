@@ -172,6 +172,15 @@ mod is_optional_asset_tests {
     }
 
     #[test]
+    fn nested_side_render_is_optional() {
+        // Regression: depots that store the side render under a nested path
+        // (e.g. `images/device/side_hero.png`) must still be treated as
+        // optional side renders, otherwise they are never fetched.
+        assert!(is_optional_asset("images/device/side_hero.png"));
+        assert!(is_optional_asset("images/device/side_riot.png"));
+    }
+
+    #[test]
     fn colour_variant_names_are_optional() {
         assert!(is_optional_asset("front_ext1.png"));
         assert!(is_optional_asset("front_ext_2.png"));
