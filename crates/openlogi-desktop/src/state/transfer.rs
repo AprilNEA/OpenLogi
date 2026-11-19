@@ -11,6 +11,7 @@ use openlogi_core::hid::SmartShiftStatus;
 
 use super::devices::DeviceRecord;
 use super::events::StateEvents;
+use super::pointer::DpiWrite;
 use super::scroll::scroll_inversion_available;
 use super::{AppState, StateEvent};
 
@@ -156,8 +157,7 @@ impl AppState {
                 let dpi = self
                     .dpi_capabilities_for(&device)
                     .map_or(dpi, |supported| supported.nearest(dpi));
-                let write = self.write_dpi(device.clone(), route.clone(), dpi);
-                self.pointer.copied_dpi_writes.insert(write);
+                self.write_dpi(device.clone(), route.clone(), dpi, DpiWrite::Copied);
             }
             if let Some(smartshift) = smartshift {
                 self.write_smartshift(
