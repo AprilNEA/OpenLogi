@@ -1,0 +1,165 @@
+{
+  "schema_version": 1,
+  "id": "pop-icon-keys-001-profile",
+  "name": "POP Icon Keys",
+  "inventories": [
+    {
+      "receiver": {
+        "name": "Logi Bolt Receiver",
+        "vendor_id": 1133,
+        "product_id": 50504,
+        "unique_id": "OL-BOLT-UID-0001"
+      },
+      "paired": [
+        {
+          "slot": 1,
+          "codename": "POP Icon Keys",
+          "wpid": 45967,
+          "kind": "keyboard",
+          "online": true,
+          "battery": {
+            "percentage": 100,
+            "level": "full",
+            "status": "discharging"
+          },
+          "model_info": {
+            "entity_count": 4,
+            "serial_number": "OL-SER-00001",
+            "unit_id": [
+              79,
+              76,
+              68,
+              1
+            ],
+            "transports": {
+              "usb": false,
+              "equad": false,
+              "btle": true,
+              "bluetooth": false
+            },
+            "model_ids": [
+              45967,
+              0,
+              0
+            ],
+            "extended_model_id": 0
+          },
+          "capabilities": {
+            "buttons": true,
+            "pointer": false,
+            "lighting": false,
+            "scroll_inversion": false,
+            "hires_wheel": false,
+            "thumbwheel": false,
+            "haptic_feedback": false,
+            "haptic_panel": false,
+            "dpi_gestures": false,
+            "fn_lock": true,
+            "os_layout": true,
+            "report_rate": false,
+            "backlight": false,
+            "easy_switch": true,
+            "virtual_thumbwheel": false,
+            "pointer_scaling": false,
+            "force_sensing": false,
+            "disable_keys": true,
+            "onboard_profiles": false,
+            "button_spy": false,
+            "sidetone": false
+          },
+          "settings_revision": 0,
+          "hidpp10": false
+        }
+      ]
+    }
+  ],
+  "standalone": [],
+  "settings": [
+    {
+      "route": {
+        "Bolt": {
+          "receiver_uid": "OL-BOLT-UID-0001",
+          "slot": 1
+        }
+      },
+      "dpi": {
+        "support": "unsupported"
+      },
+      "smartshift": {
+        "support": "unsupported"
+      },
+      "wheel": {
+        "support": "unsupported"
+      },
+      "backlight": {
+        "support": "unsupported"
+      },
+      "fn_lock": {
+        "support": "supported",
+        "value": {
+          "fn_lock": false,
+          "default_fn_lock": false
+        }
+      },
+      "report_rate": {
+        "support": "unsupported"
+      },
+      "easy_switch": {
+        "support": "supported",
+        "value": {
+          "current": 0,
+          "slots": [
+            {
+              "index": 0,
+              "paired": true,
+              "connection": "Bolt",
+              "name": "Computer 1",
+              "name_max_len": 24,
+              "os": {
+                "kind": "MacOs",
+                "major": 26,
+                "minor": 2,
+                "patch": 0
+              }
+            },
+            {
+              "index": 1,
+              "paired": false,
+              "connection": "Unknown",
+              "name": null,
+              "name_max_len": 24,
+              "os": null
+            },
+            {
+              "index": 2,
+              "paired": true,
+              "connection": "Bluetooth",
+              "name": "Computer 3",
+              "name_max_len": 24,
+              "os": null
+            }
+          ],
+          "can_rename": true
+        }
+      },
+      "pointer_speed": {
+        "support": "unsupported"
+      },
+      "force_sensing": {
+        "support": "unsupported"
+      },
+      "disable_keys": {
+        "support": "supported",
+        "value": {
+          "supported": 25,
+          "disabled": 0
+        }
+      },
+      "sidetone": {
+        "support": "unsupported"
+      },
+      "lighting": "unsupported",
+      "light": "unsupported"
+    }
+  ]
+}

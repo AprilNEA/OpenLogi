@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "name": "backlight-state",
+  "channel": "target",
+  "report_support": "short_and_long",
+  "exchanges": [
+    {
+      "request_match": "exact",
+      "request": "10ff83b5030000",
+      "response": "11ff83b5034f4c520118060e0000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "10020010000000",
+      "response": "1102001004050000000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "10020000198200",
+      "response": "110200000b000100000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "10020b00000000",
+      "response": "11020b0001050500000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "10020b20000000",
+      "response": "11020b2008020200000000000000000000000000",
+      "required": true
+    }
+  ]
+}
