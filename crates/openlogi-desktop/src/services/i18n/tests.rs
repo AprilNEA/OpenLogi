@@ -117,6 +117,7 @@ fn czech_pairing_translations_resolve() {
 /// embedding intact and a placeholder interpolated inside it.
 #[test]
 fn hebrew_pairing_translations_resolve() {
+    let _locale = super::LOCALE_LOCK.lock();
     assert_eq!(
         rust_i18n::t!("pairing.add_device", locale = "he"),
         "\u{202B}הוספת מכשיר\u{202C}"
