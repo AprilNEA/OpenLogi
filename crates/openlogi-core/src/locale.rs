@@ -47,6 +47,7 @@ pub const SUPPORTED: &[(&str, &str)] = &[
     ("el", "Ελληνικά"),
     ("ru", "Русский"),
     ("uk", "Українська"),
+    ("he", "עברית"),
     ("ja", "日本語"),
     ("zh-CN", "简体中文"),
     ("zh-HK", "繁體中文（香港）"),
@@ -87,6 +88,8 @@ fn match_supported(code: &str) -> Option<&'static str> {
 fn special_locale(requested: &LanguageIdentifier) -> Option<&'static str> {
     match requested.language.as_str() {
         "nb" | "nn" | "no" => Some("nb"),
+        // `iw` is the withdrawn ISO 639 code that Java and older Android still report.
+        "he" | "iw" => Some("he"),
         "pt" => {
             if requested
                 .region
@@ -185,6 +188,9 @@ mod tests {
         assert_eq!(match_supported("nn"), Some("nb"));
         assert_eq!(match_supported("be"), Some("be"));
         assert_eq!(match_supported("be-BY"), Some("be"));
+        assert_eq!(match_supported("he"), Some("he"));
+        assert_eq!(match_supported("he-IL"), Some("he"));
+        assert_eq!(match_supported("iw-IL"), Some("he"));
         assert_eq!(match_supported("klingon"), None);
     }
 
