@@ -127,9 +127,7 @@ fn open_transfer_preview(
                 let record_key = record_key.clone();
                 let source = source.clone();
                 move |_event, _window, cx| {
-                    AppState::apply(cx, |state| {
-                        state.commit_settings_transfer(&record_key, &source)
-                    });
+                    AppState::copy_settings(cx, &record_key, &source);
                     true
                 }
             })

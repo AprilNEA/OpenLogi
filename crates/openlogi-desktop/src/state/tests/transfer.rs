@@ -3,8 +3,10 @@
 use openlogi_core::config::SmartShift;
 
 use super::fn_lock::drain;
+use super::smartshift::{answer_smartshift_read, install};
 use super::*;
 use crate::services::ipc::{Command, SetDpi, SetSmartShift};
+use crate::state::SmartShiftWriteStatus;
 
 const OLD_MOUSE_KEY: &str = "serial:old-mouse";
 
@@ -116,6 +118,8 @@ fn a_file_without_a_device_of_this_kind_offers_nothing() {
 /// The DPI and SmartShift the old mouse has, which the known mouse does not.
 const COPIED_DPI: Dpi = Dpi::new(2400);
 const SAVED_DPI: Dpi = Dpi::new(800);
+/// The known mouse's own DPI on the route it is reached by.
+const LINK_DPI: Dpi = Dpi::new(1600);
 
 fn copied_smartshift() -> SmartShift {
     SmartShift::from(SmartShiftStatus {
@@ -164,56 +168,153 @@ fn listed_mouse(state: &AppState) -> (&DeviceRecord, String) {
     (record, key)
 }
 
-#[test]
-fn copying_onto_an_online_mouse_writes_its_dpi_and_smartshift() {
-    let (mut state, mut receiver) = known_mouse_and_an_old_one(true);
-    let (record, target) = listed_mouse(&state);
-    assert_eq!(target, KNOWN_MOUSE_KEY);
-    let key = record.device_key();
+/// Give the known mouse a DPI override on the route it is reached by, and
+/// return that route's key.
+fn override_dpi_on_its_route(state: &mut AppState) -> String {
+    let (record, target) = listed_mouse(state);
+    let route_key = record.route_key.clone();
+    state.config.edit(|config| {
+        config
+            .devices
+            .entry(target.clone())
+            .or_default()
+            .links
+            .entry(route_key.clone())
+            .or_default()
+            .overrides
+            .dpi = Some(LINK_DPI);
+    });
+    route_key
+}
+
+fn effective_dpi(state: &AppState, target: &str, route_key: &str) -> Option<Dpi> {
+    state
+        .config
+        .devices
+        .get(target)
+        .and_then(|settings| settings.effective_dpi(route_key))
+}
+
+/// Copy the old mouse onto the online known mouse and return the one DPI
+/// write it sends, with the SmartShift writes beside it.
+fn copy_onto_the_online_mouse(
+    state: &mut AppState,
+    receiver: &mut tokio::sync::mpsc::UnboundedReceiver<Command>,
+) -> (SetDpi, Vec<SmartShiftStatus>) {
+    let (record, target) = listed_mouse(state);
     let route = record.route.clone().expect("the mouse is reachable");
     let sources = state.transfer_sources(&target);
 
     let _ = state.commit_settings_transfer(&target, &sources[0]);
 
-    let commands = drain(&mut receiver);
-    let dpi_writes: Vec<&SetDpi> = commands
-        .iter()
-        .filter_map(|command| match command {
-            Command::SetDpi(write) => Some(write),
-            _ => None,
-        })
-        .collect();
-    let [write] = dpi_writes.as_slice() else {
-        panic!("one DPI write, not {}", dpi_writes.len());
-    };
-    assert_eq!(
-        (&write.route, write.dpi, &write.key),
-        (&route, COPIED_DPI, &key)
-    );
-    let smartshift_writes: Vec<SmartShiftStatus> = commands
-        .iter()
-        .filter_map(|command| match command {
+    let mut dpi_writes = Vec::new();
+    let mut smartshift_writes = Vec::new();
+    for command in drain(receiver) {
+        match command {
+            Command::SetDpi(write) => dpi_writes.push(write),
             Command::SetSmartShift(SetSmartShift {
                 route: written,
                 status,
-            }) if *written == route => Some(*status),
-            _ => None,
-        })
-        .collect();
+            }) if written == route => smartshift_writes.push(status),
+            _ => {}
+        }
+    }
+    let Ok([write]) = <[SetDpi; 1]>::try_from(dpi_writes) else {
+        panic!("one DPI write");
+    };
+    assert_eq!((&write.route, write.dpi), (&route, COPIED_DPI));
+    (write, smartshift_writes)
+}
+
+#[test]
+fn copying_onto_an_online_mouse_writes_its_dpi_and_smartshift() {
+    let (mut state, mut receiver) = known_mouse_and_an_old_one(true);
+    let route_key = override_dpi_on_its_route(&mut state);
+    let (record, target) = listed_mouse(&state);
+    let key = record.device_key();
+
+    let (write, smartshift_writes) = copy_onto_the_online_mouse(&mut state, &mut receiver);
+
+    assert_eq!(write.key, key);
     assert_eq!(
         smartshift_writes,
         [SmartShiftStatus::from(copied_smartshift())]
     );
     assert_eq!(state.config.smartshift(&target), Some(copied_smartshift()));
     assert_eq!(
-        state.config.dpi(&target),
-        Some(SAVED_DPI),
+        (
+            state.config.dpi(&target),
+            effective_dpi(&state, &target, &route_key)
+        ),
+        (Some(SAVED_DPI), Some(LINK_DPI)),
         "a DPI is saved once the mouse takes it, as from its panel"
     );
 
     let _ = state.apply_dpi_written(&key, write.write, COPIED_DPI, Ok(()));
 
     assert_eq!(state.config.dpi(&target), Some(COPIED_DPI));
+    assert_eq!(
+        effective_dpi(&state, &target, &route_key),
+        Some(COPIED_DPI),
+        "the copied DPI replaces the link's override"
+    );
+}
+
+#[test]
+fn a_failed_copy_keeps_the_mouses_dpi_and_its_link_override() {
+    let (mut state, mut receiver) = known_mouse_and_an_old_one(true);
+    let route_key = override_dpi_on_its_route(&mut state);
+    let (record, target) = listed_mouse(&state);
+    let key = record.device_key();
+
+    let (write, _) = copy_onto_the_online_mouse(&mut state, &mut receiver);
+    let _ = state.apply_dpi_written(
+        &key,
+        write.write,
+        COPIED_DPI,
+        Err(WriteError::DpiUnsupported {
+            requested: COPIED_DPI,
+        }),
+    );
+
+    assert_eq!(state.config.dpi(&target), Some(SAVED_DPI));
+    assert_eq!(
+        effective_dpi(&state, &target, &route_key),
+        Some(LINK_DPI),
+        "the next connection applies the DPI the mouse had"
+    );
+}
+
+/// A SmartShift copied onto a connected mouse is read back, so a mouse that
+/// kept its own mode shows the write as failed instead of applied.
+#[gpui::test]
+fn copying_smartshift_onto_an_online_mouse_reads_it_back(cx: &mut gpui::TestAppContext) {
+    let (state, mut receiver) = known_mouse_and_an_old_one(true);
+    let (_, target) = listed_mouse(&state);
+    let sources = state.transfer_sources(&target);
+    install(state, cx);
+    let own = SmartShiftStatus {
+        mode: SmartShiftMode::Free,
+        ..SmartShiftStatus::from(copied_smartshift())
+    };
+    let route = answer_smartshift_read(&mut receiver, own);
+    cx.run_until_parked();
+
+    cx.update(|cx| AppState::copy_settings(cx, &target, &sources[0]));
+    cx.run_until_parked();
+
+    assert_eq!(
+        answer_smartshift_read(&mut receiver, own),
+        route,
+        "the copy reads the mouse back"
+    );
+    cx.run_until_parked();
+    let status = cx.read(|cx| {
+        AppState::try_read(cx)
+            .expect("state installed")
+            .current_smartshift_write_status()
+    });
+    assert_eq!(status, Some(SmartShiftWriteStatus::Failed));
 }
 
 #[test]

@@ -8,6 +8,7 @@
 //! the editor shows the DPI the device reports, or the last one it reported.
 
 use gpui::Context;
+use openlogi_core::config::Config;
 use openlogi_core::hid::{DeviceRoute, Dpi, DpiCapabilities, WriteError};
 use tracing::{debug, warn};
 
@@ -148,11 +149,11 @@ impl AppState {
         events
     }
 
-    /// Write `dpi` to `key`'s device on `route` through the agent. The answer
-    /// arrives as [`Self::apply_dpi_written`], which saves `dpi` only if the
-    /// device took it; the editor shows it meanwhile when the device is the
-    /// active one.
-    pub(super) fn write_dpi(&mut self, key: DeviceKey, route: DeviceRoute, dpi: Dpi) {
+    /// Write `dpi` to `key`'s device on `route` through the agent and return
+    /// the write's number. The answer arrives as [`Self::apply_dpi_written`],
+    /// which saves `dpi` only if the device took it; the editor shows it
+    /// meanwhile when the device is the active one.
+    pub(super) fn write_dpi(&mut self, key: DeviceKey, route: DeviceRoute, dpi: Dpi) -> u64 {
         if self.is_current_device(&key) {
             self.pointer.dpi = dpi;
         }
@@ -165,6 +166,7 @@ impl AppState {
             key,
             write,
         });
+        write
     }
 
     /// The device's answer to a [`Self::commit_dpi`] write of `dpi`.
@@ -197,11 +199,17 @@ impl AppState {
         if newest {
             self.pointer.pending_dpi_writes.remove(key);
         }
+        let copied = self.pointer.copied_dpi_writes.remove(&write);
         // `None` shows the DPI the device is known to run at.
         let reported = match result {
             Ok(()) => {
                 self.pointer.reads.set_dpi_current(key, dpi);
-                self.persist_dpi(key, dpi);
+                let save: fn(&mut Config, &str, Dpi) = if copied {
+                    Config::set_dpi_on_every_link
+                } else {
+                    Config::set_dpi
+                };
+                self.persist_dpi(key, dpi, save);
                 Some(dpi)
             }
             Err(WriteError::DpiNotApplied { actual, .. }) => {
@@ -225,10 +233,11 @@ impl AppState {
         StateEvent::DpiChanged(key.clone()).into()
     }
 
-    /// Save `dpi` for `key`'s device after the device took it. A device with
-    /// a transient identity, or one forgotten while the write was in flight,
-    /// has nothing to save under.
-    fn persist_dpi(&mut self, key: &DeviceKey, dpi: Dpi) {
+    /// Save `dpi` for `key`'s device after the device took it, the way `save`
+    /// stores it under the device's persistent key. A device with a transient
+    /// identity, or one forgotten while the write was in flight, has nothing
+    /// to save under.
+    fn persist_dpi(&mut self, key: &DeviceKey, dpi: Dpi, save: fn(&mut Config, &str, Dpi)) {
         let Some(persistent_key) = self
             .devices
             .records
@@ -241,7 +250,7 @@ impl AppState {
             return;
         };
         self.config
-            .edit(|config| config.set_dpi(&persistent_key, dpi));
+            .edit(|config| save(config, &persistent_key, dpi));
         self.persist_and_reload("DPI");
     }
 
