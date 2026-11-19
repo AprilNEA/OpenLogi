@@ -99,7 +99,11 @@ impl EventDevice {
         }
         self.product_name.as_deref().is_some_and(|n| {
             let n = n.to_ascii_lowercase();
-            n.contains("logitech") || n.starts_with("logi ")
+            // "mx " covers Bluetooth-direct Logitech mice whose Device
+            // Information Service never reached the HID stack, so the vendor
+            // id stays 0 ("MX Master 3S") — same reason is_logitech_node in
+            // the Linux hook accepts a zeroed vendor on a known name.
+            n.contains("logitech") || n.starts_with("logi ") || n.starts_with("mx ")
         })
     }
 }

@@ -157,6 +157,24 @@ fn create_pipe() -> io::Result<(OwnedFd, OwnedFd)> {
     Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
 }
 
+/// Whether this node is Logitech hardware the hook may manage.
+///
+/// A Bluetooth-direct node can report vendor 0: bluez does not forward the
+/// DIS PnP ID into the uhid device it creates for HID-over-GATT peripherals
+/// (unmerged bluez series "Fix zero VID&PID on HoG initial connection"), so
+/// the evdev id is bus 5 with vendor/product 0. A zero-vendor node is only
+/// accepted when its name is one Logitech mice name themselves
+/// ("MX Master 3S", "MX Anywhere 3", "Lift for Mac", "Logitech …"), so
+/// foreign hardware with a broken Device Information Service is never grabbed.
+fn is_logitech_node(vendor_id: u32, name: Option<&str>) -> bool {
+    vendor_id == LOGITECH_VENDOR_ID
+        || (vendor_id == 0
+            && name.is_some_and(|n| {
+                let n = n.to_ascii_lowercase();
+                n.contains("logitech") || n.starts_with("mx ") || n.starts_with("lift")
+            }))
+}
+
 fn find_mouse_devices() -> Vec<(std::path::PathBuf, Device)> {
     evdev::enumerate()
         // Only Logitech mice: the hook exists to remap devices OpenLogi
@@ -164,7 +182,7 @@ fn find_mouse_devices() -> Vec<(std::path::PathBuf, Device)> {
         // events through the virtual device and apply foreign remaps to it.
         // `input_id().vendor()` is u16; crate::LOGITECH_VENDOR_ID is u32.
         .filter(|(path, d)| {
-            let ours = u32::from(d.input_id().vendor()) == LOGITECH_VENDOR_ID;
+            let ours = is_logitech_node(u32::from(d.input_id().vendor()), d.name());
             if !ours
                 && d.supported_keys()
                     .is_some_and(|keys| keys.contains(KeyCode::BTN_LEFT))
@@ -230,8 +248,10 @@ fn is_hookable_mouse(
     if name.is_some_and(uinput::is_own_device) {
         return false;
     }
-    // OpenLogi only remaps Logitech hardware — never grab foreign vendors.
-    if vendor_id != LOGITECH_VENDOR_ID {
+    // OpenLogi only remaps Logitech hardware — never grab foreign vendors
+    // (a zero-vendor Bluetooth node is accepted only on a Logitech-looking
+    // name; see [`is_logitech_node`]).
+    if !is_logitech_node(vendor_id, name) {
         return false;
     }
     // A mouse clicks and moves relatively; nothing else qualifies. This alone
