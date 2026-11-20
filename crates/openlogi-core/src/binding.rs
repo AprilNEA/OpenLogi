@@ -20,6 +20,7 @@ mod effect;
 mod g_keys;
 mod gaming;
 mod gesture;
+mod host;
 mod key_combo;
 mod modifiers;
 mod swipe;
@@ -46,6 +47,7 @@ pub use gaming::{
     G502_LIGHTSPEED, G903_LIGHTSPEED, GamingButtons, GamingLayout, STANDARD_BUTTONS, Slot,
 };
 pub use gesture::GestureDirection;
+pub use host::{Host, LinuxDesktop};
 pub use key_combo::{KeyCombo, KeyComboParseError, KeyboardUsage, KeyboardUsageError};
 pub use modifiers::{BareModifiers, BareModifiersParseError, Modifiers};
 pub use swipe::{
