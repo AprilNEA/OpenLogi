@@ -1749,7 +1749,11 @@ fn panel_action_rows(
             .children(
                 power_user_actions
                     .iter()
-                    .filter(|(kind, _, _)| kind.is_available())
+                    // An editor this host cannot use stays reachable while
+                    // the key is bound to its action, so it can be edited.
+                    .filter(|(kind, _, _)| {
+                        kind.is_available() || power_user_selected(current, *kind)
+                    })
                     .enumerate()
                     .map(|(idx, (kind, label, icon_path))| {
                         let kind = *kind;
