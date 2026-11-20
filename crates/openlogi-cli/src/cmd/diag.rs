@@ -17,6 +17,7 @@ pub mod battery;
 pub mod controls;
 pub mod dpi;
 pub mod features;
+pub mod g600;
 pub mod hidpp;
 pub mod host_switch;
 pub mod lighting;
@@ -50,6 +51,8 @@ pub enum DiagCmd {
     PointerSpeed(pointer_speed::PointerSpeedArgs),
     /// Read a G-series mouse's onboard profiles and mode.
     Onboard(onboard::OnboardArgs),
+    /// Read a G600's active profile and onboard DPI stages, or change them (vendor feature reports).
+    G600(g600::G600Args),
     /// Print which HID++ 0x8110 slot each button of a G-series mouse sends.
     MouseButtons(mouse_buttons::MouseButtonsArgs),
     /// Switch a multi-host device through the running agent (HID++ 0x1814).
@@ -78,6 +81,7 @@ impl DiagCmd {
             Self::Wheel(args) => wheel::run(args).await,
             Self::PointerSpeed(args) => pointer_speed::run(args).await,
             Self::Onboard(args) => onboard::run(args).await,
+            Self::G600(args) => g600::run(args).await,
             Self::MouseButtons(args) => mouse_buttons::run(args).await,
             Self::HostSwitch(args) => host_switch::run(args).await,
             Self::Sidetone(args) => sidetone::run(args).await,

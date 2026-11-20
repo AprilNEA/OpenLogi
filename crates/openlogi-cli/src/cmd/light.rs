@@ -9,6 +9,8 @@ use clap::{Args, Subcommand};
 use openlogi_core::device::{LightState, StandaloneDevice};
 use openlogi_hid::{LightCommand, LitraModel, find_litra};
 
+use crate::cmd::standalone::select;
+
 #[derive(Debug, Subcommand)]
 pub enum LightCmd {
     /// List recognized standalone lights and their advertised controls.
@@ -119,7 +121,7 @@ async fn list() -> Result<()> {
 
 async fn status(query: Option<&str>) -> Result<()> {
     let devices = standalone().await?;
-    let device = select(&devices, query)?;
+    let device = select(&devices, query, "light")?;
     let state = openlogi_hid::read_litra_state(&device.route(), litra_model(device)?)
         .await
         .context("failed to read the light")?;
@@ -170,14 +172,14 @@ fn describe_state(state: &LightState) -> Vec<String> {
 
 async fn set_power(query: Option<&str>, enabled: bool) -> Result<()> {
     let devices = standalone().await?;
-    let device = select(&devices, query)?;
+    let device = select(&devices, query, "light")?;
     apply(device, LightCommand::Power(enabled)).await
 }
 
 async fn set_brightness(args: BrightnessArgs) -> Result<()> {
     let command = brightness_command(args.percent, args.lumens)?;
     let devices = standalone().await?;
-    let device = select(&devices, args.device.device.as_deref())?;
+    let device = select(&devices, args.device.device.as_deref(), "light")?;
     apply(device, command).await
 }
 
@@ -197,7 +199,7 @@ fn brightness_command(percent: Option<u8>, lumens: Option<u16>) -> Result<LightC
 
 async fn set_temperature(args: TemperatureArgs) -> Result<()> {
     let devices = standalone().await?;
-    let device = select(&devices, args.device.device.as_deref())?;
+    let device = select(&devices, args.device.device.as_deref(), "light")?;
     apply(device, LightCommand::TemperatureKelvin(args.kelvin)).await
 }
 
@@ -225,88 +227,10 @@ async fn apply(device: &StandaloneDevice, command: LightCommand) -> Result<()> {
     Ok(())
 }
 
-fn select<'a>(
-    devices: &'a [StandaloneDevice],
-    query: Option<&str>,
-) -> Result<&'a StandaloneDevice> {
-    let Some(query) = query else {
-        return match devices {
-            [] => Err(anyhow!("no supported standalone light found")),
-            [device] => Ok(device),
-            _ => Err(anyhow!(
-                "multiple standalone lights found; select one with --device"
-            )),
-        };
-    };
-    let query = query.to_ascii_lowercase();
-    let mut matches = devices.iter().filter(|device| {
-        device.display_name.to_ascii_lowercase().contains(&query)
-            || device
-                .address
-                .identity
-                .to_ascii_lowercase()
-                .contains(&query)
-    });
-    let Some(device) = matches.next() else {
-        return Err(anyhow!("no standalone light matches --device {query}"));
-    };
-    if matches.next().is_some() {
-        return Err(anyhow!(
-            "multiple standalone lights match --device {query}; use a more specific value"
-        ));
-    }
-    Ok(device)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{LightCommand, brightness_command, describe_state, select};
-    use openlogi_core::device::{
-        DeviceKind, LightCapabilities, LightState, LightValueRange, LightValueUnit,
-        RawDeviceAddress, StandaloneDevice,
-    };
-
-    fn device(name: &str) -> StandaloneDevice {
-        StandaloneDevice {
-            address: RawDeviceAddress {
-                vendor_id: 0x046d,
-                product_id: 0xc900,
-                usage_page: 0xff43,
-                usage_id: 0x0202,
-                identity: "serial:test".into(),
-            },
-            display_name: name.into(),
-            manufacturer: Some("Logi".into()),
-            serial_number: Some("test".into()),
-            unit_id: [0; 4],
-            kind: DeviceKind::Light,
-            online: true,
-            capabilities: None,
-            light_capabilities: None,
-            driver_id: "litra".into(),
-            registry_model_id: None,
-        }
-    }
-
-    #[test]
-    fn selection_requires_disambiguation_and_supports_name_queries() {
-        let devices = vec![device("Litra Glow"), device("Litra Beam")];
-        select(&devices, None).expect_err("two lights and no --device must be ambiguous");
-        assert_eq!(
-            select(&devices, Some("beam"))
-                .expect("matching device")
-                .display_name,
-            "Litra Beam"
-        );
-        select(&devices, Some("litra"))
-            .expect_err("a --device query matching both lights must be ambiguous");
-        assert_eq!(
-            select(&devices[..1], None)
-                .expect("single device")
-                .display_name,
-            "Litra Glow"
-        );
-    }
+    use super::{LightCommand, brightness_command, describe_state};
+    use openlogi_core::device::{LightCapabilities, LightState, LightValueRange, LightValueUnit};
 
     #[test]
     fn lumens_outside_the_static_range_reach_the_driver() {

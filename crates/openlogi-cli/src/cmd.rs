@@ -14,6 +14,7 @@ mod input_monitoring;
 pub mod light;
 pub mod list;
 pub mod snapshot;
+mod standalone;
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
