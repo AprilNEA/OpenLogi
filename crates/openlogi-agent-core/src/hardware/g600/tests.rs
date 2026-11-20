@@ -185,6 +185,19 @@ fn context_for(g600: G600) -> (Arc<G600>, HardwareContext) {
     (g600, hardware)
 }
 
+/// How long a test waits for an event before it fails. The clock is paused,
+/// so this deadline passes only once nothing else is pending: the event is
+/// never coming.
+const EVENT_DEADLINE: Duration = Duration::from_secs(60);
+
+/// Wait for `event`, failing with `what` instead of hanging if it never
+/// happens, such as a write that returns before sending its profile report.
+async fn within<T>(what: &str, event: impl Future<Output = T>) -> T {
+    tokio::time::timeout(EVENT_DEADLINE, event)
+        .await
+        .unwrap_or_else(|_| panic!("{what} never happened"))
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_read_waits_until_the_mouse_has_stored_a_profile_write() {
     let (g600, hardware) = context("read-behind-write");
@@ -200,13 +213,12 @@ async fn a_read_waits_until_the_mouse_has_stored_a_profile_write() {
                 .await
         }
     });
-    g600.profile_written.notified().await;
-    let state = hardware
-        .read_g600_dpi(&route)
+    within("the profile report write", g600.profile_written.notified()).await;
+    let state = within("the queued read", hardware.read_g600_dpi(&route))
         .await
         .expect("the read runs once the write is done");
 
-    writing
+    within("the write task", writing)
         .await
         .expect("the write task finishes")
         .expect("the write is stored");
@@ -243,13 +255,12 @@ async fn a_read_waits_out_the_commit_of_a_profile_write_that_failed() {
                 .await
         }
     });
-    g600.profile_written.notified().await;
-    hardware
-        .read_g600_dpi(&route)
+    within("the profile report write", g600.profile_written.notified()).await;
+    within("the queued read", hardware.read_g600_dpi(&route))
         .await
         .expect("the read runs once the write is done");
 
-    let error = writing
+    let error = within("the write task", writing)
         .await
         .expect("the write task finishes")
         .expect_err("the host reports the profile write failed");
@@ -281,7 +292,10 @@ async fn a_caller_that_stops_waiting_does_not_cut_the_commit_short() {
             .await
     });
     // The caller gives up right after the profile report went out.
-    let (abandoned, ()) = tokio::join!(abandoned, g600.profile_written.notified());
+    let (abandoned, ()) = tokio::join!(
+        abandoned,
+        within("the profile report write", g600.profile_written.notified())
+    );
     assert!(
         abandoned.is_err(),
         "the caller stopped waiting before the commit"
@@ -326,13 +340,12 @@ async fn a_named_stage_is_selected_before_a_queued_request_reaches_the_mouse() {
                 .await
         }
     });
-    g600.profile_written.notified().await;
-    let state = hardware
-        .read_g600_dpi(&route)
+    within("the profile report write", g600.profile_written.notified()).await;
+    let state = within("the queued read", hardware.read_g600_dpi(&route))
         .await
         .expect("the read runs once the write is done");
 
-    writing
+    within("the write task", writing)
         .await
         .expect("the write task finishes")
         .expect("the write is stored and stage 2 selected");
