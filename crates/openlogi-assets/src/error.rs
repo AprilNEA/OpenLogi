@@ -56,9 +56,9 @@ pub enum AssetError {
         /// The SHA-256 of the bytes actually downloaded.
         actual: String,
     },
-    /// A remote-supplied name was not a single safe path component
-    /// (empty, contained separators, or was `.`/`..`).
-    #[error("{label} must be a single safe path component, got {component:?}")]
+    /// A remote-supplied name was not a safe depot-relative path
+    /// (empty, contained `.`/`..` or backslash segments, or was absolute).
+    #[error("{label} must be a safe depot-relative path, got {component:?}")]
     UnsafeComponent {
         /// Which input was rejected (e.g. `"asset file name"`).
         label: String,

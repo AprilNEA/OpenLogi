@@ -222,6 +222,14 @@ Common device fields are:
   field is absent, the agent selects host mode only if a setting needs it: a
   `report_rate`, a G-Shift binding, or a remapped button that the mouse
   reports only in host mode. Otherwise the agent leaves the onboard mode alone
+
+  The Buttons panel draws every control of a mouse whose `0x8110` button
+  layout has been dumped from hardware: the G502 LIGHTSPEED, the G903
+  LIGHTSPEED, and the G502 X PLUS. On those mice every button is bindable in
+  host mode, including the wheel tilts; the G502 X PLUS's wheel free-spin
+  toggle is a mechanical switch that reports nothing, so it cannot be bound.
+  A G-series mouse without a dumped layout still gets the five standard
+  buttons the OS hook remaps (left, right, middle, back, forward)
 - `action_ring`: default and complete per-application eight-slot layouts;
   `action_ring.per_app` takes the same selectors as `per_app_bindings`,
   including the Windows `exe:<filename>` fallback and `app:<alias>` keys
