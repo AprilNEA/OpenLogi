@@ -45,6 +45,10 @@ use openlogi_core::device::{
     DeviceKind, DeviceModelInfo, DeviceTransports, LightCapabilities, LightState, LightValueRange,
     LightValueUnit, LockKey, PairedDevice, RawDeviceAddress, ReceiverInfo, StandaloneDevice,
 };
+use openlogi_core::hid::g600::{
+    ActiveSelection, DpiSettings, DpiStage, DpiState, DpiValue, G600Failure,
+    OnboardProfile as G600Profile, ProfileDpi, StageAfterStore,
+};
 use openlogi_core::hid::{
     BacklightChange, BacklightControls, BacklightDuration, BacklightMode, BacklightState,
     BacklightStatus, Click, DeviceRoute, DisableKeysMask, DisableKeysState, Dpi, DpiCapabilities,
@@ -119,7 +123,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// unreleased version and leave this pin alone (`crates/openlogi-ipc/AGENTS.md`).
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 46);
+    assert_eq!(PROTOCOL_VERSION, 47);
 }
 
 #[test]
@@ -404,6 +408,219 @@ fn sidetone_calls() {
         "3202fb6d04fbc40a28",
     );
     assert_wire(&AgentResponse::SetSidetone(Ok(level)), "320028");
+}
+
+/// Decode `hex` as the transport would.
+fn decode_wire<T: serde::de::DeserializeOwned>(hex: &str) -> Result<T, bincode::Error> {
+    let bytes = (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("valid hex"))
+        .collect::<Vec<u8>>();
+    bincode::DefaultOptions::new().deserialize(&bytes)
+}
+
+fn g600_route() -> DeviceRoute {
+    DeviceRoute::RawHid {
+        vendor_id: 0x046d,
+        product_id: 0xc24a,
+        usage_page: 0xff80,
+        usage_id: 0x0080,
+        identity: "serial:ABC123".into(),
+    }
+}
+
+fn g600_stage(number: u8) -> DpiStage {
+    DpiStage::from_number(number).expect("a G600 stage")
+}
+
+fn g600_profile(number: u8) -> G600Profile {
+    G600Profile::from_number(number).expect("a G600 profile")
+}
+
+/// The G600's onboard DPI: profiles and stages as their 1-based numbers,
+/// DPI as the value.
+#[test]
+fn g600_dpi_calls() {
+    let dpi = |value| Some(DpiValue::new(value).expect("a G600 DPI"));
+    let settings =
+        DpiSettings::new([dpi(400), None, dpi(8200), None], g600_stage(3)).expect("valid settings");
+    let profile = ProfileDpi {
+        stages: [Some(800), Some(1600), None, None],
+        default_stage: Some(g600_stage(2)),
+        shift: None,
+    };
+    let state = DpiState {
+        active: ActiveSelection {
+            profile: g600_profile(2),
+            dpi_stage: g600_stage(1),
+        },
+        profiles: [profile; 3],
+    };
+    assert_wire(&HidppOperation::ReadG600Dpi, "21");
+    assert_wire(&HidppOperation::WriteG600Profile, "22");
+    assert_wire(&HidppOperation::WriteG600Stage, "23");
+    assert_wire(&settings, "01fb90010001fb08200003");
+    assert_wire(
+        &state,
+        "020101fb200301fb4006000001020001fb200301fb4006000001020001fb200301fb40060000010200",
+    );
+    assert_wire(
+        &AgentRequest::ReadG600Dpi {
+            route: g600_route(),
+        },
+        "3a03fb6d04fb4ac2fb80ff800d73657269616c3a414243313233",
+    );
+    assert_wire(
+        &AgentResponse::ReadG600Dpi(Ok(state)),
+        "3a00020101fb200301fb4006000001020001fb200301fb4006000001020001fb200301fb40060000010200",
+    );
+    assert_wire(&StageAfterStore::Keep, "00");
+    assert_wire(&StageAfterStore::Use(g600_stage(4)), "0104");
+    assert_wire(
+        &AgentRequest::SetG600ProfileDpi {
+            route: g600_route(),
+            profile: g600_profile(3),
+            settings,
+            after: StageAfterStore::Keep,
+        },
+        "3b03fb6d04fb4ac2fb80ff800d73657269616c3a4142433132330301fb90010001fb0820000300",
+    );
+    assert_wire(
+        &AgentRequest::SetG600ProfileDpi {
+            route: g600_route(),
+            profile: g600_profile(2),
+            settings,
+            after: StageAfterStore::Use(g600_stage(3)),
+        },
+        "3b03fb6d04fb4ac2fb80ff800d73657269616c3a4142433132330201fb90010001fb082000030103",
+    );
+    assert_wire(
+        &AgentRequest::SetG600ActiveStage {
+            route: g600_route(),
+            stage: g600_stage(4),
+        },
+        "3c03fb6d04fb4ac2fb80ff800d73657269616c3a41424331323304",
+    );
+    assert_wire(&AgentResponse::SetG600ProfileDpi(Ok(())), "3b00");
+    assert_wire(&AgentResponse::SetG600ActiveStage(Ok(())), "3c00");
+    assert_wire(
+        &AgentResponse::SetG600ActiveStage(Err(WriteError::G600(G600Failure::StageDisabled {
+            profile: g600_profile(2),
+            stage: g600_stage(4),
+        }))),
+        "3c0120020204",
+    );
+}
+
+#[test]
+fn g600_failures() {
+    let failures = [
+        (G600Failure::NotG600Route, "00"),
+        (
+            G600Failure::Malformed {
+                report_id: 0xf4,
+                len: 64,
+            },
+            "01f440",
+        ),
+        (
+            G600Failure::StageDisabled {
+                profile: g600_profile(2),
+                stage: g600_stage(4),
+            },
+            "020204",
+        ),
+        (
+            G600Failure::ProfileUnverified {
+                profile: g600_profile(3),
+            },
+            "0303",
+        ),
+        (
+            G600Failure::ProfileMismatch {
+                profile: g600_profile(3),
+            },
+            "0403",
+        ),
+        (
+            G600Failure::StageNotReselected {
+                profile: g600_profile(1),
+                stage: g600_stage(1),
+            },
+            "050101",
+        ),
+        (
+            G600Failure::StageUnverified {
+                stage: g600_stage(2),
+            },
+            "0602",
+        ),
+        (
+            G600Failure::StageMismatch {
+                expected: g600_stage(2),
+                actual: g600_stage(3),
+            },
+            "070203",
+        ),
+        (
+            G600Failure::ProfileNotInUse {
+                profile: g600_profile(1),
+                active: g600_profile(2),
+            },
+            "080102",
+        ),
+    ];
+    for (failure, golden) in failures {
+        assert_wire(&failure, golden);
+    }
+    assert_wire(&WriteError::G600(G600Failure::NotG600Route), "2000");
+}
+
+/// A value the G600 types refuse to construct is refused on the wire too.
+#[test]
+fn g600_values_are_validated_on_decode() {
+    // Profile 0 and 4, stage 5, an odd DPI, and one past the maximum.
+    assert!(decode_wire::<G600Profile>("00").is_err(), "profile 0");
+    assert!(decode_wire::<G600Profile>("04").is_err(), "profile 4");
+    assert!(decode_wire::<DpiStage>("05").is_err(), "stage 5");
+    assert!(
+        decode_wire::<DpiValue>(&wire_bytes(&825_u16)).is_err(),
+        "825 DPI"
+    );
+    assert!(
+        decode_wire::<DpiValue>(&wire_bytes(&8250_u16)).is_err(),
+        "8250 DPI"
+    );
+    // Settings whose default stage is off, and settings with no stage on.
+    let unchecked = |stages: [Option<u16>; 4], default: u8| wire_bytes(&(stages, default));
+    assert!(
+        decode_wire::<DpiSettings>(&unchecked([Some(400), None, None, None], 2)).is_err(),
+        "a disabled default stage"
+    );
+    assert!(
+        decode_wire::<DpiSettings>(&unchecked([None; 4], 1)).is_err(),
+        "no enabled stage"
+    );
+    assert_eq!(
+        decode_wire::<DpiSettings>(&unchecked([Some(400), None, None, None], 1))
+            .expect("valid settings")
+            .dpi(g600_stage(1))
+            .map(DpiValue::get),
+        Some(400)
+    );
+    // A failure naming a profile the mouse does not have.
+    assert!(
+        decode_wire::<G600Failure>("0400").is_err(),
+        "a profile mismatch in profile 0"
+    );
+    assert!(
+        decode_wire::<StageAfterStore>("0105").is_err(),
+        "stage 5 to use after a write"
+    );
+    assert!(
+        decode_wire::<StageAfterStore>("02").is_err(),
+        "no third way to pick the stage after a write"
+    );
 }
 
 /// The overlay long-polls the backlight indicator by generation, like

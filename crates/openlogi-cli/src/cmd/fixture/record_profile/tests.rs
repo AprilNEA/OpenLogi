@@ -7,6 +7,10 @@ use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::ActionRingSlot;
 use openlogi_core::config::Lighting;
 use openlogi_core::device::DeviceInventory;
+use openlogi_core::hid::g600::{
+    DpiSettings as G600DpiSettings, DpiStage as G600DpiStage, DpiState as G600DpiState,
+    OnboardProfile as G600Profile, StageAfterStore as G600StageAfterStore,
+};
 use openlogi_core::hid::{
     BacklightChange, BacklightControls, BacklightMode, BacklightState, BacklightStatus,
     DisableKeysMask, DisableKeysState, Dpi, DpiInfo, EasySwitchHosts, EasySwitchSlot, FnLockState,
@@ -547,6 +551,33 @@ impl Agent for TestAgent {
         _desired: DisableKeysMask,
     ) -> Result<DisableKeysState, WriteError> {
         unreachable!("profile capture must never write Disable Keys")
+    }
+    async fn read_g600_dpi(
+        self,
+        _: TarpcContext,
+        _route: DeviceRoute,
+    ) -> Result<G600DpiState, WriteError> {
+        unreachable!("profile capture does not record G600 onboard DPI")
+    }
+
+    async fn set_g600_profile_dpi(
+        self,
+        _: TarpcContext,
+        _route: DeviceRoute,
+        _profile: G600Profile,
+        _settings: G600DpiSettings,
+        _after: G600StageAfterStore,
+    ) -> Result<(), WriteError> {
+        unreachable!("profile capture must never write a G600 profile")
+    }
+
+    async fn set_g600_active_stage(
+        self,
+        _: TarpcContext,
+        _route: DeviceRoute,
+        _stage: G600DpiStage,
+    ) -> Result<(), WriteError> {
+        unreachable!("profile capture must never select a G600 DPI stage")
     }
 }
 
