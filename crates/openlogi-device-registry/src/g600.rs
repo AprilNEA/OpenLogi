@@ -71,9 +71,9 @@ pub const REPORT_TIMEOUT: Duration = Duration::from_secs(2);
 pub const PROFILE_COMMIT_TIME: Duration = Duration::from_secs(1);
 
 /// The most feature reports one profile write moves: the active selection
-/// and the profile read, the profile written and read back, then a stage
-/// selected and read back.
-const PROFILE_WRITE_REPORTS: u32 = 6;
+/// and the profile read, the profile written and read back, the active
+/// selection read again, then a stage selected and read back.
+const PROFILE_WRITE_REPORTS: u32 = 7;
 
 /// The longest one profile write takes while every report it moves stays
 /// within [`REPORT_TIMEOUT`]: those reports plus the commit wait.

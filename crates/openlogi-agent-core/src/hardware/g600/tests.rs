@@ -348,6 +348,7 @@ async fn a_named_stage_is_selected_before_a_queued_request_reaches_the_mouse() {
             .collect::<Vec<_>>(),
         [
             (0xf3, false),
+            (0xf0, false),
             (0xf0, true),
             (0xf0, false),
             (0xf0, false),
@@ -355,7 +356,7 @@ async fn a_named_stage_is_selected_before_a_queued_request_reaches_the_mouse() {
             (0xf4, false),
             (0xf5, false),
         ],
-        "read-back, one stage selection and its check, then the queued read"
+        "read-back, the active selection again, one stage selection and its check, then the queued read"
     );
     assert_eq!(state.active.dpi_stage, stage(2));
 }

@@ -162,6 +162,35 @@ pub enum G600WriteError {
         /// The stage the mouse reported afterwards.
         actual: DpiStage,
     },
+    /// The stage selection was sent, but the mouse reports another profile
+    /// than `expected`, the one it was chosen for: its own profile button
+    /// moved it, so the selection landed on whichever profile was in use.
+    #[error(
+        "the G600 switched from profile {} to profile {} while a DPI stage was being selected",
+        expected.number(),
+        active.number()
+    )]
+    ProfileSwitched {
+        /// The profile the stage was meant for.
+        expected: OnboardProfile,
+        /// The profile the mouse is using now.
+        active: OnboardProfile,
+    },
+    /// The mouse left `profile` for `active`, by its own profile button,
+    /// while it stored `profile`, so no stage selection was sent: one
+    /// carries no profile and would have landed on `active`. Only the cause
+    /// of [`Self::StageNotReselected`].
+    #[error(
+        "the G600 left profile {} for profile {} while storing it, so no DPI stage was selected",
+        profile.number(),
+        active.number()
+    )]
+    ProfileLeft {
+        /// The profile that was stored.
+        profile: OnboardProfile,
+        /// The profile the mouse is using now.
+        active: OnboardProfile,
+    },
 }
 
 impl From<StageAfterStoreError> for G600WriteError {
@@ -232,6 +261,11 @@ impl From<G600WriteError> for WriteError {
             G600WriteError::StageMismatch { expected, actual } => {
                 G600Failure::StageMismatch { expected, actual }.into()
             }
+            G600WriteError::ProfileSwitched { expected, active }
+            | G600WriteError::ProfileLeft {
+                profile: expected,
+                active,
+            } => G600Failure::ProfileSwitched { expected, active }.into(),
         }
     }
 }
@@ -272,7 +306,7 @@ pub async fn set_active_stage(
     {
         return Err(G600WriteError::StageDisabled { profile, stage });
     }
-    apply_active_stage(backend, &node, stage).await
+    apply_active_stage(backend, &node, profile, stage).await
 }
 
 /// Store `settings` in onboard `profile` of the G600 on `route`, then put
@@ -289,6 +323,17 @@ pub async fn set_active_stage(
 /// A stage `after` names that the mouse cannot use once `settings` are
 /// stored, or one named for a profile not in use, is refused before anything
 /// is written.
+///
+/// The profile button works while the mouse stores a profile, so after a
+/// write the stage is decided again from the selection the mouse reports
+/// then. A mouse that has left `profile` by then gets no stage selection:
+/// under [`StageAfterStore::Keep`] the call succeeds, since the mouse loads
+/// the stored default stage when it returns to `profile`; a named stage is
+/// [`G600WriteError::StageNotReselected`] caused by
+/// [`G600WriteError::ProfileLeft`]. A mouse that leaves `profile` after that
+/// check, before the stage selection lands, takes the selection on its new
+/// profile: [`G600WriteError::StageNotReselected`] caused by
+/// [`G600WriteError::ProfileSwitched`].
 ///
 /// Nothing reaches the mouse until [`PROFILE_COMMIT_TIME`] after the profile
 /// report went out, even when its write failed or timed out: the report may
@@ -307,7 +352,7 @@ pub async fn set_profile_dpi(
     let current = read_report::<PROFILE_REPORT_LEN>(backend, &node, report_id).await?;
     let patched = patch_profile_dpi(&current, &settings);
     let rewrite = patched != current;
-    if rewrite {
+    let stage = if rewrite {
         let written = write_report(backend, &node, &patched).await;
         tokio::time::sleep(PROFILE_COMMIT_TIME).await;
         written?;
@@ -317,9 +362,21 @@ pub async fn set_profile_dpi(
         if stored != patched {
             return Err(G600WriteError::ProfileMismatch { profile });
         }
-    }
-    if let Some(stage) = stage.filter(|stage| rewrite || *stage != active.dpi_stage) {
-        apply_active_stage(backend, &node, stage)
+        match stage {
+            Some(stage) => stage_after_commit(backend, &node, profile, &settings, after)
+                .await
+                .map_err(|source| G600WriteError::StageNotReselected {
+                    profile,
+                    stage,
+                    source: Box::new(source),
+                })?,
+            None => None,
+        }
+    } else {
+        stage.filter(|stage| *stage != active.dpi_stage)
+    };
+    if let Some(stage) = stage {
+        apply_active_stage(backend, &node, profile, stage)
             .await
             .map_err(|source| G600WriteError::StageNotReselected {
                 profile,
@@ -328,6 +385,27 @@ pub async fn set_profile_dpi(
             })?;
     }
     Ok(())
+}
+
+/// The stage to select once `settings` are stored in `profile`, decided
+/// again from the selection the mouse reports after the commit wait: the
+/// profile button may have moved it to another profile meanwhile, and a
+/// stage selection carries no profile.
+async fn stage_after_commit(
+    backend: &dyn HidBackend,
+    node: &NodeInfo,
+    profile: OnboardProfile,
+    settings: &DpiSettings,
+    after: StageAfterStore,
+) -> Result<Option<DpiStage>, G600WriteError> {
+    let now = read_active(backend, node).await?;
+    now.stage_after_store(profile, settings, after)
+        .map_err(|error| match error {
+            StageAfterStoreError::NotInUse { active, .. } => {
+                G600WriteError::ProfileLeft { profile, active }
+            }
+            error @ StageAfterStoreError::StageDisabled { .. } => error.into(),
+        })
 }
 
 /// The node of the G600 vendor collection `route` addresses.
@@ -353,16 +431,25 @@ async fn g600_node(
         .ok_or(WriteError::DeviceNotFound)?)
 }
 
+/// Select `stage` and confirm by reading the selection back that the mouse
+/// is on it in `profile`, the profile it was chosen for.
 async fn apply_active_stage(
     backend: &dyn HidBackend,
     node: &NodeInfo,
+    profile: OnboardProfile,
     stage: DpiStage,
 ) -> Result<(), G600WriteError> {
     write_report(backend, node, &encode_set_active_stage(stage)).await?;
-    let actual = read_active(backend, node)
+    let now = read_active(backend, node)
         .await
-        .map_err(|source| G600WriteError::StageUnverified { stage, source })?
-        .dpi_stage;
+        .map_err(|source| G600WriteError::StageUnverified { stage, source })?;
+    if now.profile != profile {
+        return Err(G600WriteError::ProfileSwitched {
+            expected: profile,
+            active: now.profile,
+        });
+    }
+    let actual = now.dpi_stage;
     if actual != stage {
         return Err(G600WriteError::StageMismatch {
             expected: stage,

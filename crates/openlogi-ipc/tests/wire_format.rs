@@ -569,6 +569,13 @@ fn g600_failures() {
             },
             "080102",
         ),
+        (
+            G600Failure::ProfileSwitched {
+                expected: g600_profile(1),
+                active: g600_profile(2),
+            },
+            "090102",
+        ),
     ];
     for (failure, golden) in failures {
         assert_wire(&failure, golden);

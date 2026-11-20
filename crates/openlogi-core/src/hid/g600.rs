@@ -128,4 +128,19 @@ pub enum G600Failure {
         /// The profile the mouse is using.
         active: OnboardProfile,
     },
+    /// The mouse moved to another profile, by its own profile button, while
+    /// a DPI stage was being selected in `expected`. A selection already
+    /// sent landed on the profile now in use; one not yet sent was not sent
+    /// at all.
+    #[error(
+        "the G600 switched from profile {} to profile {} while a DPI stage was being selected",
+        expected.number(),
+        active.number()
+    )]
+    ProfileSwitched {
+        /// The profile the stage was meant for.
+        expected: OnboardProfile,
+        /// The profile the mouse is using now.
+        active: OnboardProfile,
+    },
 }

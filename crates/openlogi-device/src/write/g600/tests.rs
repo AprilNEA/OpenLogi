@@ -31,6 +31,18 @@ enum OnWrite {
     IgnoreStage,
     /// Accept it, then fail every read of that report.
     Unreadable,
+    /// Apply it, then move the mouse to profile `to` the way its profile
+    /// button does.
+    SwitchProfile {
+        /// The 1-based profile the mouse moves to.
+        to: u8,
+    },
+    /// Apply it, and on a stage selection move the mouse to profile `to`
+    /// first, so the selection lands there.
+    SwitchProfileOnStage {
+        /// The 1-based profile the mouse moves to.
+        to: u8,
+    },
     /// Fail it.
     Fail,
     /// Never complete it.
@@ -171,13 +183,21 @@ impl HidBackend for FeatureBackend {
             OnWrite::Ignore => return Ok(()),
             OnWrite::IgnoreStage if report[0] == 0xf0 => return Ok(()),
             OnWrite::Unreadable => Answer::Fails,
-            OnWrite::Apply if report[0] == 0xf0 => {
+            OnWrite::SwitchProfileOnStage { to } if report[0] == 0xf0 => {
+                let mut active = self.report(0xf0);
+                active[1] = ((to - 1) << 4) | (report[1] & 0b110);
+                Answer::Bytes(active)
+            }
+            OnWrite::Apply | OnWrite::SwitchProfile { .. } if report[0] == 0xf0 => {
                 // The command keeps the profile and takes the stage bits.
                 let mut active = self.report(0xf0);
                 active[1] = (active[1] & 0xf0) | (report[1] & 0b110);
                 Answer::Bytes(active)
             }
-            OnWrite::Apply | OnWrite::IgnoreStage => Answer::Bytes(report.to_vec()),
+            OnWrite::Apply
+            | OnWrite::IgnoreStage
+            | OnWrite::SwitchProfile { .. }
+            | OnWrite::SwitchProfileOnStage { .. } => Answer::Bytes(report.to_vec()),
             OnWrite::Corrupt => {
                 let mut stored = report.to_vec();
                 if let Some(last) = stored.last_mut() {
@@ -190,6 +210,14 @@ impl HidBackend for FeatureBackend {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(report[0], stored);
+        if let OnWrite::SwitchProfile { to } = self.on_write {
+            let mut active = self.report(0xf0);
+            active[1] = ((to - 1) << 4) | (active[1] & 0x0f);
+            self.answers
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(0xf0, Answer::Bytes(active));
+        }
         Ok(())
     }
 
@@ -637,12 +665,13 @@ async fn a_named_stage_is_selected_once_the_stored_profile_reads_back() {
     .await
     .expect("the profile is stored and the named stage selected");
 
-    // Read active, read profile, write it, read it back, select stage 4 and
-    // read the active stage back: one stage selection, no other.
-    assert_eq!(backend.reads(), [0xf0, 0xf4, 0xf4, 0xf0]);
+    // Read active, read profile, write it, read it back, read active again,
+    // select stage 4 and read the active stage back: one stage selection, no
+    // other.
+    assert_eq!(backend.reads(), [0xf0, 0xf4, 0xf4, 0xf0, 0xf0]);
     assert_eq!(backend.writes(), [patched, vec![0xf0, 0x46, 0, 0]]);
     let requests = backend.requests();
-    assert_eq!(requests.len(), 6, "{requests:?}");
+    assert_eq!(requests.len(), 7, "{requests:?}");
     assert!(
         requests[3] - requests[2] >= super::PROFILE_COMMIT_TIME,
         "the read-back came {:?} after the profile write",
@@ -820,6 +849,142 @@ async fn a_failed_reselect_after_a_stored_profile_says_the_profile_is_stored() {
         "{source:?}"
     );
     assert!(error.to_string().contains("is stored"), "{error}");
+}
+
+/// The answers with the mouse on stage 3 of profile 1.
+fn answers_on_profile_1() -> HashMap<u8, Answer> {
+    let mut answers = answers();
+    answers.insert(0xf0, Answer::Bytes(vec![0xf0, 0x04, 0, 0]));
+    answers
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_profile_left_while_it_is_stored_gets_no_stage_selection() {
+    let backend = FeatureBackend::new(
+        vec![g600_node()],
+        answers_on_profile_1(),
+        OnWrite::SwitchProfile { to: 2 },
+    );
+
+    set_profile_dpi(
+        &backend,
+        &route_to(&g600_node()),
+        profile_number(1),
+        settings([Some(dpi(800)), Some(dpi(1600)), None, None], 1),
+        StageAfterStore::Keep,
+    )
+    .await
+    .expect("the profile is stored; the mouse loads its default on return");
+
+    let writes = backend.writes();
+    assert_eq!(writes.len(), 1, "only the profile is written: {writes:?}");
+    assert_eq!(writes[0][0], 0xf3);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_named_stage_is_not_selected_once_the_mouse_leaves_the_profile() {
+    let backend = FeatureBackend::new(
+        vec![g600_node()],
+        answers_on_profile_1(),
+        OnWrite::SwitchProfile { to: 2 },
+    );
+
+    let error = set_profile_dpi(
+        &backend,
+        &route_to(&g600_node()),
+        profile_number(1),
+        settings([Some(dpi(800)), Some(dpi(1600)), None, None], 1),
+        StageAfterStore::Use(stage(2)),
+    )
+    .await
+    .expect_err("the mouse left profile 1 while it stored it");
+
+    let G600WriteError::StageNotReselected {
+        profile,
+        stage: named,
+        source,
+    } = &error
+    else {
+        panic!("expected StageNotReselected, got {error:?}");
+    };
+    assert_eq!((*profile, *named), (profile_number(1), stage(2)));
+    assert!(
+        matches!(
+            **source,
+            G600WriteError::ProfileLeft { profile, active }
+                if profile == profile_number(1) && active == profile_number(2)
+        ),
+        "{source:?}"
+    );
+    assert!(
+        source.to_string().contains("no DPI stage was selected"),
+        "{source}"
+    );
+    let writes = backend.writes();
+    assert_eq!(writes.len(), 1, "no stage selection follows: {writes:?}");
+    assert_eq!(writes[0][0], 0xf3);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_stage_selection_that_lands_on_another_profile_says_it_was_sent() {
+    let backend = FeatureBackend::new(
+        vec![g600_node()],
+        answers_on_profile_1(),
+        OnWrite::SwitchProfileOnStage { to: 2 },
+    );
+
+    let error = set_profile_dpi(
+        &backend,
+        &route_to(&g600_node()),
+        profile_number(1),
+        settings([Some(dpi(800)), Some(dpi(1600)), None, None], 1),
+        StageAfterStore::Use(stage(2)),
+    )
+    .await
+    .expect_err("the mouse moved to profile 2 as the stage was selected");
+
+    let G600WriteError::StageNotReselected {
+        profile,
+        stage: named,
+        source,
+    } = &error
+    else {
+        panic!("expected StageNotReselected, got {error:?}");
+    };
+    assert_eq!((*profile, *named), (profile_number(1), stage(2)));
+    assert!(
+        matches!(
+            **source,
+            G600WriteError::ProfileSwitched { expected, active }
+                if expected == profile_number(1) && active == profile_number(2)
+        ),
+        "{source:?}"
+    );
+    let writes = backend.writes();
+    assert_eq!(writes.len(), 2, "the stage selection went out: {writes:?}");
+    assert_eq!((writes[0][0], writes[1][0]), (0xf3, 0xf0));
+}
+
+#[tokio::test]
+async fn a_stage_that_lands_after_a_profile_switch_is_reported() {
+    let backend = FeatureBackend::new(
+        vec![g600_node()],
+        answers(),
+        OnWrite::SwitchProfile { to: 3 },
+    );
+
+    let error = set_active_stage(&backend, &route_to(&g600_node()), stage(1))
+        .await
+        .expect_err("the mouse moved to profile 3");
+
+    assert!(
+        matches!(
+            error,
+            G600WriteError::ProfileSwitched { expected, active }
+                if expected == profile_number(2) && active == profile_number(3)
+        ),
+        "{error:?}"
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -1068,6 +1233,26 @@ fn g600_failures_cross_ipc_with_their_meaning() {
         WriteError::G600(G600Failure::ProfileNotInUse {
             profile: profile_number(1),
             active: profile_number(2)
+        })
+    );
+    assert_eq!(
+        WriteError::from(G600WriteError::ProfileSwitched {
+            expected: profile_number(2),
+            active: profile_number(3),
+        }),
+        WriteError::G600(G600Failure::ProfileSwitched {
+            expected: profile_number(2),
+            active: profile_number(3)
+        })
+    );
+    assert_eq!(
+        WriteError::from(G600WriteError::ProfileLeft {
+            profile: profile_number(1),
+            active: profile_number(3),
+        }),
+        WriteError::G600(G600Failure::ProfileSwitched {
+            expected: profile_number(1),
+            active: profile_number(3)
         })
     );
 }

@@ -205,7 +205,9 @@ pub use succession::Identity;
 ///      WriteG600Stage}` appended for its failures. A profile write carries
 ///      the stage the mouse uses after it (`StageAfterStore`), selected in
 ///      the same operation; `G600Failure::ProfileNotInUse` refuses one
-///      named for a profile the mouse is not using.
+///      named for a profile the mouse is not using, and
+///      `G600Failure::ProfileSwitched` reports the mouse leaving the
+///      profile a stage was selected for.
 pub const PROTOCOL_VERSION: u32 = 47;
 
 /// Environment variable through which the agent hands a supervised helper the
@@ -1301,6 +1303,8 @@ pub trait Agent {
     /// confirm the switch. A stage that profile has disabled is refused with
     /// [`openlogi_core::hid::g600::G600Failure::StageDisabled`] before
     /// anything is written.
+    /// [`openlogi_core::hid::g600::G600Failure::ProfileSwitched`] reports a
+    /// profile change the mouse made before the switch was confirmed.
     async fn set_g600_active_stage(
         route: DeviceRoute,
         stage: G600DpiStage,
