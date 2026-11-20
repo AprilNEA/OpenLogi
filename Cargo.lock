@@ -6184,6 +6184,9 @@ dependencies = [
 [[package]]
 name = "openlogi-device-registry"
 version = "0.9.0"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "openlogi-fixture"
