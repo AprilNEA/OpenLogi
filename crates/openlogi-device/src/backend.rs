@@ -191,6 +191,30 @@ pub trait HidBackend: Send + Sync {
     /// Open `node` for raw output reports.
     async fn open_raw_writer(&self, node: &NodeInfo) -> Result<Box<dyn RawWriter>, BackendError>;
 
+    /// Read one feature report from `node` into `report`, returning how many
+    /// bytes it filled.
+    ///
+    /// `report[0]` names the report id on entry, and the bytes read back start
+    /// with that id. Size `report` to the report's own length: a backend may
+    /// fill as much of a larger buffer as the collection's longest feature
+    /// report.
+    async fn read_feature_report(
+        &self,
+        node: &NodeInfo,
+        report: &mut [u8],
+    ) -> Result<usize, BackendError>;
+
+    /// Write one feature report to `node`.
+    ///
+    /// `report[0]` is the report id and the rest is the report's payload, so
+    /// `report` is the report's full length including that byte. A device
+    /// that uses no report ids takes `0` there.
+    async fn write_feature_report(
+        &self,
+        node: &NodeInfo,
+        report: &[u8],
+    ) -> Result<(), BackendError>;
+
     /// Subscribe to node connect/disconnect events.
     fn watch(&self) -> Result<HotplugStream, BackendError>;
 }

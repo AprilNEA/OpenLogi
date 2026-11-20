@@ -166,6 +166,26 @@ impl HidBackend for ScriptedBackend {
         ))
     }
 
+    async fn read_feature_report(
+        &self,
+        _node: &NodeInfo,
+        _report: &mut [u8],
+    ) -> Result<usize, BackendError> {
+        Err(BackendError::Backend(
+            "scripted backend has no feature reports".into(),
+        ))
+    }
+
+    async fn write_feature_report(
+        &self,
+        _node: &NodeInfo,
+        _report: &[u8],
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Backend(
+            "scripted backend has no feature reports".into(),
+        ))
+    }
+
     fn watch(&self) -> Result<HotplugStream, BackendError> {
         Ok(Box::new(futures_lite::stream::empty()))
     }

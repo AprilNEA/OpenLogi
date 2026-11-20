@@ -214,6 +214,26 @@ impl crate::backend::HidBackend for SlowOpenBackend {
         ))
     }
 
+    async fn read_feature_report(
+        &self,
+        _node: &NodeInfo,
+        _report: &mut [u8],
+    ) -> Result<usize, crate::backend::BackendError> {
+        Err(crate::backend::BackendError::Backend(
+            "slow-open test backend has no feature reports".into(),
+        ))
+    }
+
+    async fn write_feature_report(
+        &self,
+        _node: &NodeInfo,
+        _report: &[u8],
+    ) -> Result<(), crate::backend::BackendError> {
+        Err(crate::backend::BackendError::Backend(
+            "slow-open test backend has no feature reports".into(),
+        ))
+    }
+
     fn watch(&self) -> Result<crate::backend::HotplugStream, crate::backend::BackendError> {
         Ok(Box::new(futures_lite::stream::empty()))
     }
@@ -311,6 +331,26 @@ impl crate::backend::HidBackend for DirectChannelBackend {
     ) -> Result<Box<dyn crate::backend::RawWriter>, crate::backend::BackendError> {
         Err(crate::backend::BackendError::Backend(
             "direct-channel test backend has no raw writer".into(),
+        ))
+    }
+
+    async fn read_feature_report(
+        &self,
+        _node: &NodeInfo,
+        _report: &mut [u8],
+    ) -> Result<usize, crate::backend::BackendError> {
+        Err(crate::backend::BackendError::Backend(
+            "direct-channel test backend has no feature reports".into(),
+        ))
+    }
+
+    async fn write_feature_report(
+        &self,
+        _node: &NodeInfo,
+        _report: &[u8],
+    ) -> Result<(), crate::backend::BackendError> {
+        Err(crate::backend::BackendError::Backend(
+            "direct-channel test backend has no feature reports".into(),
         ))
     }
 

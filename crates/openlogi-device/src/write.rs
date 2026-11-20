@@ -29,6 +29,7 @@ mod easy_switch;
 mod error;
 mod fn_lock;
 mod force_sensing;
+mod g600;
 mod haptic;
 mod hires_wheel;
 mod key_display;
@@ -66,6 +67,15 @@ pub use easy_switch::{
 pub use error::{HidppFeatureErrorKind, HidppOperation, WriteError};
 pub use fn_lock::{get_fn_lock, get_fn_lock_on, set_fn_lock, set_fn_lock_on};
 pub use force_sensing::{get_force_sensing_on, set_force_sensing_on};
+pub use g600::{
+    ActiveSelection as G600ActiveSelection, DPI_STAGE_COUNT as G600_DPI_STAGE_COUNT,
+    DpiSettings as G600DpiSettings, DpiSettingsError as G600DpiSettingsError,
+    DpiStage as G600DpiStage, DpiState as G600Dpi, DpiValue as G600DpiValue, G600_DRIVER_ID,
+    G600ReadError, G600WriteError, OnboardProfile as G600Profile,
+    PROFILE_COUNT as G600_PROFILE_COUNT, ProfileDpi as G600ProfileDpi,
+    StageAfterStore as G600StageAfterStore, read_dpi as read_g600_dpi,
+    set_active_stage as set_g600_active_stage, set_profile_dpi as set_g600_profile_dpi,
+};
 pub use haptic::{
     HapticRestore, HapticRestoreOutcome, ensure_haptics_armed_on, play_haptic, play_haptic_on,
     restore_haptics_on,
