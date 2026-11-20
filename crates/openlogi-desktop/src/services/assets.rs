@@ -168,6 +168,7 @@ fn main_view(path: PathBuf, side: Option<&SideView>, front: Option<&PathBuf>) ->
 fn resolve_side_view(
     dir: &Path,
     entry: &DeviceEntry,
+    depot: &str,
     manifest: Option<&DepotManifest>,
     extended_model_id: u8,
     metadata: &Metadata,
@@ -175,9 +176,13 @@ fn resolve_side_view(
     metadata
         .image(SIDE_VIEW_KEY)
         .filter(|image| !image.assignments.is_empty())?;
+    // Same candidate bases the other manifest lookups use: the model ids
+    // alone don't reach depots keyed on their depot name (g502x_plus ships
+    // no `c095`/`4099` manifest entry, so its side render would never
+    // resolve).
     let variant = manifest.and_then(|m| {
-        entry.model_id_candidates().find_map(|base| {
-            m.resource_for_variant(base, extended_model_id, SIDE_VIEW_KEY)
+        find_variant_in_manifest(m, entry, depot, extended_model_id, |m, base, ext| {
+            m.resource_for_variant(base, ext, SIDE_VIEW_KEY)
                 .map(str::to_string)
         })
     });
@@ -429,7 +434,8 @@ impl AssetResolver {
                 debug!(depot, root = %root.display(), "depot ships no hotspot metadata — rendering image without hotspots");
                 Metadata::default()
             };
-            let side_view = resolve_side_view(&dir, entry, manifest.as_ref(), ext, &metadata);
+            let side_view =
+                resolve_side_view(&dir, entry, depot, manifest.as_ref(), ext, &metadata);
             let image_path = main_view(image_path, side_view.as_ref(), hero_image_path.as_ref());
             let (png_width, png_height) = match read_image_dimensions(&image_path) {
                 Ok(dims) => dims,
