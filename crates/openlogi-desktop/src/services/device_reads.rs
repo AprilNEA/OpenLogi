@@ -80,8 +80,11 @@ pub(crate) struct DeviceReads {
     pointer_speed: BTreeMap<DeviceKey, DeviceRead<PointerSpeed>>,
     sidetone: BTreeMap<DeviceKey, DeviceRead<SidetoneLevel>>,
     g600_dpi: BTreeMap<DeviceKey, DeviceRead<G600DpiState>>,
-    /// The G600s read again after a write, until that reading settles.
-    g600_confirming: BTreeSet<DeviceKey>,
+    /// The flight of each G600 query reading the mouse again after a write
+    /// that landed, until that reading settles. It goes with its query: a
+    /// removed or replaced query ends the confirmation, and another flight's
+    /// reading never completes it.
+    g600_confirming: BTreeMap<DeviceKey, u64>,
     force_sensing: BTreeMap<DeviceKey, DeviceRead<ForceSensingInfo>>,
     backlight: BTreeMap<DeviceKey, DeviceRead<BacklightState>>,
     /// The backlight changes sent per keyboard, for the read on the route
@@ -894,9 +897,6 @@ impl DeviceReads {
             let reads = state.device_reads_mut();
             let changed = reads.update_g600_dpi(&observed_key, flight, load);
             let confirmed = settled && reads.g600_confirmed(&observed_key, flight);
-            if confirmed {
-                state.g600_dpi_confirmed(&observed_key);
-            }
             if changed || confirmed {
                 cx.emit(StateEvent::G600DpiChanged(observed_key.clone()));
             }
@@ -913,25 +913,46 @@ impl DeviceReads {
         );
     }
 
+    /// Read `key`'s onboard DPI again after a write that landed, keeping the
+    /// last reading on screen while the mouse answers, and report it
+    /// [`Self::g600_confirming()`] until that reading settles.
+    pub(crate) fn confirm_g600_dpi(&mut self, key: &DeviceKey) {
+        let Some(flight) = self.g600_dpi.get(key).map(|read| read.flight) else {
+            return;
+        };
+        if self.reread_g600_dpi(key) {
+            self.g600_confirming.insert(key.clone(), flight);
+        }
+    }
+
     /// Read `key`'s onboard DPI again after a write, keeping the last
     /// reading on screen while the mouse answers. A read already in flight
     /// may predate the write, so it is discarded rather than waited for.
-    /// Returns whether a read started; [`AppState::g600_dpi_confirmed`]
-    /// follows once it settles.
-    pub(crate) fn confirm_g600_dpi(&mut self, key: &DeviceKey) -> bool {
+    /// Returns whether a read started.
+    pub(crate) fn reread_g600_dpi(&mut self, key: &DeviceKey) -> bool {
         let Some((client, _)) = self.cache() else {
             return false;
         };
         if !self.g600_dpi.contains_key(key) {
             return false;
         }
-        self.g600_confirming.insert(key.clone());
         client.invalidate(query_key(G600_DPI, key));
         true
     }
 
+    /// Whether `key`'s G600 is being read again after a write that landed.
+    #[must_use]
+    pub(crate) fn g600_confirming(&self, key: &DeviceKey) -> bool {
+        self.g600_confirming.get(key).is_some_and(|flight| {
+            self.g600_dpi
+                .get(key)
+                .is_some_and(|read| read.flight == *flight)
+        })
+    }
+
     /// Re-read `key`'s onboard DPI, keeping the last reading on screen while
-    /// the mouse answers: when it comes back online.
+    /// the mouse answers: when it comes back online, or when its own buttons
+    /// may have switched its stage or profile.
     pub(crate) fn refresh_g600_dpi(&mut self, key: &DeviceKey) {
         if let Some(read) = self.g600_dpi.get_mut(key) {
             read.query.revalidate();
@@ -1613,6 +1634,7 @@ impl DeviceReads {
     }
 
     fn remove_g600_dpi(&mut self, key: &DeviceKey) {
+        self.g600_confirming.remove(key);
         if let Some(read) = self.g600_dpi.remove(key) {
             drop(read);
             self.clear::<G600DpiState>(G600_DPI, key);
@@ -1770,12 +1792,18 @@ impl DeviceReads {
     }
 
     /// Whether a settled reading of `key` on `flight` ends a confirmation
-    /// [`Self::confirm_g600_dpi`] started, which it then no longer waits for.
+    /// [`Self::confirm_g600_dpi`] started on that flight, which it then no
+    /// longer waits for.
     fn g600_confirmed(&mut self, key: &DeviceKey, flight: u64) -> bool {
-        self.g600_dpi
-            .get(key)
-            .is_some_and(|read| read.flight == flight)
-            && self.g600_confirming.remove(key)
+        let confirmed = self.g600_confirming.get(key) == Some(&flight)
+            && self
+                .g600_dpi
+                .get(key)
+                .is_some_and(|read| read.flight == flight);
+        if confirmed {
+            self.g600_confirming.remove(key);
+        }
+        confirmed
     }
 
     fn update_g600_dpi(&mut self, key: &DeviceKey, flight: u64, load: G600DpiLoad) -> bool {

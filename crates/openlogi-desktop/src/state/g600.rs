@@ -9,6 +9,12 @@
 //! mouse is read again once it answers, whether it landed or not. A write
 //! that landed keeps the mouse busy until that reading is in, so the card
 //! never offers the reading from before the write as current.
+//!
+//! The mouse's own buttons switch its stage and profile without telling the
+//! agent, so the card reads it again every [`G600_RECONCILE_INTERVAL`] while
+//! it shows it, through [`AppState::reconcile_g600_dpi`].
+
+use std::time::Duration;
 
 use openlogi_core::hid::g600::{
     DpiSettings as G600DpiSettings, DpiStage as G600DpiStage, G600_DRIVER_ID,
@@ -23,9 +29,17 @@ use super::events::StateEvents;
 use super::load::G600DpiLoad;
 use super::{AppState, StateEvent};
 
+/// How long the card shows a G600's reading before it reads the mouse again
+/// to catch a stage or profile its own buttons switched.
+pub(crate) const G600_RECONCILE_INTERVAL: Duration = Duration::from_secs(2);
+
 /// The G600 write the GUI sent last, while it is in flight, while the mouse
 /// is read again after it landed, or after it failed. A write that landed
 /// leaves no status once that reading is in.
+///
+/// [`Self::Confirming`] is never stored: the device-read service owns the
+/// reading after a write, and [`AppState::current_g600_write`] reports it
+/// for as long as that reading is on its way, so it ends with that query.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum G600WriteStatus {
     /// DPI stages are being stored in this profile, and the mouse put on
@@ -37,10 +51,13 @@ pub enum G600WriteStatus {
     /// The write landed, and the mouse is being read again to show what it
     /// now holds.
     Confirming,
-    /// Storing DPI stages in this profile did not land, or could not be
-    /// confirmed.
+    /// Storing DPI stages in this profile, or selecting the stage after
+    /// them, failed or could not be confirmed. The error says how far it
+    /// got: a profile may be stored even though the stage after it failed.
     ProfileFailed(G600Profile, WriteError),
-    /// Switching the active stage did not land, or could not be confirmed.
+    /// Switching the active stage failed or could not be confirmed. The
+    /// error says how far it got: a selection may have landed on another
+    /// profile than the one it was meant for.
     StageFailed(WriteError),
 }
 
@@ -83,9 +100,9 @@ impl AppState {
 
     /// The write the active G600 is waiting on, or why its last one failed.
     #[must_use]
-    pub fn current_g600_write(&self) -> Option<&G600WriteStatus> {
+    pub fn current_g600_write(&self) -> Option<G600WriteStatus> {
         let key = self.current_record().map(DeviceRecord::device_key)?;
-        self.pointer.g600_writes.get(&key)
+        self.g600_write(&key)
     }
 
     /// Store `settings` in onboard `profile` of the active G600 through the
@@ -139,22 +156,25 @@ impl AppState {
     /// The agent's answer to a G600 write: read the mouse again, since only
     /// it knows what it stored, and stay busy until that reading is in when
     /// the write landed, or keep the error against what was written when it
-    /// failed.
+    /// failed. A failure is logged as the agent reports it, since part of
+    /// the write may have landed.
     pub fn apply_g600_dpi_written(
         &mut self,
         key: &DeviceKey,
         result: Result<(), WriteError>,
     ) -> StateEvents {
         let written = self.pointer.g600_writes.remove(key);
-        let rereading = self.pointer.reads.confirm_g600_dpi(key);
         let status = match (result, written) {
-            (Ok(()), _) => rereading.then_some(G600WriteStatus::Confirming),
+            (Ok(()), _) => {
+                self.pointer.reads.confirm_g600_dpi(key);
+                None
+            }
             (Err(error), Some(G600WriteStatus::SavingProfile(profile))) => {
-                warn!(%error, key = %key, "G600 profile write did not land");
+                warn!(%error, key = %key, "G600 profile write failed");
                 Some(G600WriteStatus::ProfileFailed(profile, error))
             }
             (Err(error), Some(G600WriteStatus::SelectingStage(_))) => {
-                warn!(%error, key = %key, "G600 stage selection did not land");
+                warn!(%error, key = %key, "G600 stage selection failed");
                 Some(G600WriteStatus::StageFailed(error))
             }
             (Err(error), written) => {
@@ -163,17 +183,10 @@ impl AppState {
             }
         };
         if let Some(status) = status {
+            self.pointer.reads.reread_g600_dpi(key);
             self.pointer.g600_writes.insert(key.clone(), status);
         }
         StateEvent::G600DpiChanged(key.clone()).into()
-    }
-
-    /// The reading `key`'s G600 gave after a write that landed is in, or
-    /// failed: the mouse is free again.
-    pub(crate) fn g600_dpi_confirmed(&mut self, key: &DeviceKey) {
-        if self.pointer.g600_writes.get(key) == Some(&G600WriteStatus::Confirming) {
-            self.pointer.g600_writes.remove(key);
-        }
     }
 
     /// Re-run `key`'s exhausted onboard-DPI read — the "click to retry"
@@ -181,6 +194,17 @@ impl AppState {
     pub(crate) fn retry_g600_dpi_read(&mut self, key: &DeviceKey) -> StateEvents {
         self.pointer.reads.retry_g600_dpi(key);
         StateEvent::G600DpiChanged(key.clone()).into()
+    }
+
+    /// Read `key`'s G600 again, keeping its reading on screen while it
+    /// answers: its DPI and profile buttons change what it uses without a
+    /// word to the agent. Skipped while a write is in flight, since the
+    /// reading after it is already on its way; the agent keeps the read
+    /// away from the mouse while it stores a profile.
+    pub(crate) fn reconcile_g600_dpi(&mut self, key: &DeviceKey) {
+        if !self.g600_writing(key) {
+            self.pointer.reads.refresh_g600_dpi(key);
+        }
     }
 
     /// `key`'s G600 came back online: read it again, since another computer
@@ -210,16 +234,28 @@ impl AppState {
         Some((record, record.addressable_route()?))
     }
 
+    /// The write `key`'s G600 is waiting on, or why its last one failed.
+    fn g600_write(&self, key: &DeviceKey) -> Option<G600WriteStatus> {
+        self.pointer.g600_writes.get(key).cloned().or_else(|| {
+            self.pointer
+                .reads
+                .g600_confirming(key)
+                .then_some(G600WriteStatus::Confirming)
+        })
+    }
+
+    /// Whether `key`'s G600 is still busy with a write.
+    fn g600_writing(&self, key: &DeviceKey) -> bool {
+        self.g600_write(key)
+            .as_ref()
+            .is_some_and(G600WriteStatus::in_flight)
+    }
+
     /// The active G600's key and route, when it can take a write now.
     fn idle_g600(&self) -> Option<(DeviceKey, DeviceRoute)> {
         let (record, route) = self.writable_g600()?;
         let key = record.device_key();
-        if self
-            .pointer
-            .g600_writes
-            .get(&key)
-            .is_some_and(G600WriteStatus::in_flight)
-        {
+        if self.g600_writing(&key) {
             debug!(key = %key, "G600 write already in flight — ignoring another");
             return None;
         }

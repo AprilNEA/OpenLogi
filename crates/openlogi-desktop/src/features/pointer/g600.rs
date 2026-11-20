@@ -11,7 +11,10 @@
 //! reading it gives then replaces the draft it confirms. A draft left by
 //! viewing another profile is kept until that profile is viewed again.
 //! Saving the profile in use keeps the mouse on the stage it is using,
-//! wherever the save puts it.
+//! wherever the save puts it. A draft also outlasts the mouse going offline
+//! and another device being selected. While the card shows a mouse, it reads
+//! it again now and then, since the mouse's own buttons switch its stage and
+//! profile without a word to the agent.
 
 mod draft;
 
@@ -20,7 +23,7 @@ use std::sync::Arc;
 use gpui::{
     AnyElement, App, AppContext as _, ClickEvent, Context, Entity, FocusHandle, Focusable as _,
     InteractiveElement as _, IntoElement, ParentElement, Render, SharedString, Styled,
-    Subscription, WeakEntity, Window, div, px,
+    Subscription, Task, WeakEntity, Window, div, px,
 };
 use gpui_kit::component::{
     Disableable as _, Selectable as _,
@@ -35,7 +38,9 @@ use openlogi_core::hid::g600::{
 };
 
 use self::draft::{G600Draft, save_reorders};
-use crate::state::{AppState, DeviceKey, G600DpiLoad, G600WriteStatus, Load, StateEvent};
+use crate::state::{
+    AppState, DeviceKey, G600_RECONCILE_INTERVAL, G600DpiLoad, G600WriteStatus, Load, StateEvent,
+};
 use crate::ui::components::{control_button, control_input, stacked_row};
 use crate::ui::log_track::{LogTrack, Nudge, TrackThumb, doubling_ticks, filled_dot, mark_swatch};
 use crate::ui::status::{retry_line, status_line};
@@ -52,6 +57,8 @@ pub struct G600Panel {
     stashed: Vec<Stashed>,
     /// The mouse's last reading, still shown while a read after it fails.
     last_reading: Option<(DeviceKey, Arc<DpiState>)>,
+    /// The next read of the mouse on view, while the card shows it.
+    reconcile: Option<Task<()>>,
     _state_obs: Subscription,
 }
 
@@ -221,6 +228,7 @@ impl G600Panel {
             editor: None,
             stashed: Vec::new(),
             last_reading: None,
+            reconcile: None,
             _state_obs: state_obs,
         }
     }
@@ -284,16 +292,7 @@ impl G600Panel {
             editor.take_reading(reading);
             return;
         }
-        if let Some(left) = self.editor.take()
-            && left.changed()
-        {
-            self.stashed.push(Stashed {
-                key: left.key,
-                profile: left.profile,
-                base: left.base,
-                draft: left.draft,
-            });
-        }
+        self.put_editor_away();
         let stashed = self
             .stashed
             .iter()
@@ -319,6 +318,47 @@ impl G600Panel {
         };
         editor.take_reading(reading);
         self.editor = Some(editor);
+    }
+
+    /// Close the editor, keeping a draft with edits until its profile is
+    /// viewed again.
+    fn put_editor_away(&mut self) {
+        if let Some(left) = self.editor.take()
+            && left.changed()
+        {
+            self.stashed.push(Stashed {
+                key: left.key,
+                profile: left.profile,
+                base: left.base,
+                draft: left.draft,
+            });
+        }
+    }
+
+    /// Stop showing a mouse: keep its draft, and stop reading it.
+    fn leave_mouse(&mut self) {
+        self.put_editor_away();
+        self.reconcile = None;
+    }
+
+    /// Read `key`'s mouse again after a while unless that is already due.
+    /// The read repaints the card, whose next frame asks for the one after,
+    /// so the reads stop with the frames once the card is no longer drawn.
+    fn schedule_reconcile(&mut self, key: &DeviceKey, cx: &mut Context<Self>) {
+        if self.reconcile.is_some() {
+            return;
+        }
+        let key = key.clone();
+        self.reconcile = Some(cx.spawn(async move |panel, cx| {
+            cx.background_executor()
+                .timer(G600_RECONCILE_INTERVAL)
+                .await;
+            let _ = panel.update(cx, |panel, cx| {
+                panel.reconcile = None;
+                AppState::update(cx, |state, _| state.reconcile_g600_dpi(&key));
+                cx.notify();
+            });
+        }));
     }
 
     fn save(&mut self, cx: &mut Context<Self>) {
@@ -370,7 +410,7 @@ impl G600Facts {
             key: state.current_record()?.device_key(),
             load: state.current_g600_dpi_load(),
             reachable: state.current_g600_route().is_some(),
-            write: state.current_g600_write().cloned(),
+            write: state.current_g600_write(),
         })
     }
 
@@ -383,7 +423,7 @@ impl Render for G600Panel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pal = theme::palette(cx);
         let Some(facts) = G600Facts::current(cx) else {
-            self.editor = None;
+            self.leave_mouse();
             return v_flex().w_full().into_any_element();
         };
         if let Load::Ready(mouse) = &facts.load {
@@ -400,10 +440,11 @@ impl Render for G600Panel {
             _ => None,
         };
         let Some(mouse) = shown.filter(|_| facts.reachable) else {
-            self.editor = None;
+            self.leave_mouse();
             return load_status(&facts.load, &facts, pal).into_any_element();
         };
         self.sync_editor(&facts.key, &mouse, window, cx);
+        self.schedule_reconcile(&facts.key, cx);
         let Some(editor) = &mut self.editor else {
             return v_flex().w_full().into_any_element();
         };
@@ -487,9 +528,9 @@ fn active_stage_row(
             let Some(stage) = indices.first().and_then(|index| DpiStage::ALL.get(*index)) else {
                 return;
             };
-            if *stage != active.dpi_stage {
-                AppState::apply(cx, |state| state.commit_g600_active_stage(*stage));
-            }
+            // The stage marked here may be one the mouse's own button has
+            // since left, so a click on it still switches.
+            AppState::apply(cx, |state| state.commit_g600_active_stage(*stage));
         }));
     let failed = match &facts.write {
         Some(G600WriteStatus::StageFailed(error)) => Some(

@@ -37,7 +37,7 @@ pub(crate) use events::{StateEvent, StateEvents};
 pub(crate) use flow::{
     FlowDeviceRow, FlowHealth, FlowHost, FlowIssue, FlowPairingRefusal, FlowReadiness,
 };
-pub(crate) use g600::G600WriteStatus;
+pub(crate) use g600::{G600_RECONCILE_INTERVAL, G600WriteStatus};
 pub(crate) use gaming_keys::GamingKeys;
 pub use light::LightCommandStatus;
 pub(crate) use load::Load;

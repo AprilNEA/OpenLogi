@@ -103,7 +103,6 @@ fn current_write(cx: &gpui::TestAppContext) -> Option<G600WriteStatus> {
         AppState::try_read(cx)
             .expect("state installed")
             .current_g600_write()
-            .cloned()
     })
 }
 
@@ -144,7 +143,7 @@ fn a_save_writes_the_profile_once_until_the_mouse_answers() {
     );
     assert_eq!(
         state.current_g600_write(),
-        Some(&G600WriteStatus::SavingProfile(profile(2)))
+        Some(G600WriteStatus::SavingProfile(profile(2)))
     );
 
     // Nothing else reaches the mouse while it stores the profile.
@@ -179,7 +178,7 @@ fn a_stage_switch_goes_to_the_agent() {
     assert_eq!((*written, written_key), (stage(2), &key));
     assert_eq!(
         state.current_g600_write(),
-        Some(&G600WriteStatus::SelectingStage(stage(2)))
+        Some(G600WriteStatus::SelectingStage(stage(2)))
     );
 }
 
@@ -453,4 +452,126 @@ fn a_save_that_did_not_land_is_shown_against_its_profile(cx: &mut gpui::TestAppC
         current_write(cx),
         Some(G600WriteStatus::ProfileFailed(profile(1), failed))
     );
+}
+
+#[gpui::test]
+fn a_reading_dropped_while_confirming_a_write_frees_the_mouse(cx: &mut gpui::TestAppContext) {
+    let (state, mut receiver) = g600_state(true);
+    let key = state.current_record().expect("G600").device_key();
+    install(state, cx);
+    answer_read(&mut receiver, reading(1));
+    cx.run_until_parked();
+    let _ = cx.update(|cx| {
+        AppState::update(cx, |state, _| {
+            state.commit_g600_profile_dpi(profile(1), settings(), StageAfterStore::Keep)
+        })
+    });
+    drain(&mut receiver);
+    let _ =
+        cx.update(|cx| AppState::update(cx, |state, _| state.apply_g600_dpi_written(&key, Ok(()))));
+    cx.run_until_parked();
+    assert_eq!(current_write(cx), Some(G600WriteStatus::Confirming));
+
+    // The mouse is rerouted before the reading after the write is in: the
+    // inventory drops its query, and that reading with it.
+    cx.update(|cx| AppState::update(cx, |state, _| state.device_reads_mut().remove(&key)));
+    cx.run_until_parked();
+    drain(&mut receiver);
+    assert_eq!(current_write(cx), None, "no reading is on its way");
+
+    // The query started for the mouse's new route is a reading of its own,
+    // not the confirmation, and the mouse takes the next write.
+    cx.update(AppState::load_current_device_reads);
+    cx.run_until_parked();
+    // Every read still on its way gets the mouse's new answer.
+    let reads: Vec<_> = drain(&mut receiver)
+        .into_iter()
+        .filter_map(|command| match command {
+            Command::ReadG600Dpi(read) => Some(read),
+            _ => None,
+        })
+        .collect();
+    for ReadG600Dpi { reply, .. } in reads {
+        let _ = reply.send(Ok(reading(2)));
+    }
+    cx.run_until_parked();
+    assert_eq!(current_load(cx), Load::Ready(Arc::new(reading(2))));
+    assert_eq!(current_write(cx), None);
+    let _ =
+        cx.update(|cx| AppState::update(cx, |state, _| state.commit_g600_active_stage(stage(1))));
+    assert_eq!(
+        current_write(cx),
+        Some(G600WriteStatus::SelectingStage(stage(1)))
+    );
+}
+
+/// A sink for what the state logs.
+#[derive(Clone, Default)]
+struct Logged(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for Logged {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// What the state logs while it takes `failed` as the answer to `write`.
+fn logged_failure(
+    write: impl FnOnce(&mut AppState) -> crate::state::events::StateEvents,
+    failed: WriteError,
+) -> String {
+    let (mut state, mut receiver) = g600_state(true);
+    let key = state.current_record().expect("G600").device_key();
+    let _ = write(&mut state);
+    drain(&mut receiver);
+    let logged = Logged::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer({
+            let logged = logged.clone();
+            move || logged.clone()
+        })
+        .finish();
+    tracing::subscriber::with_default(subscriber, || {
+        let _ = state.apply_g600_dpi_written(&key, Err(failed));
+    });
+    let bytes = logged.0.lock().expect("log").clone();
+    String::from_utf8(bytes).expect("UTF-8 log")
+}
+
+/// A stored profile whose stage selection failed, or a stage selection
+/// that landed on another profile, did land in part: the log says the
+/// write failed and how far it got, never that nothing landed.
+#[test]
+fn a_failed_write_is_logged_as_failed_with_what_landed() {
+    let stored = logged_failure(
+        |state| state.commit_g600_profile_dpi(profile(1), settings(), StageAfterStore::Keep),
+        WriteError::G600(G600Failure::StageNotReselected {
+            profile: profile(1),
+            stage: stage(2),
+        }),
+    );
+    assert!(stored.contains("G600 profile write failed"), "{stored}");
+    assert!(stored.contains("is stored"), "{stored}");
+    assert!(!stored.contains("did not land"), "{stored}");
+
+    let switched = logged_failure(
+        |state| state.commit_g600_active_stage(stage(2)),
+        WriteError::G600(G600Failure::ProfileSwitched {
+            expected: profile(1),
+            active: profile(2),
+        }),
+    );
+    assert!(
+        switched.contains("G600 stage selection failed"),
+        "{switched}"
+    );
+    assert!(!switched.contains("did not land"), "{switched}");
 }

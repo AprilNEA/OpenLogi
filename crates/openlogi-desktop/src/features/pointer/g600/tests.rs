@@ -8,7 +8,9 @@ use gpui::{
 };
 use gpui_kit::component::Root;
 use openlogi_core::config::Config;
-use openlogi_core::device::{Capabilities, DeviceKind, RawDeviceAddress, StandaloneDevice};
+use openlogi_core::device::{
+    Capabilities, DeviceKind, LightCapabilities, RawDeviceAddress, StandaloneDevice,
+};
 use openlogi_core::hid::WriteError;
 use openlogi_core::hid::g600::{
     ActiveSelection, DpiSettings, DpiStage, DpiState, DpiValue, G600_DRIVER_ID, OnboardProfile,
@@ -19,8 +21,8 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use super::G600Panel;
 use crate::services::assets::AssetResolver;
 use crate::services::i18n::LOCALE_LOCK;
-use crate::services::ipc::{Command, ReadG600Dpi, SetG600ProfileDpi};
-use crate::state::{AppState, Sources};
+use crate::services::ipc::{Command, ReadG600Dpi, SetG600ActiveStage, SetG600ProfileDpi};
+use crate::state::{AppState, G600_RECONCILE_INTERVAL, Sources};
 use crate::ui::log_track::geometry::LogScale;
 use openlogi_core::hid::HidppOperation;
 
@@ -705,4 +707,219 @@ fn a_stage_can_be_made_default_or_removed_only_when_that_changes_something() {
     assert_eq!(commands(&two, 0), (false, true), "the default of two");
     assert_eq!(commands(&two, 1), (true, true));
     assert_eq!(commands(&two, 2), (false, false), "no such stage");
+}
+
+/// `reading` with the mouse switched to `number` on its active profile, as
+/// its own DPI button does.
+fn on_stage(number: u8) -> DpiState {
+    let mut mouse = reading();
+    mouse.active.dpi_stage = stage(number);
+    mouse
+}
+
+/// Which of profile 1's two dots carry the mark of the stage in use.
+fn marked(cx: &mut VisualTestContext) -> [bool; 2] {
+    [0, 1].map(|index| {
+        cx.debug_bounds(Box::leak(
+            format!("g600-dpi-thumb-{index}-mark").into_boxed_str(),
+        ))
+        .is_some()
+    })
+}
+
+/// Let the card's next read of the mouse come due.
+fn wait_for_reconcile(cx: &mut VisualTestContext) {
+    cx.executor().advance_clock(G600_RECONCILE_INTERVAL);
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn a_stage_switched_on_the_mouse_shows_while_the_card_stays_open(cx: &mut gpui::TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    let (mut receiver, cx) = open_card(cx);
+    assert_eq!(marked(cx), [true, false]);
+
+    // The DPI button moves the mouse to stage 2 and tells nobody.
+    wait_for_reconcile(cx);
+    assert_eq!(
+        answer_reads(&mut receiver, &Ok(on_stage(2))),
+        1,
+        "the open card reads the mouse again"
+    );
+    redraw(cx);
+    assert_eq!(marked(cx), [false, true], "the card follows the mouse");
+
+    // Stage 1 is no longer the one in use: a click on it switches back.
+    click(cx, "g600-active-stage-1");
+    let commands = writes(&mut receiver);
+    assert!(
+        matches!(
+            commands.as_slice(),
+            [Command::SetG600ActiveStage(SetG600ActiveStage { stage: switched, .. })]
+                if *switched == stage(1)
+        ),
+        "expected a switch to stage 1, got {} writes",
+        commands.len()
+    );
+
+    // And the card keeps reading while it stays open.
+    let key = g600_key(cx);
+    cx.update(|_, cx| {
+        AppState::apply(cx, |state| state.apply_g600_dpi_written(&key, Ok(())));
+    });
+    cx.run_until_parked();
+    assert_eq!(answer_reads(&mut receiver, &Ok(reading())), 1);
+    redraw(cx);
+    wait_for_reconcile(cx);
+    assert_eq!(answer_reads(&mut receiver, &Ok(reading())), 1);
+}
+
+#[gpui::test]
+fn the_card_does_not_read_the_mouse_while_it_stores_a_profile(cx: &mut gpui::TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    let (mut receiver, cx) = open_card(cx);
+    let key = g600_key(cx);
+
+    remove_stage_2(cx);
+    click(cx, "g600-save");
+    assert_eq!(
+        profile_write(&mut receiver),
+        (OnboardProfile::ALL[0], without_stage_2())
+    );
+    wait_for_reconcile(cx);
+    assert_eq!(
+        answer_reads(&mut receiver, &Ok(reading())),
+        0,
+        "nothing reaches the mouse while it stores the profile"
+    );
+
+    cx.update(|_, cx| {
+        AppState::apply(cx, |state| state.apply_g600_dpi_written(&key, Ok(())));
+    });
+    cx.run_until_parked();
+    wait_for_reconcile(cx);
+    assert_eq!(
+        answer_reads(&mut receiver, &Ok(reading())),
+        1,
+        "only the read that confirms the write, while it is in flight"
+    );
+}
+
+#[gpui::test]
+fn a_click_on_the_stage_marked_in_use_still_switches(cx: &mut gpui::TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    let (mut receiver, cx) = open_card(cx);
+
+    // The mouse may have left stage 1 since the card last read it.
+    click(cx, "g600-active-stage-1");
+    assert_eq!(writes(&mut receiver).len(), 1);
+}
+
+/// The agent now sees `standalone`, and the window catches up.
+fn see(cx: &mut VisualTestContext, standalone: &[StandaloneDevice]) {
+    cx.update(|_, cx| {
+        let resolver = AssetResolver::new();
+        AppState::apply(cx, |state| {
+            state.refresh_inventories(&[], standalone, &resolver, &[])
+        });
+        AppState::load_current_device_reads(cx);
+    });
+    redraw(cx);
+}
+
+#[gpui::test]
+fn a_draft_outlasts_the_mouse_going_offline(cx: &mut gpui::TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    let (mut receiver, cx) = open_card(cx);
+
+    remove_stage_2(cx);
+    see(
+        cx,
+        &[StandaloneDevice {
+            online: false,
+            ..g600()
+        }],
+    );
+    assert!(
+        cx.debug_bounds("g600-save").is_none(),
+        "the card says the mouse is offline"
+    );
+    assert!(cx.update(|_, cx| {
+        AppState::try_read(cx).is_some_and(|state| state.current_g600_route().is_none())
+    }));
+
+    see(cx, &[g600()]);
+    assert!(answer_reads(&mut receiver, &Ok(reading())) > 0);
+    redraw(cx);
+    click(cx, "g600-save");
+    assert_eq!(
+        profile_write(&mut receiver),
+        (OnboardProfile::ALL[0], without_stage_2()),
+        "the draft came back with the mouse"
+    );
+}
+
+fn litra() -> StandaloneDevice {
+    StandaloneDevice {
+        address: RawDeviceAddress {
+            vendor_id: 0x046d,
+            product_id: 0xc900,
+            usage_page: 0xff43,
+            usage_id: 0x0202,
+            identity: "serial:g600-panel-light".into(),
+        },
+        display_name: "Litra Glow".into(),
+        manufacturer: Some("Logi".into()),
+        serial_number: None,
+        unit_id: [0; 4],
+        kind: DeviceKind::Light,
+        online: true,
+        capabilities: None,
+        light_capabilities: Some(LightCapabilities {
+            power: true,
+            ..LightCapabilities::default()
+        }),
+        driver_id: "litra".into(),
+        registry_model_id: None,
+    }
+}
+
+/// Select the device `pick` finds.
+fn select(cx: &mut VisualTestContext, pick: impl Fn(&crate::state::DeviceRecord) -> bool) {
+    cx.update(|_, cx| {
+        AppState::apply(cx, |state| {
+            let index = state
+                .devices()
+                .iter()
+                .position(&pick)
+                .expect("the device is listed");
+            state.select_device(index)
+        });
+        AppState::load_current_device_reads(cx);
+    });
+    redraw(cx);
+}
+
+#[gpui::test]
+fn a_draft_outlasts_another_device_being_selected(cx: &mut gpui::TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    let (mut receiver, cx) = open_card(cx);
+    let key = g600_key(cx);
+    see(cx, &[g600(), litra()]);
+
+    remove_stage_2(cx);
+    select(cx, |record| record.device_key() != key);
+    assert!(
+        cx.debug_bounds("g600-save").is_none(),
+        "the light has no G600 card"
+    );
+    select(cx, |record| record.device_key() == key);
+    answer_reads(&mut receiver, &Ok(reading()));
+    redraw(cx);
+    click(cx, "g600-save");
+    assert_eq!(
+        profile_write(&mut receiver),
+        (OnboardProfile::ALL[0], without_stage_2()),
+        "the draft came back with the mouse"
+    );
 }

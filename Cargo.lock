@@ -6159,6 +6159,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "url",
  "walkdir",
  "winreg",

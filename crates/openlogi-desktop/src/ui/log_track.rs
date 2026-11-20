@@ -34,7 +34,7 @@ use gpui_kit::component::{ActiveTheme as _, menu::ContextMenuExt as _, menu::Pop
 pub(crate) use self::geometry::doubling_ticks;
 use self::geometry::{Label, LogScale, hit_spans, label_at, ruler_labels, spread_labels};
 use super::commit_slider::SliderUnit;
-use super::theme::{self, Typography as _};
+use super::theme::{self, FocusRingStyle as _, Typography as _};
 
 /// Height of the row of value labels above the dots.
 const VALUE_ROW_H: f32 = 18.;
@@ -304,7 +304,10 @@ impl<T: SliderUnit> RenderOnce for LogTrack<T> {
             .w_full()
             .h(px(TRACK_H))
             .when_some(self.focus.clone(), |this, focus| this.track_focus(&focus))
-            .when(focused && !self.disabled, |this| {
+            // Disabled, the track keeps its focus and shows it: focus that
+            // vanishes while the device is busy would leave the keyboard
+            // nowhere visible.
+            .when(focused, |this| {
                 this.child(
                     div()
                         .debug_selector(move || focus_selector)
@@ -314,8 +317,8 @@ impl<T: SliderUnit> RenderOnce for LogTrack<T> {
                         .left(px(-TRACK_INSET))
                         .right(px(-TRACK_INSET))
                         .rounded_md()
-                        .border_2()
-                        .border_color(pal.ring),
+                        .border_1()
+                        .focus_ring(pal),
                 )
             })
             .child(

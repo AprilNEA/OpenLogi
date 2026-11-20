@@ -268,6 +268,21 @@ fn the_keyboard_reaches_the_track_and_sees_it_focused(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_disabled_track_still_shows_the_keyboard_where_it_is(cx: &mut TestAppContext) {
+    let (heard, cx) = open(cx, vec![400, 3200], Some(0), true);
+
+    cx.update(Window::focus_next);
+    redraw(cx);
+
+    assert!(
+        cx.debug_bounds("test-track-focus-ring").is_some(),
+        "the focused track shows it while disabled"
+    );
+    cx.simulate_keystrokes("right");
+    assert!(heard.borrow().is_empty(), "{:?}", heard.borrow());
+}
+
+#[gpui::test]
 fn a_pressed_dot_leaves_the_track_focused_and_showing_it(cx: &mut TestAppContext) {
     let (_, cx) = open(cx, vec![400, 3200], Some(0), false);
     let dot = cx.debug_bounds("test-track-thumb-1").expect("a dot");
