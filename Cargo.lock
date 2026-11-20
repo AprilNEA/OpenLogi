@@ -6003,6 +6003,7 @@ dependencies = [
  "openlogi-fixture",
  "openlogi-flow",
  "openlogi-hid",
+ "openlogi-hidpp",
  "openlogi-hook",
  "openlogi-inject",
  "openlogi-ipc",

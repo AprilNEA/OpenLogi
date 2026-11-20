@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use openlogi_core::device::{LightState, StandaloneDevice};
+use openlogi_core::hid::g600::{DpiSettings, DpiStage, DpiState, OnboardProfile, StageAfterStore};
 use openlogi_core::hid::{LightCommand, PairingError, WriteError};
 use openlogi_hid::backend::{HidBackend, HotplugStream};
 use openlogi_hid::inventory::persist::ProbeCacheStore;
@@ -135,6 +136,47 @@ impl HardwareContext {
         command: LightCommand,
     ) -> Result<Option<LightState>, WriteError> {
         openlogi_hid::write::apply_litra(&*self.backend, route, model, command).await
+    }
+
+    /// Read the active selection and onboard DPI settings of the G600
+    /// `route` reaches.
+    ///
+    /// Every G600 operation on a route runs alone, so none can reach the
+    /// mouse while it stores a profile another one wrote.
+    pub async fn read_g600_dpi(&self, route: &DeviceRoute) -> Result<DpiState, WriteError> {
+        super::g600::read_dpi(self, route).await
+    }
+
+    /// Store `settings` in onboard `profile` of the G600 `route` reaches,
+    /// confirming the write by reading it back, then put the mouse on the
+    /// stage `after` asks for.
+    ///
+    /// The write, stage selection included, runs to its end even if the
+    /// caller stops waiting, and no other G600 operation on the route starts
+    /// before it has.
+    pub async fn set_g600_profile_dpi(
+        &self,
+        route: &DeviceRoute,
+        profile: OnboardProfile,
+        settings: DpiSettings,
+        after: StageAfterStore,
+    ) -> Result<(), WriteError> {
+        super::g600::set_profile_dpi(self, route, profile, settings, after).await
+    }
+
+    /// Switch the G600 `route` reaches to DPI `stage` of its active profile,
+    /// unless that profile has it disabled.
+    pub async fn set_g600_active_stage(
+        &self,
+        route: &DeviceRoute,
+        stage: DpiStage,
+    ) -> Result<(), WriteError> {
+        super::g600::set_active_stage(self, route, stage).await
+    }
+
+    /// The backend every G600 driver call goes through.
+    pub(super) fn backend(&self) -> &dyn HidBackend {
+        &*self.backend
     }
 
     /// Watch the Litra `route` reaches for changes made on the light itself

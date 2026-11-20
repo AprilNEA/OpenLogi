@@ -42,6 +42,7 @@ use crate::receiver_access::ReceiverAccess;
 
 mod context;
 mod disable_keys;
+mod g600;
 mod light;
 mod rgb_control;
 mod write_order;
