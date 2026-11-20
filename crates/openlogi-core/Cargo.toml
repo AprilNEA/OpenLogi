@@ -28,7 +28,7 @@ worker = ["dep:tokio"]
 logging = ["dep:tracing-subscriber"]
 
 [dependencies]
-openlogi-device-registry = { workspace = true }
+openlogi-device-registry = { workspace = true, features = ["serde"] }
 serde = { workspace = true }
 toml = { workspace = true }
 thiserror = { workspace = true }

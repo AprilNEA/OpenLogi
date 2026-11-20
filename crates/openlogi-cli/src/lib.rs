@@ -241,6 +241,157 @@ mod tests {
     }
 
     #[test]
+    fn g600_device_flag_is_mapped() {
+        let cli = Cli::try_parse_from(["openlogi", "diag", "g600", "--device", "G600"])
+            .expect("valid g600 invocation parses");
+
+        match cli.cmd.expect("subcommand present") {
+            Command::Diag(DiagCmd::G600(args)) => {
+                assert_eq!(args.device.as_deref(), Some("G600"));
+                assert!(args.action.is_none(), "{:?}", args.action);
+            }
+            other => panic!("expected Diag(G600), got {other:?}"),
+        }
+    }
+
+    fn g600_args(args: &[&str]) -> Result<cmd::diag::g600::G600Args, clap::Error> {
+        let cli = Cli::try_parse_from(["openlogi", "diag", "g600"].iter().chain(args))?;
+        match cli.cmd.expect("subcommand present") {
+            Command::Diag(DiagCmd::G600(g600)) => Ok(g600),
+            other => panic!("expected Diag(G600), got {other:?}"),
+        }
+    }
+
+    fn g600_action(args: &[&str]) -> Result<cmd::diag::g600::G600Action, clap::Error> {
+        g600_args(args).map(|g600| g600.action.expect("an action"))
+    }
+
+    #[test]
+    fn g600_stage_numbers_from_one() {
+        use cmd::diag::g600::G600Action;
+        use openlogi_hid::G600DpiStage;
+
+        let G600Action::Stage { stage } = g600_action(&["stage", "4"]).expect("stage 4 parses")
+        else {
+            panic!("expected Stage");
+        };
+        assert_eq!(stage, G600DpiStage::from_number(4).expect("fourth stage"));
+        g600_action(&["stage", "0"]).expect_err("stage 0 does not exist");
+        g600_action(&["stage", "5"]).expect_err("stage 5 does not exist");
+    }
+
+    #[test]
+    fn g600_dpi_maps_profile_stages_default_and_device() {
+        use cmd::diag::g600::G600Action;
+        use openlogi_hid::{G600DpiStage, G600DpiValue, G600Profile};
+
+        let args = g600_args(&[
+            "dpi",
+            "--profile",
+            "3",
+            "--stages",
+            "800, off,8200,OFF",
+            "--default",
+            "3",
+            "--device",
+            "G600",
+        ])
+        .expect("valid dpi invocation parses");
+        assert_eq!(args.device.as_deref(), Some("G600"));
+        let Some(G600Action::Dpi {
+            profile,
+            stages,
+            default,
+            use_stage,
+        }) = args.action
+        else {
+            panic!("expected Dpi, got {:?}", args.action);
+        };
+        assert_eq!(profile, G600Profile::from_number(3).expect("third profile"));
+        assert_eq!(
+            stages,
+            [G600DpiValue::new(800), None, G600DpiValue::new(8200), None]
+        );
+        assert_eq!(default, G600DpiStage::from_number(3).expect("third stage"));
+        assert_eq!(use_stage, None, "no stage named");
+
+        let args = g600_args(&[
+            "dpi",
+            "--profile",
+            "1",
+            "--stages",
+            "800,off,off,off",
+            "--default",
+            "1",
+            "--use-stage",
+            "1",
+        ])
+        .expect("a named stage parses");
+        let Some(G600Action::Dpi { use_stage, .. }) = args.action else {
+            panic!("expected Dpi, got {:?}", args.action);
+        };
+        assert_eq!(use_stage, G600DpiStage::from_number(1));
+        g600_args(&[
+            "dpi",
+            "--profile",
+            "1",
+            "--stages",
+            "800,off,off,off",
+            "--default",
+            "1",
+            "--use-stage",
+            "5",
+        ])
+        .expect_err("stage 5 does not exist");
+    }
+
+    #[test]
+    fn g600_dpi_refuses_values_the_mouse_cannot_store() {
+        for (profile, stages, default, message) in [
+            ("4", "800,off,off,off", "1", "profile from 1 to 3"),
+            ("0", "800,off,off,off", "1", "profile from 1 to 3"),
+            ("1", "800,off,off,off", "5", "stage from 1 to 4"),
+            (
+                "1",
+                "800,off,off",
+                "1",
+                "expected 4 comma-separated stages, got 3",
+            ),
+            (
+                "1",
+                "800,off,off,off,off",
+                "1",
+                "expected 4 comma-separated stages, got 5",
+            ),
+            (
+                "1",
+                "800,150,off,off",
+                "1",
+                "stage 2: expected a DPI from 200 to 8200 in steps of 50 or `off`, got `150`",
+            ),
+            ("1", "800,off,825,off", "1", "stage 3: expected a DPI"),
+            ("1", "800,off,off,disabled", "1", "stage 4: expected a DPI"),
+            ("1", "800,,off,off", "1", "stage 2: expected a DPI"),
+        ] {
+            let args = [
+                "dpi",
+                "--profile",
+                profile,
+                "--stages",
+                stages,
+                "--default",
+                default,
+            ];
+            let error = g600_action(&args).expect_err(&args.join(" "));
+            assert!(
+                error.to_string().contains(message),
+                "{}: {error}",
+                args.join(" ")
+            );
+        }
+    }
+
+    #[test]
     fn dpi_target_and_device_flags_are_mapped() {
         let cli = Cli::try_parse_from([
             "openlogi",

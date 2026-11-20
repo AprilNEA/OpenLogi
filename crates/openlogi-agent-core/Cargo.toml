@@ -37,6 +37,8 @@ gethostname = "1.1.0"
 workspace = true
 
 [dev-dependencies]
+# The `async_trait` and channel type a test `HidBackend` implements against.
+hidpp = { workspace = true }
 openlogi-device = { path = "../openlogi-device", features = ["test-support"] }
 # Only to advance virtual time in the DeviceOp/timed timeout test without a
 # real multi-second sleep.

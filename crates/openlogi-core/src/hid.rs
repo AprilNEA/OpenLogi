@@ -15,6 +15,7 @@ pub mod easy_switch;
 pub mod error;
 pub mod fn_lock;
 pub mod force_sensing;
+pub mod g600;
 pub mod light;
 pub mod onboard;
 pub mod pairing;

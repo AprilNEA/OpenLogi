@@ -59,6 +59,9 @@ pub(crate) enum StateEvent {
     PointerSpeedChanged(DeviceKey),
     /// The headset's sidetone read landed or changed.
     SidetoneChanged(DeviceKey),
+    /// A G600's onboard-DPI read landed or changed, or a write to it started
+    /// or answered.
+    G600DpiChanged(DeviceKey),
     /// The device's press-force read landed or changed.
     ForceSensingChanged(DeviceKey),
     /// The keyboard's backlight read landed or changed.
@@ -106,6 +109,7 @@ impl StateEvent {
             | Self::ReportRateChanged(key)
             | Self::PointerSpeedChanged(key)
             | Self::SidetoneChanged(key)
+            | Self::G600DpiChanged(key)
             | Self::ForceSensingChanged(key)
             | Self::BacklightChanged(key)
             | Self::EasySwitchChanged(key)
@@ -267,6 +271,7 @@ impl AppState {
             | StateEvent::ReportRateChanged(_)
             | StateEvent::PointerSpeedChanged(_)
             | StateEvent::SidetoneChanged(_)
+            | StateEvent::G600DpiChanged(_)
             | StateEvent::ForceSensingChanged(_)
             | StateEvent::BacklightChanged(_)
             | StateEvent::EasySwitchChanged(_)

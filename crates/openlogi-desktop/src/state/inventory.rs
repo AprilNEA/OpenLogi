@@ -189,6 +189,7 @@ impl AppState {
         for key in &reconnected {
             self.pointer_speed_reconnected(key);
             self.sidetone_reconnected(key);
+            self.g600_dpi_reconnected(key);
             self.force_sensing_reconnected(key);
         }
         for key in &disable_keys_invalidated {

@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
-use async_hid::{AsyncHidWrite as _, Device, DeviceWriter};
+use async_hid::{AsyncHidFeatureHandle as _, AsyncHidWrite as _, Device, DeviceWriter};
 use hidpp::async_trait;
 use hidpp::channel::HidppChannel;
 
@@ -229,6 +229,40 @@ impl HidBackend for NativeBackend {
                 Err(error)
             }
         }
+    }
+
+    // A recording captures HID++ channels and raw writers only, so feature
+    // reads and writes pass through it unrecorded.
+    async fn read_feature_report(
+        &self,
+        node: &NodeInfo,
+        report: &mut [u8],
+    ) -> Result<usize, BackendError> {
+        self.device_io.ensure_allowed()?;
+        let read = self
+            .handle(node)?
+            .read_feature_report(report)
+            .await
+            .map_err(super::backend_error)?;
+        self.device_io.ensure_allowed()?;
+        Ok(read)
+    }
+
+    async fn write_feature_report(
+        &self,
+        node: &NodeInfo,
+        report: &[u8],
+    ) -> Result<(), BackendError> {
+        self.device_io.ensure_allowed()?;
+        self.handle(node)?
+            .open_feature_handle()
+            .await
+            .map_err(super::backend_error)?
+            .write_feature_report(report)
+            .await
+            .map_err(super::backend_error)
+        // Unlike a read, a write that completed stays done even if the gate
+        // closed meanwhile, so it is not re-checked here.
     }
 
     fn watch(&self) -> Result<HotplugStream, BackendError> {

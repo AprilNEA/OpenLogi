@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use openlogi_core::hid::g600::DpiState as G600DpiState;
 use openlogi_core::hid::{
     BacklightState, DisableKeysState, DpiInfo, EasySwitchHosts, FnLockState, ForceSensingInfo,
     OnboardState, PointerSpeed, ReportRateInfo, SidetoneLevel, SmartShiftStatus,
@@ -53,6 +54,9 @@ pub type PointerSpeedLoad = Load<Arc<PointerSpeed>>;
 /// Per-headset sidetone (`0x8300`) load state. See [`Load`]. The headset
 /// stores the level itself, so the read is the only record.
 pub type SidetoneLoad = Load<Arc<SidetoneLevel>>;
+/// Per-G600 onboard-DPI load state. See [`Load`]. The mouse stores its DPI
+/// stages in onboard memory, so the read is the only record.
+pub type G600DpiLoad = Load<Arc<G600DpiState>>;
 /// Per-device press-force (`0x19c0`) load state. See [`Load`]. The read is
 /// the force the button clicks at now, the range the device accepts, and
 /// whether software may change it.

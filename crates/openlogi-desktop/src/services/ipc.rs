@@ -73,9 +73,10 @@ pub use request::PollEventMonitor;
 pub use request::{
     CancelFlowPairing, CancelPairing, Command, ConfirmFlowPairing, LoadConfig, PairDevice,
     PairFlowPeer, ReadBacklight, ReadDisableKeys, ReadDpi, ReadEasySwitchHosts, ReadFnLock,
-    ReadForceSensing, ReadOnboard, ReadPointerSpeed, ReadReportRate, ReadSidetone, ReadSmartShift,
-    ReloadConfig, RenameEasySwitchHost, RequestAccessibilityPrompt, RetryConnection, SetBacklight,
-    SetDisableKeys, SetDpi, SetFnLock, SetForceSensing, SetLight, SetLightManualPower, SetLighting,
+    ReadForceSensing, ReadG600Dpi, ReadOnboard, ReadPointerSpeed, ReadReportRate, ReadSidetone,
+    ReadSmartShift, ReloadConfig, RenameEasySwitchHost, RequestAccessibilityPrompt,
+    RetryConnection, SetBacklight, SetDisableKeys, SetDpi, SetFnLock, SetForceSensing,
+    SetG600ActiveStage, SetG600ProfileDpi, SetLight, SetLightManualPower, SetLighting,
     SetPointerSpeed, SetReportRate, SetSidetone, SetSmartShift, StartFlowPairing, StartPairing,
     StopFlowPairing, UnpairDevice,
 };
@@ -195,6 +196,16 @@ pub enum GuiUpdate {
         key: DeviceKey,
         /// The confirmed level, or why the write did not land.
         result: Result<SidetoneLevel, WriteError>,
+    },
+    /// How a G600 onboard-DPI write the GUI asked for ended: the profile
+    /// stored or the stage selected, or why not. Answers
+    /// [`SetG600ProfileDpi`] and [`SetG600ActiveStage`]; the panel reads
+    /// the mouse again either way.
+    G600DpiWritten {
+        /// The mouse that was written.
+        key: DeviceKey,
+        /// Why the write did not land, if it did not.
+        result: Result<(), WriteError>,
     },
     /// What a force-sensing button reports after a press-force write the GUI
     /// asked for: the force it took, or the typed refusal. Answers

@@ -565,6 +565,24 @@ fn find_node_mut<'a>(
         .ok_or_else(|| ReplayError::UnknownNode(node.to_string()))
 }
 
+impl ReplayBackend {
+    /// Why a feature-report transfer to `node` fails: replay records carry
+    /// none, so a present node refuses it and an absent one is gone.
+    fn no_feature_reports(&self, node: &NodeInfo) -> BackendError {
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        match state
+            .nodes
+            .iter()
+            .find(|runtime| runtime.node.info.id == node.id)
+        {
+            Some(runtime) if runtime.node.presence == NodePresence::Present => {
+                BackendError::Backend("replay node has no feature reports".to_string())
+            }
+            _ => BackendError::Disconnected,
+        }
+    }
+}
+
 #[hidpp::async_trait]
 impl HidBackend for ReplayBackend {
     async fn enumerate(&self) -> Result<Vec<NodeInfo>, BackendError> {
@@ -661,6 +679,22 @@ impl HidBackend for ReplayBackend {
             Arc::clone(&runtime.raw_written),
             Arc::clone(&runtime.raw_connected),
         )))
+    }
+
+    async fn read_feature_report(
+        &self,
+        node: &NodeInfo,
+        _report: &mut [u8],
+    ) -> Result<usize, BackendError> {
+        Err(self.no_feature_reports(node))
+    }
+
+    async fn write_feature_report(
+        &self,
+        node: &NodeInfo,
+        _report: &[u8],
+    ) -> Result<(), BackendError> {
+        Err(self.no_feature_reports(node))
     }
 
     fn watch(&self) -> Result<HotplugStream, BackendError> {

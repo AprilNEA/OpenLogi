@@ -8,15 +8,18 @@
 //! the agent owns the device's HID channel and the device leaves this
 //! computer's radio link after the write.
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::Subcommand;
 use openlogi_core::device::DeviceInventory;
+use openlogi_core::single_instance::{self, InstanceGuard, Role};
 use openlogi_hid::{DeviceRoute, dump_features};
+use openlogi_ipc::client::ConnectError;
 
 pub mod battery;
 pub mod controls;
 pub mod dpi;
 pub mod features;
+pub mod g600;
 pub mod hidpp;
 pub mod host_switch;
 pub mod lighting;
@@ -50,6 +53,8 @@ pub enum DiagCmd {
     PointerSpeed(pointer_speed::PointerSpeedArgs),
     /// Read a G-series mouse's onboard profiles and mode.
     Onboard(onboard::OnboardArgs),
+    /// Read a G600's active profile and onboard DPI stages, or change them (vendor feature reports).
+    G600(g600::G600Args),
     /// Print which HID++ 0x8110 slot each button of a G-series mouse sends.
     MouseButtons(mouse_buttons::MouseButtonsArgs),
     /// Switch a multi-host device through the running agent (HID++ 0x1814).
@@ -78,6 +83,7 @@ impl DiagCmd {
             Self::Wheel(args) => wheel::run(args).await,
             Self::PointerSpeed(args) => pointer_speed::run(args).await,
             Self::Onboard(args) => onboard::run(args).await,
+            Self::G600(args) => g600::run(args).await,
             Self::MouseButtons(args) => mouse_buttons::run(args).await,
             Self::HostSwitch(args) => host_switch::run(args).await,
             Self::Sidetone(args) => sidetone::run(args).await,
@@ -92,6 +98,26 @@ impl DiagCmd {
     fn opens_devices_directly(&self) -> bool {
         !matches!(self, Self::HostSwitch(_))
     }
+}
+
+/// Keep the agent off the devices for as long as the returned guard lives,
+/// for a diag whose device I/O must not interleave with the agent's.
+///
+/// The agent takes this lock before any HID I/O, so holding it keeps one
+/// from starting meanwhile; the endpoint check catches an agent that is
+/// already up. Take it before enumerating, and hold it until the last
+/// request has returned.
+pub(crate) async fn exclusive_hardware() -> Result<InstanceGuard> {
+    let guard = single_instance::acquire(Role::Agent).context(
+        "could not take the agent's instance lock; quit the OpenLogi agent, then run this again",
+    )?;
+    if !matches!(
+        crate::agent::connect().await,
+        Err(ConnectError::Endpoint(_))
+    ) {
+        bail!("the OpenLogi agent is running; quit it, then run this again");
+    }
+    Ok(guard)
 }
 
 /// One online, paired device discovered during enumeration, already resolved to

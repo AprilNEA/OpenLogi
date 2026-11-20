@@ -1,0 +1,19 @@
+# Owner: openlogi_device_registry::g600 — how long a G600 report transfer and
+# a profile commit take, and how long a client waits for a profile write.
+id: registry-g600-timing-owner
+language: rust
+severity: error
+message: The G600's report timeout, profile commit time, and profile-write bounds are declared in openlogi-device-registry's g600 module (REPORT_TIMEOUT, PROFILE_COMMIT_TIME, MAX_PROFILE_WRITE_TIME, PROFILE_WRITE_DEADLINE); import them instead of declaring another here.
+note: |
+  The GUI derived its profile-write deadline from the driver's private report
+  timeout and commit time, so a driver change could fail healthy writes. See
+  "Single source of truth" in AGENTS.md.
+files:
+  - crates/**/*.rs
+ignores:
+  - crates/openlogi-device-registry/src/g600.rs
+rule:
+  kind: const_item
+  has:
+    field: name
+    regex: '^(G600_)?(PROFILE_COMMIT_TIME|MAX_PROFILE_WRITE_TIME|PROFILE_WRITE_DEADLINE)$'

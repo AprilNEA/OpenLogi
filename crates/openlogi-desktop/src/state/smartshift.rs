@@ -89,8 +89,10 @@ impl SmartShiftDeviceState {
 
 impl AppState {
     pub(super) fn load_current_smartshift(&mut self, cx: &mut Context<Self>) {
+        // SmartShift is a HID++ feature; a standalone device answers no HID++.
         let Some((key, route)) = self
             .current_record()
+            .filter(|record| !record.is_standalone())
             .and_then(|record| Some((record.device_key(), record.route.clone()?)))
         else {
             return;

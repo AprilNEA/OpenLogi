@@ -6003,6 +6003,7 @@ dependencies = [
  "openlogi-fixture",
  "openlogi-flow",
  "openlogi-hid",
+ "openlogi-hidpp",
  "openlogi-hook",
  "openlogi-inject",
  "openlogi-ipc",
@@ -6158,6 +6159,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "url",
  "walkdir",
  "winreg",
@@ -6184,6 +6186,9 @@ dependencies = [
 [[package]]
 name = "openlogi-device-registry"
 version = "0.9.0"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "openlogi-fixture"

@@ -34,6 +34,7 @@ use crate::features::lighting::standalone::LightPanel;
 use crate::features::lighting::visual as light_visual;
 use crate::features::mouse::view::MouseModelView;
 use crate::features::pointer::dpi::DpiPanel;
+use crate::features::pointer::g600::G600Panel;
 use crate::features::pointer::momentum::{MomentumPanel, confirm_turning_off_with_smooth_wheel};
 use crate::features::pointer::smartshift::SmartShiftPanel;
 use crate::features::profiles::{
@@ -105,6 +106,7 @@ pub(super) struct DetailPanels<'a> {
     pub keyboard_model: &'a gpui::Entity<FunctionRowView>,
     pub disable_keys_panel: &'a gpui::Entity<DisableKeysPanel>,
     pub dpi_panel: &'a gpui::Entity<DpiPanel>,
+    pub g600_panel: &'a gpui::Entity<G600Panel>,
     pub smartshift_panel: &'a gpui::Entity<SmartShiftPanel>,
     pub momentum_panel: &'a gpui::Entity<MomentumPanel>,
     pub lighting_panel: &'a gpui::Entity<LightingPanel>,
@@ -141,6 +143,7 @@ pub(super) fn detail_content(
         }
         DetailTab::Pointer => pointer_tab(
             panels.dpi_panel,
+            panels.g600_panel,
             panels.smartshift_panel,
             panels.momentum_panel,
             cx,
@@ -412,14 +415,40 @@ fn action_ring_tab(
 /// scroll-wheel preferences, each in a titled card, then momentum scrolling
 /// across the bottom. Use a responsive two-column grid that still fits the
 /// window's 720 px minimum width, so these short controls don't force a
-/// vertical scroll.
+/// vertical scroll. A G600 keeps its DPI in onboard profiles instead, edited
+/// in a full-width card of its own in the DPI panel's place, and has no
+/// SmartShift card: like every standalone device, it answers no HID++.
 fn pointer_tab(
     dpi_panel: &gpui::Entity<DpiPanel>,
+    g600_panel: &gpui::Entity<G600Panel>,
     smartshift_panel: &gpui::Entity<SmartShiftPanel>,
     momentum_panel: &gpui::Entity<MomentumPanel>,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
     let pal = theme::palette(cx);
+    let record = AppState::try_read(cx).and_then(AppState::current_record);
+    let g600 = record.is_some_and(DeviceRecord::has_g600_onboard_dpi);
+    let smartshift = !record.is_some_and(DeviceRecord::is_standalone);
+    let dpi_card = if g600 {
+        div()
+            .w_full()
+            .child(PanelCard::new(
+                tr!("pointer.g600_onboard_dpi"),
+                Icon::empty().path("action-icons/gauge.svg"),
+                g600_panel.clone().into_any_element(),
+            ))
+            .into_any_element()
+    } else {
+        pointer_grid_card(
+            PanelCard::new(
+                tr!("device.pointer_tuning"),
+                Icon::empty().path("action-icons/gauge.svg"),
+                dpi_panel.clone().into_any_element(),
+            )
+            .fill(),
+        )
+        .into_any_element()
+    };
     tab_body(
         DetailTab::Pointer,
         ContentWidth::Large,
@@ -428,22 +457,17 @@ fn pointer_tab(
             .items_stretch()
             .gap_4()
             .flex_wrap()
-            .child(pointer_grid_card(
-                PanelCard::new(
-                    tr!("device.pointer_tuning"),
-                    Icon::empty().path("action-icons/gauge.svg"),
-                    dpi_panel.clone().into_any_element(),
+            .child(dpi_card)
+            .children(smartshift.then(|| {
+                pointer_grid_card(
+                    PanelCard::new(
+                        tr!("pointer.smartshift"),
+                        Icon::empty().path("action-icons/refresh-cw.svg"),
+                        smartshift_panel.clone().into_any_element(),
+                    )
+                    .fill(),
                 )
-                .fill(),
-            ))
-            .child(pointer_grid_card(
-                PanelCard::new(
-                    tr!("pointer.smartshift"),
-                    Icon::empty().path("action-icons/refresh-cw.svg"),
-                    smartshift_panel.clone().into_any_element(),
-                )
-                .fill(),
-            ))
+            }))
             .child(
                 div()
                     .min_w(POINTER_CARD_MIN_W)
