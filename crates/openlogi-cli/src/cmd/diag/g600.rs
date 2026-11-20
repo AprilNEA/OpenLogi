@@ -2,6 +2,10 @@
 //! its onboard profiles, or change its active DPI stage or a profile's DPI
 //! stages. Profiles and stages are numbered from 1, like the mouse's own
 //! software.
+//!
+//! It refuses to run while the OpenLogi agent runs, and keeps the agent from
+//! starting until it exits: the mouse corrupts a profile it is storing when
+//! another request reaches it, and only one process can space them out.
 
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
@@ -10,6 +14,7 @@ use openlogi_hid::{
     G600DpiSettings, G600DpiStage, G600DpiValue, G600Profile, G600ProfileDpi, G600StageAfterStore,
 };
 
+use crate::cmd::diag::exclusive_hardware;
 use crate::cmd::standalone::select;
 
 #[derive(Debug, Args)]
@@ -173,6 +178,10 @@ impl TryFrom<G600Action> for Change {
 pub async fn run(args: G600Args) -> Result<()> {
     // Refuse invalid settings before touching any device.
     let change = args.action.map(Change::try_from).transpose()?;
+    // A request reaching the mouse while it stores a profile corrupts that
+    // profile, so this must not interleave with the agent's G600 requests,
+    // reads included.
+    let _agent_lock = exclusive_hardware().await?;
     let devices: Vec<_> = openlogi_hid::enumerate_standalone()
         .await
         .context("enumerate standalone HID devices")?
@@ -269,6 +278,68 @@ mod tests {
 
         assert_eq!(after(None), G600StageAfterStore::Keep);
         assert_eq!(after(Some(stage(2))), G600StageAfterStore::Use(stage(2)));
+    }
+
+    // Unix socket paths honor XDG_CONFIG_HOME; Windows uses a fixed pipe name
+    // and cannot isolate this endpoint test from a real agent that way.
+    #[cfg(unix)]
+    #[test]
+    fn the_agent_keeps_this_off_the_mouse() {
+        use openlogi_core::single_instance::{self, InstanceError, Role};
+
+        use super::{G600Args, run};
+
+        const TEST: &str = "cmd::diag::g600::tests::the_agent_keeps_this_off_the_mouse";
+        const MODE: &str = "OPENLOGI_DIAG_G600_EXCLUSION_TEST";
+        if std::env::var_os(MODE).is_none() {
+            let home = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", TEST, "--nocapture"])
+                .env(MODE, "exercise")
+                .env("XDG_CONFIG_HOME", home.path())
+                .env_remove("XDG_RUNTIME_DIR")
+                .env(
+                    openlogi_core::env::PROFILE,
+                    openlogi_core::paths::Profile::Production.env_value(),
+                )
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        // Even if the guard let a call through, no G600 matches this name,
+        // so nothing would reach a mouse.
+        let args = || G600Args {
+            device: Some("no such G600 in this test".to_owned()),
+            action: None,
+        };
+        openlogi_core::worker::runtime().unwrap().block_on(async {
+            {
+                // An agent that has taken its lock but not yet bound its socket.
+                let _agent = single_instance::acquire(Role::Agent).unwrap();
+                let error = run(args()).await.expect_err("the agent holds its lock");
+                assert!(
+                    matches!(
+                        error.downcast_ref::<InstanceError>(),
+                        Some(InstanceError::AlreadyRunning { .. })
+                    ),
+                    "{error:#}"
+                );
+            }
+            // An agent serving its endpoint, without its lock held here.
+            let _listener = openlogi_ipc::transport::bind().unwrap();
+            let error = run(args()).await.expect_err("the agent's endpoint is up");
+            assert_eq!(
+                error.to_string(),
+                "the OpenLogi agent is running; quit it, then run this again"
+            );
+        });
     }
 
     #[test]

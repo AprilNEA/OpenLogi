@@ -8,10 +8,12 @@
 //! the agent owns the device's HID channel and the device leaves this
 //! computer's radio link after the write.
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::Subcommand;
 use openlogi_core::device::DeviceInventory;
+use openlogi_core::single_instance::{self, InstanceGuard, Role};
 use openlogi_hid::{DeviceRoute, dump_features};
+use openlogi_ipc::client::ConnectError;
 
 pub mod battery;
 pub mod controls;
@@ -96,6 +98,26 @@ impl DiagCmd {
     fn opens_devices_directly(&self) -> bool {
         !matches!(self, Self::HostSwitch(_))
     }
+}
+
+/// Keep the agent off the devices for as long as the returned guard lives,
+/// for a diag whose device I/O must not interleave with the agent's.
+///
+/// The agent takes this lock before any HID I/O, so holding it keeps one
+/// from starting meanwhile; the endpoint check catches an agent that is
+/// already up. Take it before enumerating, and hold it until the last
+/// request has returned.
+pub(crate) async fn exclusive_hardware() -> Result<InstanceGuard> {
+    let guard = single_instance::acquire(Role::Agent).context(
+        "could not take the agent's instance lock; quit the OpenLogi agent, then run this again",
+    )?;
+    if !matches!(
+        crate::agent::connect().await,
+        Err(ConnectError::Endpoint(_))
+    ) {
+        bail!("the OpenLogi agent is running; quit it, then run this again");
+    }
+    Ok(guard)
 }
 
 /// One online, paired device discovered during enumeration, already resolved to
