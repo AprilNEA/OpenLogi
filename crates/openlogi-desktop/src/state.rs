@@ -37,12 +37,13 @@ pub(crate) use events::{StateEvent, StateEvents};
 pub(crate) use flow::{
     FlowDeviceRow, FlowHealth, FlowHost, FlowIssue, FlowPairingRefusal, FlowReadiness,
 };
+pub(crate) use g600::G600WriteStatus;
 pub(crate) use gaming_keys::GamingKeys;
 pub use light::LightCommandStatus;
 pub(crate) use load::Load;
 pub use load::{
     BacklightLoad, DisableKeysLoad, DpiLoad, EasySwitchLoad, FnLockLoad, ForceSensingLoad,
-    OnboardLoad, PointerSpeedLoad, ReportRateLoad, SidetoneLoad, SmartShiftLoad,
+    G600DpiLoad, OnboardLoad, PointerSpeedLoad, ReportRateLoad, SidetoneLoad, SmartShiftLoad,
 };
 
 /// Result of confirming a SmartShift write by reading the value back.
@@ -94,6 +95,7 @@ mod events;
 mod flow;
 mod fn_lock;
 mod force_sensing;
+mod g600;
 mod gaming_keys;
 mod host_switch;
 mod inventory;
@@ -260,6 +262,7 @@ impl AppState {
             state.load_current_report_rate(cx);
             state.load_current_pointer_speed(cx);
             state.load_current_sidetone(cx);
+            state.load_current_g600_dpi(cx);
             state.load_current_force_sensing(cx);
             state.load_current_backlight(cx);
             state.load_current_easy_switch(cx);

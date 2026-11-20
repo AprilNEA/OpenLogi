@@ -17,6 +17,11 @@
 use std::future::Future;
 
 use openlogi_core::config::{ConfigRevision, Lighting};
+use openlogi_core::hid::g600::{
+    DpiSettings as G600DpiSettings, DpiStage as G600DpiStage, DpiState as G600DpiState,
+    OnboardProfile as G600Profile, PROFILE_WRITE_DEADLINE as G600_PROFILE_WRITE_DEADLINE,
+    StageAfterStore as G600StageAfterStore,
+};
 use openlogi_core::hid::{
     BacklightChange, BacklightState, DeviceRoute, DisableKeysMask, DisableKeysState, Dpi, DpiInfo,
     EasySwitchHosts, FnLockState, ForceSensingInfo, LightCommand, OnboardState, PointerSpeed,
@@ -253,6 +258,69 @@ impl Request for SetSidetone {
 
     fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
         let _ = updates.send(GuiUpdate::SidetoneWritten {
+            key: self.key,
+            result: or_unavailable(outcome),
+        });
+    }
+}
+
+/// Store DPI stages in one of a G600's onboard profiles and put the mouse
+/// on the stage `after` asks for, answered as
+/// [`GuiUpdate::G600DpiWritten`]. A slow but healthy write outlasts the
+/// default deadline, so it waits as long as the G600 module says one may
+/// take.
+pub struct SetG600ProfileDpi {
+    pub route: DeviceRoute,
+    pub profile: G600Profile,
+    pub settings: G600DpiSettings,
+    pub after: G600StageAfterStore,
+    pub key: DeviceKey,
+}
+
+impl Request for SetG600ProfileDpi {
+    type Answer = Result<(), WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        let mut context = context::current();
+        context.deadline = std::time::Instant::now() + G600_PROFILE_WRITE_DEADLINE;
+        client
+            .set_g600_profile_dpi(
+                context,
+                self.route.clone(),
+                self.profile,
+                self.settings,
+                self.after,
+            )
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        let _ = updates.send(GuiUpdate::G600DpiWritten {
+            key: self.key,
+            result: or_unavailable(outcome),
+        });
+    }
+}
+
+/// Switch a G600 to another DPI stage of its active profile, answered as
+/// [`GuiUpdate::G600DpiWritten`].
+pub struct SetG600ActiveStage {
+    pub route: DeviceRoute,
+    pub stage: G600DpiStage,
+    pub key: DeviceKey,
+}
+
+impl Request for SetG600ActiveStage {
+    type Answer = Result<(), WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .set_g600_active_stage(context::current(), self.route.clone(), self.stage)
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        let _ = updates.send(GuiUpdate::G600DpiWritten {
             key: self.key,
             result: or_unavailable(outcome),
         });
@@ -582,6 +650,27 @@ impl Request for ReadSidetone {
     async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
         client
             .read_sidetone(context::current(), self.route.clone())
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, _: &UpdateSender) {
+        let _ = self.reply.send(or_unavailable(outcome));
+    }
+}
+
+/// Read a G600's active selection and onboard DPI; the answer goes back over
+/// `reply`.
+pub struct ReadG600Dpi {
+    pub route: DeviceRoute,
+    pub reply: oneshot::Sender<Result<G600DpiState, WriteError>>,
+}
+
+impl Request for ReadG600Dpi {
+    type Answer = Result<G600DpiState, WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .read_g600_dpi(context::current(), self.route.clone())
             .await
     }
 
@@ -1150,6 +1239,8 @@ commands! {
     SetReportRate,
     SetPointerSpeed,
     SetSidetone,
+    SetG600ProfileDpi,
+    SetG600ActiveStage,
     SetForceSensing,
     SetBacklight,
     RenameEasySwitchHost,
@@ -1159,6 +1250,7 @@ commands! {
     ReadReportRate,
     ReadPointerSpeed,
     ReadSidetone,
+    ReadG600Dpi,
     ReadForceSensing,
     ReadBacklight,
     ReadEasySwitchHosts,

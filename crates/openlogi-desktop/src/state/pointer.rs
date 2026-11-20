@@ -29,6 +29,8 @@ pub(super) struct PointerState {
     /// save it.
     pub(super) pending_force_sensing_writes: HashMap<DeviceKey, u64>,
     pub(super) next_force_sensing_write: u64,
+    /// Each G600's in-flight onboard-DPI write, or why its last one failed.
+    pub(super) g600_writes: HashMap<DeviceKey, super::g600::G600WriteStatus>,
 }
 
 impl Default for PointerState {
@@ -43,6 +45,7 @@ impl Default for PointerState {
             refused_force_sensing: HashSet::new(),
             pending_force_sensing_writes: HashMap::new(),
             next_force_sensing_write: 0,
+            g600_writes: HashMap::new(),
         }
     }
 }

@@ -26,6 +26,7 @@ use crate::features::lighting::keyboard_rgb::LightingPanel;
 use crate::features::lighting::standalone::LightPanel;
 use crate::features::mouse::view::MouseModelView;
 use crate::features::pointer::dpi::DpiPanel;
+use crate::features::pointer::g600::G600Panel;
 use crate::features::pointer::momentum::{MomentumPanel, MomentumScope};
 use crate::features::pointer::smartshift::SmartShiftPanel;
 use crate::features::profiles::{AppCatalogPicker, ProfileIconCache};
@@ -175,6 +176,7 @@ impl DetailTab {
             && record.capabilities.is_some()
             && matches!(record.kind, DeviceKind::Mouse | DeviceKind::Trackball);
         if caps.pointer
+            || record.has_g600_onboard_dpi()
             || caps.pointer_scaling
             || caps.scroll_inversion
             || caps.hires_wheel
@@ -243,6 +245,7 @@ pub struct AppView {
     keyboard_model: Entity<FunctionRowView>,
     disable_keys_panel: Entity<DisableKeysPanel>,
     dpi_panel: Entity<DpiPanel>,
+    g600_panel: Entity<G600Panel>,
     smartshift_panel: Entity<SmartShiftPanel>,
     momentum_panel: Entity<MomentumPanel>,
     lighting_panel: Entity<LightingPanel>,
@@ -328,6 +331,7 @@ impl AppView {
         let keyboard_model = cx.new(FunctionRowView::new);
         let disable_keys_panel = cx.new(DisableKeysPanel::new);
         let dpi_panel = cx.new(DpiPanel::new);
+        let g600_panel = cx.new(G600Panel::new);
         let smartshift_panel = cx.new(SmartShiftPanel::new);
         let momentum_panel = cx.new(|cx| MomentumPanel::new(MomentumScope::SelectedDevice, cx));
         let lighting_panel = cx.new(LightingPanel::new);
@@ -352,6 +356,7 @@ impl AppView {
             keyboard_model,
             disable_keys_panel,
             dpi_panel,
+            g600_panel,
             smartshift_panel,
             momentum_panel,
             lighting_panel,
@@ -428,6 +433,7 @@ impl AppView {
             | StateEvent::ReportRateChanged(_)
             | StateEvent::PointerSpeedChanged(_)
             | StateEvent::SidetoneChanged(_)
+            | StateEvent::G600DpiChanged(_)
             | StateEvent::ForceSensingChanged(_)
             | StateEvent::DeviceRemovalFailed { .. }
             | StateEvent::StalePairingRemovalFailed { .. }
@@ -749,6 +755,7 @@ impl AppView {
                         keyboard_model: &self.keyboard_model,
                         disable_keys_panel: &self.disable_keys_panel,
                         dpi_panel: &self.dpi_panel,
+                        g600_panel: &self.g600_panel,
                         smartshift_panel: &self.smartshift_panel,
                         momentum_panel: &self.momentum_panel,
                         lighting_panel: &self.lighting_panel,

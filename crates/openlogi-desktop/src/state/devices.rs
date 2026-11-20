@@ -125,6 +125,13 @@ pub struct DeviceRecord {
 }
 
 impl DeviceRecord {
+    /// Whether this is a standalone raw-HID device, which a driver of its
+    /// own controls and which answers no HID++.
+    #[must_use]
+    pub(crate) fn is_standalone(&self) -> bool {
+        self.driver_id.is_some()
+    }
+
     /// [`Self::capabilities`], or the set presumed when none is measured:
     /// from the kind, or only the host-side set for a HID++ 1.0 device, whose
     /// DPI or lighting control would have no effect (#2161).

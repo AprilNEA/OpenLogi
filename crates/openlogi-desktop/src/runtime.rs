@@ -375,6 +375,11 @@ impl Runtime {
                     AppState::apply(cx, |state| state.apply_sidetone_written(&key, result));
                 });
             }
+            ipc::GuiUpdate::G600DpiWritten { key, result } => {
+                cx.update(|cx| {
+                    AppState::apply(cx, |state| state.apply_g600_dpi_written(&key, result));
+                });
+            }
             ipc::GuiUpdate::ForceSensingWritten {
                 key,
                 write,

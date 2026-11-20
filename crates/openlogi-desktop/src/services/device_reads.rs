@@ -1,12 +1,13 @@
 //! SWR-backed device-setting reads (DPI, SmartShift, Fn lock, report rate,
-//! pointer speed, sidetone, press force, backlight, Easy-Switch hosts) keyed by device
-//! identity.
+//! pointer speed, sidetone, G600 onboard DPI, press force, backlight,
+//! Easy-Switch hosts) keyed by device identity.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{Context, Subscription};
+use openlogi_core::hid::g600::{DpiState as G600DpiState, G600Failure};
 use openlogi_core::hid::{
     BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
     ForceSensingInfo, OnboardState, PointerSpeed, ReportRateInfo, SidetoneLevel, SmartShiftStatus,
@@ -21,12 +22,12 @@ use tokio::sync::mpsc;
 
 use super::ipc::{
     Command, ReadBacklight, ReadDpi, ReadEasySwitchHosts, ReadFnLock, ReadForceSensing,
-    ReadOnboard, ReadPointerSpeed, ReadReportRate, ReadSidetone, ReadSmartShift,
+    ReadG600Dpi, ReadOnboard, ReadPointerSpeed, ReadReportRate, ReadSidetone, ReadSmartShift,
 };
 use crate::state::{
     AppState, BacklightLoad, DeviceKey, DpiLoad, EasySwitchLoad, FnLockLoad, ForceSensingLoad,
-    HostRenameRefusal, Load, OnboardLoad, PointerSpeedLoad, ReportRateLoad, SidetoneLoad,
-    SmartShiftLoad, StateEvent,
+    G600DpiLoad, HostRenameRefusal, Load, OnboardLoad, PointerSpeedLoad, ReportRateLoad,
+    SidetoneLoad, SmartShiftLoad, StateEvent,
 };
 
 const ROOT: &str = "device-read";
@@ -36,6 +37,7 @@ const FN_LOCK: &str = "fn-lock";
 const REPORT_RATE: &str = "report-rate";
 const POINTER_SPEED: &str = "pointer-speed";
 const SIDETONE: &str = "sidetone";
+const G600_DPI: &str = "g600-dpi";
 const FORCE_SENSING: &str = "force-sensing";
 const BACKLIGHT: &str = "backlight";
 const EASY_SWITCH: &str = "easy-switch";
@@ -77,6 +79,9 @@ pub(crate) struct DeviceReads {
     report_rate: BTreeMap<DeviceKey, DeviceRead<ReportRateInfo>>,
     pointer_speed: BTreeMap<DeviceKey, DeviceRead<PointerSpeed>>,
     sidetone: BTreeMap<DeviceKey, DeviceRead<SidetoneLevel>>,
+    g600_dpi: BTreeMap<DeviceKey, DeviceRead<G600DpiState>>,
+    /// The G600s read again after a write, until that reading settles.
+    g600_confirming: BTreeSet<DeviceKey>,
     force_sensing: BTreeMap<DeviceKey, DeviceRead<ForceSensingInfo>>,
     backlight: BTreeMap<DeviceKey, DeviceRead<BacklightState>>,
     /// The backlight changes sent per keyboard, for the read on the route
@@ -839,6 +844,118 @@ impl DeviceReads {
         self.sidetone.get(key).map(|read| &read.load)
     }
 
+    /// Start the G600 onboard-DPI query unless the same mouse route is
+    /// already subscribed. A write answers through
+    /// [`Self::refresh_g600_dpi`], whether it landed or not: only the mouse
+    /// knows what it stored.
+    pub(crate) fn ensure_g600_dpi(
+        &mut self,
+        key: DeviceKey,
+        route: DeviceRoute,
+        commands: mpsc::UnboundedSender<Command>,
+        cx: &mut Context<AppState>,
+    ) {
+        if self
+            .g600_dpi
+            .get(&key)
+            .is_some_and(|read| read.route == route)
+        {
+            return;
+        }
+        self.remove_g600_dpi(&key);
+        let Some((client, runtime)) = self.cache() else {
+            return;
+        };
+        let flight = self.take_flight();
+        let fetch_route = route.clone();
+        let fetcher = Retry::new(
+            runtime,
+            move |_| {
+                let commands = commands.clone();
+                let route = fetch_route.clone();
+                read_ipc(move |reply| ReadG600Dpi { route, reply }.into(), commands)
+            },
+            READ_RETRY_POLICY,
+        )
+        .retry_if(|error| !g600_error_is_permanent(error));
+        let handle = client.subscribe(
+            query_key(G600_DPI, &key),
+            fetcher,
+            QueryOptions::immutable(),
+        );
+        read_through(&client, G600_DPI, &key, &handle);
+        let query = Query::new(&client, handle, cx);
+        let load = project_load(query.read(cx), g600_error_is_permanent);
+        let observed_key = key.clone();
+        let observer = cx.observe(query.state(), move |state, query_state, cx| {
+            let query_state = query_state.read(cx);
+            let settled = !query_state.is_validating;
+            let load = project_load(query_state, g600_error_is_permanent);
+            let reads = state.device_reads_mut();
+            let changed = reads.update_g600_dpi(&observed_key, flight, load);
+            let confirmed = settled && reads.g600_confirmed(&observed_key, flight);
+            if confirmed {
+                state.g600_dpi_confirmed(&observed_key);
+            }
+            if changed || confirmed {
+                cx.emit(StateEvent::G600DpiChanged(observed_key.clone()));
+            }
+        });
+        self.g600_dpi.insert(
+            key,
+            DeviceRead {
+                route,
+                flight,
+                load,
+                query,
+                _observer: observer,
+            },
+        );
+    }
+
+    /// Read `key`'s onboard DPI again after a write, keeping the last
+    /// reading on screen while the mouse answers. A read already in flight
+    /// may predate the write, so it is discarded rather than waited for.
+    /// Returns whether a read started; [`AppState::g600_dpi_confirmed`]
+    /// follows once it settles.
+    pub(crate) fn confirm_g600_dpi(&mut self, key: &DeviceKey) -> bool {
+        let Some((client, _)) = self.cache() else {
+            return false;
+        };
+        if !self.g600_dpi.contains_key(key) {
+            return false;
+        }
+        self.g600_confirming.insert(key.clone());
+        client.invalidate(query_key(G600_DPI, key));
+        true
+    }
+
+    /// Re-read `key`'s onboard DPI, keeping the last reading on screen while
+    /// the mouse answers: when it comes back online.
+    pub(crate) fn refresh_g600_dpi(&mut self, key: &DeviceKey) {
+        if let Some(read) = self.g600_dpi.get_mut(key) {
+            read.query.revalidate();
+        }
+    }
+
+    /// Retry an exhausted G600 onboard-DPI query.
+    pub(crate) fn retry_g600_dpi(&mut self, key: &DeviceKey) {
+        let Some(read) = self.g600_dpi.get_mut(key) else {
+            return;
+        };
+        if !matches!(read.load, Load::Ready(_)) {
+            read.load = Load::Loading;
+        }
+        read.query.revalidate();
+    }
+
+    /// `key`'s G600 onboard-DPI load, or `None` while nothing has subscribed
+    /// to it.
+    #[must_use]
+    pub(crate) fn g600_dpi_load(&self, key: &DeviceKey) -> Option<&G600DpiLoad> {
+        self.g600_dpi.get(key).map(|read| &read.load)
+    }
+
     /// Start the press-force query unless the same device route is already
     /// subscribed. A write answers through [`Self::set_force_sensing_ready`],
     /// or [`Self::refresh_force_sensing`] when the device refused it.
@@ -1439,6 +1556,7 @@ impl DeviceReads {
         self.remove_report_rate(key);
         self.remove_pointer_speed(key);
         self.remove_sidetone(key);
+        self.remove_g600_dpi(key);
         self.remove_force_sensing(key);
         self.remove_backlight(key);
         self.remove_easy_switch(key);
@@ -1494,6 +1612,13 @@ impl DeviceReads {
         }
     }
 
+    fn remove_g600_dpi(&mut self, key: &DeviceKey) {
+        if let Some(read) = self.g600_dpi.remove(key) {
+            drop(read);
+            self.clear::<G600DpiState>(G600_DPI, key);
+        }
+    }
+
     fn remove_force_sensing(&mut self, key: &DeviceKey) {
         if let Some(read) = self.force_sensing.remove(key) {
             drop(read);
@@ -1527,6 +1652,7 @@ impl DeviceReads {
             .chain(self.report_rate.keys())
             .chain(self.pointer_speed.keys())
             .chain(self.sidetone.keys())
+            .chain(self.g600_dpi.keys())
             .chain(self.force_sensing.keys())
             .chain(self.backlight.keys())
             .chain(self.easy_switch.keys())
@@ -1631,6 +1757,30 @@ impl DeviceReads {
     fn update_sidetone(&mut self, key: &DeviceKey, flight: u64, load: SidetoneLoad) -> bool {
         let Some(read) = self
             .sidetone
+            .get_mut(key)
+            .filter(|read| read.flight == flight)
+        else {
+            return false;
+        };
+        if read.load == load {
+            return false;
+        }
+        read.load = load;
+        true
+    }
+
+    /// Whether a settled reading of `key` on `flight` ends a confirmation
+    /// [`Self::confirm_g600_dpi`] started, which it then no longer waits for.
+    fn g600_confirmed(&mut self, key: &DeviceKey, flight: u64) -> bool {
+        self.g600_dpi
+            .get(key)
+            .is_some_and(|read| read.flight == flight)
+            && self.g600_confirming.remove(key)
+    }
+
+    fn update_g600_dpi(&mut self, key: &DeviceKey, flight: u64, load: G600DpiLoad) -> bool {
+        let Some(read) = self
+            .g600_dpi
             .get_mut(key)
             .filter(|read| read.flight == flight)
         else {
@@ -1819,6 +1969,11 @@ fn report_rate_error_is_permanent(error: &WriteError) -> bool {
 
 fn unsupported_error_is_permanent(error: &WriteError) -> bool {
     matches!(error, WriteError::FeatureUnsupported { .. })
+}
+
+/// A route that addresses no G600 never will; anything else may pass.
+fn g600_error_is_permanent(error: &WriteError) -> bool {
+    matches!(error, WriteError::G600(G600Failure::NotG600Route))
 }
 
 fn easy_switch_error_is_permanent(error: &WriteError) -> bool {
