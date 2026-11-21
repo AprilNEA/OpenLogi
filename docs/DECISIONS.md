@@ -4,6 +4,38 @@ Durable "why we did it this way" records that are not obvious from the code.
 Add a dated entry when a non-obvious architectural or dependency decision is
 made or revisited.
 
+## 2026-11: Only Logitech nodes raise hotplug events
+
+The native backend's `watch` used to report every HID node the host added or
+removed. Every consumer answers an event by rescanning, and a rescan sends HID++
+requests to every Logitech device, so AirPods connecting (about forty Apple
+vendor nodes in four seconds) sent requests to an MX Master 3 and an MX
+Mechanical over BLE while the radio was busy with that connection. On macOS
+26.6 both requests timed out in the kernel within a second of each other, and
+from then on `BTLEServer` delivered neither HID++ replies nor input for either
+device. Turning Bluetooth off and on did not release it; killing `BTLEServer`
+did. The wedge is Apple's, but nothing is gained by touching Logitech devices
+because another vendor's device appeared.
+
+- **Filtered at the native backend.** It is the only layer that can still ask
+  what an arriving node is (`async_hid::HidBackend::query_devices`). Every
+  device OpenLogi drives carries Logitech's vendor id, so the vendor id alone
+  decides.
+  The trait only allows this (a backend may leave out another vendor's nodes),
+  so the scripted and replay backends are unaffected.
+- **Removals use the last enumeration.** A removed node can no longer be
+  queried, so the backend looks it up in the handle cache its last
+  enumeration filled. A Logitech node that arrives and leaves between two
+  enumerations raises no removal and needs none: its arrival already asked for
+  the rescan that finds it gone.
+- **A failed query still raises an arrival.** Hiding a Logitech arrival would
+  leave a device missing until the next recovery scan; one extra rescan for an
+  unknown node costs less.
+- **Rescans are not narrowed.** A hotplug pass still refreshes every known
+  device, so a Logitech node arriving still sends requests to the others.
+  Scoping a hotplug pass to the nodes that changed would cover that case too,
+  but it reaches into the reconcile core and is left for its own change.
+
 ## 2026-11: The agent saves a paired Flow computer in `config.toml`
 
 Until now the agent only read `config.toml`; the GUI and `openlogi api` wrote

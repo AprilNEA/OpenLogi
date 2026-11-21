@@ -7,23 +7,29 @@
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
-use async_hid::{AsyncHidWrite as _, Device, DeviceWriter};
+use async_hid::{AsyncHidWrite as _, Device, DeviceEvent, DeviceWriter};
+use futures_lite::StreamExt as _;
 use hidpp::async_trait;
 use hidpp::channel::HidppChannel;
 
 use openlogi_device::DeviceIoGate;
 use openlogi_device::backend::{
-    BackendError, HidBackend, HotplugStream, NodeId, NodeInfo, RawWriter,
+    BackendError, HidBackend, HotplugEvent, HotplugStream, NodeId, NodeInfo, RawWriter,
 };
 
+use crate::LOGITECH_VENDOR_ID;
 use crate::recording::{
     RecordedChannelOpenOutcome, RecordedRawWriterOpenOutcome, RecordingRawWriter, RecordingSink,
 };
 
 use super::{
-    device_io_gate, enumerate_devices, is_hidpp_node, open_hidpp_channel,
+    device_io_gate, enumerate_devices, is_hidpp_node, is_logitech_node, open_hidpp_channel,
     open_hidpp_channel_with_observer, watch_nodes,
 };
+
+/// The handle cache: OS handles from the most recent enumeration, keyed as
+/// [`HandleKey`] describes.
+type Handles = Arc<Mutex<HashMap<HandleKey, Arc<Device>>>>;
 
 /// One logical top-level collection exposed by an OS HID node.
 ///
@@ -86,9 +92,11 @@ pub(crate) struct NativeBackend {
     /// from a [`NodeId`], and re-finding one costs another enumeration. Since
     /// the trait only defines opening a node that was just enumerated, keeping
     /// the handles from that enumeration is both cheaper and a truer model
-    /// than looking them up again. Held behind an `Arc` so an open can borrow
-    /// one without keeping the map locked across its await.
-    nodes: Mutex<HashMap<HandleKey, Arc<Device>>>,
+    /// than looking them up again. Each handle is held behind an `Arc` so an
+    /// open can borrow one without keeping the map locked across its await,
+    /// and the map behind one so the hotplug stream can tell a removed node
+    /// from it.
+    nodes: Handles,
     device_io: DeviceIoGate,
     recording: Option<RecordingSink>,
 }
@@ -96,7 +104,7 @@ pub(crate) struct NativeBackend {
 impl Default for NativeBackend {
     fn default() -> Self {
         Self {
-            nodes: Mutex::new(HashMap::new()),
+            nodes: Handles::default(),
             device_io: device_io_gate(),
             recording: None,
         }
@@ -106,7 +114,7 @@ impl Default for NativeBackend {
 impl NativeBackend {
     fn with_recording(recording: RecordingSink) -> Self {
         Self {
-            nodes: Mutex::new(HashMap::new()),
+            nodes: Handles::default(),
             device_io: device_io_gate(),
             recording: Some(recording),
         }
@@ -231,8 +239,40 @@ impl HidBackend for NativeBackend {
         }
     }
 
+    /// Only Logitech nodes raise events (see `docs/DECISIONS.md`).
+    ///
+    /// The node identity `async-hid` attaches is dropped once that is decided:
+    /// every consumer reacts by re-enumerating, so carrying it would only
+    /// invite someone to trust it.
     fn watch(&self) -> Result<HotplugStream, BackendError> {
-        Ok(Box::new(watch_nodes()?))
+        let nodes = Arc::clone(&self.nodes);
+        let events = watch_nodes()?
+            .then(move |event| logitech_event(event, Arc::clone(&nodes)))
+            .filter_map(|event| event);
+        Ok(Box::new(Box::pin(events)))
+    }
+}
+
+/// `event` as a [`HotplugEvent`] when it concerns a Logitech node.
+///
+/// An arrival is judged by the vendor id of its node, and one that cannot be
+/// queried counts: hiding a Logitech arrival costs more than one extra rescan.
+/// A removed node can no longer be queried, so a removal is judged by the last
+/// enumeration. A Logitech node that arrives and leaves between two
+/// enumerations raises no removal and needs none, since its arrival already
+/// asked for the rescan that finds it gone.
+async fn logitech_event(event: DeviceEvent, nodes: Handles) -> Option<HotplugEvent> {
+    match event {
+        DeviceEvent::Connected(id) => is_logitech_node(&id)
+            .await
+            .unwrap_or(true)
+            .then_some(HotplugEvent::Connected),
+        DeviceEvent::Disconnected(id) => nodes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+            .any(|device| device.id == id && device.vendor_id == LOGITECH_VENDOR_ID)
+            .then_some(HotplugEvent::Disconnected),
     }
 }
 
@@ -303,7 +343,7 @@ mod tests {
             .expect_err("a suspended gate refuses device I/O")
             .to_string();
         let backend = NativeBackend {
-            nodes: Mutex::new(HashMap::new()),
+            nodes: Handles::default(),
             device_io,
             recording: Some(recorder.sink()),
         };

@@ -192,6 +192,8 @@ pub trait HidBackend: Send + Sync {
     async fn open_raw_writer(&self, node: &NodeInfo) -> Result<Box<dyn RawWriter>, BackendError>;
 
     /// Subscribe to node connect/disconnect events.
+    ///
+    /// A backend may leave out nodes it knows belong to another vendor.
     fn watch(&self) -> Result<HotplugStream, BackendError>;
 }
 
