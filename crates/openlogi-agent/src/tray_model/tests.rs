@@ -720,9 +720,41 @@ mod controls {
         assert_eq!(notes(&entries), ["Current: 1000 DPI"]);
     }
 
+    /// The presets a never-configured mouse offers in the menu, as titles.
+    fn offered_dpi(row: &DeviceRow) -> Vec<String> {
+        choices(&row.entries(&DeviceMemory::default()))
+            .into_iter()
+            .map(|(title, ..)| title)
+            .filter(|title| title.ends_with(" DPI"))
+            .collect()
+    }
+
     #[test]
-    fn a_mouse_without_presets_shows_its_dpi_and_the_way_to_set_presets() {
+    fn a_mouse_never_given_presets_offers_the_default_ones() {
         let row = row(mouse(true), &Config::default());
+        assert_eq!(offered_dpi(&row), ["800 DPI", "1000 DPI"]);
+    }
+
+    #[test]
+    fn a_gaming_mouse_never_given_presets_offers_its_stock_levels() {
+        let mut device = mouse(true);
+        let model = device.model_info.as_mut().expect("model info");
+        // `0407f`: a gaming layout with stock DPI levels.
+        model.extended_model_id = 0;
+        model.model_ids[0] = 0x407f;
+        let row = row(device, &Config::default());
+        assert_eq!(
+            offered_dpi(&row),
+            ["400 DPI", "800 DPI", "1600 DPI", "3200 DPI", "6400 DPI"],
+            "the menu offers the levels the agent's DPI cycle steps through"
+        );
+    }
+
+    #[test]
+    fn a_mouse_with_emptied_presets_shows_its_dpi_and_the_way_to_set_presets() {
+        let mut config = Config::default();
+        config.set_dpi_presets(MOUSE_KEY, vec![]);
+        let row = row(mouse(true), &config);
         let mut memory = DeviceMemory::default();
         memory.reading.dpi = Read::Value(dpi(1200));
         let entries = row.entries(&memory);

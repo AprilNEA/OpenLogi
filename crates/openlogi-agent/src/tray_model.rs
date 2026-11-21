@@ -14,7 +14,7 @@ use openlogi_core::brand::{DeeplinkCommand, DeviceLink};
 use openlogi_core::config::{Config, canonical_device_key};
 use openlogi_core::device::{
     BatteryAttention, BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceKind,
-    LightCapabilities, StandaloneDevice, prettify_codename,
+    DeviceModelInfo, LightCapabilities, StandaloneDevice, prettify_codename,
 };
 use openlogi_core::device_order::{DeviceIdentity, DeviceStableId, PhysicalDeviceKey};
 use openlogi_core::diagnostics::ConnectionKind;
@@ -425,7 +425,8 @@ fn devices(snapshot: &AgentSnapshot, config: &Config) -> Vec<DeviceRow> {
                     Capabilities::presumed_from_kind(device.kind)
                 }
             });
-            let controls = known.controls(config, device.kind, capabilities, &stable);
+            let model_key = model.map_or_default(DeviceModelInfo::model_key);
+            let controls = known.controls(config, device.kind, capabilities, &stable, &model_key);
             let name = known
                 .name
                 .or_else(|| device.codename.as_deref().map(prettify_codename))
@@ -486,7 +487,15 @@ fn standalone_row(
     let capabilities = device
         .capabilities
         .unwrap_or_else(|| Capabilities::presumed_from_kind(device.kind));
-    let mut controls = known.controls(config, device.kind, capabilities, &stable);
+    // The agent's DPI cycle keys a standalone device's model by its display
+    // name; the menu offers the same presets the cycle steps through.
+    let mut controls = known.controls(
+        config,
+        device.kind,
+        capabilities,
+        &stable,
+        &device.display_name,
+    );
     controls.light = observed
         .map(|light| light.state.capabilities)
         .or(device.light_capabilities)
@@ -548,20 +557,22 @@ impl Known {
 
     /// What a device of `kind` with `capabilities` can change from the menu,
     /// with the values the config saved for it on the link `stable` names —
-    /// the values the agent writes when it reconnects.
+    /// the values the agent writes when it reconnects. `model_key` picks the
+    /// stock DPI presets of a device whose presets were never set.
     fn controls(
         &self,
         config: &Config,
         kind: DeviceKind,
         capabilities: Capabilities,
         stable: &DeviceStableId,
+        model_key: &str,
     ) -> Controls {
         let key = self.key.as_ref().map(PhysicalDeviceKey::as_str);
         let device = key.and_then(|key| config.devices.get(key));
         let route_key = stable.route_key();
         Controls {
             dpi: capabilities.pointer.then(|| DpiControl {
-                presets: key.map(|key| config.dpi_presets(key)).unwrap_or_default(),
+                presets: key.map_or_default(|key| config.dpi_presets(key, model_key)),
                 saved: device.and_then(|device| device.effective_dpi(&route_key)),
             }),
             wheel: capabilities.pointer,
