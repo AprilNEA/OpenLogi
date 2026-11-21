@@ -52,6 +52,8 @@ previous = "Edellinen"
 next = "Seuraava"
 enable = "Ota käyttöön"
 not_now = "Ei nyt"
+wheel_up = "Rulla ylös"
+wheel_down = "Rulla alas"
 
 [app]
 open_openlogi = "Avaa OpenLogi"

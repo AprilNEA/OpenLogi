@@ -52,6 +52,8 @@ previous = "Vorige"
 next = "Volgende"
 enable = "Inschakelen"
 not_now = "Niet nu"
+wheel_up = "Wiel omhoog"
+wheel_down = "Wiel omlaag"
 
 [app]
 open_openlogi = "OpenLogi openen"

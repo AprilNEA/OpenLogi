@@ -52,6 +52,8 @@ previous = "Önceki"
 next = "Sonraki"
 enable = "Etkinleştir"
 not_now = "Şimdi değil"
+wheel_up = "Tekerlek Yukarı"
+wheel_down = "Tekerlek Aşağı"
 
 [app]
 open_openlogi = "OpenLogi'yi aç"

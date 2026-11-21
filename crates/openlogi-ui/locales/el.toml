@@ -52,6 +52,8 @@ previous = "Προηγούμενο"
 next = "Επόμενο"
 enable = "Ενεργοποίηση"
 not_now = "Όχι τώρα"
+wheel_up = "Τροχός πάνω"
+wheel_down = "Τροχός κάτω"
 
 [app]
 open_openlogi = "Άνοιγμα του OpenLogi"

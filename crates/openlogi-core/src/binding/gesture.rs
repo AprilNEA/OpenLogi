@@ -24,9 +24,9 @@ pub enum GestureDirection {
     /// A press-and-release that never committed a swipe — the gesture
     /// button's plain-click slot.
     Click,
-    /// Hold + scroll wheel up (negative raw-XY `dz`).
+    /// Hold + scroll wheel up.
     WheelUp,
-    /// Hold + scroll wheel down (positive raw-XY `dz`).
+    /// Hold + scroll wheel down.
     WheelDown,
 }
 
@@ -35,7 +35,7 @@ impl GestureDirection {
     /// Iterated to seed or complete a full gesture map — see
     /// [`Binding::fill_gesture_defaults`](crate::binding::Binding::fill_gesture_defaults)
     /// and [`default_binding_for`](crate::binding::default_binding_for).
-    pub const ALL: [GestureDirection; 7] = [
+    pub const ALL: [GestureDirection; 5] = [
         GestureDirection::Up,
         GestureDirection::Down,
         GestureDirection::Left,
@@ -52,8 +52,8 @@ impl GestureDirection {
             GestureDirection::Left => "Left",
             GestureDirection::Right => "Right",
             GestureDirection::Click => "Click",
-            GestureDirection::WheelUp => "Scroll Up",
-            GestureDirection::WheelDown => "Scroll Down",
+            GestureDirection::WheelUp => "Wheel Up",
+            GestureDirection::WheelDown => "Wheel Down",
         }
     }
 
@@ -66,8 +66,8 @@ impl GestureDirection {
             GestureDirection::Left => "common.left",
             GestureDirection::Right => "common.right",
             GestureDirection::Click => "common.click",
-            GestureDirection::WheelUp => "common.scroll_up",
-            GestureDirection::WheelDown => "common.scroll_down",
+            GestureDirection::WheelUp => "common.wheel_up",
+            GestureDirection::WheelDown => "common.wheel_down",
         }
     }
 }

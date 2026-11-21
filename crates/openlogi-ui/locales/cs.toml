@@ -52,6 +52,8 @@ previous = "Předchozí"
 next = "Další"
 enable = "Povolit"
 not_now = "Teď ne"
+wheel_up = "Kolečko nahoru"
+wheel_down = "Kolečko dolů"
 
 [app]
 open_openlogi = "Otevřít OpenLogi"

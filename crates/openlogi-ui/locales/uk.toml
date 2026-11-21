@@ -52,6 +52,8 @@ previous = "Назад"
 next = "Далі"
 enable = "Увімкнути"
 not_now = "Не зараз"
+wheel_up = "Коліщатко вгору"
+wheel_down = "Коліщатко вниз"
 
 [app]
 open_openlogi = "Відкрити OpenLogi"

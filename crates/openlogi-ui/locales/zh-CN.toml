@@ -52,6 +52,8 @@ previous = "上一个"
 next = "下一个"
 enable = "启用"
 not_now = "暂不"
+wheel_up = "滚轮向上"
+wheel_down = "滚轮向下"
 
 [app]
 open_openlogi = "打开 OpenLogi"

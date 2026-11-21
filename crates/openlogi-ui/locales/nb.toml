@@ -52,6 +52,8 @@ previous = "Forrige"
 next = "Neste"
 enable = "Aktiver"
 not_now = "Ikke nå"
+wheel_up = "Hjul opp"
+wheel_down = "Hjul ned"
 
 [app]
 open_openlogi = "Åpne OpenLogi"

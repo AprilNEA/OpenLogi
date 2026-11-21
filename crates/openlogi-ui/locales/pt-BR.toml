@@ -52,6 +52,8 @@ previous = "Anterior"
 next = "Próximo"
 enable = "Ativar"
 not_now = "Agora não"
+wheel_up = "Roda para Cima"
+wheel_down = "Roda para Baixo"
 
 [app]
 open_openlogi = "Abrir o OpenLogi"

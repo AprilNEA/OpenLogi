@@ -52,6 +52,8 @@ previous = "이전"
 next = "다음"
 enable = "활성화"
 not_now = "나중에"
+wheel_up = "휠 위로"
+wheel_down = "휠 아래로"
 
 [app]
 open_openlogi = "OpenLogi 열기"
