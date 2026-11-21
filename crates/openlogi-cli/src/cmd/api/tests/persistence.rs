@@ -150,6 +150,63 @@ async fn failed_reload_reports_that_the_setting_is_already_saved() {
     );
 }
 
+/// An agent that stops answering during a save fails the command on the CLI's
+/// shared call budget instead of leaving it waiting: a stalled write saves
+/// nothing, and a stalled reload reports the setting as already saved.
+#[tokio::test]
+async fn a_stalled_agent_call_fails_the_save_instead_of_waiting() {
+    // Both stalls run concurrently to keep the test within one call budget.
+    let stalled_write = async {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(CONFIG_FILE);
+        let result = run_scripted_at(
+            identified_snapshot(),
+            dpi_command(),
+            vec![
+                Scripted::Answer(dpi_read(400)),
+                Scripted::Stall(Box::new(|request| {
+                    assert!(
+                        matches!(request, AgentRequest::SetDpi { .. }),
+                        "{request:?}"
+                    );
+                })),
+            ],
+            Some(&path),
+        )
+        .await;
+        assert_eq!(result["error"]["code"], "timeout", "{result}");
+        assert!(!path.exists());
+    };
+    let stalled_reload = async {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(CONFIG_FILE);
+        let result = run_scripted_at(
+            identified_snapshot(),
+            dpi_command(),
+            vec![
+                Scripted::Answer(dpi_read(400)),
+                Scripted::Answer(dpi_write()),
+                Scripted::Answer(dpi_read(1200)),
+                Scripted::Stall(Box::new(|request| {
+                    assert!(
+                        matches!(request, AgentRequest::ReloadConfig {}),
+                        "{request:?}"
+                    );
+                })),
+            ],
+            Some(&path),
+        )
+        .await;
+        assert_eq!(result["error"]["code"], "config_reload_unknown", "{result}");
+        assert_eq!(result["error"]["persistence"], "saved");
+        assert_eq!(
+            Config::load_from_path(&path).unwrap().dpi("unit:12345678"),
+            Some(1200.into())
+        );
+    };
+    tokio::join!(stalled_write, stalled_reload);
+}
+
 #[tokio::test]
 async fn rejects_unidentified_devices_reads_and_link_overrides_before_hardware_io() {
     let dir = tempfile::tempdir().unwrap();
