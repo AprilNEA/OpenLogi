@@ -518,6 +518,20 @@ the updater does not yet change behavior based on it.
   source/manual installs, or otherwise inconclusive ownership. Missing
   metadata never implies a portable ZIP or a DMG.
 
+### Windows DPI notifications
+
+The background agent sends informational WinRT toasts using the OpenLogi
+AppUserModelID registered on the MSI's Start menu shortcut. This keeps delivery
+independent of the tray icon. Use an MSI built with the matching shortcut when
+testing notification delivery. See the [Windows desktop toast registration
+requirements](https://learn.microsoft.com/en-us/windows/win32/shell/enable-desktop-toast-with-appusermodelid).
+
+On an installed build, enable **Settings → General → DPI change notifications**.
+Change the DPI from the Pointer panel and with a bound preset action, then try
+two different values in quick succession. Confirm that Windows shows the
+actual DPI, stays silent, and keeps the latest notice for that mouse. Repeat
+with the switch off and with Windows Do not disturb enabled.
+
 ## Release updater publishing
 
 Tagged releases attach artifacts and `SHA256SUMS` to GitHub Releases for manual

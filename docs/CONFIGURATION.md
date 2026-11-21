@@ -132,6 +132,14 @@ optional physical device key.
   one on screen. The state a keyboard reports when it connects is not
   announced. With the setting off the agent shows nothing, and an indicator
   already on screen still closes on its own. Fn Lock is not shown.
+- On Windows, `dpi_notifications` defaults to `false`. **Settings → General →
+  DPI change notifications** shows a silent Windows notification with the mouse
+  name and its confirmed DPI. It covers manual changes in the Pointer panel and
+  DPI preset actions assigned to keys or buttons. Reconnects, temporary DPI
+  shifts, and application focus changes do not post notifications. A recent
+  notification for the same mouse is replaced and expires quickly. Windows
+  notification settings, including Do not disturb, control banner visibility.
+  This feature uses the Start menu identity registered by the Windows MSI.
 - `animate_desktop_switch` (default `true`, macOS only): Previous Desktop and
   Next Desktop slide to the neighbouring Space. The agent types the "Move left
   a space" or "Move right a space" shortcut from System Settings → Keyboard →

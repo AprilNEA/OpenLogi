@@ -48,11 +48,25 @@ pub(crate) async fn publish_dpi_mouse(
     route: DeviceRoute,
     accept: impl Fn() -> bool + Send + Sync + 'static,
 ) -> Arc<Mutex<[u8; 4]>> {
+    publish_dpi_mouse_with_handle(registry, route, accept)
+        .await
+        .0
+}
+
+/// As [`publish_dpi_mouse`], also providing barriers for response timing tests.
+pub(crate) async fn publish_dpi_mouse_with_handle(
+    registry: &ChannelRegistry,
+    route: DeviceRoute,
+    accept: impl Fn() -> bool + Send + Sync + 'static,
+) -> (
+    Arc<Mutex<[u8; 4]>>,
+    openlogi_device::test_support::ScriptedRawHidHandle,
+) {
     const DPI: u8 = 4;
     const INVALID_ARGUMENT: u8 = 2;
     let unit = Arc::new(Mutex::new(UNIT));
     let current = Mutex::new(800u16);
-    openlogi_device::test_support::publish_scripted_channel(
+    let (_, handle) = openlogi_device::test_support::publish_scripted_channel(
         registry,
         "dpi-mouse",
         route,
@@ -85,5 +99,5 @@ pub(crate) async fn publish_dpi_mouse(
         }),
     )
     .await;
-    unit
+    (unit, handle)
 }

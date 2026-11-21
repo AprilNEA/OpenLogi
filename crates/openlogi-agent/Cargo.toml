@@ -75,6 +75,7 @@ windows-sys = { workspace = true, features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
+windows = { version = "0.61.3", default-features = false, features = ["Data_Xml_Dom", "UI_Notifications", "Win32_System_WinRT"] }
 
 [lints]
 workspace = true

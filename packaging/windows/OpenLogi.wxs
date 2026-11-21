@@ -228,7 +228,10 @@
         <Shortcut Id="OpenLogiShortcut"
                   Name="OpenLogi"
                   Target="[INSTALLFOLDER]OpenLogi.exe"
-                  WorkingDirectory="INSTALLFOLDER" />
+                  WorkingDirectory="INSTALLFOLDER">
+          <!-- This app identity is also used by the background notification sender. -->
+          <ShortcutProperty Key="System.AppUserModel.ID" Value="org.openlogi.openlogi" />
+        </Shortcut>
         <RegistryValue Root="HKCU"
                        Key="Software\OpenLogi"
                        Name="Installed"

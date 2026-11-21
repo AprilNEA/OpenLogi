@@ -23,6 +23,8 @@ mod binary_watch;
 mod input_monitoring;
 mod lifecycle;
 mod logging;
+#[cfg(target_os = "windows")]
+mod notifications_windows;
 mod overlay;
 mod pairing;
 #[cfg(target_os = "linux")]

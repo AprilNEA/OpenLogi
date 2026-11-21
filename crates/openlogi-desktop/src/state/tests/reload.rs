@@ -294,6 +294,40 @@ fn lock_key_notifications_persist_and_reload_only_when_changed() {
     }
 }
 
+#[cfg(windows)]
+#[test]
+fn dpi_notifications_persist_and_reload_only_when_changed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(openlogi_core::paths::CONFIG_FILE);
+    let (config, file) = ConfigFile::load_from_path(&path).unwrap();
+    let resolver = AssetResolver::new();
+    let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = AppState::new(Sources {
+        persistence: ConfigPersistence::UserFile(file),
+        ..Sources::in_memory(config, &resolver, commands)
+    });
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(crate::services::ipc::Command::LoadConfig(_))
+    ));
+    assert!(!state.app_settings().dpi_notifications);
+    for enabled in [true, false] {
+        assert_eq!(
+            state.commit_dpi_notifications(enabled),
+            [StateEvent::SettingsChanged]
+        );
+        assert_eq!(state.app_settings().dpi_notifications, enabled);
+        let persisted = Config::load_from_path(&path).unwrap();
+        assert_eq!(persisted.app_settings.dpi_notifications, enabled);
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(crate::services::ipc::Command::ReloadConfig(_))
+        ));
+        let _ = state.commit_dpi_notifications(enabled);
+        assert!(receiver.try_recv().is_err());
+    }
+}
+
 /// A live language switch runs inside `AppState::update`, and the menu rebuild
 /// it schedules reads the same entity (the Device menu lists devices). Rebuilt
 /// synchronously that read is re-entrant and panics ("cannot read … while it is

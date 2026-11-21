@@ -414,6 +414,16 @@ impl AppState {
         self.persist_and_reload("lock-key notifications setting");
         StateEvent::SettingsChanged.into()
     }
+    /// Save the Windows DPI notification preference and reload the agent.
+    #[cfg(windows)]
+    pub fn commit_dpi_notifications(&mut self, enabled: bool) -> StateEvents {
+        if self.config.app_settings.dpi_notifications != enabled {
+            self.config
+                .edit(|config| config.app_settings.dpi_notifications = enabled);
+            self.persist_and_reload("DPI notifications setting");
+        }
+        StateEvent::SettingsChanged.into()
+    }
     /// Toggle the Previous/Next Desktop slide and persist it. The agent
     /// switches desktops, so it reads the new value on config reload; the
     /// next switch uses it. An already-set value writes nothing and is still
