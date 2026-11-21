@@ -5,6 +5,7 @@
 //! When the device is asleep its identity is unreadable and only the route is
 //! known, so the entry's `links` table doubles as a route index.
 
+use crate::binding::KeypadPage;
 #[cfg(test)]
 use crate::binding::{Action, ButtonId};
 use crate::config::{Config, DeviceConfig, GKeyOwner, GamingKeyMode};
@@ -16,11 +17,11 @@ use crate::device_order::{DeviceIdentity, DeviceStableId, PhysicalDeviceKey};
 use crate::hid::Dpi;
 
 impl DeviceIdentity {
-    /// This identity as a transport-free configuration key, or `None` when the
-    /// device reported no identity worth keying on.
+    /// This identity as a transport-free configuration key, or `None` for a
+    /// model identity, whose key is the route itself.
     #[must_use]
     pub fn config_key(&self) -> Option<String> {
-        self.is_physical().then(|| self.key())
+        self.fragment()
     }
 }
 
@@ -59,6 +60,22 @@ pub fn canonical_device_key(
         .and_then(DeviceIdentity::config_key)
         .and_then(|key| PhysicalDeviceKey::parse(&key))
         .or_else(|| stable.physical_key())
+}
+
+impl DeviceStableId {
+    /// The key an online device names by itself: its own identity, or the
+    /// route of a device that reports only its model.
+    ///
+    /// A model-only device's key is its route, so the `links` index must not
+    /// answer for it: that index records the device last seen on the route,
+    /// which may be a unit of the same model on a direct route, or the unit
+    /// that held a receiver slot before this device was paired into it.
+    fn own_key(&self, identity: &DeviceIdentity) -> Option<PhysicalDeviceKey> {
+        match identity.config_key() {
+            Some(key) => PhysicalDeviceKey::parse(&key),
+            None => self.physical_key(),
+        }
+    }
 }
 
 impl Config {
@@ -128,10 +145,7 @@ impl Config {
         stable: &DeviceStableId,
         identity: Option<&DeviceIdentity>,
     ) -> Option<PhysicalDeviceKey> {
-        if let Some(key) = identity
-            .and_then(DeviceIdentity::config_key)
-            .and_then(|key| PhysicalDeviceKey::parse(&key))
-        {
+        if let Some(key) = identity.and_then(|identity| stable.own_key(identity)) {
             let holds_settings = |key: &str| {
                 self.devices
                     .get(key)
@@ -204,9 +218,12 @@ impl Config {
                 changed = true;
             }
         }
-        let legacy = (route_key != canonical.as_str())
-            .then(|| self.devices.remove(route_key))
-            .flatten();
+        // A direct route key keys the entry of a device that reports only its
+        // model. Nothing says it was this device, so it is not a legacy entry.
+        let legacy = (route_key != canonical.as_str()
+            && DeviceStableId::direct_route_of_key(route_key).is_none())
+        .then(|| self.devices.remove(route_key))
+        .flatten();
         let device = self
             .devices
             .entry(canonical.as_str().to_string())
@@ -225,7 +242,7 @@ impl Config {
         let Some(legacy) = legacy else {
             return changed;
         };
-        fold(device, legacy, route_key);
+        fold(device, legacy, canonical.as_str(), route_key);
         self.repoint_references(route_key, canonical.as_str());
         true
     }
@@ -262,12 +279,32 @@ impl Config {
 /// before schema 5, so a route-keyed entry on disk cannot carry one — but
 /// [`Config::migrate_transport_scoped_keys`] folds two *renamed* entries that
 /// each already carry the route they were renamed out of.
-pub(super) fn fold(device: &mut DeviceConfig, mut legacy: DeviceConfig, route_key: &str) {
+///
+/// A legacy entry reached by the route that keys the canonical entry itself
+/// (`route_key == canonical_key`, a model-only direct device) has no other
+/// route to scope an override to: an override there would shadow the
+/// canonical value on every sighting, so the canonical value wins and the
+/// disagreement is logged.
+pub(super) fn fold(
+    device: &mut DeviceConfig,
+    mut legacy: DeviceConfig,
+    canonical_key: &str,
+    route_key: &str,
+) {
+    let scoped = route_key != canonical_key;
     for (key, value) in std::mem::take(&mut legacy.links) {
         device.links.entry(key).or_insert(value);
     }
     fold_maps(device, &mut legacy, route_key);
+    fold_bare_choices(device, &legacy);
 
+    let warn_kept = |field: &str| {
+        tracing::warn!(
+            %route_key,
+            field,
+            "value differs between merged entries; keeping the canonical one"
+        );
+    };
     let link = device.links.entry(route_key.to_string()).or_default();
     if let Some(capabilities) = legacy
         .identity
@@ -287,9 +324,10 @@ pub(super) fn fold(device: &mut DeviceConfig, mut legacy: DeviceConfig, route_ke
         ($field:ident) => {
             match (&device.$field, legacy.$field) {
                 (None, Some(value)) => device.$field = Some(value),
-                (Some(ours), Some(theirs)) if *ours != theirs => {
+                (Some(ours), Some(theirs)) if *ours != theirs && scoped => {
                     link.overrides.$field = Some(theirs);
                 }
+                (Some(ours), Some(theirs)) if *ours != theirs => warn_kept(stringify!($field)),
                 _ => {}
             }
         };
@@ -305,18 +343,11 @@ pub(super) fn fold(device: &mut DeviceConfig, mut legacy: DeviceConfig, route_ke
     // wrongly (a device that simply never had the setting touched) than
     // rightly.
     if device.invert_scroll != legacy.invert_scroll && legacy.invert_scroll {
-        link.overrides.invert_scroll = Some(legacy.invert_scroll);
-    }
-    // `smooth_wheel` is a bare opt-in with no per-link slot: for the same
-    // reason only a legacy `true` is evidence of a choice, so it carries over.
-    device.smooth_wheel |= legacy.smooth_wheel;
-    // Handing the G-keys to OpenLogi is the same kind of bare opt-in.
-    if legacy.g_key_owner == GKeyOwner::OpenLogi {
-        device.g_key_owner = GKeyOwner::OpenLogi;
-    }
-    // Only a mode the user picked is evidence; the default is never-set.
-    if device.gaming_key_mode == GamingKeyMode::default() {
-        device.gaming_key_mode = legacy.gaming_key_mode;
+        if scoped {
+            link.overrides.invert_scroll = Some(legacy.invert_scroll);
+        } else {
+            warn_kept("invert_scroll");
+        }
     }
 
     // Scalar values with no per-link override slot: take the legacy value
@@ -327,13 +358,7 @@ pub(super) fn fold(device: &mut DeviceConfig, mut legacy: DeviceConfig, route_ke
         ($field:ident) => {
             match (&device.$field, legacy.$field) {
                 (None, Some(value)) => device.$field = Some(value),
-                (Some(ours), Some(theirs)) if *ours != theirs => {
-                    tracing::warn!(
-                        %route_key,
-                        field = stringify!($field),
-                        "value differs between merged entries; keeping the canonical one"
-                    );
-                }
+                (Some(ours), Some(theirs)) if *ours != theirs => warn_kept(stringify!($field)),
                 _ => {}
             }
         };
@@ -355,6 +380,8 @@ pub(super) fn fold(device: &mut DeviceConfig, mut legacy: DeviceConfig, route_ke
     // folded into a canonical entry with none would drop it silently — the
     // one field here a user typed by hand, so the loss is the most visible.
     fold_option_field!(custom_name);
+
+    fold_keypad_pages(device, legacy.keypad_pages, warn_kept);
 
     if device.identity.is_none() {
         device.identity = legacy.identity.take();
@@ -403,6 +430,42 @@ pub(super) fn fold(device: &mut DeviceConfig, mut legacy: DeviceConfig, route_ke
     }
 }
 
+/// The settings of [`fold`] that have no per-link override slot and whose
+/// default means never-set, split out to keep that function inside the
+/// workspace's line budget.
+///
+/// Only a non-default legacy value is evidence of a choice, so it carries over
+/// and a default one changes nothing. No choice can be lost here: each setting
+/// has a single non-default value, so two choices cannot disagree.
+fn fold_bare_choices(device: &mut DeviceConfig, legacy: &DeviceConfig) {
+    device.smooth_wheel |= legacy.smooth_wheel;
+    if legacy.g_key_owner == GKeyOwner::OpenLogi {
+        device.g_key_owner = GKeyOwner::OpenLogi;
+    }
+    if device.gaming_key_mode == GamingKeyMode::default() {
+        device.gaming_key_mode = legacy.gaming_key_mode;
+    }
+}
+
+/// The keypad page count of [`fold`], split out to keep that function inside
+/// the workspace's line budget.
+///
+/// A page count has no "unset" to match on: one page is the default, so a
+/// legacy count only displaces a single-page canonical entry. Links have no
+/// override slot for it, so two real counts cannot both survive and the
+/// displaced one is reported through `warn_kept`.
+fn fold_keypad_pages(
+    device: &mut DeviceConfig,
+    legacy_pages: KeypadPage,
+    warn_kept: impl Fn(&str),
+) {
+    if device.keypad_pages == KeypadPage::FIRST {
+        device.keypad_pages = legacy_pages;
+    } else if legacy_pages != KeypadPage::FIRST && legacy_pages != device.keypad_pages {
+        warn_kept("keypad_pages");
+    }
+}
+
 /// The map-valued halves of [`fold`], split out to keep that function inside
 /// the workspace's line budget.
 ///
@@ -444,7 +507,7 @@ mod tests {
         DeviceStableId::Direct {
             vendor_id: 0x046d,
             product_id: 0xc08d,
-            identity: DeviceIdentity::Unit([0x6b, 0xe9, 0xd3, 0x00]),
+            identity: Some(DeviceIdentity::from_parts(None, [0x6b, 0xe9, 0xd3, 0x00])),
         }
     }
 
@@ -458,7 +521,7 @@ mod tests {
     #[test]
     fn a_known_unit_keys_the_entry_directly() {
         let config = Config::default();
-        let unit = DeviceIdentity::Unit([0x6b, 0xe9, 0xd3, 0x00]);
+        let unit = DeviceIdentity::from_parts(None, [0x6b, 0xe9, 0xd3, 0x00]);
         let key = config
             .resolve_device_key(&cabled(), Some(&unit))
             .expect("a non-zero unit is a physical identity");
@@ -469,7 +532,7 @@ mod tests {
     fn the_same_unit_resolves_alike_on_either_route() {
         // The whole point: one mouse, two routes, one entry.
         let config = Config::default();
-        let unit = DeviceIdentity::Unit([0x6b, 0xe9, 0xd3, 0x00]);
+        let unit = DeviceIdentity::from_parts(None, [0x6b, 0xe9, 0xd3, 0x00]);
         assert_eq!(
             config.resolve_device_key(&cabled(), Some(&unit)),
             config.resolve_device_key(&on_receiver(), Some(&unit)),
@@ -502,7 +565,7 @@ mod tests {
             },
         );
 
-        let unit = DeviceIdentity::Unit([0x6b, 0xe9, 0xd3, 0x00]);
+        let unit = DeviceIdentity::from_parts(None, [0x6b, 0xe9, 0xd3, 0x00]);
         let key = config
             .resolve_device_key(&on_receiver(), Some(&unit))
             .expect("resolves");
@@ -555,7 +618,7 @@ mod tests {
         );
         config.devices.insert("unit:6be9d300".to_string(), bare);
 
-        let unit = DeviceIdentity::Unit([0x6b, 0xe9, 0xd3, 0x00]);
+        let unit = DeviceIdentity::from_parts(None, [0x6b, 0xe9, 0xd3, 0x00]);
         let key = config
             .resolve_device_key(&on_receiver(), Some(&unit))
             .expect("resolves");
@@ -583,7 +646,7 @@ mod tests {
             },
         );
 
-        let unit = DeviceIdentity::Unit([0x6b, 0xe9, 0xd3, 0x00]);
+        let unit = DeviceIdentity::from_parts(None, [0x6b, 0xe9, 0xd3, 0x00]);
         let key = config
             .resolve_device_key(&on_receiver(), Some(&unit))
             .expect("resolves");
@@ -608,7 +671,7 @@ mod tests {
         }
         let unknown = DeviceStableId::Unknown {
             slot: 2,
-            identity: DeviceIdentity::Unit([0x6b, 0xe9, 0xd3, 0x00]),
+            identity: Some(DeviceIdentity::from_parts(None, [0x6b, 0xe9, 0xd3, 0x00])),
         };
         assert_eq!(
             unknown.route_key(),
@@ -685,26 +748,146 @@ mod tests {
     }
 
     #[test]
-    fn an_all_zero_unit_over_a_receiver_keeps_its_route_key() {
+    fn a_model_identity_over_a_receiver_keeps_its_route_key() {
         // Not every device reports a unit id. Such a device simply never
-        // correlates across transports rather than colliding on `unit:00000000`.
+        // correlates across transports; the receiver slot stays its key.
         let config = Config::default();
-        let zero = DeviceIdentity::Unit([0; 4]);
         let key = config
-            .resolve_device_key(&on_receiver(), Some(&zero))
-            .expect("falls back rather than failing");
+            .resolve_device_key(&on_receiver(), Some(&DeviceIdentity::Model))
+            .expect("receiver keys are physical");
         assert_eq!(key.as_str(), "receiver:82839805:slot:1");
     }
 
+    fn model_identified_cable() -> DeviceStableId {
+        DeviceStableId::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc07e,
+            identity: Some(DeviceIdentity::Model),
+        }
+    }
+
     #[test]
-    fn a_direct_device_with_no_identity_stays_non_persistent() {
+    fn a_direct_device_identified_by_its_model_persists_under_its_route() {
         let config = Config::default();
-        let anonymous = DeviceStableId::Direct {
+        let key = config
+            .resolve_device_key(&model_identified_cable(), Some(&DeviceIdentity::Model))
+            .expect("the model is the device's most specific identity");
+        assert_eq!(key.as_str(), "direct:046d:c07e");
+        assert_eq!(
+            canonical_device_key(&model_identified_cable(), Some(&DeviceIdentity::Model))
+                .map(PhysicalDeviceKey::into_string),
+            Some("direct:046d:c07e".to_string())
+        );
+    }
+
+    #[test]
+    fn a_direct_device_whose_identity_was_never_read_stays_non_persistent() {
+        let config = Config::default();
+        let unread = DeviceStableId::Direct {
             vendor_id: 0x046d,
             product_id: 0xc08d,
-            identity: DeviceIdentity::Unit([0; 4]),
+            identity: None,
         };
-        assert_eq!(config.resolve_device_key(&anonymous, None), None);
+        assert_eq!(config.resolve_device_key(&unread, None), None);
+    }
+
+    #[test]
+    fn a_model_identified_device_adopts_its_own_route_without_folding() {
+        // The route key and the canonical key are the same string, so the
+        // legacy fold has nothing to consume; the entry simply indexes itself.
+        let mut config = Config::default();
+        config.set_dpi("direct:046d:c07e", Dpi::new(1600));
+        let canonical = PhysicalDeviceKey::parse("direct:046d:c07e").expect("valid");
+
+        assert!(config.adopt_route(&canonical, "direct:046d:c07e", None));
+        assert!(!config.adopt_route(&canonical, "direct:046d:c07e", None));
+
+        let device = &config.devices["direct:046d:c07e"];
+        assert_eq!(device.dpi, Some(Dpi::new(1600)));
+        assert!(device.links.contains_key("direct:046d:c07e"));
+    }
+
+    /// A model-only device's entry, `direct:046d:c08d`, holding its DPI.
+    fn config_with_a_model_entry() -> Config {
+        let mut config = Config::default();
+        config.set_dpi("direct:046d:c08d", Dpi::new(1600));
+        let canonical = PhysicalDeviceKey::parse("direct:046d:c08d").expect("valid");
+        config.adopt_route(&canonical, "direct:046d:c08d", None);
+        config
+    }
+
+    #[test]
+    fn units_of_a_model_do_not_read_the_model_entry() {
+        // Nothing on disk says the model-only device was either unit: the
+        // recorded identity carries no unit id. Reading it would hand both
+        // mice the settings of a third device.
+        let config = config_with_a_model_entry();
+        for unit_id in [[0x6b, 0xe9, 0xd3, 0x00], [0x01, 0x02, 0x03, 0x04]] {
+            let unit = DeviceIdentity::from_parts(None, unit_id);
+            let stable = DeviceStableId::Direct {
+                vendor_id: 0x046d,
+                product_id: 0xc08d,
+                identity: Some(unit.clone()),
+            };
+            assert_eq!(
+                config
+                    .resolve_device_key(&stable, Some(&unit))
+                    .map(PhysicalDeviceKey::into_string),
+                unit.config_key(),
+            );
+        }
+    }
+
+    #[test]
+    fn adopting_a_unit_leaves_the_model_entry_alone() {
+        let mut config = config_with_a_model_entry();
+        let canonical = PhysicalDeviceKey::parse("unit:6be9d300").expect("valid");
+
+        config.adopt_route(&canonical, "direct:046d:c08d", None);
+
+        assert_eq!(
+            config.devices["direct:046d:c08d"].dpi,
+            Some(Dpi::new(1600)),
+            "the model-only device keeps its settings"
+        );
+        assert_eq!(config.devices["unit:6be9d300"].dpi, None);
+    }
+
+    #[test]
+    fn a_model_identity_does_not_read_the_unit_that_last_indexed_its_route() {
+        let mut config = config_with_a_model_entry();
+        config.set_dpi("unit:6be9d300", Dpi::new(800));
+        let unit = PhysicalDeviceKey::parse("unit:6be9d300").expect("valid");
+        config.adopt_route(&unit, "direct:046d:c08d", None);
+        let model = DeviceStableId::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc08d,
+            identity: Some(DeviceIdentity::Model),
+        };
+
+        assert_eq!(
+            config
+                .resolve_device_key(&model, Some(&DeviceIdentity::Model))
+                .map(PhysicalDeviceKey::into_string)
+                .as_deref(),
+            Some("direct:046d:c08d")
+        );
+    }
+
+    #[test]
+    fn a_model_identity_does_not_read_the_unit_that_last_held_its_receiver_slot() {
+        let mut config = Config::default();
+        config.set_dpi("unit:6be9d300", Dpi::new(800));
+        let unit = PhysicalDeviceKey::parse("unit:6be9d300").expect("valid");
+        config.adopt_route(&unit, "receiver:82839805:slot:1", None);
+
+        assert_eq!(
+            config
+                .resolve_device_key(&on_receiver(), Some(&DeviceIdentity::Model))
+                .map(PhysicalDeviceKey::into_string)
+                .as_deref(),
+            Some("receiver:82839805:slot:1")
+        );
     }
 
     #[test]
@@ -1060,5 +1243,150 @@ mod tests {
             !config.devices["unit:6be9d300"].enabled,
             "the legacy opt-out survives adoption"
         );
+    }
+
+    /// Records the `field` of every warning logged under it. A setting `fold`
+    /// discards leaves no other trace, so the log is what a test must observe.
+    #[derive(Clone, Default)]
+    struct WarnedFields(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+    #[derive(Default)]
+    struct FieldValue(Option<String>);
+
+    impl tracing::field::Visit for FieldValue {
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            if field.name() == "field" {
+                self.0 = Some(value.to_string());
+            }
+        }
+
+        fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {}
+    }
+
+    impl tracing::Subscriber for WarnedFields {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            if *event.metadata().level() != tracing::Level::WARN {
+                return;
+            }
+            let mut value = FieldValue::default();
+            event.record(&mut value);
+            self.0
+                .lock()
+                .expect("no test panics while holding it")
+                .extend(value.0);
+        }
+
+        fn enter(&self, _: &tracing::span::Id) {}
+
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    /// The settings `action` warned about on this thread, so tests running in
+    /// parallel cannot pollute each other's result.
+    fn fields_warned_about(action: impl FnOnce()) -> Vec<String> {
+        let warned = WarnedFields::default();
+        tracing::subscriber::with_default(warned.clone(), action);
+        warned
+            .0
+            .lock()
+            .expect("no test panics while holding it")
+            .clone()
+    }
+
+    #[test]
+    fn a_legacy_inverted_scroll_is_kept_on_its_link_or_logged_as_lost() {
+        // Only a legacy `true` is evidence of a choice. On its own route it
+        // survives as an override; reached by the route that keys the
+        // canonical entry it has nowhere to go, so the loss must be logged.
+        const CANONICAL: &str = "unit:6be9d300";
+        const OTHER_ROUTE: &str = "receiver:82839805:slot:1";
+        const LOST: &[&str] = &["invert_scroll"];
+        const KEPT: &[&str] = &[];
+
+        let cases = [
+            (OTHER_ROUTE, false, false, None, KEPT),
+            (OTHER_ROUTE, false, true, Some(true), KEPT),
+            (OTHER_ROUTE, true, false, None, KEPT),
+            (OTHER_ROUTE, true, true, None, KEPT),
+            (CANONICAL, false, false, None, KEPT),
+            (CANONICAL, false, true, None, LOST),
+            (CANONICAL, true, false, None, KEPT),
+            (CANONICAL, true, true, None, KEPT),
+        ];
+
+        for (route, canonical, legacy, expected_override, expected_warnings) in cases {
+            let mut device = DeviceConfig {
+                invert_scroll: canonical,
+                ..DeviceConfig::default()
+            };
+            let legacy_entry = DeviceConfig {
+                invert_scroll: legacy,
+                ..DeviceConfig::default()
+            };
+
+            let warned = fields_warned_about(|| fold(&mut device, legacy_entry, CANONICAL, route));
+
+            let case = format!("route={route}, canonical={canonical}, legacy={legacy}");
+            assert_eq!(device.invert_scroll, canonical, "canonical wins: {case}");
+            assert_eq!(
+                device.links[route].overrides.invert_scroll, expected_override,
+                "override: {case}"
+            );
+            assert_eq!(warned, expected_warnings, "warnings: {case}");
+        }
+    }
+
+    #[test]
+    fn a_legacy_page_count_fills_a_single_page_keypad_or_is_logged_as_lost() {
+        // One page is the default, so it cannot be told from never-set: only
+        // a canonical single page yields to the legacy count. Links have no
+        // override slot for it, so on every route a count the canonical entry
+        // disagrees with is lost and must be logged.
+        const CANONICAL: &str = "unit:6be9d300";
+        const OTHER_ROUTE: &str = "receiver:82839805:slot:1";
+        const LOST: &[&str] = &["keypad_pages"];
+        const KEPT: &[&str] = &[];
+
+        let cases = [
+            (1, 1, 1, KEPT),
+            (1, 3, 3, KEPT),
+            (3, 1, 3, KEPT),
+            (3, 3, 3, KEPT),
+            (2, 3, 2, LOST),
+            (3, 2, 3, LOST),
+        ];
+        let page = |number| KeypadPage::new(number).expect("a page in range");
+
+        for route in [OTHER_ROUTE, CANONICAL] {
+            for (canonical, legacy, expected, expected_warnings) in cases {
+                let mut device = DeviceConfig {
+                    keypad_pages: page(canonical),
+                    ..DeviceConfig::default()
+                };
+                let legacy_entry = DeviceConfig {
+                    keypad_pages: page(legacy),
+                    ..DeviceConfig::default()
+                };
+
+                let warned =
+                    fields_warned_about(|| fold(&mut device, legacy_entry, CANONICAL, route));
+
+                let case = format!("route={route}, canonical={canonical}, legacy={legacy}");
+                assert_eq!(device.keypad_pages, page(expected), "pages: {case}");
+                assert_eq!(warned, expected_warnings, "warnings: {case}");
+            }
+        }
     }
 }

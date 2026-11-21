@@ -7,9 +7,12 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use atomic_write_file::AtomicWriteFile;
-use tracing::warn;
+use serde::de::DeserializeOwned;
+use tracing::{debug, warn};
 
-use openlogi_device::inventory::persist::{ProbeCacheError, ProbeCacheSnapshot, ProbeCacheStore};
+use openlogi_device::inventory::persist::{
+    EncodedSnapshot, ProbeCacheError, ProbeCacheSnapshot, ProbeCacheStore, SnapshotRejected,
+};
 
 /// Keeps the probe cache as JSON at a fixed path.
 pub struct FileProbeCacheStore {
@@ -48,10 +51,25 @@ impl ProbeCacheStore for FileProbeCacheStore {
         let Ok(bytes) = std::fs::read(&self.path) else {
             return ProbeCacheSnapshot::empty();
         };
-        serde_json::from_slice(&bytes).unwrap_or_else(|_| {
-            warn!(path = ?self.path, "probe cache unreadable — starting cold");
-            ProbeCacheSnapshot::empty()
-        })
+        match ProbeCacheSnapshot::read(&Json(&bytes)) {
+            Ok(snapshot) => snapshot,
+            Err(SnapshotRejected::ForeignSchema { version }) => {
+                debug!(
+                    path = ?self.path,
+                    version,
+                    "The probe cache was written with another schema, so it starts empty. This is not a problem: devices are probed afresh and the cache is rebuilt."
+                );
+                ProbeCacheSnapshot::empty()
+            }
+            Err(SnapshotRejected::Unreadable { reason }) => {
+                warn!(
+                    path = ?self.path,
+                    %reason,
+                    "The probe cache file could not be decoded, so it starts empty. This is safe to ignore: devices are probed afresh and the cache is rebuilt."
+                );
+                ProbeCacheSnapshot::empty()
+            }
+        }
     }
 
     /// Written atomically via [`AtomicWriteFile`] so a crash mid-write can't
@@ -60,6 +78,17 @@ impl ProbeCacheStore for FileProbeCacheStore {
     fn save(&self, snapshot: &ProbeCacheSnapshot) -> Result<(), ProbeCacheError> {
         self.write(snapshot)
             .map_err(|e| ProbeCacheError::new(format!("{}: {e}", self.path.display())))
+    }
+}
+
+/// The bytes of a snapshot this store kept, in its JSON encoding.
+struct Json<'a>(&'a [u8]);
+
+impl EncodedSnapshot for Json<'_> {
+    type Error = serde_json::Error;
+
+    fn decode<T: DeserializeOwned>(&self) -> Result<T, serde_json::Error> {
+        serde_json::from_slice(self.0)
     }
 }
 

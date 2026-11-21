@@ -71,18 +71,7 @@ impl Save {
                 )
             })?;
         let identity = DeviceIdentity::from_parts(model.serial_number.as_deref(), model.unit_id);
-        if identity.config_key().is_none() {
-            return Err(ApiError::new(
-                "identity_unavailable",
-                "device has no persistent physical identity",
-            ));
-        }
-        let stable = DeviceStableId::from_parts(
-            Some(&route),
-            slot,
-            model.serial_number.as_deref(),
-            model.unit_id,
-        );
+        let stable = DeviceStableId::from_parts(Some(&route), slot, Some(identity.clone()));
         let mut edit = DeviceEdit::load(path, &stable, Some(&identity)).map_err(refused)?;
         // Stage the DPI the command names now, so a per-link override refuses
         // it before any hardware I/O.

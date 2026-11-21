@@ -150,9 +150,9 @@ fn a_light_command_is_saved_only_in_settings_the_light_already_has() {
         usage_id: 0x0202,
         identity: "serial:glow".to_owned(),
     };
-    let stable =
-        DeviceStableId::from_parts(Some(&route), DIRECT_DEVICE_INDEX, Some("glow"), [0; 4]);
     let identity = Identity::from_parts(Some("glow"), [0; 4]);
+    let stable =
+        DeviceStableId::from_parts(Some(&route), DIRECT_DEVICE_INDEX, Some(identity.clone()));
     let key = Config::default()
         .resolve_device_key(&stable, Some(&identity))
         .expect("a serial names the light");

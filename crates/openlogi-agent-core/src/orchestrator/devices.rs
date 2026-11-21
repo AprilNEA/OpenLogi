@@ -206,18 +206,14 @@ pub(super) fn build_devices(
                 continue;
             };
             let route = DeviceRoute::for_slot(inv, paired.slot);
-            let stable_id = DeviceStableId::from_parts(
-                route.as_ref(),
-                paired.slot,
-                model.serial_number.as_deref(),
-                model.unit_id,
-            );
-            // An offline probe reports an all-zero unit id, which is not a
-            // physical identity — offer it only while the device is online,
-            // exactly as the GUI does, or every sleeping device would resolve
-            // to the same non-key.
             let identity =
                 DeviceIdentity::from_parts(model.serial_number.as_deref(), model.unit_id);
+            let stable_id =
+                DeviceStableId::from_parts(route.as_ref(), paired.slot, Some(identity.clone()));
+            // An offline probe reports an all-zero unit id, which reads as a
+            // model identity — offer it only while the device is online,
+            // exactly as the GUI does: an offline sighting resolves through
+            // the persisted route index instead.
             let Some(config_key) =
                 config.resolve_device_key(&stable_id, paired.online.then_some(&identity))
             else {
@@ -242,13 +238,9 @@ pub(super) fn build_devices(
     }
     for device in standalone {
         let route = device.route();
-        let stable_id = DeviceStableId::from_parts(
-            Some(&route),
-            DIRECT_DEVICE_INDEX,
-            device.serial_number.as_deref(),
-            device.unit_id,
-        );
         let identity = DeviceIdentity::from_parts(device.serial_number.as_deref(), device.unit_id);
+        let stable_id =
+            DeviceStableId::from_parts(Some(&route), DIRECT_DEVICE_INDEX, Some(identity.clone()));
         let Some(config_key) =
             config.resolve_device_key(&stable_id, device.online.then_some(&identity))
         else {
@@ -644,8 +636,10 @@ pub(super) fn stable_id(dev: &AgentDevice) -> DeviceStableId {
     DeviceStableId::from_parts(
         dev.route.as_ref(),
         dev.slot,
-        dev.serial.as_deref(),
-        dev.unit_id,
+        Some(DeviceIdentity::from_parts(
+            dev.serial.as_deref(),
+            dev.unit_id,
+        )),
     )
 }
 

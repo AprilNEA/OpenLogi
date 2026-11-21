@@ -22,6 +22,14 @@ mod report_rate;
 
 type Step = Box<dyn FnOnce(AgentRequest) -> AgentResponse + Send>;
 
+/// What the scripted agent does with one request.
+enum Scripted {
+    /// Answer it.
+    Answer(Step),
+    /// Check it and never answer, as a wedged agent would.
+    Stall(Box<dyn FnOnce(AgentRequest) + Send>),
+}
+
 fn snapshot() -> AgentSnapshot {
     AgentSnapshot {
         status: AgentStatus {
@@ -86,19 +94,35 @@ async fn run_script_at(
     steps: Vec<Step>,
     path: Option<&Path>,
 ) -> Value {
-    let mut queue: VecDeque<Step> = VecDeque::new();
-    queue.push_back(Box::new(move |request| {
+    let script = steps.into_iter().map(Scripted::Answer).collect();
+    run_scripted_at(snapshot, command, script, path).await
+}
+
+/// [`run_script_at`] for a script that may also leave a request unanswered.
+async fn run_scripted_at(
+    snapshot: AgentSnapshot,
+    command: ApiCommand,
+    script: Vec<Scripted>,
+    path: Option<&Path>,
+) -> Value {
+    let mut queue: VecDeque<Scripted> = VecDeque::new();
+    queue.push_back(Scripted::Answer(Box::new(move |request| {
         assert!(matches!(request, AgentRequest::Snapshot {}));
         AgentResponse::Snapshot(snapshot)
-    }));
-    queue.extend(steps);
+    })));
+    queue.extend(script);
     let queue = Arc::new(Mutex::new(queue));
     let calls = queue.clone();
     let client = in_memory_agent(
-        move |request| {
-            let step = calls.lock().unwrap().pop_front().expect("unexpected RPC");
-            let response = step(request);
-            Box::pin(async move { Ok(response) })
+        move |request| match calls.lock().unwrap().pop_front().expect("unexpected RPC") {
+            Scripted::Answer(step) => {
+                let response = step(request);
+                Box::pin(async move { Ok(response) })
+            }
+            Scripted::Stall(check) => {
+                check(request);
+                Box::pin(pending())
+            }
         },
         pending(),
     );
@@ -213,6 +237,50 @@ async fn status_has_a_separate_explicit_json_contract() {
             "virtual_keyboard": "unsupported",
         })
     );
+}
+
+#[tokio::test]
+async fn a_direct_route_listed_twice_is_ambiguous_even_for_a_model_only_device() {
+    // Two G402s report only their model and share one route: the selection
+    // cannot tell them apart, so no write is attempted.
+    let g402 = DeviceInventory {
+        receiver: ReceiverInfo {
+            name: "G402".into(),
+            vendor_id: 0x046d,
+            product_id: 0xc07e,
+            unique_id: None,
+        },
+        paired: vec![PairedDevice {
+            slot: openlogi_core::hid::DIRECT_DEVICE_INDEX,
+            codename: Some("G402".into()),
+            wpid: None,
+            kind: DeviceKind::Mouse,
+            online: true,
+            battery: None,
+            model_info: None,
+            capabilities: None,
+            settings_revision: 0,
+            hidpp10: false,
+        }],
+    };
+    let route = DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xc07e,
+    };
+    let mut seen_twice = snapshot();
+    seen_twice.inventory = vec![g402.clone(), g402];
+
+    let result = run_script(
+        seen_twice,
+        ApiCommand::Dpi {
+            device: route.to_string(),
+            set: Some(1200),
+        },
+        vec![],
+    )
+    .await;
+    assert_eq!(result["ok"], false);
+    assert_eq!(result["error"]["code"], "ambiguous_device");
 }
 
 #[tokio::test]

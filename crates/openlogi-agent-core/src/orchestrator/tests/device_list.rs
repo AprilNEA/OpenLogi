@@ -123,8 +123,104 @@ fn build_devices_still_finds_settings_left_under_a_pre_upgrade_receiver_key() {
 }
 
 #[test]
-fn build_devices_skips_transient_zero_unit_direct_identity() {
-    assert!(build_devices(&Config::default(), &[direct_inventory(None, [0; 4])], &[]).is_empty());
+fn a_model_only_device_does_not_take_the_settings_of_the_unit_that_last_held_its_slot() {
+    // The agent never adopts a route, so with the GUI closed the `links` index
+    // still names the unit. The device answering there says it is not one.
+    let mut config = Config::default();
+    let previous = config
+        .devices
+        .entry("unit:6be9d300".to_string())
+        .or_default();
+    previous.dpi = Some(Dpi::new(3200));
+    previous.links.insert(
+        "receiver:82839805:slot:1".to_string(),
+        LinkConfig::default(),
+    );
+
+    let devices = build_devices(&config, &[bolt_inventory([0; 4])], &[]);
+
+    let device = devices.first().expect("one paired device");
+    assert_eq!(device.config_key, "receiver:82839805:slot:1");
+}
+
+#[test]
+fn a_model_identified_direct_device_cycles_the_presets_saved_under_its_route() {
+    // DeviceInformation answered with every identity field zero (the G402
+    // shape): the device is one instance of its model, and the agent cycles
+    // the DPI presets the GUI saved under its route.
+    let presets = vec![Dpi::new(400), Dpi::new(800), Dpi::new(1600)];
+    let mut config = Config::default();
+    config.set_dpi_presets("direct:046d:c07e", presets.clone());
+    let mut orch = orchestrator(config);
+
+    orch.refresh_inventory(
+        &[direct_inventory_state(0xc07e, None, [0; 4], true)],
+        &[],
+        false,
+    );
+
+    assert_eq!(orch.devices.len(), 1);
+    assert_eq!(orch.devices[0].config_key, "direct:046d:c07e");
+    let Ok(cycles) = orch.shared.dpi_cycle.read() else {
+        panic!("DPI cycle lock should not be poisoned");
+    };
+    let cycle = cycles
+        .by_key
+        .get("direct:046d:c07e")
+        .expect("the agent cycles the device's DPI");
+    assert_eq!(cycle.presets, presets);
+    assert_eq!(
+        cycle.target,
+        Some(DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc07e,
+        })
+    );
+}
+
+#[test]
+fn units_of_a_model_do_not_take_the_settings_saved_under_its_model_key() {
+    // `direct:<vid>:<pid>` holds the settings of a device of that model that
+    // reports neither a serial nor a unit id. Nothing says it was either of
+    // these mice, so each keeps its own, still empty, entry.
+    let mut config = Config::default();
+    config.set_dpi("direct:046d:c08d", Dpi::new(1600));
+    let mut orch = orchestrator(config);
+
+    orch.refresh_inventory(
+        &[
+            direct_inventory_state(0xc08d, None, [0x6b, 0xe9, 0xd3, 0x00], true),
+            direct_inventory_state(0xc08d, None, [0x01, 0x02, 0x03, 0x04], true),
+        ],
+        &[],
+        false,
+    );
+
+    let keys: Vec<&str> = orch
+        .devices
+        .iter()
+        .map(|device| device.config_key.as_str())
+        .collect();
+    assert_eq!(keys, ["unit:01020304", "unit:6be9d300"]);
+}
+
+#[test]
+fn build_devices_skips_a_receiver_device_whose_identity_was_never_read() {
+    // Its slot would give it a key, as the GUI lists it, but nothing the device
+    // reported says which device sits there, so no settings are applied to it.
+    let mut inventory = bolt_inventory([0xa3, 0x93, 0xca, 0xe0]);
+    inventory.paired[0].model_info = None;
+
+    assert!(build_devices(&Config::default(), &[inventory], &[]).is_empty());
+}
+
+#[test]
+fn build_devices_skips_a_device_whose_identity_was_never_read() {
+    // No DeviceInformation answer at all: the agent has nothing to key on and
+    // waits for the next probe rather than applying defaults.
+    let mut inventory = direct_inventory(None, [0; 4]);
+    inventory.paired[0].model_info = None;
+    assert!(build_devices(&Config::default(), &[inventory], &[]).is_empty());
 
     let devices = build_devices(
         &Config::default(),
@@ -188,7 +284,7 @@ fn direct_stable_id() -> DeviceStableId {
     DeviceStableId::Direct {
         vendor_id: 0x046d,
         product_id: 0xc08d,
-        identity: DeviceIdentity::Unit([0; 4]),
+        identity: Some(DeviceIdentity::Model),
     }
 }
 
@@ -339,4 +435,38 @@ fn a_link_removed_after_the_keyboard_left_is_still_cleared() {
     orchestrator.refresh_inventory(std::slice::from_ref(&mouse_inventory), &[], false);
     orchestrator.reload_config(Config::default());
     assert_eq!(orchestrator.follower_cookies().held_for(mouse), [byte]);
+}
+
+#[test]
+fn two_devices_with_their_own_units_on_one_route_are_both_managed() {
+    // Two cabled mice of one model share the route but not the key.
+    let devices = build_devices(
+        &Config::default(),
+        &[
+            direct_inventory_state(0xc08d, None, [1, 1, 1, 1], true),
+            direct_inventory_state(0xc08d, None, [2, 2, 2, 2], true),
+        ],
+        &[],
+    );
+
+    let keys: Vec<&str> = devices
+        .iter()
+        .map(|device| device.config_key.as_str())
+        .collect();
+    assert_eq!(keys, ["unit:01010101", "unit:02020202"]);
+}
+
+#[test]
+fn two_model_only_devices_of_one_model_are_both_managed_under_one_key() {
+    // Two G402s report neither a serial nor a unit id, and are reached by
+    // the same `direct:<vid>:<pid>` route: nothing tells them apart, so they
+    // share the one entry their route keys.
+    let g402 = direct_inventory_state(0xc07e, None, [0; 4], true);
+    let devices = build_devices(&Config::default(), &[g402.clone(), g402], &[]);
+
+    let keys: Vec<&str> = devices
+        .iter()
+        .map(|device| device.config_key.as_str())
+        .collect();
+    assert_eq!(keys, ["direct:046d:c07e", "direct:046d:c07e"]);
 }

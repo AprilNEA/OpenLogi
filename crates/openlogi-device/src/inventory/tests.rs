@@ -15,6 +15,7 @@ use super::cache::{
 };
 use super::events::EventFeatureIndices;
 use super::features::{ProbedFeatures, ProbedProtocol};
+use super::identity::ProbedIdentity;
 use super::ledger;
 use super::probe::{
     NodeProbe, PassContext, ProbeVerdict, assemble_bolt_probe, assemble_unifying_device,
@@ -39,6 +40,7 @@ mod cache;
 mod deferral;
 mod publication;
 mod retry;
+mod serial;
 mod unifying;
 
 fn cache_entry() -> Cached {
@@ -126,10 +128,9 @@ fn model(unit_id: [u8; 4], serial: Option<&str>) -> DeviceModelInfo {
     }
 }
 
-fn probed(model_info: Option<DeviceModelInfo>, identity_incomplete: bool) -> ProbedFeatures {
+fn probed(identity: ProbedIdentity) -> ProbedFeatures {
     ProbedFeatures {
-        model_info,
-        identity_incomplete,
+        identity,
         kind: Some(DeviceKind::Mouse),
         ..ProbedFeatures::default()
     }

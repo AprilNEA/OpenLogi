@@ -37,6 +37,7 @@ use crate::reprog_controls::{BACK_CIDS, DPI_MODE_SHIFT_CIDS, FORWARD_CIDS};
 use crate::write::{force_button_is_changeable, panel_button};
 
 use super::events::{EventFeatureIndices, EventSubscriptionHandle};
+use super::identity::{ProbedIdentity, SerialRead};
 use super::mappings::{
     charge_register_battery_info, legacy_battery_info, legacy_battery_level_from_percentage,
     map_adc_battery_status, map_battery_level, map_battery_status, map_device_type,
@@ -49,7 +50,8 @@ use super::mappings::{
 #[derive(Default, Clone, Serialize, Deserialize)]
 pub(super) struct ProbedFeatures {
     pub(super) battery: Option<BatteryInfo>,
-    pub(super) model_info: Option<DeviceModelInfo>,
+    /// The device's own identity, from DeviceInformation.
+    pub(super) identity: ProbedIdentity,
     /// Marketing type from HID++ `0x0005` — an identity hint only.
     pub(super) kind: Option<DeviceKind>,
     /// Marketing name from HID++ `0x0005`; preferred over generic OS HID names
@@ -58,12 +60,6 @@ pub(super) struct ProbedFeatures {
     /// Which protocol the device answered in, and with it the configuration
     /// capabilities derived from its feature table.
     pub(super) protocol: ProbedProtocol,
-    /// A `DeviceInformation` read *failed* (vs. the feature being absent), so
-    /// the identity fields above may be missing data the device does have.
-    /// This is intentionally independent of `model_info`: `true` with `Some`
-    /// means only the serial-number read failed, while `true` with `None` means
-    /// the whole device-information read failed.
-    pub(super) identity_incomplete: bool,
     /// The battery feature answered that the battery-powered end is not
     /// linked: a headset dongle whose headset is switched off. Volatile like
     /// `battery`, so never persisted. The cache resolves both fields from
@@ -530,43 +526,44 @@ async fn probe_hidpp20(
     let (battery_probe, battery_capability_unknown) =
         resolve_battery_capability(channel, slot, battery_probe).await;
     capabilities_incomplete |= battery_capability_unknown;
-    let mut identity_incomplete = false;
-    let model_info = match device.get_feature::<DeviceInformationFeature>() {
+    let identity = match device.get_feature::<DeviceInformationFeature>() {
         Some(feature) => match feature.get_device_info().await {
             Ok(info) => {
-                let serial_number = if info.capabilities.serial_number {
+                let serial = if info.capabilities.serial_number {
                     match feature.get_serial_number().await {
-                        Ok(serial) => normalize_serial_number(&serial),
+                        Ok(serial) => normalize_serial_number(&serial)
+                            .map_or(SerialRead::Unreported, SerialRead::Read),
                         Err(e) => {
                             debug!(slot, error = ?e, "DeviceInformation serial read failed");
-                            identity_incomplete = true;
-                            None
+                            SerialRead::Lost
                         }
                     }
                 } else {
-                    None
+                    SerialRead::Unreported
                 };
-                Some(DeviceModelInfo {
-                    entity_count: info.entity_count,
-                    serial_number,
-                    unit_id: info.unit_id,
-                    transports: DeviceTransports {
-                        usb: info.transport.contains(DeviceTransport::USB),
-                        equad: info.transport.contains(DeviceTransport::E_QUAD),
-                        btle: info.transport.contains(DeviceTransport::BTLE),
-                        bluetooth: info.transport.contains(DeviceTransport::BLUETOOTH),
+                ProbedIdentity::answered(
+                    DeviceModelInfo {
+                        entity_count: info.entity_count,
+                        serial_number: None,
+                        unit_id: info.unit_id,
+                        transports: DeviceTransports {
+                            usb: info.transport.contains(DeviceTransport::USB),
+                            equad: info.transport.contains(DeviceTransport::E_QUAD),
+                            btle: info.transport.contains(DeviceTransport::BTLE),
+                            bluetooth: info.transport.contains(DeviceTransport::BLUETOOTH),
+                        },
+                        model_ids: info.model_id,
+                        extended_model_id: info.extended_model_id,
                     },
-                    model_ids: info.model_id,
-                    extended_model_id: info.extended_model_id,
-                })
+                    serial,
+                )
             }
             Err(e) => {
                 debug!(slot, error = ?e, "DeviceInformation read failed");
-                identity_incomplete = true;
-                None
+                ProbedIdentity::ReadFailed
             }
         },
-        None => None,
+        None => ProbedIdentity::Unavailable,
     };
 
     // `0x0005` reports the device's own marketing type and name. The type is
@@ -577,7 +574,7 @@ async fn probe_hidpp20(
     (
         ProbedFeatures {
             battery: None,
-            model_info,
+            identity,
             kind,
             marketing_name,
             protocol: capabilities.map_or(ProbedProtocol::Unanswered, |capabilities| {
@@ -586,7 +583,6 @@ async fn probe_hidpp20(
                     incomplete: capabilities_incomplete,
                 }
             }),
-            identity_incomplete,
             unlinked: false,
             refresh: Refresh::Answered,
         },
@@ -850,14 +846,17 @@ mod tests {
         disable_keys::DisableKeysFeature, unified_battery::UnifiedBatteryFeature,
     };
 
-    use openlogi_core::device::{BatteryInfo, BatteryLevel, BatteryStatus};
+    use openlogi_core::device::{
+        BatteryInfo, BatteryLevel, BatteryStatus, DeviceModelInfo, DeviceTransports,
+    };
 
     use super::{
-        BatteryProbe, BatteryRead, ProbedFeatures, ProbedProtocol, Refreshed,
-        battery_feature_index, probe_features, read_battery, refresh_features,
+        BatteryProbe, BatteryRead, ProbedFeatures, ProbedIdentity, ProbedProtocol, Refreshed,
+        SerialRead, battery_feature_index, probe_features, read_battery, refresh_features,
     };
     use crate::channel::scripted::{
         ScriptedRawHidChannel, feature_error, ping_reply, register_error, scripted_channel,
+        within_deadline,
     };
     use crate::host_lock::ReceiverRegisterPhase;
 
@@ -961,6 +960,132 @@ mod tests {
                 .all(|report| report.get(2) != Some(&0x81)),
             "no register read may go out without the register phase"
         );
+    }
+
+    /// What the scripted DeviceInformation answers below say beside `unit_id`:
+    /// three entities, and every other field zero.
+    fn answered_model(unit_id: [u8; 4]) -> DeviceModelInfo {
+        DeviceModelInfo {
+            entity_count: 3,
+            serial_number: None,
+            unit_id,
+            transports: DeviceTransports::default(),
+            model_ids: [0; 3],
+            extended_model_id: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_v0_device_information_answer_is_a_completed_identity() {
+        // The G402 answers DeviceInformation v0: firmware entities only, every
+        // identity field zero. That is the device's complete answer, not a
+        // lost reply, so the probe is whole and carries the model info the
+        // agent and GUI key the device by.
+        let (raw, _) = ScriptedRawHidChannel::with_dynamic_responder(|request| {
+            let mut response = vec![0; 20];
+            response[..4].copy_from_slice(&request[..4]);
+            response[0] = 0x11;
+            match (request[2], request[3] >> 4) {
+                // Root: protocol 4.x ping, then the feature index lookups.
+                (0, 1) => response[4] = 4,
+                (0, 0) => {
+                    response[4] = match u16::from_be_bytes([request[4], request[5]]) {
+                        0x0001 => 1,
+                        0x0003 => 2,
+                        _ => 0,
+                    };
+                }
+                // FeatureSet: two features, IFeatureSet and DeviceInformation.
+                (1, 0) => response[4] = 2,
+                (1, 1) => response[4..6].copy_from_slice(
+                    &[0x0001u16, 0x0003][usize::from(request[4]) - 1].to_be_bytes(),
+                ),
+                // DeviceInformation v0: three entities, nothing else.
+                (2, 0) => response[4] = 3,
+                _ => panic!("unexpected request: {request:02x?}"),
+            }
+            Some(response)
+        });
+        let channel = within_deadline("opening the channel", scripted_channel(raw)).await;
+
+        let (probe, _, _) =
+            within_deadline("the probe", probe_features(&channel, 0xff, None, None)).await;
+
+        // Known, not merely read: nothing was lost, the device has no more to
+        // say.
+        assert_eq!(
+            probe.identity,
+            ProbedIdentity::Known(answered_model([0; 4])),
+            "a v0 answer is a complete answer"
+        );
+        assert!(probe.capabilities().is_some());
+    }
+
+    /// A HID++ 2.0 device whose DeviceInformation says it has a serial number
+    /// and reports `unit_id`, but whose serial-number read fails.
+    async fn probe_with_a_lost_serial_read(unit_id: [u8; 4]) -> ProbedFeatures {
+        let (raw, _) = ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+            let mut response = vec![0; 20];
+            response[..4].copy_from_slice(&request[..4]);
+            response[0] = 0x11;
+            match (request[2], request[3] >> 4) {
+                (0, 1) => response[4] = 4,
+                (0, 0) => {
+                    response[4] = match u16::from_be_bytes([request[4], request[5]]) {
+                        0x0001 => 1,
+                        0x0003 => 2,
+                        _ => 0,
+                    };
+                }
+                (1, 0) => response[4] = 2,
+                (1, 1) => response[4..6].copy_from_slice(
+                    &[0x0001u16, 0x0003][usize::from(request[4]) - 1].to_be_bytes(),
+                ),
+                (2, 0) => {
+                    response[4] = 3;
+                    response[5..9].copy_from_slice(&unit_id);
+                    response[18] = 0x01;
+                }
+                (2, 2) => return Some(feature_error(request, 0x08)),
+                _ => panic!("unexpected request: {request:02x?}"),
+            }
+            Some(response)
+        });
+        let channel = within_deadline("opening the channel", scripted_channel(raw)).await;
+        within_deadline("the probe", probe_features(&channel, 0xff, None, None))
+            .await
+            .0
+    }
+
+    #[tokio::test]
+    async fn a_lost_serial_read_beside_a_zero_unit_id_is_no_identity() {
+        // Its model info would read as a model identity and key the device by
+        // its route alone, which is not what the device said.
+        let probe = probe_with_a_lost_serial_read([0; 4]).await;
+
+        assert_eq!(
+            probe.identity,
+            ProbedIdentity::answered(answered_model([0; 4]), SerialRead::Lost),
+            "the device has an identity the probe failed to read"
+        );
+        assert_eq!(probe.identity.model(), None, "no identity was read");
+        assert!(probe.capabilities().is_some());
+    }
+
+    #[tokio::test]
+    async fn a_lost_serial_read_beside_a_unit_id_is_no_identity() {
+        // Its model info would read as a unit identity and key the device
+        // `unit:<hex>`, and settings saved under that key are left behind
+        // once the serial is read (#2025).
+        let probe = probe_with_a_lost_serial_read([0xa3, 0x93, 0xca, 0xe0]).await;
+
+        assert_eq!(
+            probe.identity,
+            ProbedIdentity::answered(answered_model([0xa3, 0x93, 0xca, 0xe0]), SerialRead::Lost),
+            "the device has an identity the probe failed to read"
+        );
+        assert_eq!(probe.identity.model(), None, "no identity was read");
+        assert!(probe.capabilities().is_some());
     }
 
     #[tokio::test]
