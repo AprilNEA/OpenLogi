@@ -518,7 +518,9 @@ impl SharedHandles {
                         .write_dpi(&c, write_ticket, openlogi_hid::DpiTarget::Value(dpi), None)
                         .await?;
                     if let Some(restore) = restore {
-                        show_precision_led(&c, false, started).await;
+                        device
+                            .show_precision_led_after_write(&c, false, started)
+                            .await;
                         speeds.restored(&restore);
                     }
                     Ok(())

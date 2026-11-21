@@ -44,6 +44,13 @@ impl Default for DpiProbeTime {
 }
 
 impl DpiProbeTime {
+    /// Adjust a write's start for follow-up deadlines after the write returns.
+    /// The optional read spends its own time rather than that of the follow-up.
+    #[must_use]
+    pub fn exclude_from(&self, started: Instant) -> Instant {
+        started + *self.0.borrow()
+    }
+
     /// Run the write with its full ordinary budget plus only the time spent
     /// in the optional read. Required sensor reads spend the ordinary budget.
     pub async fn within_write_budget<T>(

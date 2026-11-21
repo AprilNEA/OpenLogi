@@ -4,6 +4,9 @@ use std::sync::{Arc, Mutex};
 
 use openlogi_hid::{ChannelRegistry, DeviceRoute};
 
+/// Feature index for the optional `0x1300` in the scripted DPI mouse.
+pub(crate) const DPI_MOUSE_LED_INDEX: u8 = 5;
+
 /// The HID++ `0x0003` unit ID a scripted device reports unless a test
 /// changes it.
 pub(crate) const UNIT: [u8; 4] = [0x12, 0x34, 0x56, 0x78];
@@ -62,6 +65,28 @@ pub(crate) async fn publish_dpi_mouse_with_handle(
     Arc<Mutex<[u8; 4]>>,
     openlogi_device::test_support::ScriptedRawHidHandle,
 ) {
+    publish_scripted_dpi_mouse(registry, route, accept, None).await
+}
+
+/// A mouse that also has one software-controlled DPI LED.
+pub(crate) async fn publish_dpi_mouse_with_led(
+    registry: &ChannelRegistry,
+    route: DeviceRoute,
+) -> openlogi_device::test_support::ScriptedRawHidHandle {
+    publish_scripted_dpi_mouse(registry, route, || true, Some(DPI_MOUSE_LED_INDEX))
+        .await
+        .1
+}
+
+async fn publish_scripted_dpi_mouse(
+    registry: &ChannelRegistry,
+    route: DeviceRoute,
+    accept: impl Fn() -> bool + Send + Sync + 'static,
+    led_index: Option<u8>,
+) -> (
+    Arc<Mutex<[u8; 4]>>,
+    openlogi_device::test_support::ScriptedRawHidHandle,
+) {
     const DPI: u8 = 4;
     const INVALID_ARGUMENT: u8 = 2;
     let unit = Arc::new(Mutex::new(UNIT));
@@ -78,10 +103,10 @@ pub(crate) async fn publish_dpi_mouse_with_handle(
             match (request[2], request[3] >> 4) {
                 (0, 1) => response[4] = 4,
                 (0, 0) => {
-                    response[4] = if request[4..6] == [0x22, 0x01] {
-                        DPI
-                    } else {
-                        0
+                    response[4] = match request[4..6] {
+                        [0x22, 0x01] => DPI,
+                        [0x13, 0x00] => led_index.unwrap_or_default(),
+                        _ => 0,
                     }
                 }
                 (DPI, 0) => response[4] = 1,
@@ -93,6 +118,12 @@ pub(crate) async fn publish_dpi_mouse_with_handle(
                 (DPI, 3) => {
                     response[2..6].copy_from_slice(&[0xff, DPI, request[3], INVALID_ARGUMENT]);
                 }
+                // One LED, software control already enabled.
+                (index, 0 | 2) if Some(index) == led_index => response[4] = 1,
+                (index, 1) if Some(index) == led_index => {
+                    response[4..9].copy_from_slice(&[0, 2, 1, 0, 3]);
+                }
+                (index, 5) if Some(index) == led_index => {}
                 _ => return None,
             }
             Some(response)

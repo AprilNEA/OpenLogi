@@ -350,6 +350,19 @@ impl DeviceOp {
             .and_then(|feedback| feedback.probe_time.as_ref())
     }
 
+    /// Give the precision LED its ordinary budget after an optional DPI read.
+    pub(crate) async fn show_precision_led_after_write(
+        &self,
+        channel: &SharedChannel,
+        on: bool,
+        started: tokio::time::Instant,
+    ) {
+        let started = self
+            .dpi_probe_time()
+            .map_or(started, |probe| probe.exclude_from(started));
+        show_precision_led(channel, on, started).await;
+    }
+
     /// Runs inside the transport turn, so the before/after readings describe
     /// this write and a stale result cannot publish after a newer write.
     pub(crate) async fn write_dpi(
@@ -1022,7 +1035,7 @@ pub(crate) fn write_pointer_speed_in_background(
                             .map_or(Landed::NoDefaultDpi, Landed::Dpi),
                     };
                     if let Some(on) = led {
-                        show_precision_led(&shared, on, started).await;
+                        op.show_precision_led_after_write(&shared, on, started).await;
                     }
                     Ok(Some(landed))
                 },
