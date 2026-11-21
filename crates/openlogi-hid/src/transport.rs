@@ -222,6 +222,7 @@ impl Drop for SwIdLease {
 /// the condition is per-host, not per-open.
 static SW_ID_LOCK_FALLBACK_REPORTED: AtomicBool = AtomicBool::new(false);
 
+mod hotplug;
 mod native;
 pub(crate) use native::{native_backend, recording_backend};
 
@@ -326,11 +327,13 @@ pub(crate) fn watch_nodes()
     HID_BACKEND.watch().map_err(backend_error)
 }
 
-/// Whether the node `id` names is a Logitech one, or `None` when it could not
-/// be queried.
-pub(crate) async fn is_logitech_node(id: &async_hid::DeviceId) -> Option<bool> {
+/// The vendor ids of the devices behind the node `id` names, or `None` when it
+/// could not be queried.
+pub(crate) async fn node_vendor_ids(
+    id: &async_hid::DeviceId,
+) -> Option<impl Iterator<Item = u16> + use<>> {
     match HID_BACKEND.query_devices(id).await {
-        Ok(mut devices) => Some(devices.any(|device| device.vendor_id == LOGITECH_VENDOR_ID)),
+        Ok(devices) => Some(devices.map(|device| device.vendor_id)),
         Err(error) => {
             debug!(%error, "arriving HID node could not be queried");
             None

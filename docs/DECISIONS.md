@@ -23,11 +23,16 @@ because another vendor's device appeared.
   decides.
   The trait only allows this (a backend may leave out another vendor's nodes),
   so the scripted and replay backends are unaffected.
-- **Removals use the last enumeration.** A removed node can no longer be
-  queried, so the backend looks it up in the handle cache its last
-  enumeration filled. A Logitech node that arrives and leaves between two
-  enumerations raises no removal and needs none: its arrival already asked for
-  the rescan that finds it gone.
+- **Removals use the Logitech nodes not yet seen leaving.** A removed node can
+  no longer be queried, so the backend keeps the Logitech node ids its
+  enumerations and arrivals reported, and drops one only when the hotplug
+  stream reads its removal. Not the handle cache: an enumeration replaces
+  that, and an inventory pass enumerates more than once, so a removal still
+  queued behind a later enumeration would be dropped and the device would stay
+  listed until the recovery scan. An id whose removal never comes (an
+  enumeration that started before it and finished after) stays in the set; it
+  can cost at most one extra rescan, and only on a platform that reuses node
+  ids.
 - **A failed query still raises an arrival.** Hiding a Logitech arrival would
   leave a device missing until the next recovery scan; one extra rescan for an
   unknown node costs less.

@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
-use async_hid::{AsyncHidWrite as _, Device, DeviceEvent, DeviceWriter};
+use async_hid::{AsyncHidWrite as _, Device, DeviceEvent, DeviceId, DeviceWriter};
 use futures_lite::StreamExt as _;
 use hidpp::async_trait;
 use hidpp::channel::HidppChannel;
@@ -17,19 +17,15 @@ use openlogi_device::backend::{
     BackendError, HidBackend, HotplugEvent, HotplugStream, NodeId, NodeInfo, RawWriter,
 };
 
-use crate::LOGITECH_VENDOR_ID;
 use crate::recording::{
     RecordedChannelOpenOutcome, RecordedRawWriterOpenOutcome, RecordingRawWriter, RecordingSink,
 };
 
+use super::hotplug::LogitechNodes;
 use super::{
-    device_io_gate, enumerate_devices, is_hidpp_node, is_logitech_node, open_hidpp_channel,
+    device_io_gate, enumerate_devices, is_hidpp_node, node_vendor_ids, open_hidpp_channel,
     open_hidpp_channel_with_observer, watch_nodes,
 };
-
-/// The handle cache: OS handles from the most recent enumeration, keyed as
-/// [`HandleKey`] describes.
-type Handles = Arc<Mutex<HashMap<HandleKey, Arc<Device>>>>;
 
 /// One logical top-level collection exposed by an OS HID node.
 ///
@@ -92,11 +88,14 @@ pub(crate) struct NativeBackend {
     /// from a [`NodeId`], and re-finding one costs another enumeration. Since
     /// the trait only defines opening a node that was just enumerated, keeping
     /// the handles from that enumeration is both cheaper and a truer model
-    /// than looking them up again. Each handle is held behind an `Arc` so an
-    /// open can borrow one without keeping the map locked across its await,
-    /// and the map behind one so the hotplug stream can tell a removed node
-    /// from it.
-    nodes: Handles,
+    /// than looking them up again. Held behind an `Arc` so an open can borrow
+    /// one without keeping the map locked across its await.
+    nodes: Mutex<HashMap<HandleKey, Arc<Device>>>,
+    /// Filled by enumerations and arrivals, emptied by the removals the
+    /// hotplug stream reads. A removal is read once, so a second subscriber
+    /// would miss the ones the first read; the inventory worker is the only
+    /// subscriber.
+    logitech_nodes: Arc<Mutex<LogitechNodes<DeviceId>>>,
     device_io: DeviceIoGate,
     recording: Option<RecordingSink>,
 }
@@ -104,7 +103,8 @@ pub(crate) struct NativeBackend {
 impl Default for NativeBackend {
     fn default() -> Self {
         Self {
-            nodes: Handles::default(),
+            nodes: Mutex::new(HashMap::new()),
+            logitech_nodes: Arc::default(),
             device_io: device_io_gate(),
             recording: None,
         }
@@ -114,7 +114,8 @@ impl Default for NativeBackend {
 impl NativeBackend {
     fn with_recording(recording: RecordingSink) -> Self {
         Self {
-            nodes: Handles::default(),
+            nodes: Mutex::new(HashMap::new()),
+            logitech_nodes: Arc::default(),
             device_io: device_io_gate(),
             recording: Some(recording),
         }
@@ -134,6 +135,14 @@ impl NativeBackend {
             .map(|device| (HandleKey::for_device(device), Arc::clone(device)))
             .collect();
         *self.nodes.lock().unwrap_or_else(PoisonError::into_inner) = handles;
+        self.logitech_nodes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .enumerated(
+                devices
+                    .iter()
+                    .map(|device| (device.id.clone(), device.vendor_id)),
+            );
         Ok(devices)
     }
 
@@ -245,7 +254,7 @@ impl HidBackend for NativeBackend {
     /// every consumer reacts by re-enumerating, so carrying it would only
     /// invite someone to trust it.
     fn watch(&self) -> Result<HotplugStream, BackendError> {
-        let nodes = Arc::clone(&self.nodes);
+        let nodes = Arc::clone(&self.logitech_nodes);
         let events = watch_nodes()?
             .then(move |event| logitech_event(event, Arc::clone(&nodes)))
             .filter_map(|event| event);
@@ -254,24 +263,23 @@ impl HidBackend for NativeBackend {
 }
 
 /// `event` as a [`HotplugEvent`] when it concerns a Logitech node.
-///
-/// An arrival is judged by the vendor id of its node, and one that cannot be
-/// queried counts: hiding a Logitech arrival costs more than one extra rescan.
-/// A removed node can no longer be queried, so a removal is judged by the last
-/// enumeration. A Logitech node that arrives and leaves between two
-/// enumerations raises no removal and needs none, since its arrival already
-/// asked for the rescan that finds it gone.
-async fn logitech_event(event: DeviceEvent, nodes: Handles) -> Option<HotplugEvent> {
+async fn logitech_event(
+    event: DeviceEvent,
+    nodes: Arc<Mutex<LogitechNodes<DeviceId>>>,
+) -> Option<HotplugEvent> {
     match event {
-        DeviceEvent::Connected(id) => is_logitech_node(&id)
-            .await
-            .unwrap_or(true)
-            .then_some(HotplugEvent::Connected),
+        DeviceEvent::Connected(id) => {
+            let vendor_ids = node_vendor_ids(&id).await;
+            nodes
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .arrived(id, vendor_ids)
+                .then_some(HotplugEvent::Connected)
+        }
         DeviceEvent::Disconnected(id) => nodes
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .values()
-            .any(|device| device.id == id && device.vendor_id == LOGITECH_VENDOR_ID)
+            .departed(&id)
             .then_some(HotplugEvent::Disconnected),
     }
 }
@@ -343,7 +351,8 @@ mod tests {
             .expect_err("a suspended gate refuses device I/O")
             .to_string();
         let backend = NativeBackend {
-            nodes: Handles::default(),
+            nodes: Mutex::new(HashMap::new()),
+            logitech_nodes: Arc::default(),
             device_io,
             recording: Some(recorder.sink()),
         };
