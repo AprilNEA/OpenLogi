@@ -11,12 +11,10 @@ use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute, Dpi};
 use rust_i18n::t;
 use tokio::sync::Mutex;
 use tokio::sync::broadcast::error::RecvError;
-use tracing::debug;
+use tracing::{debug, warn};
 use windows::Data::Xml::Dom::XmlDocument;
 use windows::Foundation::{DateTime, IReference, PropertyValue};
-use windows::UI::Notifications::{
-    NotificationSetting, ToastNotification, ToastNotificationManager,
-};
+use windows::UI::Notifications::{ToastNotification, ToastNotificationManager};
 use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize};
 use windows::core::{HSTRING, Interface as _, Result};
 
@@ -30,58 +28,67 @@ pub(super) fn start(
     let mut changes = notifications.subscribe();
     let notifications = Arc::downgrade(notifications);
     let orchestrator = Arc::downgrade(orchestrator);
-    tokio::spawn(async move {
-        loop {
-            match changes.recv().await {
-                Ok(change) => {
-                    let Some(notifications) = notifications.upgrade() else {
-                        break;
-                    };
-                    if !notifications.enabled() || !change.is_current() {
-                        continue;
-                    }
-                    let Some(orchestrator) = orchestrator.upgrade() else {
-                        break;
-                    };
-                    let name =
-                        orchestrator
-                            .lock()
-                            .await
-                            .dpi_notification_label(&change.route, |slot| {
-                                if change.route.device_index() == DIRECT_DEVICE_INDEX {
-                                    t!("device.mouse").into_owned()
-                                } else {
-                                    t!("device.receiver_slot_number", number => slot).into_owned()
-                                }
-                            });
-                    let Some(name) = name else {
-                        continue;
-                    };
-                    // Serial delivery preserves replacement order. Windows RPC
-                    // stays off the Tokio executor and out of the HID turn.
-                    match tokio::task::spawn_blocking(move || show(&notifications, &change, &name))
-                        .await
-                    {
-                        Ok(Ok(())) => {}
-                        Ok(Err(error)) => debug!(%error, "could not show Windows DPI notification"),
-                        Err(error) => debug!(%error, "Windows DPI notification task failed"),
+    let worker = std::thread::Builder::new()
+        .name("dpi-notifications".into())
+        .spawn(move || {
+            // windows-rs caches activation factories across calls. Keep this
+            // apartment alive across notifications so COM cannot unload a
+            // factory's server between two writes.
+            let mut apartment = None;
+            loop {
+                let change = match changes.blocking_recv() {
+                    Ok(change) => change,
+                    Err(RecvError::Lagged(_)) => continue,
+                    Err(RecvError::Closed) => break,
+                };
+                let Some(notifications) = notifications.upgrade() else {
+                    break;
+                };
+                if !notifications.enabled() || !change.is_current() {
+                    continue;
+                }
+                let Some(orchestrator) = orchestrator.upgrade() else {
+                    break;
+                };
+                let name = {
+                    let orchestrator = orchestrator.blocking_lock();
+                    orchestrator.dpi_notification_label(&change.route, |slot| {
+                        if change.route.device_index() == DIRECT_DEVICE_INDEX {
+                            t!("device.mouse").into_owned()
+                        } else {
+                            t!("device.receiver_slot_number", number => slot).into_owned()
+                        }
+                    })
+                };
+                let Some(name) = name else {
+                    continue;
+                };
+                if apartment.is_none() {
+                    match Apartment::initialize() {
+                        Ok(initialized) => apartment = Some(initialized),
+                        Err(error) => {
+                            warn!(%error, "could not initialize Windows DPI notifications");
+                            continue;
+                        }
                     }
                 }
-                Err(RecvError::Lagged(_)) => {}
-                Err(RecvError::Closed) => break,
+                if let Err(error) = show(&notifications, &change, &name) {
+                    debug!(%error, "could not show Windows DPI notification");
+                }
             }
-        }
-    });
+        });
+    if let Err(error) = worker {
+        warn!(%error, "could not start Windows DPI notifications");
+    }
 }
 
 fn show(notifications: &DpiNotifications, change: &DpiNotice, name: &str) -> Result<()> {
-    let _apartment = Apartment::initialize()?;
     let notifier = ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(APP_ID))?;
-    if notifier.Setting()? == NotificationSetting::Enabled {
-        let toast = build_toast(&change.route, name, change.dpi)?;
-        if notifications.enabled() && change.is_current() {
-            notifier.Show(&toast)?;
-        }
+    let toast = build_toast(&change.route, name, change.dpi)?;
+    if notifications.enabled() && change.is_current() {
+        // Setting() can return ERROR_NOT_FOUND before the first Show().
+        // Windows applies its notification and Do Not Disturb settings.
+        notifier.Show(&toast)?;
     }
     Ok(())
 }
@@ -120,7 +127,7 @@ struct Apartment(std::marker::PhantomData<std::rc::Rc<()>>);
 impl Apartment {
     #[expect(unsafe_code, reason = "initialize WinRT on the current thread")]
     fn initialize() -> Result<Self> {
-        // SAFETY: this blocking worker uses the MTA and balances each
+        // SAFETY: the notification worker uses the MTA and balances each
         // successful initialization (including S_FALSE) on the same thread.
         unsafe { RoInitialize(RO_INIT_MULTITHREADED) }?;
         Ok(Self(std::marker::PhantomData))
