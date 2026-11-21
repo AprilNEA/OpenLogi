@@ -97,6 +97,8 @@ pub(super) fn general_page(
     let group = group
         .item(low_battery_notifications_item())
         .item(lock_key_notifications_item());
+    #[cfg(windows)]
+    let group = group.item(dpi_notifications_item());
 
     // Momentum scrolling's app-wide default. A mouse can set its own on its
     // Pointer tab; the card counts those.
@@ -189,6 +191,20 @@ fn low_battery_notifications_item() -> SettingItem {
         ),
     )
     .description(tr!("app.low_battery_notifications_description"))
+}
+
+#[cfg(windows)]
+fn dpi_notifications_item() -> SettingItem {
+    SettingItem::new(
+        tr!("app.dpi_notifications"),
+        SettingField::switch(
+            |cx| AppState::try_read(cx).is_some_and(|s| s.app_settings().dpi_notifications),
+            |enabled, cx| {
+                AppState::apply(cx, |state| state.commit_dpi_notifications(enabled));
+            },
+        ),
+    )
+    .description(tr!("app.dpi_notifications_description"))
 }
 
 /// The switch for the overlay's lock-key indicator.

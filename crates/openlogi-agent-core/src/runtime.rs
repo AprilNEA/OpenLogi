@@ -25,7 +25,7 @@ pub(crate) use self::button::{HidppSessionId, PressToken};
 pub(crate) use self::pointer::{FocusBinding, PointerPress, PointerSelection};
 use crate::dpi::DpiBeforeShift;
 use crate::hardware::{
-    DeviceAccess, restore_dpi_in_background, step_dpi_in_background,
+    DeviceAccess, DeviceOp, restore_dpi_in_background, step_dpi_in_background,
     toggle_smartshift_in_background, write_pointer_speed_in_background,
 };
 use crate::pointer_speed::{PrecisionPress, Restore, ShiftRestore, SpeedPlace, SpeedWrite};
@@ -250,14 +250,20 @@ impl ActionExecutor {
 
     /// [`Self::write_speed`], first reading the sensor DPI into `before`.
     fn write_speed_reading(&self, write: SpeedWrite, before: Option<DpiBeforeShift>) {
-        self.write_speed_then(write, before, || {});
+        let op = self.access.op(&write.route);
+        self.write_speed_then(op, write, before, || {});
     }
 
     /// Write the DPI a preset action picked. If the mouse rejects it, the
     /// cache forgets that DPI, so a DPI shift reads the mouse instead.
     fn write_preset(&self, route: &DeviceRoute, dpi: Dpi) {
         let rejected = self.preset_rejected(route.clone());
+        let op = self
+            .access
+            .op(route)
+            .notifying_dpi_changes(&self.pointer_speeds.dpi_notifications);
         self.write_speed_then(
+            op,
             self.pointer_speeds.preset_write(route, dpi),
             None,
             move || {
@@ -282,6 +288,7 @@ impl ActionExecutor {
     /// announced ([`Self::announce_written`]).
     fn write_speed_then(
         &self,
+        op: DeviceOp,
         write: SpeedWrite,
         before: Option<DpiBeforeShift>,
         on_failed: impl FnOnce() + Send + 'static,
@@ -297,7 +304,7 @@ impl ActionExecutor {
         let applied = self.announce_written(&route);
         let failed = self.announce_written(&route);
         write_pointer_speed_in_background(
-            self.access.op(&route),
+            op,
             ticket,
             target,
             led,
@@ -401,7 +408,9 @@ impl ActionExecutor {
         let failed = self.announce_written(&route);
         let rejected = self.preset_rejected(route.clone());
         step_dpi_in_background(
-            self.access.op(&route),
+            self.access
+                .op(&route)
+                .notifying_dpi_changes(&self.pointer_speeds.dpi_notifications),
             ticket,
             led,
             move |reading| {
@@ -1417,13 +1426,47 @@ mod tests {
     #[tokio::test]
     async fn a_dpi_step_from_the_mouse_reading_is_announced() {
         let (executor, mut received, route) = answered_dpi_executor(None, || true).await;
+        let notifications = &executor.pointer_speeds.dpi_notifications;
+        let mut notices = notifications.subscribe();
+        notifications.set_enabled(true);
 
         executor.dispatch(&Action::NextDpiPreset, Some("mouse"));
 
         assert_eq!(
             next_request(&mut received).await,
-            ActionRequest::SettingsWritten { route }
+            ActionRequest::SettingsWritten {
+                route: route.clone()
+            }
         );
+        let notice = notices.try_recv().unwrap();
+        assert_eq!(notice.route, route);
+        assert_eq!(notice.dpi, Dpi::new(1600));
+    }
+
+    #[tokio::test]
+    async fn dpi_preset_notifications_follow_success_and_opt_in() {
+        for (enabled, accepted) in [(false, true), (true, false), (true, true)] {
+            let (executor, mut received, route) =
+                answered_dpi_executor(Some(Dpi::new(400)), move || accepted).await;
+            let notifications = &executor.pointer_speeds.dpi_notifications;
+            let mut notices = notifications.subscribe();
+            notifications.set_enabled(enabled);
+            executor.dispatch(&Action::CycleDpiPresets, Some("mouse"));
+            assert_eq!(
+                next_request(&mut received).await,
+                ActionRequest::SettingsWritten {
+                    route: route.clone()
+                }
+            );
+            let notice = notices
+                .try_recv()
+                .ok()
+                .map(|change| (change.route, change.dpi));
+            assert_eq!(
+                notice,
+                (enabled && accepted).then_some((route, Dpi::new(1600)))
+            );
+        }
     }
 
     /// A DPI shift announces both its write and the restore its release

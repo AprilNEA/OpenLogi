@@ -42,11 +42,12 @@
 //! [`Action::TogglePrecisionMode`]: openlogi_core::binding::Action::TogglePrecisionMode
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use openlogi_core::hid::{DeviceRoute, Dpi, PointerSpeed};
 use openlogi_hid::DpiTarget;
 
+use crate::dpi_notifications::DpiNotifications;
 use crate::hardware::{WriteOrder, WriteTicket};
 
 /// The precision mode of every mouse whose speed OpenLogi sets, and the
@@ -55,6 +56,7 @@ use crate::hardware::{WriteOrder, WriteTicket};
 pub struct PointerSpeeds {
     order: WriteOrder,
     state: Mutex<State>,
+    pub(crate) dpi_notifications: Arc<DpiNotifications>,
 }
 
 #[derive(Default)]

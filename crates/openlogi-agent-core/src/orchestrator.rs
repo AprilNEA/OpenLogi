@@ -117,6 +117,16 @@ struct AgentDevice {
     battery: Option<BatteryInfo>,
 }
 
+fn device_display_name(
+    config: &Config,
+    key: Option<&str>,
+    codename: Option<&str>,
+) -> Option<String> {
+    key.and_then(|key| config.device_custom_name(key))
+        .map(str::to_owned)
+        .or_else(|| codename.map(prettify_codename))
+}
+
 impl AgentDevice {
     /// A reload may adopt the remembered route into a physical key without
     /// another inventory pass. Resolve against the supplied config, not the
@@ -394,6 +404,12 @@ impl SharedHandles {
         Arc::clone(&self.pointer_speeds)
     }
 
+    /// The native notification backend's source of confirmed DPI changes.
+    #[must_use]
+    pub fn dpi_notifications(&self) -> Arc<crate::dpi_notifications::DpiNotifications> {
+        Arc::clone(&self.pointer_speeds.dpi_notifications)
+    }
+
     /// Write `speed` to the mouse at `route` and return what it reads back.
     /// The write ends the mouse's precision mode, so the pointer moves at the
     /// speed the settings app shows, and darkens the DPI LED when the
@@ -487,14 +503,20 @@ impl SharedHandles {
             cycles.reapplied_at(route, dpi);
         }
         let speeds = Arc::clone(&self.pointer_speeds);
-        let result = self
+        let device = self
             .device(route)
+            .notifying_dpi_changes(&speeds.dpi_notifications);
+        let device = &device;
+        let write_ticket = &ticket;
+        let result = device
             .run_in_turn(
                 HidppOperation::WriteDpi,
-                &ticket,
+                write_ticket,
                 |c| async move {
                     let started = tokio::time::Instant::now();
-                    openlogi_hid::set_dpi_on(&c, dpi).await?;
+                    device
+                        .write_dpi(&c, write_ticket, openlogi_hid::DpiTarget::Value(dpi), None)
+                        .await?;
                     if let Some(restore) = restore {
                         show_precision_led(&c, false, started).await;
                         speeds.restored(&restore);
@@ -966,6 +988,10 @@ impl Orchestrator {
             observable,
             low_battery: LowBatteryWatch::default(),
         };
+        orch.shared
+            .pointer_speeds
+            .dpi_notifications
+            .set_enabled(orch.config.app_settings.dpi_notifications);
         orch.rebuild();
         orch.observable
             .set_launch_at_login(orch.config.app_settings.launch_at_login);
@@ -976,6 +1002,37 @@ impl Orchestrator {
     #[must_use]
     pub fn shared(&self) -> SharedHandles {
         self.shared.clone()
+    }
+
+    /// Name the current mouse for a DPI notification. The caller supplies a
+    /// localized fallback for a device with no custom name or codename.
+    pub fn dpi_notification_label(
+        &self,
+        route: &DeviceRoute,
+        fallback: impl FnOnce(u8) -> String,
+    ) -> Option<String> {
+        self.observable.read(|snapshot| {
+            let device = snapshot.inventory.iter().find_map(|inventory| {
+                inventory.paired.iter().find(|device| {
+                    device.online
+                        && DeviceRoute::for_slot(inventory, device.slot).as_ref() == Some(route)
+                })
+            })?;
+            let model = device.model_info.as_ref();
+            let serial = model.and_then(|model| model.serial_number.as_deref());
+            let unit = model.map_or([0; 4], |model| model.unit_id);
+            let stable = DeviceStableId::from_parts(Some(route), device.slot, serial, unit);
+            let identity = DeviceIdentity::from_parts(serial, unit);
+            let key = self.config.resolve_device_key(&stable, Some(&identity));
+            Some(
+                device_display_name(
+                    &self.config,
+                    key.as_ref().map(PhysicalDeviceKey::as_str),
+                    device.codename.as_deref(),
+                )
+                .unwrap_or_else(|| fallback(device.slot)),
+            )
+        })
     }
 
     /// The selected inventory entry. A device seen on two links has an entry
@@ -1817,11 +1874,11 @@ impl Orchestrator {
             ) {
                 continue;
             }
-            let name = self
-                .config
-                .device_custom_name(&device.config_key)
-                .map(str::to_owned)
-                .or_else(|| device.codename.as_deref().map(prettify_codename));
+            let name = device_display_name(
+                &self.config,
+                Some(&device.config_key),
+                device.codename.as_deref(),
+            );
             info!(device = %device.config_key, ?battery, "announcing a low battery");
             self.observable.notices().post(
                 NoticeKind::LowBattery {
@@ -2375,6 +2432,10 @@ impl Orchestrator {
     fn replace_config_from(&mut self, config: Config, source: ConfigSource<'_>) -> Vec<LightWrite> {
         let previous_lights = self.effective_online_lights();
         let previous = std::mem::replace(&mut self.config, config);
+        self.shared
+            .pointer_speeds
+            .dpi_notifications
+            .set_enabled(self.config.app_settings.dpi_notifications);
         self.forget_saved_light_changes(&previous, source);
         // Parameter-only edits must not erase a transient manual choice while
         // the light remains camera-linked. Changing the policy invalidates it.
