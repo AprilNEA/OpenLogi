@@ -505,7 +505,7 @@ impl SharedHandles {
         let speeds = Arc::clone(&self.pointer_speeds);
         let device = self
             .device(route)
-            .notifying_dpi_changes(&speeds.dpi_notifications);
+            .notifying_dpi_changes_with_probe(&speeds.dpi_notifications);
         let device = &device;
         let write_ticket = &ticket;
         let result = device

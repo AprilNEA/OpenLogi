@@ -393,18 +393,18 @@ pub(super) async fn set_dpi_on_channel(
     index: u8,
     dpi: Dpi,
 ) -> Result<(), WriteError> {
-    write_dpi_target(channel, index, DpiTarget::Value(dpi), DpiTracking::Skip)
+    write_dpi_target(channel, index, DpiTarget::Value(dpi), None)
         .await
         .map(|_| ())
 }
 
+/// The source of the sensor reading before a tracked write.
 #[derive(Clone, Copy)]
-enum DpiTracking<'a> {
-    Skip,
-    Track {
-        previous: Option<Dpi>,
-        time: &'a DpiProbeTime,
-    },
+pub enum DpiChangeSource<'a> {
+    /// A reading already taken in the same transport turn.
+    Known(Dpi),
+    /// Read older sensors that do not already report the value during a write.
+    Probe(&'a DpiProbeTime),
 }
 
 /// What a DPI write requested and which change was confirmed by the sensor.
@@ -423,7 +423,7 @@ async fn write_dpi_target(
     channel: &Arc<hidpp::channel::HidppChannel>,
     index: u8,
     target: DpiTarget,
-    tracking: DpiTracking<'_>,
+    tracking: Option<DpiChangeSource<'_>>,
 ) -> Result<DpiWriteOutcome, WriteError> {
     let mut device = Device::new(Arc::clone(channel), index)
         .await
@@ -453,28 +453,15 @@ async fn write_dpi_target(
     }
     // Bound the optional pre-read independently. A missing reading can
     // suppress feedback, but must not prevent the user's write from running.
-    let previous = match (&feature, tracking) {
-        (
-            _,
-            DpiTracking::Track {
-                previous: Some(dpi),
-                ..
-            },
-        ) => Some(dpi),
-        (
-            DpiFeature::Adjustable { .. },
-            DpiTracking::Track {
-                previous: None,
-                time,
-            },
-        ) => time.read(&feature).await,
+    let previous = match (tracking, &feature) {
+        (Some(DpiChangeSource::Known(dpi)), _) => Some(dpi),
+        (Some(DpiChangeSource::Probe(time)), DpiFeature::Adjustable { .. }) => {
+            time.read(&feature).await
+        }
         _ => None,
     };
     let before_write = feature.set_dpi(dpi).await.map_err(write_error)?;
-    let previous = match tracking {
-        DpiTracking::Track { .. } => before_write.or(previous),
-        DpiTracking::Skip => None,
-    };
+    let previous = tracking.and_then(|_| before_write.or(previous));
     let outcome = |confirmed: Option<Dpi>| DpiWriteOutcome {
         written: Some(dpi),
         changed: confirmed.filter(|&actual| previous.is_some_and(|before| before != actual)),
@@ -530,31 +517,24 @@ pub async fn set_dpi_target_on(
     shared: &SharedChannel,
     target: DpiTarget,
 ) -> Result<Option<Dpi>, WriteError> {
-    write_dpi_target(
-        shared.channel(),
-        shared.device_index(),
-        target,
-        DpiTracking::Skip,
-    )
-    .await
-    .map(|outcome| outcome.written)
+    write_dpi_target(shared.channel(), shared.device_index(), target, None)
+        .await
+        .map(|outcome| outcome.written)
 }
 
 /// As [`set_dpi_target_on`], also reporting whether the sensor confirmed a
 /// change from its previous setting. An unavailable reading suppresses the
-/// change report without changing the write's result. Pass `previous` only
-/// if the sensor was read in the same transport turn for this write.
+/// change report without changing the write's result.
 pub async fn set_dpi_target_tracking_change_on(
     shared: &SharedChannel,
     target: DpiTarget,
-    previous: Option<Dpi>,
-    time: &DpiProbeTime,
+    source: DpiChangeSource<'_>,
 ) -> Result<DpiWriteOutcome, WriteError> {
     write_dpi_target(
         shared.channel(),
         shared.device_index(),
         target,
-        DpiTracking::Track { previous, time },
+        Some(source),
     )
     .await
 }

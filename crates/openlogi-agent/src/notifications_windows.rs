@@ -1,7 +1,7 @@
 //! Quiet, informational Windows app notifications from the background agent.
 
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use openlogi_agent_core::dpi_notifications::{DpiNotice, DpiNotifications};
@@ -9,12 +9,12 @@ use openlogi_agent_core::orchestrator::Orchestrator;
 use openlogi_core::brand::APP_ID;
 use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute, Dpi};
 use rust_i18n::t;
-use tokio::sync::Mutex;
 use tokio::sync::broadcast::error::RecvError;
+use tokio::sync::{Mutex, broadcast};
 use tracing::{debug, warn};
 use windows::Data::Xml::Dom::XmlDocument;
 use windows::Foundation::{DateTime, IReference, PropertyValue};
-use windows::UI::Notifications::{ToastNotification, ToastNotificationManager};
+use windows::UI::Notifications::{ToastNotification, ToastNotificationManager, ToastNotifier};
 use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize};
 use windows::core::{HSTRING, Interface as _, Result};
 
@@ -28,64 +28,108 @@ pub(super) fn start(
     let mut changes = notifications.subscribe();
     let notifications = Arc::downgrade(notifications);
     let orchestrator = Arc::downgrade(orchestrator);
-    let worker = std::thread::Builder::new()
-        .name("dpi-notifications".into())
-        .spawn(move || {
-            // windows-rs caches activation factories across calls. Keep this
-            // apartment alive across notifications so COM cannot unload a
-            // factory's server between two writes.
-            let mut apartment = None;
-            loop {
-                let change = match changes.blocking_recv() {
-                    Ok(change) => change,
-                    Err(RecvError::Lagged(_)) => continue,
-                    Err(RecvError::Closed) => break,
-                };
-                let Some(notifications) = notifications.upgrade() else {
-                    break;
-                };
-                if !notifications.enabled() || !change.is_current() {
-                    continue;
-                }
-                let Some(orchestrator) = orchestrator.upgrade() else {
-                    break;
-                };
-                let name = {
-                    let orchestrator = orchestrator.blocking_lock();
-                    orchestrator.dpi_notification_label(&change.route, |slot| {
-                        if change.route.device_index() == DIRECT_DEVICE_INDEX {
-                            t!("device.mouse").into_owned()
-                        } else {
-                            t!("device.receiver_slot_number", number => slot).into_owned()
-                        }
-                    })
-                };
-                let Some(name) = name else {
-                    continue;
-                };
-                if apartment.is_none() {
-                    match Apartment::initialize() {
-                        Ok(initialized) => apartment = Some(initialized),
-                        Err(error) => {
-                            warn!(%error, "could not initialize Windows DPI notifications");
-                            continue;
-                        }
+    // Subscribe at startup so enabling the preference later works. Wait on the
+    // agent runtime until there is work for a native thread.
+    tokio::spawn(async move {
+        let first = loop {
+            match changes.recv().await {
+                Ok(change) => {
+                    let Some(source) = notifications.upgrade() else {
+                        return;
+                    };
+                    if should_show(&source, &change) {
+                        break change;
                     }
                 }
-                if let Err(error) = show(&notifications, &change, &name) {
-                    debug!(%error, "could not show Windows DPI notification");
+                Err(RecvError::Lagged(_)) => {}
+                Err(RecvError::Closed) => return,
+            }
+        };
+        if let Err(error) = std::thread::Builder::new()
+            .name("dpi-notifications".into())
+            .spawn(move || run_worker(first, changes, &notifications, &orchestrator))
+        {
+            warn!(%error, "could not start Windows DPI notifications");
+        }
+    });
+}
+
+fn run_worker(
+    first: DpiNotice,
+    mut pending: broadcast::Receiver<DpiNotice>,
+    notifications: &Weak<DpiNotifications>,
+    orchestrator: &Weak<Mutex<Orchestrator>>,
+) {
+    // windows-rs caches activation factories. Keep the apartment alive across
+    // notifications, and drop the notifier before uninitializing the apartment.
+    let mut apartment = None;
+    let mut notifier = None;
+    let remaining = std::iter::from_fn(|| {
+        loop {
+            match pending.blocking_recv() {
+                Ok(change) => return Some(change),
+                Err(RecvError::Lagged(_)) => {}
+                Err(RecvError::Closed) => return None,
+            }
+        }
+    });
+    for change in std::iter::once(first).chain(remaining) {
+        let Some(notifications) = notifications.upgrade() else {
+            break;
+        };
+        if !should_show(&notifications, &change) {
+            continue;
+        }
+        let Some(orchestrator) = orchestrator.upgrade() else {
+            break;
+        };
+        let name = {
+            let orchestrator = orchestrator.blocking_lock();
+            orchestrator.dpi_notification_label(&change.route, |slot| {
+                if change.route.device_index() == DIRECT_DEVICE_INDEX {
+                    t!("device.mouse").into_owned()
+                } else {
+                    t!("device.receiver_slot_number", number => slot).into_owned()
+                }
+            })
+        };
+        let Some(name) = name else {
+            continue;
+        };
+        if apartment.is_none() {
+            match Apartment::initialize() {
+                Ok(initialized) => apartment = Some(initialized),
+                Err(error) => {
+                    warn!(%error, "could not initialize Windows DPI notifications");
+                    continue;
                 }
             }
-        });
-    if let Err(error) = worker {
-        warn!(%error, "could not start Windows DPI notifications");
+        }
+        if let Err(error) = show(&mut notifier, &notifications, &change, &name) {
+            notifier = None;
+            debug!(%error, "could not show Windows DPI notification");
+        }
     }
 }
 
-fn show(notifications: &DpiNotifications, change: &DpiNotice, name: &str) -> Result<()> {
-    let notifier = ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(APP_ID))?;
+fn should_show(notifications: &DpiNotifications, change: &DpiNotice) -> bool {
+    notifications.enabled() && change.is_current()
+}
+
+fn show(
+    notifier: &mut Option<ToastNotifier>,
+    notifications: &DpiNotifications,
+    change: &DpiNotice,
+    name: &str,
+) -> Result<()> {
+    let notifier = match notifier {
+        Some(notifier) => notifier,
+        None => notifier.insert(ToastNotificationManager::CreateToastNotifierWithId(
+            &HSTRING::from(APP_ID),
+        )?),
+    };
     let toast = build_toast(&change.route, name, change.dpi)?;
-    if notifications.enabled() && change.is_current() {
+    if should_show(notifications, change) {
         // Setting() can return ERROR_NOT_FOUND before the first Show().
         // Windows applies its notification and Do Not Disturb settings.
         notifier.Show(&toast)?;

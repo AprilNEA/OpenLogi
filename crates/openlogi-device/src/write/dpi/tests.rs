@@ -393,19 +393,33 @@ async fn dpi_change_tracking_confirms_a_changed_value_only() -> Result<(), Write
     };
     let target = DpiTarget::Value(Dpi::new(1600));
     let harness = Harness::new(sensor).await;
-    let changed =
-        set_dpi_target_tracking_change_on(&harness.shared, target, None, &DpiProbeTime::default())
-            .await?;
+    let changed = set_dpi_target_tracking_change_on(
+        &harness.shared,
+        target,
+        DpiChangeSource::Probe(&DpiProbeTime::default()),
+    )
+    .await?;
     assert_eq!(changed.changed, Some(Dpi::new(1600)));
-    let unchanged =
-        set_dpi_target_tracking_change_on(&harness.shared, target, None, &DpiProbeTime::default())
-            .await?;
+    let unchanged = set_dpi_target_tracking_change_on(
+        &harness.shared,
+        target,
+        DpiChangeSource::Probe(&DpiProbeTime::default()),
+    )
+    .await?;
     assert_eq!(unchanged.changed, None);
     assert_eq!(harness.requests_to(ADJUSTABLE_INDEX, GET_DPI).len(), 4);
 
     let quiet = Harness::new(sensor).await;
     set_dpi_target_on(&quiet.shared, target).await?;
     assert_eq!(quiet.requests_to(ADJUSTABLE_INDEX, GET_DPI).len(), 1);
+
+    let known = Harness::new(sensor).await;
+    let reading = get_dpi_info_on(&known.shared).await?.current;
+    let outcome =
+        set_dpi_target_tracking_change_on(&known.shared, target, DpiChangeSource::Known(reading))
+            .await?;
+    assert_eq!(outcome.changed, Some(Dpi::new(1600)));
+    assert_eq!(known.requests_to(ADJUSTABLE_INDEX, GET_DPI).len(), 2);
     Ok(())
 }
 
@@ -414,9 +428,12 @@ async fn dpi_change_tracking_reuses_the_extended_sensors_parameter_read() -> Res
 {
     let harness = Harness::new(ExtendedSensor::new(SensorCapabilities::LOD)).await;
     let target = DpiTarget::Value(Dpi::new(1200));
-    let changed =
-        set_dpi_target_tracking_change_on(&harness.shared, target, None, &DpiProbeTime::default())
-            .await?;
+    let changed = set_dpi_target_tracking_change_on(
+        &harness.shared,
+        target,
+        DpiChangeSource::Probe(&DpiProbeTime::default()),
+    )
+    .await?;
     assert_eq!(changed.changed, Some(Dpi::new(1200)));
     assert_eq!(harness.requests_to(EXTENDED_INDEX, GET_PARAMETERS).len(), 2);
     Ok(())
@@ -436,15 +453,13 @@ async fn dpi_change_tracking_requires_both_readings() -> Result<(), WriteError> 
     })
     .await;
     let target = DpiTarget::Value(Dpi::new(1600));
-    for previous in [None, Some(Dpi::new(800))] {
+    let probe = DpiProbeTime::default();
+    for source in [
+        DpiChangeSource::Probe(&probe),
+        DpiChangeSource::Known(Dpi::new(800)),
+    ] {
         assert_eq!(
-            set_dpi_target_tracking_change_on(
-                &harness.shared,
-                target,
-                previous,
-                &DpiProbeTime::default()
-            )
-            .await?,
+            set_dpi_target_tracking_change_on(&harness.shared, target, source).await?,
             DpiWriteOutcome {
                 written: Some(Dpi::new(1600)),
                 changed: None,

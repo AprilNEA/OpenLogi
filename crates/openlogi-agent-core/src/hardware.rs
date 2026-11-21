@@ -290,7 +290,7 @@ pub struct DeviceOp {
 
 struct DpiFeedback {
     notifications: Arc<DpiNotifications>,
-    probe_time: openlogi_hid::write::DpiProbeTime,
+    probe_time: Option<openlogi_hid::write::DpiProbeTime>,
 }
 
 /// Why a device operation has no channel to write through right now.
@@ -323,19 +323,31 @@ impl From<Unresolved> for WriteError {
 }
 
 impl DeviceOp {
-    /// Only interactive DPI writes opt in to notification feedback.
+    /// A DPI step already reads the sensor to choose its target.
     pub(crate) fn notifying_dpi_changes(mut self, notifications: &Arc<DpiNotifications>) -> Self {
         self.dpi_notifications = notifications.enabled().then(|| DpiFeedback {
             notifications: Arc::clone(notifications),
-            probe_time: openlogi_hid::write::DpiProbeTime::default(),
+            probe_time: None,
         });
         self
+    }
+
+    /// A direct DPI write may need a separately budgeted sensor reading.
+    pub(crate) fn notifying_dpi_changes_with_probe(
+        self,
+        notifications: &Arc<DpiNotifications>,
+    ) -> Self {
+        let mut op = self.notifying_dpi_changes(notifications);
+        if let Some(feedback) = op.dpi_notifications.as_mut() {
+            feedback.probe_time = Some(openlogi_hid::write::DpiProbeTime::default());
+        }
+        op
     }
 
     fn dpi_probe_time(&self) -> Option<&openlogi_hid::write::DpiProbeTime> {
         self.dpi_notifications
             .as_ref()
-            .map(|feedback| &feedback.probe_time)
+            .and_then(|feedback| feedback.probe_time.as_ref())
     }
 
     /// Runs inside the transport turn, so the before/after readings describe
@@ -347,26 +359,27 @@ impl DeviceOp {
         target: openlogi_hid::DpiTarget,
         previous: Option<Dpi>,
     ) -> Result<Option<Dpi>, WriteError> {
-        let Some(feedback) = self
+        use openlogi_hid::write::DpiChangeSource;
+
+        if let Some(feedback) = self
             .dpi_notifications
             .as_ref()
             .filter(|feedback| feedback.notifications.enabled())
-        else {
-            return openlogi_hid::set_dpi_target_on(channel, target).await;
-        };
-        let result = openlogi_hid::write::set_dpi_target_tracking_change_on(
-            channel,
-            target,
-            previous,
-            &feedback.probe_time,
-        )
-        .await?;
-        if let Some(dpi) = result.changed {
-            feedback
-                .notifications
-                .publish(channel, &self.access.registry, dpi, ticket);
+            && let Some(source) = previous
+                .map(DpiChangeSource::Known)
+                .or_else(|| feedback.probe_time.as_ref().map(DpiChangeSource::Probe))
+        {
+            let result =
+                openlogi_hid::write::set_dpi_target_tracking_change_on(channel, target, source)
+                    .await?;
+            if let Some(dpi) = result.changed {
+                feedback
+                    .notifications
+                    .publish(channel, &self.access.registry, dpi, ticket);
+            }
+            return Ok(result.written);
         }
-        Ok(result.written)
+        openlogi_hid::set_dpi_target_on(channel, target).await
     }
 
     /// Reach only the device on the route that reports `unit` through HID++

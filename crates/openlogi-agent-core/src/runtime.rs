@@ -261,7 +261,7 @@ impl ActionExecutor {
         let op = self
             .access
             .op(route)
-            .notifying_dpi_changes(&self.pointer_speeds.dpi_notifications);
+            .notifying_dpi_changes_with_probe(&self.pointer_speeds.dpi_notifications);
         self.write_speed_then(
             op,
             self.pointer_speeds.preset_write(route, dpi),

@@ -1,5 +1,6 @@
 //! Confirmed manual DPI changes for the agent's native notification backend.
 
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -36,18 +37,10 @@ impl DpiNotice {
 }
 
 /// Publishes native DPI feedback independently of the existing overlay.
+#[derive(Default)]
 pub struct DpiNotifications {
     enabled: AtomicBool,
-    changes: broadcast::Sender<DpiNotice>,
-}
-
-impl Default for DpiNotifications {
-    fn default() -> Self {
-        Self {
-            enabled: AtomicBool::new(false),
-            changes: broadcast::channel(16).0,
-        }
-    }
+    changes: OnceLock<broadcast::Sender<DpiNotice>>,
 }
 
 impl DpiNotifications {
@@ -59,13 +52,24 @@ impl DpiNotifications {
     /// backend attached, the normal write needs no additional sensor read.
     #[must_use]
     pub fn enabled(&self) -> bool {
-        self.enabled.load(Ordering::Relaxed) && self.changes.receiver_count() != 0
+        self.active_sender().is_some()
+    }
+
+    fn active_sender(&self) -> Option<&broadcast::Sender<DpiNotice>> {
+        if !self.enabled.load(Ordering::Relaxed) {
+            return None;
+        }
+        self.changes
+            .get()
+            .filter(|sender| sender.receiver_count() != 0)
     }
 
     /// Subscribe to new changes. A slow backend keeps only the newest events.
     #[must_use]
     pub fn subscribe(&self) -> broadcast::Receiver<DpiNotice> {
-        self.changes.subscribe()
+        self.changes
+            .get_or_init(|| broadcast::channel(16).0)
+            .subscribe()
     }
 
     pub(crate) fn publish(
@@ -75,8 +79,10 @@ impl DpiNotifications {
         dpi: Dpi,
         ticket: &WriteTicket,
     ) {
-        if self.enabled() && ticket.is_current() {
-            let _ = self.changes.send(DpiNotice {
+        if let Some(sender) = self.active_sender()
+            && ticket.is_current()
+        {
+            let _ = sender.send(DpiNotice {
                 route: channel.route().clone(),
                 dpi,
                 ticket: ticket.clone(),

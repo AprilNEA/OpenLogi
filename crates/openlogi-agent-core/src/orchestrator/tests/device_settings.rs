@@ -781,6 +781,28 @@ async fn dpi_panel_notifications_follow_the_reloaded_preference() {
     assert!(notices.try_recv().is_err());
 }
 
+#[tokio::test]
+async fn dpi_notifications_without_a_backend_do_not_read_before_the_write() {
+    let route = dev("mouse", 1, true).route.unwrap();
+    let mut config = Config::default();
+    config.app_settings.dpi_notifications = true;
+    let orch = orchestrator(config);
+    let (_, handle) =
+        publish_dpi_mouse_with_handle(&orch.shared.channel_registry, route.clone(), || true).await;
+
+    orch.shared.set_dpi(&route, Dpi::new(1600)).await.unwrap();
+
+    assert_eq!(
+        handle
+            .written_reports()
+            .iter()
+            .filter(|report| report[2] == 4 && report[3] >> 4 == 2)
+            .count(),
+        1,
+        "only the ordinary post-write verification reads the sensor"
+    );
+}
+
 #[test]
 fn dpi_notification_labels_use_user_names_and_distinguish_unnamed_slots() {
     let mut inventory = direct_inventory(None, [1, 2, 3, 4]);
