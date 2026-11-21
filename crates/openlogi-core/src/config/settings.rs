@@ -311,6 +311,10 @@ pub struct AppSettings {
     /// [`LockKey::is_indicated_here`](crate::device::LockKey::is_indicated_here)).
     #[serde(default = "default_true")]
     pub lock_key_notifications: bool,
+    /// Show a silent Windows notification after a manual DPI change
+    /// confirmed by the mouse. Off by default.
+    #[serde(default)]
+    pub dpi_notifications: bool,
     /// Whether Previous Desktop and Next Desktop slide to the neighbouring
     /// desktop the way a three-finger swipe does. **On by default**, as in
     /// Logi Options+; off switches instantly. Only macOS reads it.
@@ -522,6 +526,7 @@ impl Default for AppSettings {
             mouse_profile_target: MouseProfileTarget::Pointer,
             low_battery_notifications: true,
             lock_key_notifications: true,
+            dpi_notifications: false,
             animate_desktop_switch: true,
         }
     }

@@ -5983,6 +5983,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "windows 0.61.3",
  "windows-sys 0.61.2",
  "winreg",
  "zbus",
