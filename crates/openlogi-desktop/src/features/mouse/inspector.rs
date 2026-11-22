@@ -34,6 +34,19 @@ use crate::ui::theme::{
 
 pub(super) const INSPECTOR_W: f32 = 328.;
 
+/// Whether the wheel section adds the Smooth-wheel caption.
+///
+/// [`Self::TurnOn`] only when this link can enable Smooth wheel and it is
+/// off. A link that cannot must not be told to flip a switch that stays off,
+/// so that case looks the same as Smooth wheel already being on.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum SmoothWheelNote {
+    /// The held-wheel caption is enough.
+    Hidden,
+    /// Tell the user to turn on Smooth wheel on the Pointer tab.
+    TurnOn,
+}
+
 #[derive(Clone, Copy)]
 pub(super) struct BindingInspectorData<'a> {
     pub selected: Option<&'a Selection>,
@@ -48,6 +61,11 @@ pub(super) struct BindingInspectorData<'a> {
     pub virtual_thumbwheel: bool,
     /// Buttons that hold the wheel to scroll sideways, from the global profile.
     pub wheel_hold: &'a BTreeSet<ButtonId>,
+    /// Wheel directions opted into repeating on every notch. A step action
+    /// repeats without an entry here.
+    pub wheel_notch_repeat: &'a BTreeMap<ButtonId, BTreeSet<GestureDirection>>,
+    /// Whether to say that Smooth wheel is off on a link that can turn it on.
+    pub smooth_wheel_note: SmoothWheelNote,
     pub editing_app: Option<&'a str>,
     pub overridden: Option<&'a BTreeMap<ButtonId, Action>>,
     /// The haptic panel's press-force row, present only while
@@ -485,10 +503,18 @@ fn gesture_inspector(
             direction,
             gesture_map,
             button,
+            data,
             picker.view,
             pal,
         ))
         .child(current_action_card(&current, picker, pal))
+        .when(offers_each_notch(direction, &current), |panel| {
+            let repeating = data
+                .wheel_notch_repeat
+                .get(&button)
+                .is_some_and(|set| set.contains(&direction));
+            panel.child(each_notch_row(button, direction, repeating, pal))
+        })
         .when(offer_wheel_hold, |panel| {
             panel.child(wheel_hold_row(button, false, picker.view, pal))
         })
@@ -524,74 +550,158 @@ fn gesture_inspector(
         })
 }
 
+/// Wheel slots under the five swipe directions. They stay out of
+/// [`GestureDirection::ALL`] so seeding a gesture map does not invent them.
+const WHEEL_DIRECTIONS: [GestureDirection; 2] =
+    [GestureDirection::WheelUp, GestureDirection::WheelDown];
+
 fn gesture_directions(
     active: GestureDirection,
     gesture_map: &BTreeMap<GestureDirection, Action>,
     button: ButtonId,
+    data: &BindingInspectorData<'_>,
     view: &Entity<MouseModelView>,
     pal: Palette,
 ) -> impl IntoElement {
+    let rows = |id_prefix: &'static str, directions: &'static [GestureDirection]| {
+        let view = view.clone();
+        directions
+            .iter()
+            .copied()
+            .enumerate()
+            .map(move |(index, direction)| {
+                let action = gesture_action(gesture_map, button, direction);
+                gesture_direction_row(
+                    (id_prefix, index),
+                    direction,
+                    direction == active,
+                    &action,
+                    view.clone(),
+                    pal,
+                )
+            })
+    };
     v_flex()
         .gap_1()
         .child(editor_section(tr!("actions.direction"), pal))
-        .children(
-            GestureDirection::ALL
-                .into_iter()
-                .enumerate()
-                .map(|(index, direction)| {
-                    let selected = direction == active;
-                    let action = gesture_action(gesture_map, button, direction);
-                    let view = view.clone();
-                    let aria_label = format!(
-                        "{}: {}",
-                        tr!(direction.translation_key()),
-                        localized_action_label(&action)
-                    );
-                    MenuRow::new(("inspector-direction", index))
-                        .selected(selected)
-                        .role(Role::Button)
-                        .aria_label(aria_label)
-                        .child(
-                            h_flex()
-                                .min_w_0()
-                                .gap_2()
-                                // `.size_4()` is not decoration: a bare `Icon`
-                                // falls through to the current font size, which
-                                // would leave these a step under the 16px leading
-                                // column the action rows below use.
-                                .child(gesture_direction_icon(direction).size_4())
-                                .child(
-                                    v_flex()
-                                        .min_w_0()
-                                        .child(
-                                            div()
-                                                .text_body()
-                                                .child(tr!(direction.translation_key())),
-                                        )
-                                        .child(
-                                            div()
-                                                .truncate()
-                                                .text_caption()
-                                                .text_color(pal.text_muted)
-                                                .child(localized_action_label(&action)),
-                                        ),
-                                ),
-                        )
-                        .when(selected, |row| {
-                            row.child(
-                                Icon::new(IconName::Check)
-                                    .size_3()
-                                    .text_color(rgb(ACCENT_BLUE)),
-                            )
-                        })
-                        .on_click(move |_, _, cx| {
-                            view.update(cx, |view, cx| {
-                                view.select_gesture_direction(direction);
-                                cx.notify();
-                            });
-                        })
-                }),
+        .children(rows("inspector-direction", &GestureDirection::ALL))
+        .child(editor_section(tr!("actions.wheel"), pal))
+        .child(
+            div()
+                .debug_selector(|| "inspector-wheel-caption".into())
+                .px_2()
+                .text_caption()
+                .text_color(pal.text_muted)
+                .child(tr!("actions.wheel_while_held")),
         )
+        .when(data.smooth_wheel_note == SmoothWheelNote::TurnOn, |list| {
+            list.child(
+                div()
+                    .debug_selector(|| "inspector-wheel-needs-smooth".into())
+                    .px_2()
+                    .text_caption()
+                    .text_color(pal.text_muted)
+                    .child(tr!("actions.wheel_needs_smooth_wheel")),
+            )
+        })
+        .children(rows("inspector-wheel-direction", &WHEEL_DIRECTIONS))
+}
+
+fn gesture_direction_row<T: Into<gpui::ElementId>>(
+    id: T,
+    direction: GestureDirection,
+    selected: bool,
+    action: &Action,
+    view: Entity<MouseModelView>,
+    pal: Palette,
+) -> impl IntoElement + use<T> {
+    let aria_label = format!(
+        "{}: {}",
+        tr!(direction.translation_key()),
+        localized_action_label(action)
+    );
+    let selector: &'static str = match direction {
+        GestureDirection::WheelUp => "inspector-wheel-up",
+        GestureDirection::WheelDown => "inspector-wheel-down",
+        _ => "",
+    };
+    MenuRow::new(id)
+        .when(!selector.is_empty(), |row| {
+            row.debug_selector(move || selector.into())
+        })
+        .selected(selected)
+        .role(Role::Button)
+        .aria_label(aria_label)
+        .child(
+            h_flex()
+                .min_w_0()
+                .gap_2()
+                // `.size_4()` is not decoration: a bare `Icon`
+                // falls through to the current font size, which
+                // would leave these a step under the 16px leading
+                // column the action rows below use.
+                .child(gesture_direction_icon(direction).size_4())
+                .child(
+                    v_flex()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .text_body()
+                                .child(tr!(direction.translation_key())),
+                        )
+                        .child(
+                            div()
+                                .truncate()
+                                .text_caption()
+                                .text_color(pal.text_muted)
+                                .child(localized_action_label(action)),
+                        ),
+                ),
+        )
+        .when(selected, |row| {
+            row.child(
+                Icon::new(IconName::Check)
+                    .size_3()
+                    .text_color(rgb(ACCENT_BLUE)),
+            )
+        })
+        .on_click(move |_, _, cx| {
+            view.update(cx, |view, cx| {
+                view.select_gesture_direction(direction);
+                cx.notify();
+            });
+        })
+}
+
+/// A real non-step wheel action can opt into repeating. A step already
+/// repeats, and [`Action::None`] must not gain a switch that does nothing.
+fn offers_each_notch(direction: GestureDirection, action: &Action) -> bool {
+    matches!(
+        direction,
+        GestureDirection::WheelUp | GestureDirection::WheelDown
+    ) && *action != Action::None
+        && !action.each_wheel_notch()
+}
+
+fn each_notch_row(
+    button: ButtonId,
+    direction: GestureDirection,
+    repeating: bool,
+    pal: Palette,
+) -> impl IntoElement {
+    toggle_row(
+        "inspector-wheel-each-notch",
+        pal,
+        tr!("actions.each_notch"),
+        tr!("actions.each_notch_description"),
+        Toggle::new("inspector-wheel-each-notch-toggle")
+            .selected(repeating)
+            .on_change(move |repeat, _window, cx| {
+                AppState::apply(cx, |state| {
+                    state.commit_wheel_notch_repeat(button, direction, *repeat)
+                });
+            }),
+    )
 }
 
 /// Whether the default-profile inspector may promote `button` into gesture
@@ -1076,11 +1186,28 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn each_notch_is_offered_only_for_a_real_non_step_wheel_action() {
+        assert!(!offers_each_notch(GestureDirection::Up, &Action::Copy));
+        assert!(!offers_each_notch(GestureDirection::WheelUp, &Action::None));
+        assert!(!offers_each_notch(
+            GestureDirection::WheelDown,
+            &Action::NextDesktop
+        ));
+        assert!(offers_each_notch(GestureDirection::WheelUp, &Action::Copy));
+        assert!(offers_each_notch(
+            GestureDirection::WheelDown,
+            &Action::MissionControl
+        ));
+    }
+
     fn global_profile<'a>(
         bindings: &'a BTreeMap<ButtonId, Action>,
         gesture_maps: &'a BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
         wheel_hold: &'a BTreeSet<ButtonId>,
     ) -> BindingInspectorData<'a> {
+        static NO_WHEEL_NOTCH_REPEAT: BTreeMap<ButtonId, BTreeSet<GestureDirection>> =
+            BTreeMap::new();
         BindingInspectorData {
             selected: None,
             bindings,
@@ -1091,6 +1218,8 @@ mod tests {
             hidden_actions: &[],
             virtual_thumbwheel: true,
             wheel_hold,
+            wheel_notch_repeat: &NO_WHEEL_NOTCH_REPEAT,
+            smooth_wheel_note: SmoothWheelNote::Hidden,
             editing_app: None,
             overridden: None,
             press_force: None,

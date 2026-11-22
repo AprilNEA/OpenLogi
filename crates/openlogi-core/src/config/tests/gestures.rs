@@ -335,3 +335,53 @@ fn wheel_notch_repeat_survives_a_save() {
         "a non-wheel direction is stored; the planner ignores it"
     );
 }
+
+#[test]
+fn set_wheel_notch_repeat_writes_only_wheel_directions_and_drops_an_empty_set() {
+    let mut cfg = Config::default();
+    cfg.set_wheel_notch_repeat(
+        "2b042",
+        ButtonId::GestureButton,
+        GestureDirection::Click,
+        true,
+    );
+    assert!(
+        !cfg.devices.contains_key("2b042"),
+        "a swipe direction is not an opt-in"
+    );
+
+    cfg.set_wheel_notch_repeat(
+        "2b042",
+        ButtonId::GestureButton,
+        GestureDirection::WheelUp,
+        true,
+    );
+    cfg.set_wheel_notch_repeat(
+        "2b042",
+        ButtonId::GestureButton,
+        GestureDirection::WheelDown,
+        true,
+    );
+    let set = &cfg.devices["2b042"].wheel_notch_repeat[&ButtonId::GestureButton];
+    assert_eq!(
+        set,
+        &BTreeSet::from([GestureDirection::WheelUp, GestureDirection::WheelDown])
+    );
+
+    cfg.set_wheel_notch_repeat(
+        "2b042",
+        ButtonId::GestureButton,
+        GestureDirection::WheelUp,
+        false,
+    );
+    cfg.set_wheel_notch_repeat(
+        "2b042",
+        ButtonId::GestureButton,
+        GestureDirection::WheelDown,
+        false,
+    );
+    assert!(
+        cfg.devices["2b042"].wheel_notch_repeat.is_empty(),
+        "the last opt-in removes the button, so the field can stay out of the file"
+    );
+}

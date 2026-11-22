@@ -25,7 +25,7 @@ use super::geometry::{
 };
 use super::hotspots::{Hotspot, MOUSE_MODEL_SIZE, MouseControlId};
 use super::inspector::{
-    ActionPickerContext, BindingInspectorData, ShortcutError, binding_inspector,
+    ActionPickerContext, BindingInspectorData, ShortcutError, SmoothWheelNote, binding_inspector,
 };
 use super::leader_lines::{Geometry as LeaderGeometry, Label, paint as paint_leader_lines};
 use crate::app::{glow_canvas, keyboard_glow};
@@ -102,6 +102,8 @@ struct MouseWorkspaceData<'a> {
     dpi_gestures: bool,
     virtual_thumbwheel: bool,
     wheel_hold: &'a BTreeSet<ButtonId>,
+    wheel_notch_repeat: &'a BTreeMap<ButtonId, BTreeSet<GestureDirection>>,
+    smooth_wheel_note: SmoothWheelNote,
     editing_app: Option<String>,
     overridden: Option<&'a BTreeMap<ButtonId, Action>>,
     /// Actions the picker offers beyond the catalog.
@@ -138,6 +140,14 @@ impl<'a> MouseWorkspaceData<'a> {
                 .and_then(|record| record.capabilities)
                 .is_some_and(|capabilities| capabilities.virtual_thumbwheel),
             wheel_hold: state.wheel_hold_buttons(),
+            wheel_notch_repeat: state.wheel_notch_repeat(),
+            smooth_wheel_note: if state.current_hires_wheel_supported()
+                && !state.current_smooth_wheel()
+            {
+                SmoothWheelNote::TurnOn
+            } else {
+                SmoothWheelNote::Hidden
+            },
             editing_app: if state.binding_layer() == BindingLayer::GShift {
                 Some(tr!("actions.g_shift").to_string())
             } else {
@@ -164,6 +174,8 @@ impl<'a> MouseWorkspaceData<'a> {
         static NO_GESTURE_MAPS: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>> =
             BTreeMap::new();
         static NO_WHEEL_HOLD: BTreeSet<ButtonId> = BTreeSet::new();
+        static NO_WHEEL_NOTCH_REPEAT: BTreeMap<ButtonId, BTreeSet<GestureDirection>> =
+            BTreeMap::new();
         Self {
             asset: None,
             layout: None,
@@ -175,6 +187,8 @@ impl<'a> MouseWorkspaceData<'a> {
             dpi_gestures: false,
             virtual_thumbwheel: false,
             wheel_hold: &NO_WHEEL_HOLD,
+            wheel_notch_repeat: &NO_WHEEL_NOTCH_REPEAT,
+            smooth_wheel_note: SmoothWheelNote::Hidden,
             editing_app: None,
             overridden: None,
             extra_actions: &[],
@@ -519,6 +533,8 @@ impl Render for MouseModelView {
             dpi_gestures,
             virtual_thumbwheel,
             wheel_hold,
+            wheel_notch_repeat,
+            smooth_wheel_note,
             editing_app,
             overridden,
             extra_actions,
@@ -592,6 +608,8 @@ impl Render for MouseModelView {
                 dpi_gestures,
                 virtual_thumbwheel,
                 wheel_hold,
+                wheel_notch_repeat,
+                smooth_wheel_note,
                 editing_app: editing_app.as_deref(),
                 overridden,
                 press_force: PressForce::of(force_sensing.as_ref(), self.press_force()),
