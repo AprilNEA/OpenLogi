@@ -106,6 +106,15 @@ mod tests {
         );
     }
 
+    /// A node that answered its query with no devices is not one that could
+    /// not be queried: nothing behind it is Logitech's.
+    #[test]
+    fn a_queried_node_without_devices_raises_nothing() {
+        let nodes = LogitechNodes::default();
+        assert!(!nodes.arrived(1, Some([])));
+        assert!(!nodes.departed(&1));
+    }
+
     #[test]
     fn an_enumerated_logitech_nodes_removal_raises() {
         let nodes = LogitechNodes::default();
