@@ -19,9 +19,8 @@ use crate::ui::theme::{self, Typography as _};
 /// selection; each row only asks it to link or unlink that row's device.
 pub(crate) fn target_table(cx: &mut App) -> impl IntoElement {
     let pal = theme::palette(cx);
-    let targets = AppState::try_read(cx)
-        .map(AppState::current_host_switch_targets)
-        .unwrap_or_default();
+    let targets =
+        AppState::try_read(cx).map_or_else(Default::default, AppState::current_host_switch_targets);
     v_flex()
         .w_full()
         .gap_3()

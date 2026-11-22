@@ -76,9 +76,7 @@ impl LightingPanel {
 impl Render for LightingPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pal = theme::palette(cx);
-        let lighting = AppState::try_read(cx)
-            .map(AppState::lighting)
-            .unwrap_or_default();
+        let lighting = AppState::try_read(cx).map_or_else(Default::default, AppState::lighting);
 
         // Pull the slider thumb to the active device's brightness whenever it
         // changed in `AppState` (device switch / external edit), without

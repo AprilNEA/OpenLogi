@@ -77,8 +77,7 @@ impl AppState {
     pub fn dpi_presets(&self) -> Vec<Dpi> {
         self.current_record()
             .and_then(DeviceRecord::persistent_config_key)
-            .map(|key| self.config.dpi_presets(key))
-            .unwrap_or_default()
+            .map_or_else(Default::default, |key| self.config.dpi_presets(key))
     }
     /// The active device's known DPI: the live capability read once it
     /// completes, else the persisted config value, else [`DEFAULT_DPI`] for a

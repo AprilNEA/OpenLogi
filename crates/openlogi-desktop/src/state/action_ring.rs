@@ -14,8 +14,7 @@ impl AppState {
     pub fn current_action_ring(&self) -> ActionRingConfig {
         self.current_record()
             .and_then(DeviceRecord::persistent_config_key)
-            .map(|key| self.config.action_ring(key))
-            .unwrap_or_default()
+            .map_or_else(Default::default, |key| self.config.action_ring(key))
     }
 
     /// Application profile open in the Actions Ring editor, or `None` for the

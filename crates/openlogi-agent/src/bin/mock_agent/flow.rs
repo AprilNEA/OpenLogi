@@ -114,8 +114,7 @@ impl MockFlow {
             .config_path()
             .ok()
             .and_then(|path| ConfigFile::load_from_path(&path).ok())
-            .map(|(config, _)| config.flow)
-            .unwrap_or_default();
+            .map_or_else(Default::default, |(config, _)| config.flow);
         FlowStatus {
             enabled: flow.enabled,
             peers: flow
