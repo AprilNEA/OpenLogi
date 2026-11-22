@@ -372,4 +372,5 @@ use the keyboard fallbacks above.
 | Limitation | Status |
 |---|---|
 | Wayland: per-application profile switching | Native on wlroots compositors (sway, Hyprland, …); GNOME needs the [companion extension](../crates/openlogi-hook/gnome-shell-extension/README.md); KDE falls back to XWayland. wlroots reports the xdg-shell `app_id` while X11 and GNOME report `WM_CLASS`, so a profile keyed under one does not match under the other |
+| Wayland: Actions Ring opens away from the cursor on GNOME | GNOME's window-open animation skews the ring's first pointer position. The [companion extension](../crates/openlogi-hook/gnome-shell-extension/README.md) turns that animation off for the ring; install it, then log out and back in |
 | Button capture: middle / mode-shift / thumbwheel | Side buttons only today |
