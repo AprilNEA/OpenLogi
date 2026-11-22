@@ -105,10 +105,11 @@ pub(super) async fn probe_bolt_receiver(
 /// `slot_results` holds one entry per *occupied* slot in slot order — empty or
 /// unreadable slots are dropped in phase 1 ([`read_bolt_slot_identity`]) and
 /// never reach here. The verdict is `Healthy` only when the pairing-count
-/// register answered AND every counted slot was readable: `None` (the
-/// receiver didn't answer, e.g. a parked channel) or a shortfall is "couldn't
-/// fully check", so the ledger replays the last good snapshot instead of
-/// presenting the partial walk as the new truth (#218). A slot whose feature
+/// register answered AND every counted slot was readable. `None` (the
+/// receiver didn't answer, e.g. a parked channel) is `Failed`; a shortfall is
+/// `Partial`. Both are "couldn't fully check", so the ledger replays the last
+/// good snapshot instead of presenting the partial walk as the new truth
+/// (#218); `Partial` also tells it the receiver is alive. A slot whose feature
 /// walk merely timed out still counts here — it falls back to cached/identity
 /// data in [`walk_bolt_slot`].
 pub(in crate::inventory) fn assemble_bolt_probe(
@@ -171,11 +172,17 @@ pub(in crate::inventory) fn assemble_bolt_probe(
             "paired-device count mismatch — some slots may be unreadable"
         );
     }
-    let answered_in_full = pairing_count.is_some_and(|count| readable_slots == usize::from(count));
+    let verdict = match pairing_count {
+        Some(count) if readable_slots == usize::from(count) => {
+            ProbeVerdict::Healthy { complete: true }
+        }
+        Some(_) => ProbeVerdict::Partial,
+        None => ProbeVerdict::Failed,
+    };
 
     NodeProbe {
         inventory: Some(DeviceInventory { receiver, paired }),
-        verdict: ProbeVerdict::healthy_when(answered_in_full),
+        verdict,
         outcomes,
     }
 }

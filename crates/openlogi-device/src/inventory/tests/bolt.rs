@@ -124,8 +124,8 @@ fn bolt_probe_is_incomplete_when_a_counted_slot_is_unreadable() {
     );
     assert_eq!(
         probe.verdict,
-        ProbeVerdict::Failed,
-        "an incomplete Bolt walk is not authoritative"
+        ProbeVerdict::Partial,
+        "an incomplete Bolt walk is not authoritative, but the receiver answered"
     );
 }
 

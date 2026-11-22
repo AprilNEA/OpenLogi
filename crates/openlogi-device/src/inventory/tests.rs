@@ -37,6 +37,7 @@ mod backfill;
 mod bolt;
 mod cache;
 mod deferral;
+mod eviction_backoff;
 mod publication;
 mod retry;
 mod unifying;
