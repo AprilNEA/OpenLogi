@@ -804,6 +804,46 @@ fn drive_wheel_toward(
 }
 
 #[test]
+fn windows_momentum_keeps_scrolling_during_a_sustained_spin() {
+    let mut engine = momentum_engine_with(|settings| settings.max_glide_speed = 15000);
+    engine.report_driven_momentum = true;
+    let source = hidpp_source("mouse", 1);
+    let start = Instant::now();
+    let mut frames = Vec::new();
+    let end = drive_wheel(
+        &mut engine,
+        &source,
+        start,
+        |_| 180.0,
+        Duration::from_secs(2),
+        &mut frames,
+    );
+    frames.clear();
+    let stopped = drive_wheel(
+        &mut engine,
+        &source,
+        end,
+        |_| 180.0,
+        Duration::from_millis(80),
+        &mut frames,
+    );
+    assert!(
+        frames.iter().map(in_ticks).sum::<f64>() > 34.0,
+        "a sustained fast spin must still scroll farther than its ~29 input ticks"
+    );
+    assert!(frames.iter().all(|frame| frame.kind == FrameKind::Eased));
+    let settled = run_on(&mut engine, stopped, Duration::from_millis(80), &mut frames);
+    frames.clear();
+    run_on(
+        &mut engine,
+        settled,
+        Duration::from_millis(100),
+        &mut frames,
+    );
+    assert!(frames.is_empty(), "output must stop once the wheel stops");
+}
+
+#[test]
 fn ratchet_wheel_scrolling_eases_as_before() {
     let mut engine = momentum_engine();
     let source = hidpp_source("mouse", 1);

@@ -519,7 +519,10 @@ fn run_worker(
     emit_smooth: &mut impl FnMut(ScrollFrame),
     emit_direct: &mut impl FnMut(WheelDelta),
 ) {
-    let mut engine = ScrollEngine::default();
+    let mut engine = ScrollEngine {
+        report_driven_momentum: cfg!(windows),
+        ..ScrollEngine::default()
+    };
     let mut observed_smoothing = preferences.smooth_scroll_enabled();
     // An overflow-cancelled incarnation stays tombstoned so accepted input that
     // was already queued when control overtook the saturated queue is ignored.
