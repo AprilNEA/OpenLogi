@@ -95,7 +95,7 @@ pub(crate) struct NativeBackend {
     /// hotplug stream reads. A removal is read once, so a second subscriber
     /// would miss the ones the first read; the inventory worker is the only
     /// subscriber.
-    logitech_nodes: Arc<Mutex<LogitechNodes<DeviceId>>>,
+    logitech_nodes: Arc<LogitechNodes<DeviceId>>,
     device_io: DeviceIoGate,
     recording: Option<RecordingSink>,
 }
@@ -114,10 +114,8 @@ impl Default for NativeBackend {
 impl NativeBackend {
     fn with_recording(recording: RecordingSink) -> Self {
         Self {
-            nodes: Mutex::new(HashMap::new()),
-            logitech_nodes: Arc::default(),
-            device_io: device_io_gate(),
             recording: Some(recording),
+            ..Self::default()
         }
     }
 
@@ -135,14 +133,11 @@ impl NativeBackend {
             .map(|device| (HandleKey::for_device(device), Arc::clone(device)))
             .collect();
         *self.nodes.lock().unwrap_or_else(PoisonError::into_inner) = handles;
-        self.logitech_nodes
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .enumerated(
-                devices
-                    .iter()
-                    .map(|device| (device.id.clone(), device.vendor_id)),
-            );
+        self.logitech_nodes.enumerated(
+            devices
+                .iter()
+                .map(|device| (device.id.clone(), device.vendor_id)),
+        );
         Ok(devices)
     }
 
@@ -265,22 +260,16 @@ impl HidBackend for NativeBackend {
 /// `event` as a [`HotplugEvent`] when it concerns a Logitech node.
 async fn logitech_event(
     event: DeviceEvent,
-    nodes: Arc<Mutex<LogitechNodes<DeviceId>>>,
+    nodes: Arc<LogitechNodes<DeviceId>>,
 ) -> Option<HotplugEvent> {
     match event {
         DeviceEvent::Connected(id) => {
             let vendor_ids = node_vendor_ids(&id).await;
             nodes
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
                 .arrived(id, vendor_ids)
                 .then_some(HotplugEvent::Connected)
         }
-        DeviceEvent::Disconnected(id) => nodes
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .departed(&id)
-            .then_some(HotplugEvent::Disconnected),
+        DeviceEvent::Disconnected(id) => nodes.departed(&id).then_some(HotplugEvent::Disconnected),
     }
 }
 
@@ -351,10 +340,9 @@ mod tests {
             .expect_err("a suspended gate refuses device I/O")
             .to_string();
         let backend = NativeBackend {
-            nodes: Mutex::new(HashMap::new()),
-            logitech_nodes: Arc::default(),
             device_io,
             recording: Some(recorder.sink()),
+            ..NativeBackend::default()
         };
         let node = NodeInfo {
             id: NodeId::from("suspended-test-node".to_owned()),
