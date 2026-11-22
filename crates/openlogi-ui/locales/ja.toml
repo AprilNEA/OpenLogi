@@ -357,7 +357,6 @@ smooth_wheel_unsupported = "このデバイスはスムーズホイールに対�
 smooth_wheel_other_connection = "別の接続方式ではスムーズホイールに対応していますが、現在の接続では利用できません。"
 smartshift = "SmartShift"
 momentum_title = "慣性スクロール"
-momentum_macos_only = "macOS でのみテスト済み"
 momentum = "フリースピンで慣性スクロール"
 momentum_description = "SmartShift がホイールをフリースピンにすると、ページが滑らかに流れ、ホイールに触れた瞬間に止まります。"
 momentum_needs_smooth_wheel = "この機能を使うには、このマウスの「スムーズホイール」をオンにしてください。"

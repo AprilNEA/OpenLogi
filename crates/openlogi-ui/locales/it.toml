@@ -357,7 +357,6 @@ smooth_wheel_unsupported = "Questo dispositivo non supporta la rotellina fluida.
 smooth_wheel_other_connection = "Il dispositivo supporta la rotellina fluida con la connessione alternativa, ma non con questa."
 smartshift = "SmartShift"
 momentum_title = "Scorrimento con inerzia"
-momentum_macos_only = "Testato solo su macOS"
 momentum = "Scivolamento in scorrimento libero"
 momentum_description = "Quando SmartShift lascia girare liberamente la rotella, la pagina scivola con essa e si ferma appena tocchi la rotella."
 momentum_needs_smooth_wheel = "Attiva Rotellina fluida per questo mouse per usare questa funzione."

@@ -80,8 +80,10 @@ optional physical device key.
   spin freely, the page glides off at the speed it was spun, slows along the
   chosen shape, and stops the moment a finger stops the wheel. Ratchet scrolling
   keeps its steps. A glide's speed is `(1 − t/T)^p` of its start speed over
-  `T = τ·(p + 1)`, so every shape covers start speed × τ. Each value is clamped
-  into its range when the agent reads it:
+  `T = τ·(p + 1)`, so every shape covers start speed × τ. On Windows, the curve
+  boosts incoming wheel reports and the page keeps moving while those reports
+  arrive, even after the curve ends. Each value is clamped into its range when
+  the agent reads it:
   - `enabled` (default `false`)
   - `pixels_per_notch`, `10` through `60` (default `28`): reference pixels per
     wheel notch, for ratchet steps and for the speed a spin launches the glide

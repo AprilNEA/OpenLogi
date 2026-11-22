@@ -357,7 +357,6 @@ smooth_wheel_unsupported = "이 기기는 부드러운 휠을 지원하지 않�
 smooth_wheel_other_connection = "다른 연결 방식에서는 부드러운 휠을 지원하지만 현재 연결에서는 지원하지 않습니다."
 smartshift = "SmartShift"
 momentum_title = "관성 스크롤"
-momentum_macos_only = "macOS에서만 테스트됨"
 momentum = "자유 회전 시 관성 스크롤"
 momentum_description = "SmartShift가 휠을 자유 회전시키면 페이지가 함께 미끄러지고, 휠을 만지는 순간 멈춥니다."
 momentum_needs_smooth_wheel = "이 기능을 사용하려면 이 마우스의 부드러운 휠을 켜세요."

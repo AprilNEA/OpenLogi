@@ -13,7 +13,6 @@ use gpui_kit::component::{
     description_list::{DescriptionItem, DescriptionList},
     h_flex,
     scroll::ScrollableElement as _,
-    tag::Tag,
     tooltip::Tooltip,
     v_flex,
 };
@@ -458,11 +457,6 @@ fn pointer_tab(
                         tr!("pointer.momentum_title"),
                         Icon::empty().path("action-icons/mouse.svg"),
                         momentum_panel.clone().into_any_element(),
-                    )
-                    .title_suffix(
-                        Tag::secondary()
-                            .small()
-                            .child(tr!("pointer.momentum_macos_only")),
                     ),
                 ),
             ),

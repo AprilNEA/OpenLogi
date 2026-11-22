@@ -311,6 +311,7 @@ impl PanelCard {
     }
 
     /// Show `suffix` beside the title, such as a status tag.
+    #[cfg(debug_assertions)]
     #[must_use]
     pub(crate) fn title_suffix(mut self, suffix: impl IntoElement) -> Self {
         self.title_suffix = Some(suffix.into_any_element());

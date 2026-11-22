@@ -357,7 +357,6 @@ smooth_wheel_unsupported = "Гэта прылада не падтрымліва�
 smooth_wheel_other_connection = "Гэта прылада падтрымлівае плаўнае кола на іншым падключэнні, але не на гэтым."
 smartshift = "SmartShift"
 momentum_title = "Інерцыйная пракрутка"
-momentum_macos_only = "Праверана толькі ў macOS"
 momentum = "Слізганне пры свабодным кручэнні"
 momentum_description = "Калі SmartShift дазваляе колу круціцца свабодна, старонка слізгае разам з ім і спыняецца, як толькі вы дакранаецеся да кола."
 momentum_needs_smooth_wheel = "Уключыце «Плаўнае кола» для гэтай мышы, каб карыстацца гэтай функцыяй."

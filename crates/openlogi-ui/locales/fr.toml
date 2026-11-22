@@ -357,7 +357,6 @@ smooth_wheel_unsupported = "Cet appareil ne prend pas en charge la molette fluid
 smooth_wheel_other_connection = "L’appareil prend en charge la molette fluide avec son autre connexion, mais pas celle-ci."
 smartshift = "SmartShift"
 momentum_title = "Défilement avec inertie"
-momentum_macos_only = "Testé uniquement sur macOS"
 momentum = "Glissement en roue libre"
 momentum_description = "Quand SmartShift laisse la molette tourner librement, la page glisse avec elle et s’arrête dès que vous touchez la molette."
 momentum_needs_smooth_wheel = "Activez Molette fluide pour cette souris afin de l’utiliser."
