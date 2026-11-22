@@ -21,13 +21,16 @@
 //! defaults (click bound, rotation rebound, or sensitivity changed).
 //! The main wheel (`0x2121`) is diverted the same way, but only when the
 //! device's smooth-wheel switch asks for it: the GUI then posts eased scrolling
-//! from the [`CapturedInput::MainWheel`] reports (`main_wheel`).
+//! from the [`CapturedInput::MainWheel`] reports (`main_wheel`). When the spec
+//! asks, a held gesture source consumes those reports as gesture directions
+//! instead, so the wheel does not also scroll.
 
 mod accum;
 mod arm;
 pub(super) mod main_wheel;
 mod spy;
 
+use std::collections::BTreeMap;
 use std::num::NonZeroU8;
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -61,9 +64,9 @@ use crate::thumbwheel::{self, RotationStatus, WheelResolution};
 /// One input captured from the active device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CapturedInput {
-    /// A completed swipe (or tap click) from a diverted gesture source,
-    /// tagged with the source control so dispatch resolves it against that
-    /// button's own direction map.
+    /// A completed swipe, a tap click, or a wheel notch from a diverted
+    /// gesture source, tagged with the source control so dispatch resolves
+    /// it against that button's own direction map.
     Gesture(ButtonId, GestureDirection),
     /// A diverted button's physical down edge.
     ButtonDown(ButtonId),
@@ -176,6 +179,18 @@ pub const GESTURE_SOURCE_BUTTONS: [(u16, ButtonId); 3] = [
     (reprog_controls::HAPTIC_PANEL_CID, ButtonId::HapticPanel),
 ];
 
+/// Which wheel directions of one gesture button fire on every notch.
+///
+/// Both `false` matches the button being absent: each direction fires once
+/// per hold.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WheelNotchRepeat {
+    /// [`GestureDirection::WheelUp`] repeats on every notch.
+    pub up: bool,
+    /// [`GestureDirection::WheelDown`] repeats on every notch.
+    pub down: bool,
+}
+
 /// Which of one device's controls a capture session should divert.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CaptureSpec {
@@ -203,6 +218,18 @@ pub struct CaptureSpec {
     /// mode along with the divert; `None` leaves the wheel native. Inert on a
     /// device without the feature.
     pub divert_main_wheel: Option<MainWheelDivert>,
+    /// When set, a held gesture source consumes diverted main-wheel samples
+    /// as [`CapturedInput::Gesture`] directions ([`GestureDirection::WheelUp`]
+    /// and [`GestureDirection::WheelDown`]) instead of
+    /// [`CapturedInput::MainWheel`]. Inert while no gesture source is held,
+    /// and while the main wheel itself is not diverted: this does not turn
+    /// diversion on.
+    pub gesture_wheel: bool,
+    /// For each gesture button, which wheel directions fire on every notch.
+    /// A direction left false fires once per hold; further notches that way
+    /// are consumed and do not scroll. Inert unless [`Self::gesture_wheel`]
+    /// is set, and it does not turn diversion on.
+    pub gesture_wheel_each_notch: BTreeMap<ButtonId, WheelNotchRepeat>,
     /// G-series host mode or onboard profile.
     pub onboard: Option<OnboardTarget>,
 }
@@ -325,6 +352,8 @@ impl ArmedCapture for GestureCapture {
             .collect();
         let wheel_set = armed.wheel_button_cids.clone();
         let hires_per_notch = armed.hires_per_notch;
+        let gesture_wheel = armed.gesture_wheel;
+        let gesture_wheel_each_notch = armed.gesture_wheel_each_notch.clone();
         let main_wheel = armed
             .main_wheel
             .as_ref()
@@ -396,14 +425,15 @@ impl ArmedCapture for GestureCapture {
             if let Some((idx, per_notch)) = main_wheel
                 && let Some(event) = hires_wheel::decode_event(msg, device_index, idx)
             {
-                if let HiResWheelEvent::RatchetSwitch(state) = event {
-                    // Not input. The inventory's listener on this channel
-                    // counts it as a setting change, so clients re-read
-                    // SmartShift.
-                    debug!(index = device_index, ?state, "wheel ratchet switched");
-                } else if let Some(input) = main_wheel::movement_input(event, per_notch) {
-                    let _ = sink.send(input);
-                }
+                note_hires_wheel(
+                    device_index,
+                    event,
+                    per_notch,
+                    &accum,
+                    gesture_wheel,
+                    &gesture_wheel_each_notch,
+                    &sink,
+                );
             }
         }
     }
@@ -436,6 +466,49 @@ impl ArmedCapture for GestureCapture {
 
     fn into_pending(self, retired: &SharedChannel) -> Option<PendingCaptureRestore> {
         self.armed.into_pending(retired)
+    }
+}
+
+/// A diverted `0x2121` report: a ratchet change is only logged, and movement
+/// is offered to the gesture hold before it stays a main-wheel sample.
+fn note_hires_wheel(
+    device_index: u8,
+    event: HiResWheelEvent,
+    per_notch: NonZeroU8,
+    accum: &Mutex<CaptureAccum>,
+    gesture_wheel: bool,
+    each_notch: &BTreeMap<ButtonId, WheelNotchRepeat>,
+    sink: &mpsc::UnboundedSender<CapturedInput>,
+) {
+    if let HiResWheelEvent::RatchetSwitch(state) = event {
+        // Not input. The inventory's listener on this channel counts it as a
+        // setting change, so clients re-read SmartShift.
+        debug!(index = device_index, ?state, "wheel ratchet switched");
+    } else if let Some(input) = main_wheel::movement_input(event, per_notch) {
+        dispatch_main_wheel(accum, input, gesture_wheel, each_notch, sink);
+    }
+}
+
+/// Hand one diverted main-wheel sample to the gesture hold when the spec
+/// asked for wheel directions. A sample the hold does not consume stays a
+/// [`CapturedInput::MainWheel`].
+fn dispatch_main_wheel(
+    accum: &Mutex<CaptureAccum>,
+    input: CapturedInput,
+    gesture_wheel: bool,
+    each_notch: &BTreeMap<ButtonId, WheelNotchRepeat>,
+    sink: &mpsc::UnboundedSender<CapturedInput>,
+) {
+    let CapturedInput::MainWheel { delta, per_notch } = input else {
+        let _ = sink.send(input);
+        return;
+    };
+    let consumed = accum
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .on_main_wheel(delta, per_notch, gesture_wheel, each_notch, sink);
+    if !consumed {
+        let _ = sink.send(CapturedInput::MainWheel { delta, per_notch });
     }
 }
 

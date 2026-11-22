@@ -60,11 +60,34 @@ pub(super) struct SlideFrame {
 /// distance left, until less than [`SLIDE_RELEASE`] of it remains. The
 /// release then follows one period later at the same progress.
 pub(super) fn slide(direction: Direction) -> Vec<SlideFrame> {
+    paced(direction, SLIDE_STEP, SLIDE_RELEASE)
+}
+
+/// Share of the remaining distance one flick frame covers. The first tick
+/// already crosses a quarter of the desktop.
+const FLICK_STEP: f64 = 0.25;
+/// Let go once less than an eighth remains. The Dock finishes from there.
+const FLICK_RELEASE: f64 = 0.125;
+/// Further flicks remembered while one is still moving. A ratchet can
+/// arrive faster than the slide; past this the extra notches are dropped.
+const MAX_PENDING_FLICKS: u32 = 48;
+
+/// The frames of one trackpad flick, in posting order.
+///
+/// A gesture-wheel notch has no finger to follow, so this is shorter than
+/// [`slide`]: a quarter of the desktop on the first tick, then three
+/// quarters of what is left, released once under an eighth remains. The
+/// whole post is eight moving frames and one release, 132.8 ms.
+pub(super) fn flick(direction: Direction) -> Vec<SlideFrame> {
+    paced(direction, FLICK_STEP, FLICK_RELEASE)
+}
+
+fn paced(direction: Direction, step: f64, release: f64) -> Vec<SlideFrame> {
     let mut frames = Vec::new();
     let mut remaining = 1.0;
     let mut at = Duration::ZERO;
-    while remaining >= SLIDE_RELEASE {
-        remaining *= 1.0 - SLIDE_STEP;
+    while remaining >= release {
+        remaining *= 1.0 - step;
         let phase = if frames.is_empty() {
             SlidePhase::Began
         } else {
@@ -83,6 +106,77 @@ pub(super) fn slide(direction: Direction) -> Vec<SlideFrame> {
         at,
     });
     frames
+}
+
+/// What [`FlickChain::admit`] did with one requested flick.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum FlickAdmit {
+    /// Nothing was moving. The caller starts the chain.
+    Start,
+    /// A flick is already moving. This one joins the tail, or replaces it
+    /// when the direction changed.
+    Follow,
+}
+
+/// Flicks still owed while one slide is in flight.
+///
+/// The flick already being posted is not part of [`Self::pending`]. The
+/// chain plays that one, then one more for each pending count.
+#[derive(Debug)]
+pub(super) struct FlickChain {
+    running: bool,
+    direction: Direction,
+    pending: u32,
+}
+
+impl FlickChain {
+    pub(super) const fn new() -> Self {
+        Self {
+            running: false,
+            direction: Direction::Next,
+            pending: 0,
+        }
+    }
+
+    /// Remember `direction`. The first call starts the chain; a later call
+    /// in the same direction adds one flick, and the other direction
+    /// replaces the tail with a single flick that way.
+    pub(super) fn admit(&mut self, direction: Direction) -> FlickAdmit {
+        if !self.running {
+            self.running = true;
+            self.direction = direction;
+            self.pending = 0;
+            return FlickAdmit::Start;
+        }
+        if self.direction != direction {
+            self.direction = direction;
+            self.pending = 1;
+            return FlickAdmit::Follow;
+        }
+        if self.pending < MAX_PENDING_FLICKS {
+            self.pending += 1;
+        }
+        FlickAdmit::Follow
+    }
+
+    /// One flick reached its Space. `Some` is the next flick; `None` means
+    /// the chain is idle.
+    pub(super) fn finish_one(&mut self) -> Option<Direction> {
+        if self.pending == 0 {
+            self.running = false;
+            None
+        } else {
+            self.pending -= 1;
+            Some(self.direction)
+        }
+    }
+
+    /// Drop the chain. A flick that never started, or one that failed,
+    /// must not keep later notches waiting.
+    pub(super) fn stop(&mut self) {
+        self.running = false;
+        self.pending = 0;
+    }
 }
 
 /// The clock a slide is paced by and the sink its frames go to.
@@ -229,6 +323,12 @@ struct PostWait {
 }
 
 impl PostGate {
+    /// A gate nobody waits on. A follow-up flick posts through one of these
+    /// so the action thread is not held for the slide.
+    pub(super) fn detached() -> Self {
+        Self::new(Instant::now() + PREPARATION_TIMEOUT).0
+    }
+
     #[cfg(test)]
     pub(super) fn for_test() -> Self {
         Self::new(Instant::now() + PREPARATION_TIMEOUT).0

@@ -111,6 +111,10 @@ pub fn default_binding_on(layout: Option<&GamingLayout>, button: ButtonId) -> Ac
 /// Per-direction defaults for the gesture button. These are captured live over
 /// HID++ `0x1b04` (raw-XY diversion) and dispatched like any other binding; the
 /// defaults give the picker something sensible to show on first run.
+///
+/// [`GestureDirection::WheelUp`] and [`GestureDirection::WheelDown`] stay
+/// [`Action::None`]. They are outside [`GestureDirection::ALL`], so a missing
+/// wheel key is not seeded.
 #[must_use]
 pub fn default_gesture_binding(direction: GestureDirection) -> Action {
     match direction {
@@ -119,6 +123,7 @@ pub fn default_gesture_binding(direction: GestureDirection) -> Action {
         GestureDirection::Left => Action::PrevTab,
         GestureDirection::Right => Action::NextTab,
         GestureDirection::Click => Action::AppExpose,
+        GestureDirection::WheelUp | GestureDirection::WheelDown => Action::None,
     }
 }
 

@@ -227,7 +227,10 @@ impl SwipeAccumulator {
             Some(GestureDirection::Left) => self.dx = self.dx.max(0),
             Some(GestureDirection::Down) => self.dy = self.dy.min(0),
             Some(GestureDirection::Up) => self.dy = self.dy.max(0),
-            Some(GestureDirection::Click) | None => {}
+            Some(
+                GestureDirection::Click | GestureDirection::WheelUp | GestureDirection::WheelDown,
+            )
+            | None => {}
         }
         let held_long_enough = self
             .held_since
@@ -282,7 +285,8 @@ fn along(direction: GestureDirection, dx: i32, dy: i32) -> i32 {
         GestureDirection::Right => dx,
         GestureDirection::Up => dy.saturating_neg(),
         GestureDirection::Down => dy,
-        GestureDirection::Click => 0,
+        // Wheel directions are main-wheel notches, not raw-XY travel.
+        GestureDirection::Click | GestureDirection::WheelUp | GestureDirection::WheelDown => 0,
     }
 }
 
@@ -291,7 +295,7 @@ fn across(direction: GestureDirection, dx: i32, dy: i32) -> i32 {
     match direction {
         GestureDirection::Left | GestureDirection::Right => dy,
         GestureDirection::Up | GestureDirection::Down => dx,
-        GestureDirection::Click => 0,
+        GestureDirection::Click | GestureDirection::WheelUp | GestureDirection::WheelDown => 0,
     }
 }
 
@@ -302,7 +306,7 @@ fn reversal(direction: GestureDirection, dx: i32, dy: i32) -> i32 {
         GestureDirection::Right => dx.saturating_neg(),
         GestureDirection::Up => dy,
         GestureDirection::Down => dy.saturating_neg(),
-        GestureDirection::Click => 0,
+        GestureDirection::Click | GestureDirection::WheelUp | GestureDirection::WheelDown => 0,
     }
     .max(0)
 }
@@ -316,7 +320,7 @@ fn continues(direction: GestureDirection, dx: i32, dy: i32) -> bool {
         GestureDirection::Right => dx > 0 && ax >= ay,
         GestureDirection::Up => dy < 0 && ay >= ax,
         GestureDirection::Down => dy > 0 && ay >= ax,
-        GestureDirection::Click => false,
+        GestureDirection::Click | GestureDirection::WheelUp | GestureDirection::WheelDown => false,
     }
 }
 

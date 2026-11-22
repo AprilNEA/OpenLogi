@@ -1,5 +1,7 @@
 //! Gesture mode as a per-button shape: seeding, demoting, and what survives a save.
 
+use std::collections::BTreeSet;
+
 use super::*;
 
 #[test]
@@ -304,4 +306,32 @@ fn disabled_gesture_maps_survive_a_save_load_cycle() {
         }
         other => panic!("expected the persisted stash restored, got {other:?}"),
     }
+}
+
+#[test]
+fn wheel_notch_repeat_survives_a_save() {
+    let mut cfg = Config::default();
+    cfg.devices
+        .insert("2b042".to_string(), DeviceConfig::default());
+    let body = toml::to_string(&cfg).expect("serialize");
+    assert!(
+        !body.contains("wheel_notch_repeat"),
+        "an empty set stays out of the file: {body}"
+    );
+
+    cfg.devices
+        .get_mut("2b042")
+        .expect("device")
+        .wheel_notch_repeat
+        .insert(
+            ButtonId::GestureButton,
+            BTreeSet::from([GestureDirection::WheelUp, GestureDirection::Click]),
+        );
+    let restored = write_and_read(&cfg);
+    let set = &restored.devices["2b042"].wheel_notch_repeat[&ButtonId::GestureButton];
+    assert!(set.contains(&GestureDirection::WheelUp));
+    assert!(
+        set.contains(&GestureDirection::Click),
+        "a non-wheel direction is stored; the planner ignores it"
+    );
 }

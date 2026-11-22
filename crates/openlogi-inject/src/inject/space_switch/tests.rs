@@ -377,6 +377,59 @@ fn slide_eases_out() {
     }
 }
 
+#[test]
+fn a_flick_is_a_quarter_on_the_first_tick_and_releases_inside_a_trackpad_swipe() {
+    for direction in BOTH_DIRECTIONS {
+        let frames = flick(direction);
+        assert_eq!(frames.len(), 9, "eight moving frames, then the release");
+        assert_eq!(frames[0].phase, SlidePhase::Began);
+        assert_eq!(frames[0].at, Duration::ZERO);
+        assert!((frames[0].progress * direction.sign() - 0.25).abs() < 1e-12);
+        assert_eq!(
+            frames.last().map(|frame| (frame.phase, frame.at)),
+            Some((SlidePhase::Ended, Duration::from_micros(132_800)))
+        );
+        let travel: Vec<f64> = frames
+            .iter()
+            .map(|frame| frame.progress * direction.sign())
+            .collect();
+        assert!(travel.last().is_some_and(|t| *t > 0.85), "{travel:?}");
+    }
+}
+
+#[test]
+fn three_notches_chain_and_a_reverse_replaces_the_tail() {
+    let mut chain = FlickChain::new();
+    assert_eq!(chain.admit(Direction::Next), FlickAdmit::Start);
+    assert_eq!(chain.admit(Direction::Next), FlickAdmit::Follow);
+    assert_eq!(chain.admit(Direction::Next), FlickAdmit::Follow);
+    // The start is the flick in flight. Two more are waiting.
+    assert_eq!(chain.finish_one(), Some(Direction::Next));
+    assert_eq!(chain.finish_one(), Some(Direction::Next));
+    assert_eq!(chain.finish_one(), None);
+
+    assert_eq!(chain.admit(Direction::Next), FlickAdmit::Start);
+    assert_eq!(chain.admit(Direction::Next), FlickAdmit::Follow);
+    assert_eq!(chain.admit(Direction::Previous), FlickAdmit::Follow);
+    assert_eq!(chain.finish_one(), Some(Direction::Previous));
+    assert_eq!(chain.finish_one(), None);
+}
+
+#[test]
+fn a_full_flick_queue_drops_another_notch_until_one_finishes() {
+    let mut chain = FlickChain::new();
+    assert_eq!(chain.admit(Direction::Previous), FlickAdmit::Start);
+    for _ in 0..48 {
+        assert_eq!(chain.admit(Direction::Previous), FlickAdmit::Follow);
+    }
+    assert_eq!(chain.admit(Direction::Previous), FlickAdmit::Follow);
+    let mut extra = 0;
+    while chain.finish_one().is_some() {
+        extra += 1;
+    }
+    assert_eq!(extra, 48);
+}
+
 /// A clock that moves only when the slide sleeps. One sleep can end late.
 struct FakePace {
     now: Duration,

@@ -6,7 +6,9 @@ use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU8;
 use std::time::Instant;
 
-use openlogi_core::binding::{Action, Binding, ButtonId, HeldWheel, default_binding};
+use openlogi_core::binding::{
+    Action, Binding, ButtonId, GestureDirection, HeldWheel, default_binding,
+};
 use openlogi_core::config::ThumbwheelSensitivity;
 use openlogi_core::scroll::ScrollDelta;
 use openlogi_hid::CapturedInput;
@@ -206,27 +208,7 @@ impl InputDispatcher {
         let key = session.device_key();
         match input {
             CapturedInput::Gesture(button, direction) => {
-                let Some(press) = self.held_presses.get(session, button) else {
-                    debug!(key, %button, ?direction, "gesture from a canceled button lifecycle — ignored");
-                    return;
-                };
-                if let Some(action) = plan
-                    .gesture_bindings
-                    .get(&button)
-                    .or_else(|| plan.side_gesture_bindings.get(&button))
-                    .and_then(|map| map.get(&direction))
-                {
-                    debug!(key, %button, ?direction, action = %action.label(), "gesture → action");
-                    if !self
-                        .outputs
-                        .actions
-                        .try_dispatch_while_pressed(press, action)
-                    {
-                        debug!(key, %button, ?direction, "gesture press no longer active — ignored");
-                    }
-                } else {
-                    debug!(key, %button, ?direction, "gesture with no binding — ignored");
-                }
+                self.dispatch_gesture(session, plan, button, direction);
             }
             CapturedInput::ButtonDown(button) => {
                 if self.start_gshift(session, plan, button) {
@@ -288,6 +270,43 @@ impl InputDispatcher {
             CapturedInput::ButtonDiverted(_) => {
                 unreachable!("the session's forwarder records diverted buttons instead")
             }
+        }
+    }
+
+    /// One completed gesture direction on a press the runtime already admitted.
+    fn dispatch_gesture(
+        &self,
+        session: &HidppSessionId,
+        plan: &DispatchPlan,
+        button: ButtonId,
+        direction: GestureDirection,
+    ) {
+        let key = session.device_key();
+        let Some(press) = self.held_presses.get(session, button) else {
+            debug!(key, %button, ?direction, "gesture from a canceled button lifecycle — ignored");
+            return;
+        };
+        let Some(action) = plan
+            .gesture_bindings
+            .get(&button)
+            .or_else(|| plan.side_gesture_bindings.get(&button))
+            .and_then(|map| map.get(&direction))
+        else {
+            debug!(key, %button, ?direction, "gesture with no binding — ignored");
+            return;
+        };
+        debug!(key, %button, ?direction, action = %action.label(), "gesture → action");
+        let admitted = if trackpad_desktop(direction, action) {
+            self.outputs
+                .actions
+                .try_dispatch_trackpad_while_pressed(press, action)
+        } else {
+            self.outputs
+                .actions
+                .try_dispatch_while_pressed(press, action)
+        };
+        if !admitted {
+            debug!(key, %button, ?direction, "gesture press no longer active — ignored");
         }
     }
 
@@ -384,6 +403,19 @@ impl InputDispatcher {
             }
         }
     }
+}
+
+/// A gesture-wheel notch bound to Previous or Next Desktop. It flicks like
+/// a trackpad swipe. A swipe or click bound to the same action, and every
+/// other wheel action, keeps the ordinary path.
+fn trackpad_desktop(direction: GestureDirection, action: &Action) -> bool {
+    matches!(
+        (direction, action),
+        (
+            GestureDirection::WheelUp | GestureDirection::WheelDown,
+            Action::PreviousDesktop | Action::NextDesktop,
+        )
+    )
 }
 
 /// The horizontal scroll one held-wheel report stands for: away from the

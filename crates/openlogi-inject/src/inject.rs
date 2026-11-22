@@ -500,6 +500,25 @@ pub enum DesktopSwitch {
     Animated,
 }
 
+/// Run Previous or Next Desktop the way a trackpad flick does.
+///
+/// On macOS, with animated switches on, a gesture-wheel notch posts a short
+/// DockSwipe and a later notch in the same direction joins that chain. It
+/// does not type the Space shortcut, so several notches do not each wait out
+/// a full keyboard Space transition. Animation off switches at once, like
+/// [`execute`]. Any other action, and every platform but macOS, uses
+/// [`execute`].
+pub fn execute_trackpad_desktop(action: &Action) {
+    cfg_select! {
+        target_os = "macos" => {
+            macos::execute_trackpad_desktop(action);
+        }
+        _ => {
+            execute(action);
+        }
+    }
+}
+
 /// Choose how later [`Action::PreviousDesktop`] and [`Action::NextDesktop`]
 /// actions switch. They switch instantly until a host calls this; a switch
 /// already under way keeps the style it started with.

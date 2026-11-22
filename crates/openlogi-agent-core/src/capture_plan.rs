@@ -21,7 +21,7 @@ use openlogi_hid::DeviceRoute;
 use openlogi_hid::reprog_controls::DPI_MODE_SHIFT_CIDS;
 use openlogi_hid::session::gesture::{
     CaptureSpec, DIVERTABLE_STANDARD_BUTTONS, GESTURE_SOURCE_BUTTONS, HostMode, OnboardTarget,
-    SlotRoute,
+    SlotRoute, WheelNotchRepeat,
 };
 use tokio::sync::watch;
 
@@ -307,6 +307,116 @@ pub struct PlanDevice<'a> {
     pub layout: Option<&'a GamingLayout>,
 }
 
+/// Whether any live gesture map binds a wheel direction to a real action.
+///
+/// A missing key and [`Action::None`] both leave the wheel scrolling normally,
+/// even while its button is held. Either real binding consumes the whole
+/// vertical wheel for the duration of that hold.
+/// Directions that fire on every notch. A real step action qualifies on its
+/// own. A non-step action qualifies only when `repeat` lists that direction.
+/// [`Action::None`] never does, so an opt-in cannot consume the wheel by
+/// itself. The set is inserted only when at least one direction repeats.
+fn each_notch_by_button(
+    gesture_bindings: &BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
+    side_gesture_bindings: &BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
+    repeat: Option<&BTreeMap<ButtonId, BTreeSet<GestureDirection>>>,
+) -> BTreeMap<ButtonId, WheelNotchRepeat> {
+    let mut each = BTreeMap::<ButtonId, WheelNotchRepeat>::new();
+    for (button, map) in gesture_bindings.iter().chain(side_gesture_bindings.iter()) {
+        let opted = repeat.and_then(|buttons| buttons.get(button));
+        let slot = WheelNotchRepeat {
+            up: repeats_each_notch(map, GestureDirection::WheelUp, opted),
+            down: repeats_each_notch(map, GestureDirection::WheelDown, opted),
+        };
+        if !slot.up && !slot.down {
+            continue;
+        }
+        each.entry(*button)
+            .and_modify(|existing| {
+                existing.up |= slot.up;
+                existing.down |= slot.down;
+            })
+            .or_insert(slot);
+    }
+    each
+}
+
+/// `direction` repeats when its action is a real step, or a real non-step
+/// listed in `opted`. Missing and [`Action::None`] do not.
+fn repeats_each_notch(
+    map: &BTreeMap<GestureDirection, Action>,
+    direction: GestureDirection,
+    opted: Option<&BTreeSet<GestureDirection>>,
+) -> bool {
+    map.get(&direction).is_some_and(|action| {
+        *action != Action::None
+            && (action.each_wheel_notch() || opted.is_some_and(|set| set.contains(&direction)))
+    })
+}
+
+fn gesture_wheel_configured(
+    gesture_bindings: &BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
+    side_gesture_bindings: &BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
+) -> bool {
+    gesture_bindings
+        .values()
+        .chain(side_gesture_bindings.values())
+        .any(|map| {
+            [GestureDirection::WheelUp, GestureDirection::WheelDown]
+                .into_iter()
+                .any(|direction| {
+                    map.get(&direction)
+                        .is_some_and(|action| *action != Action::None)
+                })
+        })
+}
+
+/// Standard buttons, plus gesture sources that are not in gesture mode, whose
+/// binding has to be delivered over HID++. A source in gesture mode is left
+/// out: its raw-XY divert already owns the control. OS-hook buttons stay
+/// native when mouse capture is off, when the hook owns their gesture, or
+/// when a wheel-hold divert already covers them.
+fn plain_divert_buttons(
+    config: &Config,
+    bindings: &BTreeMap<ButtonId, Binding>,
+    gesture_bindings: &BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
+    oshook: &BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
+    divert_wheel_buttons: &[(u16, ButtonId)],
+) -> Vec<(u16, ButtonId)> {
+    let plain_sources = GESTURE_SOURCE_BUTTONS
+        .into_iter()
+        .filter(|(_, button)| !gesture_bindings.contains_key(button));
+    DIVERTABLE_STANDARD_BUTTONS
+        .into_iter()
+        .chain(plain_sources)
+        .filter(|(_, button)| {
+            config.app_settings.capture_mouse_events || !button.is_os_hook_button()
+        })
+        .filter(|(_, button)| !oshook.contains_key(button))
+        .filter(|entry| !divert_wheel_buttons.contains(entry))
+        .filter(|(_, button)| {
+            bindings.get(button).is_some_and(|binding| {
+                // Both decide on release whether the click runs, which only
+                // the shared button runtime can do.
+                if matches!(binding, Binding::LongPress(_) | Binding::WheelHold(_)) {
+                    return true;
+                }
+                let action = binding.click_action();
+                // Gesture sources have no host-visible firmware action, so any
+                // single binding needs the divert. `None` leaves them native.
+                if GESTURE_SOURCE_BUTTONS
+                    .iter()
+                    .any(|(_, source)| source == button)
+                {
+                    action != Action::None
+                } else {
+                    action != default_binding(*button)
+                }
+            })
+        })
+        .collect()
+}
+
 /// Build one device's plan from the config (per-app effective for `app`).
 #[must_use]
 pub fn plan_for_device(
@@ -361,42 +471,13 @@ pub fn plan_for_device(
         } else {
             Vec::new()
         };
-    // The HID++ gesture sources never reach the OS hook, so a non-default
-    // single binding on one is deliverable only via a plain HID++ divert — but
-    // only while the source is NOT in gesture mode (the raw-XY gesture divert
-    // owns a gesturing source's CID).
-    let plain_sources = GESTURE_SOURCE_BUTTONS
-        .into_iter()
-        .filter(|(_, button)| !gesture_bindings.contains_key(button));
-    let divert_buttons: Vec<(u16, ButtonId)> = DIVERTABLE_STANDARD_BUTTONS
-        .into_iter()
-        .chain(plain_sources)
-        // These controls are owned by the OS-hook path. The capture opt-out
-        // must leave them native even when they carry a non-default binding;
-        // HID++-only controls remain independently remappable.
-        .filter(|(_, button)| {
-            config.app_settings.capture_mouse_events || !button.is_os_hook_button()
-        })
-        .filter(|(_, button)| !oshook.contains_key(button))
-        .filter(|entry| !divert_wheel_buttons.contains(entry))
-        .filter(|(_, button)| {
-            bindings.get(button).is_some_and(|binding| {
-                // Both decide on release whether the click runs, which only
-                // the shared button runtime can do.
-                if matches!(binding, Binding::LongPress(_) | Binding::WheelHold(_)) {
-                    return true;
-                }
-                let action = binding.click_action();
-                // Gesture sources have no host-visible firmware action, so any
-                // single binding needs the divert. `None` leaves them native.
-                if GESTURE_SOURCE_BUTTONS.iter().any(|(_, source)| source == button) {
-                    action != Action::None
-                } else {
-                    action != default_binding(*button)
-                }
-            })
-        })
-        .collect();
+    let divert_buttons = plain_divert_buttons(
+        config,
+        &bindings,
+        &gesture_bindings,
+        &oshook,
+        &divert_wheel_buttons,
+    );
     let thumbwheel_bindings_nondefault = [
         ButtonId::Thumbwheel,
         ButtonId::ThumbwheelScrollUp,
@@ -409,6 +490,15 @@ pub fn plan_for_device(
             .is_some_and(|binding| binding.click_action() != default_binding(*button))
     });
     let thumbwheel_sensitivity = config.thumbwheel_sensitivity(config_key);
+    let gesture_wheel = gesture_wheel_configured(&gesture_bindings, &side_gesture_bindings);
+    let gesture_wheel_each_notch = each_notch_by_button(
+        &gesture_bindings,
+        &side_gesture_bindings,
+        config
+            .devices
+            .get(config_key)
+            .map(|device| &device.wheel_notch_repeat),
+    );
     DeviceCapturePlan {
         target: CaptureTarget {
             physical_key,
@@ -427,6 +517,8 @@ pub fn plan_for_device(
                 // Needs the device's wheel capabilities and the settings of
                 // its current link, so the orchestrator fills it in.
                 divert_main_wheel: None,
+                gesture_wheel,
+                gesture_wheel_each_notch,
                 onboard: None,
             },
             rearm_generation,
@@ -1087,6 +1179,158 @@ mod tests {
                 .divert_gesture_sources
                 .contains(&MULTIPLATFORM_GESTURE_BUTTON_CID),
             "the M720's gesture CID must be armed for gestures"
+        );
+    }
+
+    #[test]
+    fn a_wheel_direction_binding_marks_the_capture_spec() {
+        let defaults = plan_for_device(&Config::default(), "2b042", route(), None, 0, true);
+        assert!(
+            !defaults.target.spec.gesture_wheel,
+            "an unbound wheel keeps scrolling"
+        );
+        assert!(
+            defaults.target.spec.gesture_wheel_each_notch.is_empty(),
+            "an unbound wheel has nothing to repeat"
+        );
+
+        let mut cfg = Config::default();
+        cfg.set_gesture_direction(
+            "2b042",
+            ButtonId::GestureButton,
+            GestureDirection::WheelDown,
+            Action::NextDesktop,
+        );
+        let plan = plan_for_device(&cfg, "2b042", route(), None, 0, true);
+        assert!(
+            plan.target.spec.gesture_wheel,
+            "a real wheel action consumes the wheel while the button is held"
+        );
+        assert_eq!(
+            plan.target
+                .spec
+                .gesture_wheel_each_notch
+                .get(&ButtonId::GestureButton),
+            Some(&WheelNotchRepeat {
+                up: false,
+                down: true
+            }),
+            "next desktop is one step per notch, and the other direction is not bound"
+        );
+    }
+
+    #[test]
+    fn a_click_repeats_on_each_notch_only_when_asked() {
+        let mut cfg = Config::default();
+        cfg.set_gesture_direction(
+            "2b042",
+            ButtonId::GestureButton,
+            GestureDirection::WheelUp,
+            Action::LeftClick,
+        );
+        cfg.set_gesture_direction(
+            "2b042",
+            ButtonId::GestureButton,
+            GestureDirection::WheelDown,
+            Action::NextDesktop,
+        );
+        let once = plan_for_device(&cfg, "2b042", route(), None, 0, true);
+        assert!(once.target.spec.gesture_wheel);
+        assert_eq!(
+            once.target
+                .spec
+                .gesture_wheel_each_notch
+                .get(&ButtonId::GestureButton),
+            Some(&WheelNotchRepeat {
+                up: false,
+                down: true
+            }),
+            "a click is once per hold; next desktop still steps"
+        );
+
+        cfg.devices
+            .get_mut("2b042")
+            .expect("the binding created the device")
+            .wheel_notch_repeat
+            .insert(
+                ButtonId::GestureButton,
+                BTreeSet::from([GestureDirection::WheelUp, GestureDirection::Click]),
+            );
+        let repeating = plan_for_device(&cfg, "2b042", route(), None, 0, true);
+        assert_eq!(
+            repeating
+                .target
+                .spec
+                .gesture_wheel_each_notch
+                .get(&ButtonId::GestureButton),
+            Some(&WheelNotchRepeat {
+                up: true,
+                down: true
+            }),
+            "the opt-in adds the click and cannot turn the step off; Click is ignored"
+        );
+    }
+
+    #[test]
+    fn an_explicit_none_wheel_direction_does_not_mark() {
+        let mut cfg = Config::default();
+        cfg.set_gesture_direction(
+            "2b042",
+            ButtonId::GestureButton,
+            GestureDirection::WheelUp,
+            Action::None,
+        );
+        let plan = plan_for_device(&cfg, "2b042", route(), None, 0, true);
+        assert!(
+            !plan.target.spec.gesture_wheel,
+            "an explicit None wheel direction is not configured"
+        );
+        cfg.devices
+            .get_mut("2b042")
+            .expect("the binding created the device")
+            .wheel_notch_repeat
+            .insert(
+                ButtonId::GestureButton,
+                BTreeSet::from([GestureDirection::WheelUp]),
+            );
+        let opted = plan_for_device(&cfg, "2b042", route(), None, 0, true);
+        assert!(
+            !opted.target.spec.gesture_wheel,
+            "an opt-in on None does not consume the wheel"
+        );
+        assert!(
+            opted.target.spec.gesture_wheel_each_notch.is_empty(),
+            "None does not repeat"
+        );
+    }
+
+    /// Back is not a HID++ gesture source, so only the side-button map can
+    /// mark the spec. That map exists on the hosts that capture side swipes.
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn a_side_button_wheel_direction_marks_the_capture_spec() {
+        let mut cfg = Config::default();
+        cfg.set_gesture_direction(
+            "2b042",
+            ButtonId::Back,
+            GestureDirection::WheelUp,
+            Action::PreviousDesktop,
+        );
+        let plan = plan_for_device(&cfg, "2b042", route(), None, 0, true);
+        assert!(
+            plan.target.spec.gesture_wheel,
+            "a side-button wheel action consumes the wheel too"
+        );
+        assert_eq!(
+            plan.target
+                .spec
+                .gesture_wheel_each_notch
+                .get(&ButtonId::Back),
+            Some(&WheelNotchRepeat {
+                up: true,
+                down: false
+            }),
+            "previous desktop on a side button steps too"
         );
     }
 

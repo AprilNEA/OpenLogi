@@ -51,11 +51,13 @@ pub(crate) const GESTURE_BUTTON_ICON: &str = "action-icons/move.svg";
 /// Icon for one gesture direction: an arrow away from the centre, or the
 /// centre itself for the click. Four come from gpui-component's bundled set
 /// and the dot is vendored, but all five are lucide at the same stroke weight
-/// as the action icons they sit above.
+/// as the action icons they sit above. Wheel directions reuse the vertical
+/// arrows; the five-slot summary never asks for them, and these arms exist
+/// so the match stays exhaustive.
 pub(crate) fn gesture_direction_icon(direction: GestureDirection) -> Icon {
     match direction {
-        GestureDirection::Up => Icon::new(IconName::ArrowUp),
-        GestureDirection::Down => Icon::new(IconName::ArrowDown),
+        GestureDirection::Up | GestureDirection::WheelUp => Icon::new(IconName::ArrowUp),
+        GestureDirection::Down | GestureDirection::WheelDown => Icon::new(IconName::ArrowDown),
         GestureDirection::Left => Icon::new(IconName::ArrowLeft),
         GestureDirection::Right => Icon::new(IconName::ArrowRight),
         GestureDirection::Click => Icon::empty().path("action-icons/circle-dot.svg"),

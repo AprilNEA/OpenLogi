@@ -19,7 +19,8 @@ use openlogi_core::binding::{Action, Binding, ButtonId};
 use tracing::{debug, info, warn};
 
 use self::button::{
-    ButtonInputHandle, ButtonRuntimeEvent, ButtonRuntimeOwner, EndReason, PressControl,
+    ButtonInputHandle, ButtonRuntimeEvent, ButtonRuntimeOwner, DesktopMotion, EndReason,
+    PressControl,
 };
 pub(crate) use self::button::{HidppSessionId, PressToken};
 pub(crate) use self::pointer::{FocusBinding, PointerPress, PointerSelection};
@@ -230,6 +231,10 @@ impl ActionExecutor {
         self.dispatch_to(action, device_key, ActionDispatchTarget::capture());
     }
 
+    fn dispatch_to(&self, action: &Action, device_key: Option<&str>, target: ActionDispatchTarget) {
+        self.dispatch_motion(action, device_key, target, DesktopMotion::System);
+    }
+
     /// Turn precision mode on or off for the mouse `device_key` names, or
     /// the selected device, and write the speed that follows. Returns
     /// `false` when that device is not an online mouse that `press` acts on.
@@ -422,7 +427,13 @@ impl ActionExecutor {
         true
     }
 
-    fn dispatch_to(&self, action: &Action, device_key: Option<&str>, target: ActionDispatchTarget) {
+    fn dispatch_motion(
+        &self,
+        action: &Action,
+        device_key: Option<&str>,
+        target: ActionDispatchTarget,
+        motion: DesktopMotion,
+    ) {
         if let Some(request) = agent_request(action, device_key) {
             if self.requests.send(request).is_err() {
                 warn!(action = %action.label(), "agent runtime unavailable — request ignored");
@@ -489,30 +500,12 @@ impl ActionExecutor {
                 }
                 return;
             }
-            // Browser navigation uses Safari's captured Accessibility target
-            // or, elsewhere, the platform shortcut (on macOS pressed as the
-            // frontmost app's menu item), not a native mouse click. Preserve
-            // the press-time target through queued dispatch and debounce
-            // duplicate capture paths before either output.
             Action::BrowserBack | Action::BrowserForward => {
-                if let Some(reservation) = browser_nav_debounce_begin(action) {
-                    if dispatch_browser_navigation(
-                        action,
-                        target,
-                        openlogi_inject::ax_navigate_browser,
-                        || openlogi_inject::execute(action),
-                    ) {
-                        browser_nav_debounce_commit(reservation);
-                    } else {
-                        browser_nav_debounce_cancel(reservation);
-                    }
-                } else {
-                    info!(action = %action.label(), "browser nav debounced — duplicate dispatch path suppressed");
-                }
+                dispatch_browser_action(action, target);
                 None
             }
             other => {
-                openlogi_inject::execute(other);
+                inject_action(other, motion);
                 None
             }
         };
@@ -545,6 +538,35 @@ impl ActionExecutor {
                 "no DPI presets configured for active device — press ignored"
             );
         }
+    }
+}
+
+/// Browser navigation uses Safari's captured Accessibility target or,
+/// elsewhere, the platform shortcut (on macOS pressed as the frontmost
+/// app's menu item), not a native mouse click. Preserve the press-time
+/// target through queued dispatch and debounce duplicate capture paths
+/// before either output.
+fn dispatch_browser_action(action: &Action, target: ActionDispatchTarget) {
+    if let Some(reservation) = browser_nav_debounce_begin(action) {
+        if dispatch_browser_navigation(action, target, openlogi_inject::ax_navigate_browser, || {
+            openlogi_inject::execute(action);
+        }) {
+            browser_nav_debounce_commit(reservation);
+        } else {
+            browser_nav_debounce_cancel(reservation);
+        }
+    } else {
+        info!(action = %action.label(), "browser nav debounced — duplicate dispatch path suppressed");
+    }
+}
+
+/// Post `action`. Trackpad motion runs Previous or Next Desktop as a short
+/// flick; a button or swipe desktop switch keeps the host path.
+fn inject_action(action: &Action, motion: DesktopMotion) {
+    if motion == DesktopMotion::Trackpad {
+        openlogi_inject::execute_trackpad_desktop(action);
+    } else {
+        openlogi_inject::execute(action);
     }
 }
 
@@ -707,14 +729,30 @@ impl ButtonEventHandler {
                     if matches!(action, Action::ShowActionsRing) {
                         self.ring_triggers.insert(press.token().clone());
                     }
-                    self.start_action(press.token(), action, press.device_key(), press.target());
+                    self.start_action(
+                        press.token(),
+                        action,
+                        press.device_key(),
+                        press.target(),
+                        DesktopMotion::System,
+                    );
                 }
             }
-            ButtonRuntimeEvent::Triggered { press, action } => {
+            ButtonRuntimeEvent::Triggered {
+                press,
+                action,
+                motion,
+            } => {
                 if press.captured_by_os_hook() {
                     log_bound_action(press.control(), &action);
                 }
-                self.start_action(press.token(), &action, press.device_key(), press.target());
+                self.start_action(
+                    press.token(),
+                    &action,
+                    press.device_key(),
+                    press.target(),
+                    motion,
+                );
             }
             ButtonRuntimeEvent::Ended { press, reason } => {
                 self.held.end(press.token());
@@ -751,6 +789,7 @@ impl ButtonEventHandler {
         action: &Action,
         device_key: Option<&str>,
         target: ActionDispatchTarget,
+        motion: DesktopMotion,
     ) {
         if (action.held_chord().is_some() || action.held_modifier().is_some())
             && target.resolve(action).is_none()
@@ -762,7 +801,8 @@ impl ButtonEventHandler {
             return;
         }
         if !self.held.start(press, action) {
-            self.executor.dispatch_to(action, device_key, target);
+            self.executor
+                .dispatch_motion(action, device_key, target, motion);
         }
     }
 }
@@ -884,6 +924,17 @@ impl ActionDispatcher {
     /// Execute a semantic gesture action only if its exact press is still live.
     pub(crate) fn try_dispatch_while_pressed(&self, press: &PressToken, action: &Action) -> bool {
         self.buttons.try_trigger_while_pressed(press, action)
+    }
+
+    /// Like [`Self::try_dispatch_while_pressed`], but a desktop switch flicks
+    /// the way a trackpad swipe does instead of typing the Space shortcut.
+    pub(crate) fn try_dispatch_trackpad_while_pressed(
+        &self,
+        press: &PressToken,
+        action: &Action,
+    ) -> bool {
+        self.buttons
+            .try_trigger_trackpad_while_pressed(press, action)
     }
 
     /// Record that the wheel moved while `press` was down, so a wheel-hold

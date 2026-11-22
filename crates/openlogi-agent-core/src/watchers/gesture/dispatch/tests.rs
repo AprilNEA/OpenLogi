@@ -74,6 +74,26 @@ fn replacement_session_does_not_inherit_partial_progress() {
     );
 }
 
+#[test]
+fn only_a_wheel_desktop_switch_uses_the_trackpad_flick() {
+    for (direction, action, trackpad) in [
+        (GestureDirection::WheelUp, Action::PreviousDesktop, true),
+        (GestureDirection::WheelDown, Action::NextDesktop, true),
+        (GestureDirection::WheelUp, Action::NextDesktop, true),
+        (GestureDirection::WheelDown, Action::Copy, false),
+        (GestureDirection::WheelUp, Action::VolumeUp, false),
+        (GestureDirection::Up, Action::PreviousDesktop, false),
+        (GestureDirection::Left, Action::NextDesktop, false),
+        (GestureDirection::Click, Action::PreviousDesktop, false),
+    ] {
+        assert_eq!(
+            trackpad_desktop(direction, &action),
+            trackpad,
+            "{direction:?} {action:?}"
+        );
+    }
+}
+
 fn per_notch(units: u8) -> NonZeroU8 {
     NonZeroU8::new(units).expect("non-zero test multiplier")
 }
