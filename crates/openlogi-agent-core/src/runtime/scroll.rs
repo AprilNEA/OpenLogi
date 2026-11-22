@@ -837,15 +837,17 @@ impl ScrollEngine {
         let WheelTick { impulse, notches } = tick;
         self.update_glide(source, tick, at, momentum, emit);
         if self.report_driven_momentum {
-            let gain = self.wheels.get(source).map_or(1.0, |state| {
-                if state.detector.phase() != WheelPhase::FreeSpin {
-                    return 1.0;
+            let gain = self.wheels.get(source).and_then(|state| {
+                match state.detector.phase() {
+                    WheelPhase::Stopped(_) => return None,
+                    WheelPhase::Ratchet => return Some(1.0),
+                    WheelPhase::FreeSpin => {}
                 }
                 let speed = state.detector.speed(at);
                 let sensitivity = (impulse.y / notches).abs();
                 let pace = glide::pace(speed, sensitivity, &momentum);
                 if pace <= 0.0 {
-                    return 1.0;
+                    return Some(1.0);
                 }
                 let sustained = glide::launch_speed(speed, sensitivity, &momentum);
                 let (desired, repeat) = state.gliding().map_or((sustained, 1.0), |glide| {
@@ -853,9 +855,11 @@ impl ScrollEngine {
                 });
                 // A decelerating wheel can report much less motion than the
                 // curve predicts. Bound the boost by the current spin speed.
-                (desired / pace).clamp(1.0, glide::flick_response(speed) * repeat)
+                Some((desired / pace).clamp(1.0, glide::flick_response(speed) * repeat))
             });
-            self.impulse(source.clone(), impulse.scale(gain), at, emit);
+            if let Some(gain) = gain {
+                self.impulse(source.clone(), impulse.scale(gain), at, emit);
+            }
         }
     }
 

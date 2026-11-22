@@ -919,6 +919,42 @@ fn a_free_spin_scrolls_by_momentum_and_a_finger_stop_ends_it_at_once() {
     assert!(settling.is_empty(), "settling tick scrolled: {settling:?}");
 }
 
+#[test]
+fn windows_momentum_ignores_settling_and_accepts_the_next_push() {
+    let mut engine = momentum_engine();
+    engine.report_driven_momentum = true;
+    let source = hidpp_source("mouse", 1);
+    let mut frames = Vec::new();
+    let caught = drive_wheel(
+        &mut engine,
+        &source,
+        Instant::now(),
+        |_| 200.0,
+        Duration::from_millis(600),
+        &mut frames,
+    );
+    let settling = run_on(&mut engine, caught, Duration::from_millis(60), &mut frames);
+    assert!(matches!(
+        engine.wheels[&source].detector.phase(),
+        WheelPhase::Stopped(_)
+    ));
+    frames.clear();
+    engine.wheel_impulse(source.clone(), wheel(0.0, 1.0), 1.0, settling, &mut |f| {
+        frames.push(f);
+    });
+    let push = run_on(&mut engine, settling, Duration::from_millis(8), &mut frames);
+    assert!(frames.is_empty(), "settling report scrolled: {frames:?}");
+
+    engine.wheel_impulse(source, wheel(0.0, 1.0), 1.0, push, &mut |f| {
+        frames.push(f);
+    });
+    run_on(&mut engine, push, Duration::from_millis(48), &mut frames);
+    assert_delta(
+        wheel(0.0, frames.iter().map(in_ticks).sum()),
+        wheel(0.0, 1.0),
+    );
+}
+
 /// A finger catches a free spin to flick it again: the catch ends the glide
 /// at once, and the push that follows scrolls straight away — its second
 /// notch is no longer the wheel settling — instead of being swallowed until
