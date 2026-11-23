@@ -15,7 +15,7 @@ use gpui_kit::component::{
     input::{InputEvent, InputState},
     v_flex,
 };
-use openlogi_core::binding::{Action, ButtonId, GamingLayout, GestureDirection};
+use openlogi_core::binding::{Action, ButtonId, GamingLayout, GestureDirection, HeldDrag};
 
 use super::editor_mode::{EditorMode, PickerDrafts};
 use super::force_sensing::{ForceSensingFacts, ForceSensingSlider, PressForce};
@@ -102,6 +102,7 @@ struct MouseWorkspaceData<'a> {
     dpi_gestures: bool,
     virtual_thumbwheel: bool,
     wheel_hold: &'a BTreeSet<ButtonId>,
+    drag_hold: &'a BTreeMap<ButtonId, HeldDrag>,
     editing_app: Option<String>,
     overridden: Option<&'a BTreeMap<ButtonId, Action>>,
     /// Actions the picker offers beyond the catalog.
@@ -138,6 +139,7 @@ impl<'a> MouseWorkspaceData<'a> {
                 .and_then(|record| record.capabilities)
                 .is_some_and(|capabilities| capabilities.virtual_thumbwheel),
             wheel_hold: state.wheel_hold_buttons(),
+            drag_hold: state.drag_hold_buttons(),
             editing_app: if state.binding_layer() == BindingLayer::GShift {
                 Some(tr!("actions.g_shift").to_string())
             } else {
@@ -164,6 +166,7 @@ impl<'a> MouseWorkspaceData<'a> {
         static NO_GESTURE_MAPS: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>> =
             BTreeMap::new();
         static NO_WHEEL_HOLD: BTreeSet<ButtonId> = BTreeSet::new();
+        static NO_DRAG_HOLD: BTreeMap<ButtonId, HeldDrag> = BTreeMap::new();
         Self {
             asset: None,
             layout: None,
@@ -175,6 +178,7 @@ impl<'a> MouseWorkspaceData<'a> {
             dpi_gestures: false,
             virtual_thumbwheel: false,
             wheel_hold: &NO_WHEEL_HOLD,
+            drag_hold: &NO_DRAG_HOLD,
             editing_app: None,
             overridden: None,
             extra_actions: &[],
@@ -519,6 +523,7 @@ impl Render for MouseModelView {
             dpi_gestures,
             virtual_thumbwheel,
             wheel_hold,
+            drag_hold,
             editing_app,
             overridden,
             extra_actions,
@@ -592,6 +597,7 @@ impl Render for MouseModelView {
                 dpi_gestures,
                 virtual_thumbwheel,
                 wheel_hold,
+                drag_hold,
                 editing_app: editing_app.as_deref(),
                 overridden,
                 press_force: PressForce::of(force_sensing.as_ref(), self.press_force()),

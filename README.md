@@ -102,7 +102,7 @@ Things OpenLogi does that Options+ won't:
 <table>
     <tr>
         <td width="50%"><img src="https://assets.openlogi.org/screenshots/macos/light/cards/buttons.png" width="400" alt="Button mapping for an MX Master 4, with the gesture button inspector open"></td>
-        <td width="50%"><b>Remap any button</b><ul><li>A built-in action catalog, custom shortcuts, typed text, or multi-step workflows</li><li>Separate tap and hold actions, and hold-to-talk chords that release with the button</li><li>Gestures on Middle Click, Back/Forward, DPI/ModeShift, the gesture button, and the haptic panel</li></ul></td>
+        <td width="50%"><b>Remap any button</b><ul><li>A built-in action catalog, custom shortcuts, typed text, or multi-step workflows</li><li>Separate tap and hold actions, and hold-to-talk chords that release with the button</li><li>Gestures on Middle Click, Back/Forward, DPI/ModeShift, the gesture button, and the haptic panel</li><li>Hold Back or Forward and drag for a two- or three-finger trackpad swipe that follows your hand (macOS)</li></ul></td>
     </tr>
     <tr>
         <td width="50%"><img src="https://assets.openlogi.org/screenshots/macos/light/cards/actions-ring.png" width="400" alt="Actions Ring editor with eight slots around the cursor"></td>

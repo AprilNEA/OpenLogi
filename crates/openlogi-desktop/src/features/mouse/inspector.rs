@@ -10,11 +10,15 @@ use gpui::{
 };
 use gpui_kit::base::Button as BaseButton;
 use gpui_kit::component::{
-    Disableable as _, Icon, IconName, Selectable as _, Sizable as _, button::Button, h_flex,
-    input::InputState, scroll::ScrollableElement as _, v_flex,
+    Disableable as _, Icon, IconName, Selectable as _, Sizable as _,
+    button::{Button, ButtonGroup},
+    h_flex,
+    input::InputState,
+    scroll::ScrollableElement as _,
+    v_flex,
 };
 use openlogi_core::binding::{
-    Action, ButtonId, GamingLayout, GestureDirection, default_binding, default_binding_on,
+    Action, ButtonId, GamingLayout, GestureDirection, HeldDrag, default_binding, default_binding_on,
 };
 
 use super::editor_mode::Selection;
@@ -27,7 +31,9 @@ use crate::features::binding_editor::{
 };
 use crate::state::AppState;
 use crate::ui::action::localized_action_label;
-use crate::ui::components::{MenuRow, Toggle, control_button, control_input, toggle_row};
+use crate::ui::components::{
+    MenuRow, Toggle, control_button, control_input, stacked_row, toggle_row,
+};
 use crate::ui::theme::{
     self, ACCENT_BLUE, Palette, PressableStyle as _, SelectableStyle as _, Typography as _,
 };
@@ -48,6 +54,9 @@ pub(super) struct BindingInspectorData<'a> {
     pub virtual_thumbwheel: bool,
     /// Buttons that hold the wheel to scroll sideways, from the global profile.
     pub wheel_hold: &'a BTreeSet<ButtonId>,
+    /// Buttons whose hold and drag plays a trackpad swipe, and which one,
+    /// from the global profile.
+    pub drag_hold: &'a BTreeMap<ButtonId, HeldDrag>,
     pub editing_app: Option<&'a str>,
     pub overridden: Option<&'a BTreeMap<ButtonId, Action>>,
     /// The haptic panel's press-force row, present only while
@@ -244,6 +253,14 @@ fn button_inspector(
             picker.view,
             pal,
         ))
+        .children(drag_hold_section(
+            button,
+            data,
+            overridden,
+            picker.view,
+            pal,
+            cx,
+        ))
         .when(overridden, |panel| {
             let observer = picker.view.clone();
             panel.child(
@@ -315,8 +332,9 @@ fn button_status(
     data: &BindingInspectorData<'_>,
     overridden: bool,
 ) -> gpui::SharedString {
-    let default =
-        *action == default_binding_on(data.layout, button) && !data.wheel_hold.contains(&button);
+    let default = *action == default_binding_on(data.layout, button)
+        && !data.wheel_hold.contains(&button)
+        && !data.drag_hold.contains_key(&button);
     match (data.editing_app, overridden, default) {
         (Some(app), true, _) => tr!("actions.overridden_in_app", app => app.to_string()),
         (Some(_), false, _) => tr!("profiles.inherited_from_default"),
@@ -386,6 +404,100 @@ fn wheel_hold_row(
                     });
                 }
             }),
+    )
+}
+
+/// Whether this build can play a held button's drag as a trackpad swipe:
+/// Back/Forward, on macOS, where the agent synthesises trackpad gestures.
+fn offers_drag_hold(button: ButtonId) -> bool {
+    cfg!(target_os = "macos") && button.supports_drag_hold()
+}
+
+/// Back/Forward's hold-and-drag control: the swipe choice in the global
+/// profile, or, in an app profile that has not overridden the button, a note
+/// that an action picked there replaces it.
+fn drag_hold_section(
+    button: ButtonId,
+    data: &BindingInspectorData<'_>,
+    overridden: bool,
+    view: &Entity<MouseModelView>,
+    pal: Palette,
+    cx: &gpui::App,
+) -> Option<gpui::AnyElement> {
+    let drag = data.drag_hold.get(&button).copied();
+    match data.editing_app {
+        // A swipe carried over from another platform can still be turned off.
+        None if offers_drag_hold(button) || drag.is_some() => {
+            Some(drag_hold_row(button, drag, view, pal, cx).into_any_element())
+        }
+        Some(app) if drag.is_some() && !overridden => Some(
+            div()
+                .debug_selector(|| "inspector-drag-hold-app-note".into())
+                .text_caption()
+                .text_color(pal.text_muted)
+                .child(tr!(
+                    "actions.app_profile_action_replaces_drag_hold",
+                    app => app.to_string()
+                ))
+                .into_any_element(),
+        ),
+        _ => None,
+    }
+}
+
+/// Back/Forward's hold-and-drag choice: off, a two-finger swipe, or a
+/// three-finger swipe. Shown only in the global profile, like wheel-hold.
+/// The gesture inspector offers it too; picking a swipe there leaves gesture
+/// mode, so the selected direction goes back to Click.
+fn drag_hold_row(
+    button: ButtonId,
+    current: Option<HeldDrag>,
+    view: &Entity<MouseModelView>,
+    pal: Palette,
+    cx: &gpui::App,
+) -> impl IntoElement {
+    let choices: [(&'static str, Option<HeldDrag>, gpui::SharedString); 3] = [
+        (
+            "inspector-drag-hold-off",
+            None,
+            tr!("actions.drag_hold_off"),
+        ),
+        (
+            "inspector-drag-hold-two",
+            Some(HeldDrag::TwoFingerSwipe),
+            tr!("actions.two_finger_swipe"),
+        ),
+        (
+            "inspector-drag-hold-three",
+            Some(HeldDrag::ThreeFingerSwipe),
+            tr!("actions.three_finger_swipe"),
+        ),
+    ];
+    let view = view.clone();
+    stacked_row(
+        "inspector-drag-hold-row",
+        pal,
+        tr!("actions.hold_and_drag"),
+        tr!("actions.hold_and_drag_description"),
+        ButtonGroup::new("inspector-drag-hold")
+            .outline()
+            .children(choices.map(|(id, drag, label)| {
+                let observer = view.clone();
+                Button::new(id)
+                    .label(label)
+                    .selected(current == drag)
+                    .selected_segment(current == drag, cx)
+                    .debug_selector(move || id.into())
+                    .on_click(move |_, _, cx| {
+                        AppState::apply(cx, |state| state.commit_drag_hold(button, drag));
+                        if drag.is_some() {
+                            observer.update(cx, |view, cx| {
+                                view.select_gesture_direction(GestureDirection::Click);
+                                cx.notify();
+                            });
+                        }
+                    })
+            })),
     )
 }
 
@@ -491,6 +603,9 @@ fn gesture_inspector(
         .child(current_action_card(&current, picker, pal))
         .when(offer_wheel_hold, |panel| {
             panel.child(wheel_hold_row(button, false, picker.view, pal))
+        })
+        .when(offers_drag_hold(button), |panel| {
+            panel.child(drag_hold_row(button, None, picker.view, pal, cx))
         })
         .child(
             control_button("inspector-single-action")
@@ -1076,10 +1191,13 @@ mod tests {
         ));
     }
 
+    static NO_DRAG_HOLD: BTreeMap<ButtonId, HeldDrag> = BTreeMap::new();
+
     fn global_profile<'a>(
         bindings: &'a BTreeMap<ButtonId, Action>,
         gesture_maps: &'a BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
         wheel_hold: &'a BTreeSet<ButtonId>,
+        drag_hold: &'a BTreeMap<ButtonId, HeldDrag>,
     ) -> BindingInspectorData<'a> {
         BindingInspectorData {
             selected: None,
@@ -1091,6 +1209,7 @@ mod tests {
             hidden_actions: &[],
             virtual_thumbwheel: true,
             wheel_hold,
+            drag_hold,
             editing_app: None,
             overridden: None,
             press_force: None,
@@ -1101,7 +1220,7 @@ mod tests {
     fn a_g_button_on_its_stock_function_reads_as_the_device_default() {
         let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
         let (bindings, gesture_maps, held) = (BTreeMap::new(), BTreeMap::new(), BTreeSet::new());
-        let mut data = global_profile(&bindings, &gesture_maps, &held);
+        let mut data = global_profile(&bindings, &gesture_maps, &held, &NO_DRAG_HOLD);
         data.layout = Some(&openlogi_core::binding::G502_LIGHTSPEED);
         assert_eq!(
             button_status(ButtonId::G6, &Action::DpiShift, &data, false),
@@ -1120,13 +1239,13 @@ mod tests {
         let (bindings, gesture_maps) = (BTreeMap::new(), BTreeMap::new());
         let action = default_binding(ButtonId::Back);
         let plain = BTreeSet::new();
-        let data = global_profile(&bindings, &gesture_maps, &plain);
+        let data = global_profile(&bindings, &gesture_maps, &plain, &NO_DRAG_HOLD);
         assert_eq!(
             button_status(ButtonId::Back, &action, &data, false),
             tr!("pointer.device_default")
         );
         let held = BTreeSet::from([ButtonId::Back]);
-        let data = global_profile(&bindings, &gesture_maps, &held);
+        let data = global_profile(&bindings, &gesture_maps, &held, &NO_DRAG_HOLD);
         assert_eq!(
             button_status(ButtonId::Back, &action, &data, false),
             tr!("profiles.customized")
