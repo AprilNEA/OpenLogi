@@ -1896,39 +1896,43 @@ mod tests {
 
     #[tokio::test]
     async fn queue_transitions_refuse_idle_takes_and_duplicate_wakes() {
-        let (notifier, mut receiver) = event_channel();
-        assert_eq!(
-            notifier
-                .queue
-                .lock()
-                .unwrap()
-                .transition(ReconcileTransition::Take),
-            None
-        );
-        assert!(receiver.lifecycle.is_empty());
-        notifier.notify(HidppEventSource::UnifiedBattery);
-        notifier.notify(HidppEventSource::ReceiverConnection);
-        assert_eq!(
-            receiver.lifecycle.len(),
-            1,
-            "an upgrade must not emit another token"
-        );
-        assert_eq!(
-            receiver.recv().await,
-            Some(HidppEventSource::ReceiverConnection)
-        );
-        assert_eq!(receiver.try_recv(), Err(mpsc::error::TryRecvError::Empty));
-        notifier.notify(HidppEventSource::UnifiedBattery);
-        drop(notifier);
-        assert_eq!(
-            receiver.recv().await,
-            Some(HidppEventSource::UnifiedBattery)
-        );
-        assert_eq!(
-            receiver.recv().await,
-            None,
-            "the queue owner must not prevent closure"
-        );
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            let (notifier, mut receiver) = event_channel();
+            assert_eq!(
+                notifier
+                    .queue
+                    .lock()
+                    .unwrap()
+                    .transition(ReconcileTransition::Take),
+                None
+            );
+            assert!(receiver.lifecycle.is_empty());
+            notifier.notify(HidppEventSource::UnifiedBattery);
+            notifier.notify(HidppEventSource::ReceiverConnection);
+            assert_eq!(
+                receiver.lifecycle.len(),
+                1,
+                "an upgrade must not emit another token"
+            );
+            assert_eq!(
+                receiver.recv().await,
+                Some(HidppEventSource::ReceiverConnection)
+            );
+            assert_eq!(receiver.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+            notifier.notify(HidppEventSource::UnifiedBattery);
+            drop(notifier);
+            assert_eq!(
+                receiver.recv().await,
+                Some(HidppEventSource::UnifiedBattery)
+            );
+            assert_eq!(
+                receiver.recv().await,
+                None,
+                "the queue owner must not prevent closure"
+            );
+        })
+        .await
+        .expect("event queue delivery and closure must finish within one second");
     }
 
     #[test]

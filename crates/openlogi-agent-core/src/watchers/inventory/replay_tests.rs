@@ -136,136 +136,140 @@ async fn failed_confirmation_and_repairs_keep_delayed_work_until_recovery() {
     reason = "one vertical regression keeps queue, failure, publication and recovery assertions together"
 )]
 async fn receiver_reconnect_survives_failed_scan_to_refresh() {
-    use super::ReapplyReason;
-    use super::schedule::{ReconcileTrigger, Schedule, WakeDetector};
-    use openlogi_device::test_support::notify_inventory_event;
-    use openlogi_hid::inventory::events::HidppEventSource;
-    use std::time::{Instant, SystemTime};
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        use super::ReapplyReason;
+        use super::schedule::{ReconcileTrigger, Schedule, WakeDetector};
+        use openlogi_device::test_support::notify_inventory_event;
+        use openlogi_hid::inventory::events::HidppEventSource;
+        use std::time::{Instant, SystemTime};
 
-    for reconnect_during_settle in [false, true] {
-        let node = NodeId::from("reconnect-recovery-mouse".to_string());
-        let backend = Arc::new(
-            ReplayBackend::new(
-                direct_topology(node),
-                vec![HidCassette {
-                    schema_version: FIXTURE_SCHEMA_VERSION,
-                    name: "unchanged device across receiver reconnect".to_string(),
-                    channel: CHANNEL.to_string(),
-                    report_support: ReportSupport::ShortAndLong,
-                    exchanges: identified_probe_exchanges(),
-                }],
-            )
-            .unwrap(),
-        );
-        let (_signal, device_io) = device_io_channel();
-        let hardware = HardwareContext::injected(backend.clone(), device_io.clone());
-        let observable = Arc::new(ObservableState::new("test".to_string()));
-        let mut orchestrator =
-            Orchestrator::with_hardware(Config::default(), observable, hardware.clone());
-        let (events, mut published) = tokio::sync::mpsc::unbounded_channel();
-        let (sender, refresh_requests) = tokio::sync::mpsc::channel(1);
-        let (rescan, rescans) = tokio::sync::mpsc::channel(1);
-        let refresh = super::InventoryRefresh { sender, rescan };
-        let (notifier, hid_events) = openlogi_hid::inventory::events::event_channel();
-        let start = Instant::now();
-        let mut worker = super::InventoryWorker {
-            events,
-            refresh_requests,
-            rescans,
-            enumerator: hardware.enumerator().with_event_notifier(notifier.clone()),
-            hardware,
-            state: super::WatchState::default(),
-            hotplug: None,
-            hid_events,
-            schedule: Schedule::new(start),
-            wake_detector: WakeDetector::new(SystemTime::now(), start),
-            device_io,
-            refresh_open: true,
-            rescans_open: true,
-        };
-        assert!(worker.reconcile(ReconcileTrigger::Initial).await);
-        assert!(
-            orchestrator
-                .apply_inventory_event(published.try_recv().unwrap(), &refresh)
-                .is_none()
-        );
-        finish_confirmations(&mut worker, &mut published, &mut orchestrator, &refresh).await;
-        let before = orchestrator.inventory();
-        assert_eq!(before.len(), 1);
-        assert!(before[0].paired[0].online);
-
-        notify_inventory_event(&notifier, HidppEventSource::UnifiedBattery);
-        if !reconnect_during_settle {
-            notify_inventory_event(&notifier, HidppEventSource::ReceiverConnection);
-        }
-        let trigger = worker.next_trigger().await;
-        assert_eq!(
-            trigger,
-            ReconcileTrigger::HidEvent(if reconnect_during_settle {
-                HidppEventSource::UnifiedBattery
-            } else {
-                HidppEventSource::ReceiverConnection
-            })
-        );
-        if reconnect_during_settle {
-            notify_inventory_event(&notifier, HidppEventSource::ReceiverConnection);
-            notify_inventory_event(&notifier, HidppEventSource::UnifiedBattery);
-        }
-        assert!(worker.settle_trigger(trigger).await);
-        // Inject the fallible enumerator's result at its existing completion
-        // boundary, not into WatchState. No result is published on failure.
-        assert!(
-            worker
-                .complete_enumeration(
-                    trigger,
-                    Err(openlogi_hid::InventoryError::Hid(
-                        openlogi_hid::BackendError::Disconnected
-                    )),
-                    Instant::now(),
+        for reconnect_during_settle in [false, true] {
+            let node = NodeId::from("reconnect-recovery-mouse".to_string());
+            let backend = Arc::new(
+                ReplayBackend::new(
+                    direct_topology(node),
+                    vec![HidCassette {
+                        schema_version: FIXTURE_SCHEMA_VERSION,
+                        name: "unchanged device across receiver reconnect".to_string(),
+                        channel: CHANNEL.to_string(),
+                        report_support: ReportSupport::ShortAndLong,
+                        exchanges: identified_probe_exchanges(),
+                    }],
                 )
-                .await
-        );
-        assert!(published.is_empty());
-        assert!(!orchestrator.needs_reapply_confirmation());
+                .unwrap(),
+            );
+            let (_signal, device_io) = device_io_channel();
+            let hardware = HardwareContext::injected(backend.clone(), device_io.clone());
+            let observable = Arc::new(ObservableState::new("test".to_string()));
+            let mut orchestrator =
+                Orchestrator::with_hardware(Config::default(), observable, hardware.clone());
+            let (events, mut published) = tokio::sync::mpsc::unbounded_channel();
+            let (sender, refresh_requests) = tokio::sync::mpsc::channel(1);
+            let (rescan, rescans) = tokio::sync::mpsc::channel(1);
+            let refresh = super::InventoryRefresh { sender, rescan };
+            let (notifier, hid_events) = openlogi_hid::inventory::events::event_channel();
+            let start = Instant::now();
+            let mut worker = super::InventoryWorker {
+                events,
+                refresh_requests,
+                rescans,
+                enumerator: hardware.enumerator().with_event_notifier(notifier.clone()),
+                hardware,
+                state: super::WatchState::default(),
+                hotplug: None,
+                hid_events,
+                schedule: Schedule::new(start),
+                wake_detector: WakeDetector::new(SystemTime::now(), start),
+                device_io,
+                refresh_open: true,
+                rescans_open: true,
+            };
+            assert!(worker.reconcile(ReconcileTrigger::Initial).await);
+            assert!(
+                orchestrator
+                    .apply_inventory_event(published.try_recv().unwrap(), &refresh)
+                    .is_none()
+            );
+            finish_confirmations(&mut worker, &mut published, &mut orchestrator, &refresh).await;
+            let before = orchestrator.inventory();
+            assert_eq!(before.len(), 1);
+            assert!(before[0].paired[0].online);
 
-        assert!(worker.settle_trigger(ReconcileTrigger::RepairRetry).await);
-        assert!(worker.reconcile(ReconcileTrigger::RepairRetry).await);
-        let recovered = published.try_recv().unwrap();
-        assert!(matches!(&recovered, InventoryEvent::Snapshot {
-            inventories, reapply_volatile: Some(ReapplyReason::Volatile), ..
-        } if inventories == &before));
-        assert!(
-            orchestrator
-                .apply_inventory_event(recovered, &refresh)
-                .is_none()
-        );
-        assert_eq!(orchestrator.inventory(), before);
-        assert!(
-            orchestrator.needs_reapply_confirmation(),
-            "unchanged online devices still need recovery"
-        );
-        assert!(
-            !worker.refresh_requests.is_empty(),
-            "the consumer schedules real confirmation work"
-        );
-        finish_confirmations(&mut worker, &mut published, &mut orchestrator, &refresh).await;
+            notify_inventory_event(&notifier, HidppEventSource::UnifiedBattery);
+            if !reconnect_during_settle {
+                notify_inventory_event(&notifier, HidppEventSource::ReceiverConnection);
+            }
+            let trigger = worker.next_trigger().await;
+            assert_eq!(
+                trigger,
+                ReconcileTrigger::HidEvent(if reconnect_during_settle {
+                    HidppEventSource::UnifiedBattery
+                } else {
+                    HidppEventSource::ReceiverConnection
+                })
+            );
+            if reconnect_during_settle {
+                notify_inventory_event(&notifier, HidppEventSource::ReceiverConnection);
+                notify_inventory_event(&notifier, HidppEventSource::UnifiedBattery);
+            }
+            assert!(worker.settle_trigger(trigger).await);
+            // Inject the fallible enumerator's result at its existing completion
+            // boundary, not into WatchState. No result is published on failure.
+            assert!(
+                worker
+                    .complete_enumeration(
+                        trigger,
+                        Err(openlogi_hid::InventoryError::Hid(
+                            openlogi_hid::BackendError::Disconnected
+                        )),
+                        Instant::now(),
+                    )
+                    .await
+            );
+            assert!(published.is_empty());
+            assert!(!orchestrator.needs_reapply_confirmation());
 
-        notify_inventory_event(&notifier, HidppEventSource::UnifiedBattery);
-        let trigger = worker.next_trigger().await;
-        assert!(worker.settle_trigger(trigger).await);
-        assert!(worker.reconcile(trigger).await);
-        assert!(
-            orchestrator
-                .apply_inventory_event(published.try_recv().unwrap(), &refresh)
-                .is_none()
-        );
-        assert!(
-            !orchestrator.needs_reapply_confirmation(),
-            "publishing consumes the reconnect; battery alone must not reapply"
-        );
-        assert!(worker.refresh_requests.is_empty());
-        backend.require_complete().unwrap();
-    }
+            assert!(worker.settle_trigger(ReconcileTrigger::RepairRetry).await);
+            assert!(worker.reconcile(ReconcileTrigger::RepairRetry).await);
+            let recovered = published.try_recv().unwrap();
+            assert!(matches!(&recovered, InventoryEvent::Snapshot {
+                inventories, reapply_volatile: Some(ReapplyReason::Volatile), ..
+            } if inventories == &before));
+            assert!(
+                orchestrator
+                    .apply_inventory_event(recovered, &refresh)
+                    .is_none()
+            );
+            assert_eq!(orchestrator.inventory(), before);
+            assert!(
+                orchestrator.needs_reapply_confirmation(),
+                "unchanged online devices still need recovery"
+            );
+            assert!(
+                !worker.refresh_requests.is_empty(),
+                "the consumer schedules real confirmation work"
+            );
+            finish_confirmations(&mut worker, &mut published, &mut orchestrator, &refresh).await;
+
+            notify_inventory_event(&notifier, HidppEventSource::UnifiedBattery);
+            let trigger = worker.next_trigger().await;
+            assert!(worker.settle_trigger(trigger).await);
+            assert!(worker.reconcile(trigger).await);
+            assert!(
+                orchestrator
+                    .apply_inventory_event(published.try_recv().unwrap(), &refresh)
+                    .is_none()
+            );
+            assert!(
+                !orchestrator.needs_reapply_confirmation(),
+                "publishing consumes the reconnect; battery alone must not reapply"
+            );
+            assert!(worker.refresh_requests.is_empty());
+            backend.require_complete().unwrap();
+        }
+    })
+    .await
+    .expect("inventory queue, failed scan and recovery must finish within ten seconds");
 }
 
 fn identified_probe_exchanges() -> Vec<CassetteExchange> {
