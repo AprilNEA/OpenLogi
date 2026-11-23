@@ -78,6 +78,9 @@ pub enum CapturedInput {
         dx: i16,
         /// Sensor counts, positive down.
         dy: i16,
+        /// When the report arrived, read as it was decoded: a queued batch
+        /// keeps its pauses however late it is handled.
+        at: std::time::Instant,
     },
     /// Thumb-wheel rotation to re-synthesise on the configured scroll axis.
     /// Emitted while the wheel is diverted (click bound, rotation rebound, or

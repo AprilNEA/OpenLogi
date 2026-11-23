@@ -886,6 +886,12 @@ impl ActionDispatcher {
         self.buttons.try_trigger_while_pressed(press, action)
     }
 
+    /// Whether the runtime would still accept `press`: no binding, profile or
+    /// capture-owner change has invalidated it since it went down.
+    pub(crate) fn press_is_current(&self, press: &PressToken) -> bool {
+        self.buttons.is_current(press)
+    }
+
     /// Record that `press` used its hold (the wheel moved or the mouse
     /// dragged), so a hold button's release does not also fire its click.
     pub(crate) fn try_hold_used_while_pressed(&self, press: &PressToken) -> bool {

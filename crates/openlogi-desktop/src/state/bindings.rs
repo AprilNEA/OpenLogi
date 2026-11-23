@@ -782,6 +782,18 @@ impl AppState {
             debug!(?button, "drag-hold is not supported for this control");
             return events;
         }
+        // Turning it off stays possible without the capability, so a binding
+        // carried over from another device can always be removed. Unknown
+        // capabilities count as unsupported.
+        if drag.is_some()
+            && !self
+                .current_record()
+                .and_then(|record| record.capabilities)
+                .is_some_and(|caps| caps.drag_hold)
+        {
+            debug!("drag-hold requires measured raw-XY support");
+            return events;
+        }
         let Some(key) = self
             .current_record()
             .and_then(DeviceRecord::persistent_config_key)

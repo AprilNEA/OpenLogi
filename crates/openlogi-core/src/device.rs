@@ -247,6 +247,12 @@ pub struct Capabilities {
     /// identity.
     #[serde(default)]
     pub change_host: bool,
+    /// Back or Forward in the device's `0x1b04` control table can be diverted
+    /// with raw-XY reporting, so a drag-hold binding can play a trackpad
+    /// swipe from the hand's motion while the pointer stays put. Appended:
+    /// crosses the IPC and the persisted identity.
+    #[serde(default)]
+    pub drag_hold: bool,
 }
 
 impl Capabilities {
@@ -307,6 +313,8 @@ impl Capabilities {
             m_keys: ids.contains(&0x8020),
             macro_record: ids.contains(&0x8030),
             change_host: ids.contains(&0x1814),
+            // Measured from the control table, not a feature ID.
+            drag_hold: false,
         }
     }
 
@@ -937,6 +945,7 @@ mod tests {
                     m_keys: false,
                     macro_record: false,
                     change_host: false,
+                    drag_hold: false,
                 }),
                 settings_revision: 0,
                 hidpp10: false,
@@ -1066,6 +1075,7 @@ mod tests {
                 m_keys: false,
                 macro_record: false,
                 change_host: false,
+                drag_hold: false,
             }
         );
         assert!(!Capabilities::from_feature_ids(&[0x0003, 0x1b04]).thumbwheel);
@@ -1099,6 +1109,7 @@ mod tests {
                 m_keys: false,
                 macro_record: false,
                 change_host: false,
+                drag_hold: false,
             }
         );
         // A G713: the gaming-key features and onboard profiles, no

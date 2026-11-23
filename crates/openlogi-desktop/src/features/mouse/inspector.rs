@@ -52,6 +52,9 @@ pub(super) struct BindingInspectorData<'a> {
     /// The device reports raw wheel on Back/Forward, so holding one can
     /// scroll sideways (`Capabilities::virtual_thumbwheel`).
     pub virtual_thumbwheel: bool,
+    /// The device reports raw XY on Back/Forward, so holding one can play a
+    /// trackpad swipe (`Capabilities::drag_hold`).
+    pub drag_hold_capable: bool,
     /// Buttons that hold the wheel to scroll sideways, from the global profile.
     pub wheel_hold: &'a BTreeSet<ButtonId>,
     /// Buttons whose hold and drag plays a trackpad swipe, and which one,
@@ -407,10 +410,11 @@ fn wheel_hold_row(
     )
 }
 
-/// Whether this build can play a held button's drag as a trackpad swipe:
-/// Back/Forward, on macOS, where the agent synthesises trackpad gestures.
-fn offers_drag_hold(button: ButtonId) -> bool {
-    cfg!(target_os = "macos") && button.supports_drag_hold()
+/// Whether a held button's drag can play a trackpad swipe here: Back/Forward
+/// on a device that measured raw-XY support for them, on macOS, where the
+/// agent synthesises trackpad gestures.
+fn offers_drag_hold(button: ButtonId, data: &BindingInspectorData<'_>) -> bool {
+    cfg!(target_os = "macos") && button.supports_drag_hold() && data.drag_hold_capable
 }
 
 /// Back/Forward's hold-and-drag control: the swipe choice in the global
@@ -427,7 +431,7 @@ fn drag_hold_section(
     let drag = data.drag_hold.get(&button).copied();
     match data.editing_app {
         // A swipe carried over from another platform can still be turned off.
-        None if offers_drag_hold(button) || drag.is_some() => {
+        None if offers_drag_hold(button, data) || drag.is_some() => {
             Some(drag_hold_row(button, drag, view, pal, cx).into_any_element())
         }
         Some(app) if drag.is_some() && !overridden => Some(
@@ -487,6 +491,7 @@ fn drag_hold_row(
                     .label(label)
                     .selected(current == drag)
                     .selected_segment(current == drag, cx)
+                    .focus_visible(move |style| style.focus_ring(pal))
                     .debug_selector(move || id.into())
                     .on_click(move |_, _, cx| {
                         AppState::apply(cx, |state| state.commit_drag_hold(button, drag));
@@ -604,7 +609,7 @@ fn gesture_inspector(
         .when(offer_wheel_hold, |panel| {
             panel.child(wheel_hold_row(button, false, picker.view, pal))
         })
-        .when(offers_drag_hold(button), |panel| {
+        .when(offers_drag_hold(button, data), |panel| {
             panel.child(drag_hold_row(button, None, picker.view, pal, cx))
         })
         .child(
@@ -1208,6 +1213,7 @@ mod tests {
             extra_actions: &[],
             hidden_actions: &[],
             virtual_thumbwheel: true,
+            drag_hold_capable: true,
             wheel_hold,
             drag_hold,
             editing_app: None,

@@ -91,6 +91,10 @@ const MODEL_HORIZONTAL_RESERVE: f32 =
 /// Floor for the model's available width on a narrow window.
 const MODEL_MIN_CONTENT_W: f32 = 200.;
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent device capability flags, each read straight into the inspector"
+)]
 struct MouseWorkspaceData<'a> {
     asset: Option<&'a ResolvedAsset>,
     layout: Option<&'static GamingLayout>,
@@ -101,6 +105,7 @@ struct MouseWorkspaceData<'a> {
     thumbwheel: bool,
     dpi_gestures: bool,
     virtual_thumbwheel: bool,
+    drag_hold_capable: bool,
     wheel_hold: &'a BTreeSet<ButtonId>,
     drag_hold: &'a BTreeMap<ButtonId, HeldDrag>,
     editing_app: Option<String>,
@@ -138,6 +143,10 @@ impl<'a> MouseWorkspaceData<'a> {
                 .current_record()
                 .and_then(|record| record.capabilities)
                 .is_some_and(|capabilities| capabilities.virtual_thumbwheel),
+            drag_hold_capable: state
+                .current_record()
+                .and_then(|record| record.capabilities)
+                .is_some_and(|capabilities| capabilities.drag_hold),
             wheel_hold: state.wheel_hold_buttons(),
             drag_hold: state.drag_hold_buttons(),
             editing_app: if state.binding_layer() == BindingLayer::GShift {
@@ -177,6 +186,7 @@ impl<'a> MouseWorkspaceData<'a> {
             thumbwheel: false,
             dpi_gestures: false,
             virtual_thumbwheel: false,
+            drag_hold_capable: false,
             wheel_hold: &NO_WHEEL_HOLD,
             drag_hold: &NO_DRAG_HOLD,
             editing_app: None,
@@ -522,6 +532,7 @@ impl Render for MouseModelView {
             thumbwheel,
             dpi_gestures,
             virtual_thumbwheel,
+            drag_hold_capable,
             wheel_hold,
             drag_hold,
             editing_app,
@@ -596,6 +607,7 @@ impl Render for MouseModelView {
                 gesture_maps,
                 dpi_gestures,
                 virtual_thumbwheel,
+                drag_hold_capable,
                 wheel_hold,
                 drag_hold,
                 editing_app: editing_app.as_deref(),

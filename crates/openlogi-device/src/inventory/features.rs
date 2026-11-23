@@ -782,6 +782,7 @@ async fn probe_extra_capabilities(
         let mut haptic_panel = false;
         let mut dpi_gestures = false;
         let mut virtual_thumbwheel = false;
+        let mut drag_hold = false;
         for index in 0..count {
             let info = feature.get_cid_info(index).await.map_err(|_| ())?;
             haptic_panel |= probe_haptic_controls
@@ -795,12 +796,16 @@ async fn probe_extra_capabilities(
                 || FORWARD_CIDS.contains(&info.cid.0))
                 && info.flags.is_divertable()
                 && info.flags.supports_raw_wheel();
+            drag_hold |= (BACK_CIDS.contains(&info.cid.0) || FORWARD_CIDS.contains(&info.cid.0))
+                && info.flags.is_divertable()
+                && info.flags.supports_raw_xy();
         }
         // Publish only a complete control walk. A lost reply must retain the
         // cache's last-good capabilities and schedule repair, not hide support.
         caps.haptic_panel = haptic_panel;
         caps.dpi_gestures = dpi_gestures;
         caps.virtual_thumbwheel = virtual_thumbwheel;
+        caps.drag_hold = drag_hold;
     }
     force_sensing_read
 }

@@ -565,6 +565,7 @@ fn a_selected_gesture_can_render_in_the_binding_inspector(cx: &mut TestAppContex
                 gesture_maps: &gesture_maps,
                 dpi_gestures: false,
                 virtual_thumbwheel: false,
+                drag_hold_capable: false,
                 wheel_hold: &BTreeSet::new(),
                 drag_hold: &BTreeMap::new(),
                 editing_app: None,

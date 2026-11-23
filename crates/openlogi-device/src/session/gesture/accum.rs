@@ -256,6 +256,7 @@ impl CaptureAccum {
             button: *button,
             dx,
             dy,
+            at: std::time::Instant::now(),
         });
         // Commit the instant a clean direction emerges (mid-swipe, repeatable per hold);
         // the accumulator gates on hold duration internally and drops travel that

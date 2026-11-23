@@ -637,6 +637,12 @@ impl ButtonInputHandle {
         )
     }
 
+    /// Whether `token` belongs to the current generation: a binding, profile
+    /// or capture-owner change since its press has invalidated it.
+    pub(crate) fn is_current(&self, token: &PressToken) -> bool {
+        token.generation == self.generation.load(Ordering::Acquire)
+    }
+
     /// Tell the press `token` that its hold was used while it was down (the
     /// wheel moved or the mouse dragged), so a hold press does not also fire
     /// its click on release.

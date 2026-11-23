@@ -37,7 +37,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 use tracing::{debug, warn};
 
-use self::dispatch::InputDispatcher;
+use self::dispatch::{InputDispatcher, LiveDrags, SharedDragOutput};
 use super::capture_manager::{self, CaptureManager, ManagerInputs, PendingRestore};
 use super::capture_session::{
     CaptureRecovery, CaptureSession, CaptureSlot, ReconcileAction, settle_capture_task,
@@ -59,6 +59,8 @@ pub struct GestureOutputs {
     actions: ActionDispatcher,
     scroll: ScrollInputHandle,
     hook_maps: SharedHookMaps,
+    /// Where drag holds play their trackpad gestures.
+    drags: SharedDragOutput,
 }
 
 impl GestureOutputs {
@@ -73,6 +75,7 @@ impl GestureOutputs {
             actions,
             scroll,
             hook_maps,
+            drags: Arc::new(LiveDrags),
         }
     }
 
