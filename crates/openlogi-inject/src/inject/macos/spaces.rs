@@ -91,7 +91,7 @@ fn start(direction: Direction) {
         Admission::Lead(ticket) => ticket,
         Admission::Follow(follower) => {
             if follow_up(display_id, direction) {
-                FLIGHT.followed(follower);
+                follower.posted();
             }
             return;
         }
@@ -145,8 +145,9 @@ fn start(direction: Direction) {
 /// A switch requested while another is in flight on `display_id` and has
 /// posted. It is posted at once, the way a second key press reaches the Dock
 /// mid-slide, never waiting for the first Space to land. Nothing confirms
-/// it; the switch in flight already owns the one confirmation. True once it
-/// is posted.
+/// it; the switch in flight already owns the one confirmation. Its caller
+/// holds the flight until this returns, so no switch starts while it
+/// prepares or posts. True once it is posted.
 fn follow_up(display_id: u32, direction: Direction) -> bool {
     let switch = desktop_switch();
     let Some(output) = Output::prepare(switch, direction) else {

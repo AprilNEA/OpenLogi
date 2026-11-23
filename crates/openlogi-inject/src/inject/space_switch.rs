@@ -1,5 +1,6 @@
 //! Space-switch transaction policy, independent of macOS FFI for regression tests.
 
+use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, mpsc};
 use std::time::{Duration, Instant};
@@ -366,11 +367,21 @@ enum Phase {
     /// it too.
     Posting { flight: u64, display: u32 },
     /// Switch `flight` on `display` has posted and waits for its Space.
-    /// `followed` once a follow-up was posted after it.
+    /// `followed` once a follow-up was posted after it. `followers` counts
+    /// the follow-ups admitted after it that have not finished.
     Confirming {
         flight: u64,
         display: u32,
         followed: bool,
+        followers: u32,
+    },
+    /// Switch `flight` on `display` has ended, but `followers` follow-ups
+    /// admitted after it still prepare or post. No switch may start until
+    /// they finish: it would read Spaces they are about to change.
+    Draining {
+        flight: u64,
+        display: u32,
+        followers: NonZeroU32,
     },
 }
 
@@ -405,8 +416,16 @@ impl Phase {
                 flight,
                 display: busy,
                 ..
+            }
+            | Self::Draining {
+                flight,
+                display: busy,
+                ..
             } if chain && busy == display => Step::Follow(flight),
-            Self::Preparing { .. } | Self::Posting { .. } | Self::Confirming { .. } => Step::Refuse,
+            Self::Preparing { .. }
+            | Self::Posting { .. }
+            | Self::Confirming { .. }
+            | Self::Draining { .. } => Step::Refuse,
         }
     }
 
@@ -415,7 +434,89 @@ impl Phase {
             Self::Idle => None,
             Self::Preparing { flight, .. }
             | Self::Posting { flight, .. }
-            | Self::Confirming { flight, .. } => Some(flight),
+            | Self::Confirming { flight, .. }
+            | Self::Draining { flight, .. } => Some(flight),
+        }
+    }
+
+    /// This phase with one more follow-up admitted after its switch. Only a
+    /// phase [`Self::step`] lets a request follow has followers.
+    fn joined(self) -> Self {
+        match self {
+            Self::Confirming {
+                flight,
+                display,
+                followed,
+                followers,
+            } => Self::Confirming {
+                flight,
+                display,
+                followed,
+                followers: followers.saturating_add(1),
+            },
+            Self::Draining {
+                flight,
+                display,
+                followers,
+            } => Self::Draining {
+                flight,
+                display,
+                followers: followers.saturating_add(1),
+            },
+            phase => phase,
+        }
+    }
+
+    /// This phase once a follow-up admitted after switch `of` finished.
+    /// The last one to finish after its switch ended frees the flight.
+    fn left(self, of: u64) -> Self {
+        match self {
+            Self::Confirming {
+                flight,
+                display,
+                followed,
+                followers,
+            } if flight == of => Self::Confirming {
+                flight,
+                display,
+                followed,
+                followers: followers.saturating_sub(1),
+            },
+            Self::Draining {
+                flight,
+                display,
+                followers,
+            } if flight == of => {
+                NonZeroU32::new(followers.get() - 1).map_or(Self::Idle, |followers| {
+                    Self::Draining {
+                        flight,
+                        display,
+                        followers,
+                    }
+                })
+            }
+            phase => phase,
+        }
+    }
+
+    /// This phase once switch `of` ended. Follow-ups admitted after it that
+    /// have not finished keep the flight.
+    fn ended(self, of: u64) -> Self {
+        match self {
+            Self::Confirming {
+                flight,
+                display,
+                followers,
+                ..
+            } if flight == of => {
+                NonZeroU32::new(followers).map_or(Self::Idle, |followers| Self::Draining {
+                    flight,
+                    display,
+                    followers,
+                })
+            }
+            phase if phase.flight() == Some(of) => Self::Idle,
+            phase => phase,
         }
     }
 }
@@ -432,7 +533,9 @@ struct FlightState {
 /// chaining on, a request on the same display follows the switch in flight,
 /// but only once that switch has posted: posted earlier, it would move the
 /// Space under the first switch's preparation, which then gives up, and two
-/// requests would make one switch.
+/// requests would make one switch. A follow-up holds the flight until it has
+/// posted, for the same reason: a switch that ends first must not let the
+/// next one read Spaces the follow-up is about to change.
 pub(super) struct Flight {
     state: Mutex<FlightState>,
     changed: Condvar,
@@ -442,16 +545,18 @@ pub(super) struct Flight {
 pub(super) enum Admission<'a> {
     /// Start a switch. The ticket holds the flight until it drops.
     Lead(Ticket<'a>),
-    /// Post at once after the switch in flight, which has posted.
-    Follow(Follower),
+    /// Post at once after the switch in flight, which has posted. The
+    /// follower holds the flight until it drops.
+    Follow(Follower<'a>),
     /// Drop the request: a switch it may not follow is in flight, or the one
     /// it waited for did not post before its preparation ended.
     Refused,
 }
 
-/// A follow-up's claim on the switch it follows.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct Follower {
+/// A follow-up's hold on the switch it follows. Dropping it ends the
+/// follow-up, posted or not.
+pub(super) struct Follower<'a> {
+    owner: &'a Flight,
     flight: u64,
 }
 
@@ -494,7 +599,13 @@ impl Flight {
                         deadline,
                     });
                 }
-                Step::Follow(flight) => return Admission::Follow(Follower { flight }),
+                Step::Follow(flight) => {
+                    state.phase = state.phase.joined();
+                    return Admission::Follow(Follower {
+                        owner: self,
+                        flight,
+                    });
+                }
                 Step::Refuse => return Admission::Refused,
                 Step::WaitForPost => {
                     state = self
@@ -518,23 +629,37 @@ impl Flight {
             }
         }
     }
+}
 
-    /// Record that `follower` posted. Only the switch it followed counts it;
-    /// a switch that started since does not.
-    pub(super) fn followed(&self, follower: Follower) {
-        let mut state = self.lock();
+impl Follower<'_> {
+    /// Record that this follow-up posted. Only a switch it follows that
+    /// still waits for its Space counts it.
+    pub(super) fn posted(&self) {
+        let mut state = self.owner.lock();
         if let Phase::Confirming {
             flight, followed, ..
         } = &mut state.phase
-            && *flight == follower.flight
+            && *flight == self.flight
         {
             *followed = true;
         }
     }
 }
 
-/// A leading switch's hold on the flight. Dropping it ends the flight,
-/// however the switch ended, so a stuck worker keeps it until it exits.
+impl Drop for Follower<'_> {
+    fn drop(&mut self) {
+        let mut state = self.owner.lock();
+        let left = state.phase.left(self.flight);
+        if left != state.phase {
+            state.phase = left;
+            self.owner.changed.notify_all();
+        }
+    }
+}
+
+/// A leading switch's hold on the flight. Dropping it ends the switch,
+/// however it ended, so a stuck worker keeps the flight until it exits.
+/// Follow-ups admitted after it that have not finished keep it longer.
 pub(super) struct Ticket<'a> {
     owner: &'a Flight,
     flight: u64,
@@ -594,6 +719,7 @@ impl Ticket<'_> {
                 flight,
                 display,
                 followed: false,
+                followers: 0,
             };
             self.owner.changed.notify_all();
         }
@@ -611,8 +737,9 @@ impl Ticket<'_> {
 impl Drop for Ticket<'_> {
     fn drop(&mut self) {
         let mut state = self.owner.lock();
-        if state.phase.flight() == Some(self.flight) {
-            state.phase = Phase::Idle;
+        let ended = state.phase.ended(self.flight);
+        if ended != state.phase {
+            state.phase = ended;
             self.owner.changed.notify_all();
         }
     }

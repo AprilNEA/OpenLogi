@@ -193,9 +193,9 @@ fn lead(admission: Admission<'_>) -> Ticket<'_> {
     }
 }
 
-fn follower(admission: &Admission<'_>) -> Follower {
+fn follower(admission: Admission<'_>) -> Follower<'_> {
     match admission {
-        Admission::Follow(follower) => *follower,
+        Admission::Follow(follower) => follower,
         Admission::Lead(_) => panic!("expected a follow-up, got a lead"),
         Admission::Refused => panic!("expected a follow-up, got refused"),
     }
@@ -221,6 +221,12 @@ fn every_phase_decides_every_request() {
         flight: 1,
         display: 5,
         followed: false,
+        followers: 0,
+    };
+    let draining = Phase::Draining {
+        flight: 1,
+        display: 5,
+        followers: NonZeroU32::MIN,
     };
     for (phase, display, chain, step) in [
         (Phase::Idle, 5, false, Step::Lead),
@@ -234,6 +240,9 @@ fn every_phase_decides_every_request() {
         (confirming, 5, true, Step::Follow(1)),
         (confirming, 5, false, Step::Refuse),
         (confirming, 6, true, Step::Refuse),
+        (draining, 5, true, Step::Follow(1)),
+        (draining, 5, false, Step::Refuse),
+        (draining, 6, true, Step::Refuse),
     ] {
         assert_eq!(phase.step(display, chain), step, "{phase:?} on {display}");
     }
@@ -254,13 +263,13 @@ fn follow_up_waits_for_first_post() {
     let flight = Flight::new();
     let ticket = lead(flight.admit(5, true, Instant::now()));
     std::thread::scope(|scope| {
-        let waiting = scope.spawn(|| follower(&flight.admit(5, true, Instant::now())));
+        let waiting = scope.spawn(|| follower(flight.admit(5, true, Instant::now())));
         // Only this post can let the waiting request through as a follow-up.
         assert!(ticket.begin_posting(Instant::now()));
         ticket.posted();
         let follower = waiting.join().unwrap();
         assert!(!ticket.followed());
-        flight.followed(follower);
+        follower.posted();
         assert!(ticket.followed());
     });
 }
@@ -273,10 +282,10 @@ fn follower_waits_for_committed_post_past_preparation_deadline() {
     // A slide that began just before the deadline is still posting after it.
     let late = ticket.deadline() + PREPARATION_TIMEOUT;
     std::thread::scope(|scope| {
-        let waiting = scope.spawn(|| follower(&flight.admit(5, true, late)));
+        let waiting = scope.spawn(|| follower(flight.admit(5, true, late)));
         ticket.posted();
         let follower = waiting.join().unwrap();
-        flight.followed(follower);
+        follower.posted();
         assert!(ticket.followed());
     });
 }
@@ -315,24 +324,42 @@ fn a_follow_up_of_a_switch_that_never_posted_is_refused() {
     let _next = lead(flight.admit(5, true, Instant::now()));
 }
 
+/// A switch can land before the follow-ups admitted after it have posted.
+/// They keep the flight until they finish, so the next switch never reads
+/// Spaces they are about to change, and they never count toward it.
 #[test]
-fn a_stale_follow_up_never_marks_the_next_switch() {
+fn follow_up_keeps_flight_until_post_finishes() {
     let flight = Flight::new();
     let first = lead(flight.admit(5, true, Instant::now()));
     assert!(first.begin_posting(Instant::now()));
     first.posted();
-    let stale = follower(&flight.admit(5, true, Instant::now()));
+    let posting = follower(flight.admit(5, true, Instant::now()));
+
     drop(first);
+
+    assert!(
+        refused(&flight.admit(5, false, Instant::now())),
+        "a follow-up still posting holds the flight"
+    );
+    assert!(refused(&flight.admit(6, true, Instant::now())));
+    // Another request on the display posts right after it, reading no Spaces.
+    let next = follower(flight.admit(5, true, Instant::now()));
+    posting.posted();
+    drop(posting);
+    assert!(
+        refused(&flight.admit(5, false, Instant::now())),
+        "the second follow-up still holds the flight"
+    );
+    // A follow-up that never posts lets go all the same.
+    drop(next);
     let second = lead(flight.admit(5, true, Instant::now()));
     assert!(second.begin_posting(Instant::now()));
     second.posted();
-    flight.followed(stale);
     assert!(
         !second.followed(),
-        "the follow-up belonged to the first switch"
+        "the earlier follow-ups belonged to the first switch"
     );
-    let current = follower(&flight.admit(5, true, Instant::now()));
-    flight.followed(current);
+    follower(flight.admit(5, true, Instant::now())).posted();
     assert!(second.followed());
 }
 
