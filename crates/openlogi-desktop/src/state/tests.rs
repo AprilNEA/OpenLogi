@@ -61,7 +61,7 @@ pub(crate) mod keypad_pages;
 mod light_adoption;
 mod lighting;
 mod os_layout;
-mod pointer_speed;
+pub(crate) mod pointer_speed;
 mod power_off_timeout;
 mod profile_scope;
 mod reload;

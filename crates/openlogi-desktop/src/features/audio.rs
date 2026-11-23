@@ -224,17 +224,29 @@ struct PowerOffFacts {
 }
 
 impl PowerOffFacts {
-    /// The selected headset's facts, or `None` when nothing is selected or
-    /// the device has no `0x1F20`.
+    /// The selected headset's facts, or `None` when nothing is selected, the
+    /// device has no `0x1F20`, or it refused the timeout read while the
+    /// sidetone row still has something to show.
+    ///
+    /// A headset can list `0x1F20` for its battery alone. Its refusal hides
+    /// the row, as the menu-bar menu hides the group, so a working sidetone
+    /// slider is not followed by a permanent "unsupported" line. The line
+    /// stays when the tab would otherwise be empty.
     fn current(cx: &App) -> Option<Self> {
         let state = AppState::try_read(cx)?;
         if !state.current_power_off_timeout_supported() {
             return None;
         }
+        let load = state.current_power_off_timeout_load();
+        let sidetone_shown = state.current_sidetone_supported()
+            && !matches!(state.current_sidetone_load(), SidetoneLoad::Unsupported(_));
+        if matches!(load, PowerOffTimeoutLoad::Unsupported(_)) && sidetone_shown {
+            return None;
+        }
         let record = state.current_record()?;
         Some(Self {
             key: record.device_key(),
-            load: state.current_power_off_timeout_load(),
+            load,
             reachable: state.current_power_off_timeout_route().is_some(),
         })
     }
@@ -362,3 +374,6 @@ fn power_off_section(
         )
         .into_any_element()
 }
+
+#[cfg(test)]
+mod tests;
