@@ -53,8 +53,8 @@ fn assert_copy_selection(cx: &mut gpui::VisualTestContext, inherited: bool) {
         assert_eq!(
             state
                 .editing_app_overrides()
-                .and_then(|rows| rows.get(&CALCULATOR)),
-            (!inherited).then_some(&Action::Copy),
+                .and_then(|rows| rows.get(&CALCULATOR).cloned()),
+            (!inherited).then_some(Binding::Single(Action::Copy)),
         );
     });
 }
@@ -79,7 +79,7 @@ fn keyboard_native_inherited_copy_can_be_explicitly_selected_and_cleared(
             .unwrap()
             .per_app_overrides(KEY, APP)
             .unwrap()[&CALCULATOR],
-        Action::Copy
+        Binding::Single(Action::Copy)
     );
     click(cx, "key-panel-native");
     assert_copy_selection(cx, true);

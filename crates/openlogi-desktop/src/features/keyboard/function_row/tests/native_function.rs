@@ -211,7 +211,7 @@ fn keyboard_native_removes_the_whole_compound_binding_but_not_other_settings() {
     );
     assert_eq!(
         saved.per_app_overrides(KEY, "com.example.Editor").unwrap()[&CALCULATOR],
-        Action::Paste
+        Binding::Single(Action::Paste)
     );
     assert_eq!(saved.fn_lock(KEY), Some(true));
 }
@@ -250,7 +250,7 @@ fn keyboard_native_in_app_scope_inherits_default_without_clearing_other_scopes()
         assert!(saved.per_app_overrides(KEY, "com.example.Editor").is_none());
         assert_eq!(
             saved.per_app_overrides(KEY, "com.example.Browser").unwrap()[&CALCULATOR],
-            Action::Undo
+            Binding::Single(Action::Undo)
         );
         assert_eq!(events, [StateEvent::BindingsChanged(DeviceKey::from(KEY))]);
         let commands: Vec<_> = std::iter::from_fn(|| receiver.try_recv().ok()).collect();

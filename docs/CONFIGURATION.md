@@ -57,7 +57,7 @@ parsing its fields. A v10 file without the section loads with Flow disabled.
 
 ## Shape
 
-`schema_version` is required and currently `11`. `selected_device` is an
+`schema_version` is required and currently `12`. `selected_device` is an
 optional physical device key.
 
 `[app_settings]` contains application-wide preferences:
@@ -209,8 +209,15 @@ Common device fields are:
   Identifiers differ between platforms, so a profile keyed by one of them does
   not match on another. Key the profile `app:<alias>` instead to share it
   across platforms (see [Application aliases](#application-aliases)). An
-  overlay holds one action per button; gesture-direction maps live in
-  `bindings`
+  overlay entry replaces the whole button and takes every shape `bindings`
+  takes, including a gesture-direction map; a single action is written as the
+  bare action. The Buttons panel's gesture controls edit the selected
+  application's map without changing the global one, and a button without an
+  override inherits its global binding
+- `per_app_disabled_gestures`: application-managed memory of the gesture maps
+  an application profile turned off, keyed like `per_app_bindings` and then by
+  button. Never dispatched; turning gestures back on in that profile restores
+  the map, and resetting the button to the default profile removes it
 - `gshift_bindings` for G-series mice: the G-Shift layer, one action per
   button, for example `G7 = "Copy"`. While a button bound to `GShift` is held,
   a button in this layer runs its layer action; a button the layer leaves out
@@ -313,7 +320,8 @@ Common device fields are:
   and MR are `KeyM1` … `KeyM3` and `KeyMR`. Changing the mode keeps them all.
   `g_key_profile_names` optionally names the profiles (`M2 = "Work"`); the
   names only label them in the desktop app
-- `identity` and `disabled_gestures`, which are application-managed metadata
+- `identity`, `disabled_gestures` and `per_app_disabled_gestures`, which are
+  application-managed metadata
 
 `[keyboard.bindings]` contains global key triggers such as `f1` or
 `shift+command+f5`. Supported trigger modifiers are `shift`, `control`,
@@ -641,10 +649,10 @@ report an instantaneous button pulse falls back to `short`. `long` may itself
 be a `HoldShortcut`, in which case its chord stays down from the 500 ms
 threshold until the physical release.
 
-Long-press pairs currently apply to global device `bindings` and are authored
-in TOML. The GUI presents their `short` action; changing that button in the GUI
-replaces the whole pair with the selected single action. `per_app_bindings` and
-`keyboard.bindings` remain single-action maps.
+Long-press pairs are authored in TOML, in global device `bindings` or in
+`per_app_bindings`. The GUI presents their `short` action; changing that button
+in the GUI replaces the whole pair with the selected single action.
+`keyboard.bindings` remains a single-action map.
 
 A wheel-hold binding on `Back` or `Forward` turns the main scroll wheel into a
 virtual thumb wheel while the button is held, as Logi Options+ offers on mice
@@ -678,6 +686,44 @@ turning it on leaves gesture mode with the gesture map's `Click` as the press,
 and turning gestures back on restores the saved directions. The setting is per
 device, not per application: an app profile that gives the button its own
 action replaces the wheel hold in that application.
+
+## Application gestures and inheritance
+
+The effective binding for a button starts with its global `bindings` entry.
+The application selector chooses one `per_app_bindings` profile, and each
+button that profile lists replaces the global binding whole: a single action,
+or a gesture-direction map. Other buttons inherit the global profile. An
+application's direction map is a snapshot of the map it inherited when it was
+first edited, not a patch that tracks later global edits.
+
+In the Buttons panel, turning on Gesture mode in an application profile gives
+the button the inherited map; an inherited single action becomes the click,
+with default swipes. Editing a direction of an inherited map takes the same
+snapshot. Turning Gesture mode off, or choosing a single action, keeps the
+application's map in `per_app_disabled_gestures`; turning Gesture mode back on
+restores it. Resetting a button to the default profile removes its override
+and its kept map. Resetting the whole Buttons profile removes both for that
+application while preserving the open editor and the global profile. The
+separate Actions Ring application layout has its own reset; Delete all
+profiles removes both Buttons and Ring profiles for the selected application.
+
+```toml
+[devices."unit:example".per_app_bindings."com.microsoft.VSCode".GestureButton]
+Click = { CustomShortcut = "Cmd+Shift+P" }
+Up = "MissionControl"
+Down = "AppExpose"
+Left = "PreviousDesktop"
+Right = "NextDesktop"
+
+[devices."unit:example".per_app_bindings."app:chrome".GestureButton]
+Left = "PrevTab"
+Right = "NextTab"
+```
+
+`unit:example` is illustrative; use a physical key generated for your own
+device. An `app:<alias>` key needs the alias in `[apps]` (see
+[Application aliases](#application-aliases)); a profile keyed by the
+platform's own identifier still wins over it.
 
 An Actions Ring entry wraps the action and may add an icon or literal label:
 

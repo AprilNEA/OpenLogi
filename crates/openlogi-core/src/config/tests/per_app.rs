@@ -378,3 +378,268 @@ PLATFORM = ["com.example.editor", "com.example.editorbeta"]
     let reloaded = Config::load_from_path(&path).expect("saved config loads");
     assert_eq!(reloaded.apps, config.apps);
 }
+
+#[test]
+fn a_schema_11_single_action_profile_loads_and_saves_as_a_bare_action() {
+    let config = load(
+        "schema_version = 11\n[devices.mouse.per_app_bindings.\"com.example.editor\"]\nBack = \"Undo\"\n",
+    )
+    .expect("a schema 11 per-app action must load");
+    assert_eq!(
+        config.per_app_overrides("mouse", "com.example.editor"),
+        Some(&BTreeMap::from([(
+            ButtonId::Back,
+            Binding::Single(Action::Undo)
+        )]))
+    );
+    let saved = toml::to_string(&config).expect("serialize");
+    assert!(saved.contains("Back = \"Undo\""), "{saved}");
+    assert!(!saved.contains("per_app_disabled_gestures"), "{saved}");
+}
+
+#[test]
+fn an_app_gesture_map_survives_single_mode_and_inherit_drops_it() {
+    let (device, app, button) = ("2b042", "com.example.Editor", ButtonId::GestureButton);
+    let mut cfg = Config::default();
+    cfg.set_gesture_direction(device, button, GestureDirection::Up, Action::Copy);
+    let global = cfg.effective_bindings(device, None);
+
+    cfg.set_per_app_gesture_direction(device, app, button, GestureDirection::Click, Action::Paste);
+    let custom = cfg.effective_bindings(device, Some(app));
+    let Binding::Gesture(map) = &custom[&button] else {
+        panic!("the first direction edit must snapshot the inherited map");
+    };
+    assert_eq!(map[&GestureDirection::Up], Action::Copy);
+    assert_eq!(map[&GestureDirection::Click], Action::Paste);
+    assert_eq!(cfg.effective_bindings(device, None), global);
+
+    cfg.disable_per_app_gestures(device, app, button);
+    assert_eq!(
+        cfg.effective_bindings(device, Some(app))[&button],
+        Binding::Single(Action::Paste)
+    );
+    assert_eq!(
+        cfg.devices[device].per_app_disabled_gestures[app][&button],
+        *map
+    );
+    // A stale direction edit does not promote the single action.
+    cfg.set_per_app_gesture_direction(device, app, button, GestureDirection::Down, Action::Undo);
+    assert_eq!(
+        cfg.effective_bindings(device, Some(app))[&button],
+        Binding::Single(Action::Paste)
+    );
+
+    cfg.enable_per_app_gestures(device, app, button);
+    assert_eq!(cfg.effective_bindings(device, Some(app)), custom);
+    assert!(cfg.devices[device].per_app_disabled_gestures.is_empty());
+    assert_eq!(
+        cfg.effective_bindings(device, Some("com.example.Other")),
+        global
+    );
+
+    cfg.disable_per_app_gestures(device, app, button);
+    cfg.set_per_app_binding(device, app, button, None);
+    assert_eq!(cfg.effective_bindings(device, Some(app)), global);
+    assert!(cfg.app_profiles(device).next().is_none());
+    assert!(cfg.devices[device].per_app_disabled_gestures.is_empty());
+    assert_eq!(cfg.effective_bindings(device, None), global);
+}
+
+#[test]
+fn choosing_a_single_action_stashes_the_app_gesture_map() {
+    let (device, app, button) = ("2b042", "com.example.Editor", ButtonId::Back);
+    let mut cfg = Config::default();
+    cfg.enable_per_app_gestures(device, app, button);
+    let Binding::Gesture(map) = cfg.effective_bindings(device, Some(app))[&button].clone() else {
+        panic!("enabling must promote the inherited single action");
+    };
+    assert_eq!(map[&GestureDirection::Click], default_binding(button));
+    assert!(!cfg.is_gesture_mode(device, button), "global stays single");
+
+    cfg.set_per_app_binding(device, app, button, Some(Action::Copy));
+    assert_eq!(
+        cfg.effective_bindings(device, Some(app))[&button],
+        Binding::Single(Action::Copy)
+    );
+    cfg.enable_per_app_gestures(device, app, button);
+    assert_eq!(
+        cfg.effective_bindings(device, Some(app))[&button],
+        Binding::Gesture(map)
+    );
+}
+
+#[test]
+fn app_gesture_maps_and_their_stash_survive_a_save() {
+    let mut cfg = Config::default();
+    cfg.set_binding(
+        "unit:12345678",
+        ButtonId::HapticPanel,
+        Binding::Single(Action::ShowActionsRing),
+    );
+    cfg.enable_per_app_gestures("unit:12345678", "com.example.App", ButtonId::HapticPanel);
+    cfg.set_per_app_gesture_direction(
+        "unit:12345678",
+        "com.example.App",
+        ButtonId::HapticPanel,
+        GestureDirection::Up,
+        Action::Copy,
+    );
+    cfg.enable_per_app_gestures("unit:12345678", "com.example.App", ButtonId::Back);
+    cfg.disable_per_app_gestures("unit:12345678", "com.example.App", ButtonId::Back);
+
+    let reread = write_and_read(&cfg);
+    let (before, after) = (
+        &cfg.devices["unit:12345678"],
+        &reread.devices["unit:12345678"],
+    );
+    assert_eq!(after.per_app_bindings, before.per_app_bindings);
+    assert_eq!(
+        after.per_app_disabled_gestures,
+        before.per_app_disabled_gestures
+    );
+    assert_eq!(after.bindings, before.bindings);
+    assert!(after.per_app_disabled_gestures["com.example.App"].contains_key(&ButtonId::Back));
+}
+
+#[test]
+fn an_alias_gesture_profile_resolves_and_a_platform_profile_still_wins() {
+    let config = load(&on_this_platform(
+        r#"schema_version = 12
+[devices.mouse.per_app_bindings."app:chrome".GestureButton]
+Left = "PrevTab"
+Right = "NextTab"
+Click = "MissionControl"
+[devices.mouse.per_app_bindings."com.example.chromebeta"]
+GestureButton = "Copy"
+[apps.chrome]
+PLATFORM = ["com.example.chrome", "com.example.chromebeta"]
+"#,
+    ))
+    .expect("an alias gesture profile must load");
+    let Binding::Gesture(map) =
+        &config.effective_bindings("mouse", Some("com.example.chrome"))[&ButtonId::GestureButton]
+    else {
+        panic!("the alias profile's gesture map must dispatch");
+    };
+    assert_eq!(map[&GestureDirection::Left], Action::PrevTab);
+    assert_eq!(
+        config.effective_bindings("mouse", Some("com.example.chromebeta"))
+            [&ButtonId::GestureButton],
+        Binding::Single(Action::Copy)
+    );
+}
+
+#[test]
+fn an_exact_gesture_profile_wins_over_an_executable_fallback() {
+    let mut cfg = Config::default();
+    let exact = r"c:\apps\code_1\code.exe";
+    let button = ButtonId::GestureButton;
+    cfg.set_per_app_binding("device", "exe:code.exe", button, Some(Action::Copy));
+    cfg.enable_per_app_gestures("device", exact, button);
+    cfg.set_per_app_gesture_direction("device", exact, button, GestureDirection::Up, Action::Undo);
+
+    let Binding::Gesture(directions) = &cfg.effective_bindings("device", Some(exact))[&button]
+    else {
+        panic!("the exact profile's gesture map must win");
+    };
+    assert_eq!(directions[&GestureDirection::Up], Action::Undo);
+    assert_eq!(
+        cfg.effective_bindings("device", Some(r"c:\apps\code_2\code.exe"))[&button],
+        Binding::Single(Action::Copy)
+    );
+}
+
+#[test]
+fn a_stash_for_an_undefined_alias_fails_to_load() {
+    let source = "schema_version = 12\n[devices.mouse.per_app_disabled_gestures.\"app:editr\".Back]\nUp = \"Copy\"\n[apps.editor]\nlinux = \"editor\"\n";
+    assert_matches!(
+        load(source).expect_err("a misspelled alias in the stash must not load"),
+        ConfigError::UndefinedAppAlias { device, key, .. }
+            if device == "mouse" && key == "app:editr"
+    );
+}
+
+#[test]
+fn removing_an_app_profile_drops_its_stash() {
+    let mut cfg = Config::default();
+    cfg.enable_per_app_gestures("mouse", "com.example.App", ButtonId::Back);
+    cfg.disable_per_app_gestures("mouse", "com.example.App", ButtonId::Back);
+    cfg.remove_app_profile("mouse", "com.example.App");
+    assert!(cfg.devices["mouse"].per_app_bindings.is_empty());
+    assert!(cfg.devices["mouse"].per_app_disabled_gestures.is_empty());
+}
+
+#[test]
+fn an_app_direction_edit_changes_only_that_direction_of_a_sparse_map() {
+    let mut cfg = Config::default();
+    let sparse = BTreeMap::from([
+        (GestureDirection::Click, Action::Copy),
+        (GestureDirection::Up, Action::Undo),
+    ]);
+    cfg.set_binding("mouse", ButtonId::Back, Binding::Gesture(sparse.clone()));
+    cfg.set_per_app_gesture_direction(
+        "mouse",
+        "com.example.App",
+        ButtonId::Back,
+        GestureDirection::Up,
+        Action::Redo,
+    );
+    let mut expected = sparse;
+    expected.insert(GestureDirection::Up, Action::Redo);
+    assert_eq!(
+        cfg.per_app_overrides("mouse", "com.example.App").unwrap()[&ButtonId::Back],
+        Binding::Gesture(expected)
+    );
+}
+
+/// After an exact profile is reset, its editor shows the `exe:` profile it
+/// now falls back to; the next edit must start from that map, not Default.
+#[test]
+fn an_edit_after_resetting_an_exact_profile_starts_from_its_fallback() {
+    let (device, exact, button) = ("mouse", r"c:\apps\code_1\code.exe", ButtonId::Back);
+    let fallback_map = BTreeMap::from([
+        (GestureDirection::Click, Action::Copy),
+        (GestureDirection::Left, Action::Undo),
+    ]);
+    let mut cfg = Config::default();
+    cfg.set_binding(device, button, Binding::Single(Action::BrowserBack));
+    cfg.devices
+        .get_mut(device)
+        .unwrap()
+        .per_app_bindings
+        .insert(
+            "exe:code.exe".into(),
+            BTreeMap::from([(button, Binding::Gesture(fallback_map.clone()))]),
+        );
+    cfg.set_per_app_binding(device, exact, button, Some(Action::Paste));
+    cfg.set_per_app_binding(device, exact, button, None);
+    assert_eq!(
+        cfg.effective_bindings(device, Some(exact))[&button],
+        Binding::Gesture(fallback_map.clone()),
+        "the reset exact profile shows its fallback"
+    );
+
+    cfg.set_per_app_gesture_direction(device, exact, button, GestureDirection::Up, Action::Redo);
+    let mut expected = fallback_map.clone();
+    expected.insert(GestureDirection::Up, Action::Redo);
+    assert_eq!(
+        cfg.per_app_overrides(device, exact).unwrap()[&button],
+        Binding::Gesture(expected)
+    );
+
+    cfg.set_per_app_binding(device, exact, button, None);
+    cfg.disable_per_app_gestures(device, exact, button);
+    assert_eq!(
+        cfg.effective_bindings(device, Some(exact))[&button],
+        Binding::Single(Action::Copy),
+        "turning the shown gestures off keeps their click"
+    );
+    assert_eq!(
+        cfg.devices[device].per_app_disabled_gestures[exact][&button],
+        fallback_map
+    );
+    assert_eq!(
+        cfg.effective_bindings(device, None)[&button],
+        Binding::Single(Action::BrowserBack)
+    );
+}

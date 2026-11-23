@@ -431,6 +431,7 @@ fn fold_maps(device: &mut DeviceConfig, legacy: &mut DeviceConfig, route_key: &s
     fold_map_field!(bindings);
     fold_map_field!(disabled_gestures);
     fold_map_field!(per_app_bindings);
+    fold_map_field!(per_app_disabled_gestures);
     fold_map_field!(camera_profiles);
     fold_map_field!(g_key_profile_names);
 }
@@ -938,7 +939,10 @@ mod tests {
         let legacy = DeviceConfig {
             per_app_bindings: std::collections::BTreeMap::from([(
                 "com.example.App".to_string(),
-                std::collections::BTreeMap::from([(ButtonId::MiddleClick, Action::Copy)]),
+                std::collections::BTreeMap::from([(
+                    ButtonId::MiddleClick,
+                    crate::binding::Binding::Single(Action::Copy),
+                )]),
             )]),
             ..DeviceConfig::default()
         };
@@ -957,7 +961,7 @@ mod tests {
             device.per_app_bindings.get("com.example.App"),
             Some(&std::collections::BTreeMap::from([(
                 ButtonId::MiddleClick,
-                Action::Copy
+                crate::binding::Binding::Single(Action::Copy)
             )])),
             "the app overlay survives adoption"
         );

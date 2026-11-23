@@ -41,7 +41,7 @@ use gpui_kit::component::{
     Selectable as _, h_flex, input::InputState, scroll::ScrollableElement as _, v_flex,
 };
 use openlogi_core::binding::{
-    Action, ActionRingIcon, ButtonId, GKeyProfile, KeypadPage, WorkflowStep,
+    Action, ActionRingIcon, Binding, ButtonId, GKeyProfile, KeypadPage, WorkflowStep,
 };
 use openlogi_core::config::GamingKeyMode;
 
@@ -917,8 +917,7 @@ fn selected_key_action(state: &AppState, target: &KeyTarget) -> Option<Action> {
     if state.editing_app().is_some() {
         state
             .editing_app_overrides()
-            .and_then(|overrides| overrides.get(&button))
-            .cloned()
+            .and_then(|overrides| overrides.get(&button).map(Binding::click_action))
     } else {
         bound_action(state, target)
     }

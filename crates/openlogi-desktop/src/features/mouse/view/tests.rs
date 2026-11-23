@@ -558,7 +558,7 @@ fn a_selected_gesture_can_render_in_the_binding_inspector(cx: &mut TestAppContex
         let entity = cx.entity();
 
         binding_inspector(
-            BindingInspectorData {
+            &BindingInspectorData {
                 selected: view.mode.selection(),
                 bindings: &bindings,
                 layout: None,
@@ -567,6 +567,7 @@ fn a_selected_gesture_can_render_in_the_binding_inspector(cx: &mut TestAppContex
                 virtual_thumbwheel: false,
                 wheel_hold: &BTreeSet::new(),
                 editing_app: None,
+                layer: BindingLayer::Normal,
                 overridden: None,
                 press_force: None,
                 extra_actions: &[],
@@ -887,6 +888,22 @@ fn a_gesture_button_offers_wheel_hold_and_leaves_gestures_for_it(cx: &mut TestAp
         "the gesture inspector offers the switch too"
     );
 
+    cx.update(|_, cx| {
+        AppState::apply(cx, |state| {
+            state.set_editing_app(Some("com.apple.Safari".into()))
+        });
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(in_gesture_mode(cx, ButtonId::Back));
+    assert!(
+        cx.debug_bounds("inspector-wheel-hold-row").is_none(),
+        "an inherited app gesture map cannot edit device-wide wheel-hold"
+    );
+    cx.update(|_, cx| {
+        AppState::apply(cx, |state| state.set_editing_app(None));
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
     click_picker_control(cx, "inspector-wheel-hold-row-control");
 
     assert!(holds_the_wheel(cx, ButtonId::Back));
@@ -930,30 +947,91 @@ fn a_gesture_button_without_raw_wheel_offers_no_wheel_hold(cx: &mut TestAppConte
     cx.run_until_parked();
 }
 
-/// An app profile replaces a gesture button's gestures with a button binding,
-/// which gets a release, so its picker offers the held actions too.
+/// An app profile edits the gesture map it inherits in place: a direction
+/// edit gives the app its own map, a single action stashes that map, gestures
+/// bring it back, and the default profile's map never changes.
 #[gpui::test]
-fn an_inherited_gesture_button_offers_the_held_actions(cx: &mut TestAppContext) {
+fn an_app_profile_edits_its_own_gestures_without_changing_the_default(cx: &mut TestAppContext) {
     let _locale = LOCALE_LOCK.lock().unwrap();
     rust_i18n::set_locale("en");
+    let key = crate::state::tests::KNOWN_MOUSE_KEY;
     let mut config = Config::ephemeral();
-    config.set_gesture_mode(crate::state::tests::KNOWN_MOUSE_KEY, ButtonId::Back, true);
+    config.set_gesture_mode(key, ButtonId::Back, true);
+    config.set_gesture_direction(key, ButtonId::Back, GestureDirection::Up, Action::Copy);
     let (view, cx) = wheel_hold_view(cx, true, config, ButtonId::Back);
     cx.update(|_, cx| {
         AppState::apply(cx, |state| {
             state.set_editing_app(Some("com.apple.Safari".into()))
         });
     });
-    view.update(cx, |view, _| {
-        view.mode = mem::take(&mut view.mode).open_picker();
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let app_up = |cx: &mut VisualTestContext| {
+        cx.update(|_, cx| {
+            AppState::try_read(cx)
+                .unwrap()
+                .gesture_bindings()
+                .get(&ButtonId::Back)
+                .map(|map| map[&GestureDirection::Up].clone())
+        })
+    };
+
+    // Inherited: the gesture editor shows, with nothing to reset.
+    assert!(cx.debug_bounds("inspector-single-action").is_some());
+    assert!(cx.debug_bounds("inspector-use-default").is_none());
+    assert_eq!(app_up(cx), Some(Action::Copy));
+
+    click_picker_control(cx, "inspector-single-action");
+    assert_eq!(app_up(cx), None);
+    click_picker_control(cx, "inspector-use-gestures");
+    assert_eq!(app_up(cx), Some(Action::Copy));
+
+    cx.update(|_, cx| {
+        AppState::apply(cx, |state| {
+            state.commit_gesture_binding(ButtonId::Back, GestureDirection::Up, Action::Paste)
+        });
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert_eq!(app_up(cx), Some(Action::Paste));
+
+    click_picker_control(cx, "inspector-use-default");
+    assert_eq!(app_up(cx), Some(Action::Copy));
+    cx.update(|_, cx| {
+        assert!(
+            AppState::try_read(cx)
+                .unwrap()
+                .app_profiles()
+                .next()
+                .is_none(),
+            "resetting the only override drops the app profile and its stash"
+        );
+        AppState::apply(cx, |state| state.set_editing_app(None));
+    });
+    assert_eq!(app_up(cx), Some(Action::Copy));
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}
+
+/// The G-Shift layer shows a gesturing button as inherited from the normal
+/// layer and offers no gesture controls, which would edit Default.
+#[gpui::test]
+fn the_gshift_layer_offers_no_gesture_controls(cx: &mut TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    let mut config = Config::ephemeral();
+    config.set_gesture_mode(crate::state::tests::KNOWN_MOUSE_KEY, ButtonId::Back, true);
+    let (view, cx) = wheel_hold_view(cx, true, config, ButtonId::Back);
+    cx.update(|_, cx| {
+        AppState::apply(cx, |state| state.set_binding_layer(BindingLayer::GShift));
     });
     cx.update(|window, cx| window.draw(cx).clear(cx));
 
-    assert!(cx.debug_bounds("inspector-gesture-override-Copy").is_some());
     assert!(
-        cx.debug_bounds("inspector-gesture-override-DpiShift")
+        cx.debug_bounds("inspector-current-gesture-summary")
             .is_some()
     );
+    assert!(cx.debug_bounds("inspector-single-action").is_none());
+    assert!(cx.debug_bounds("inspector-use-gestures").is_none());
     drop(view);
     cx.update(|window, _| window.remove_window());
     cx.run_until_parked();

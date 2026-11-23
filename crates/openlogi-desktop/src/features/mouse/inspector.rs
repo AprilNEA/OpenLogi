@@ -1,6 +1,7 @@
 //! Fixed binding inspector for the Buttons workspace.
 
 use crate::ui::theme::FocusRingStyle as _;
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
@@ -14,7 +15,7 @@ use gpui_kit::component::{
     input::InputState, scroll::ScrollableElement as _, v_flex,
 };
 use openlogi_core::binding::{
-    Action, ButtonId, GamingLayout, GestureDirection, default_binding, default_binding_on,
+    Action, Binding, ButtonId, GamingLayout, GestureDirection, default_binding, default_binding_on,
 };
 
 use super::editor_mode::Selection;
@@ -25,7 +26,7 @@ use crate::features::binding_editor::{
     ActionOffer, GESTURE_BUTTON_ICON, PickFn, action_icon_path, action_rows_with,
     application_editor, command_editor, editor_section, gesture_direction_icon,
 };
-use crate::state::AppState;
+use crate::state::{AppState, BindingLayer};
 use crate::ui::action::localized_action_label;
 use crate::ui::components::{MenuRow, Toggle, control_button, control_input, toggle_row};
 use crate::ui::theme::{
@@ -34,7 +35,7 @@ use crate::ui::theme::{
 
 pub(super) const INSPECTOR_W: f32 = 328.;
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) struct BindingInspectorData<'a> {
     pub selected: Option<&'a Selection>,
     pub bindings: &'a BTreeMap<ButtonId, Action>,
@@ -49,7 +50,10 @@ pub(super) struct BindingInspectorData<'a> {
     /// Buttons that hold the wheel to scroll sideways, from the global profile.
     pub wheel_hold: &'a BTreeSet<ButtonId>,
     pub editing_app: Option<&'a str>,
-    pub overridden: Option<&'a BTreeMap<ButtonId, Action>>,
+    /// Which bindings the inspector edits. Gesture maps are edited in the
+    /// normal layer only: the G-Shift layer holds single actions.
+    pub layer: BindingLayer,
+    pub overridden: Option<Cow<'a, BTreeMap<ButtonId, Binding>>>,
     /// The haptic panel's press-force row, present only while
     /// [`ForceSensingFacts::current`](super::force_sensing::ForceSensingFacts::current)
     /// says it shows.
@@ -115,7 +119,7 @@ impl ShortcutMode {
 }
 
 pub(super) fn binding_inspector(
-    data: BindingInspectorData<'_>,
+    data: &BindingInspectorData<'_>,
     picker: ActionPickerContext<'_>,
     cx: &Context<MouseModelView>,
 ) -> gpui::Div {
@@ -123,17 +127,17 @@ pub(super) fn binding_inspector(
     let body = match data.selected {
         None => empty_inspector(
             data.editing_app,
-            data.overridden.map_or(0, BTreeMap::len),
+            data.overridden
+                .as_ref()
+                .map_or(0, |overrides| overrides.len()),
             pal,
         ),
         Some(selection) => match selection.button() {
-            Some((button, direction)) => {
-                button_inspector(button, direction, &data, picker, pal, cx)
-            }
+            Some((button, direction)) => button_inspector(button, direction, data, picker, pal, cx),
             None => thumbwheel_inspector(
                 data.bindings,
                 data.editing_app,
-                data.overridden,
+                data.overridden.as_deref(),
                 picker,
                 pal,
             ),
@@ -202,17 +206,23 @@ fn button_inspector(
     let gesture_map = data.gesture_maps.get(&button);
     let overridden = data
         .overridden
+        .as_ref()
         .is_some_and(|overrides| overrides.contains_key(&button));
-    if data.editing_app.is_none()
-        && let Some(gesture_map) = gesture_map
-    {
-        return gesture_inspector(button, gesture_map, direction, data, picker, pal, cx);
-    }
-    if let Some(app) = data.editing_app
-        && !overridden
-        && gesture_map.is_some()
-    {
-        return inherited_gesture_inspector(button, app, data, picker, pal, cx);
+    match (data.layer, gesture_map) {
+        (BindingLayer::Normal, Some(gesture_map)) => {
+            return gesture_inspector(button, gesture_map, direction, data, picker, pal, cx);
+        }
+        (BindingLayer::GShift, Some(_)) if !overridden => {
+            return inherited_gesture_inspector(
+                button,
+                data.editing_app.unwrap_or_default(),
+                data,
+                picker,
+                pal,
+                cx,
+            );
+        }
+        _ => {}
     }
 
     let action = data
@@ -248,6 +258,7 @@ fn button_inspector(
             let observer = picker.view.clone();
             panel.child(
                 control_button("inspector-use-default")
+                    .debug_selector(|| "inspector-use-default".into())
                     .w_full()
                     .icon(IconName::Undo)
                     .label(tr!("profiles.use_the_default_profile"))
@@ -260,33 +271,39 @@ fn button_inspector(
                     }),
             )
         })
-        .when(can_enable_gestures(button, data.editing_app), |panel| {
-            let observer = picker.view.clone();
-            let unavailable = button == ButtonId::DpiToggle && !data.dpi_gestures;
-            panel
-                .child(
-                    control_button("inspector-use-gestures")
-                        .w_full()
-                        .icon(Icon::empty().path(GESTURE_BUTTON_ICON))
-                        .label(tr!("actions.use_gestures"))
-                        .disabled(unavailable)
-                        .on_click(move |_, _, cx| {
-                            AppState::apply(cx, |state| state.commit_gesture_mode(button, true));
-                            observer.update(cx, |view, cx| {
-                                view.select_gesture_direction(GestureDirection::Click);
-                                cx.notify();
-                            });
-                        }),
-                )
-                .when(unavailable, |panel| {
-                    panel.child(
-                        div()
-                            .text_body()
-                            .text_color(pal.text_muted)
-                            .child(tr!("actions.dpi_gestures_unavailable")),
+        .when(
+            data.layer == BindingLayer::Normal && button.supports_gesture_mode(),
+            |panel| {
+                let observer = picker.view.clone();
+                let unavailable = button == ButtonId::DpiToggle && !data.dpi_gestures;
+                panel
+                    .child(
+                        control_button("inspector-use-gestures")
+                            .debug_selector(|| "inspector-use-gestures".into())
+                            .w_full()
+                            .icon(Icon::empty().path(GESTURE_BUTTON_ICON))
+                            .label(tr!("actions.use_gestures"))
+                            .disabled(unavailable)
+                            .on_click(move |_, _, cx| {
+                                AppState::apply(cx, |state| {
+                                    state.commit_gesture_mode(button, true)
+                                });
+                                observer.update(cx, |view, cx| {
+                                    view.select_gesture_direction(GestureDirection::Click);
+                                    cx.notify();
+                                });
+                            }),
                     )
-                })
-        })
+                    .when(unavailable, |panel| {
+                        panel.child(
+                            div()
+                                .text_body()
+                                .text_color(pal.text_muted)
+                                .child(tr!("actions.dpi_gestures_unavailable")),
+                        )
+                    })
+            },
+        )
         .children(
             data.press_force
                 .map(|press_force| force_sensing_row(press_force, pal)),
@@ -460,7 +477,8 @@ fn gesture_inspector(
 ) -> gpui::Div {
     // Gesture mode never holds the wheel, so the switch here is off and only
     // turning it on is useful, which needs measured raw wheel.
-    let offer_wheel_hold = button.supports_wheel_hold() && data.virtual_thumbwheel;
+    let offer_wheel_hold =
+        data.editing_app.is_none() && button.supports_wheel_hold() && data.virtual_thumbwheel;
     let current = gesture_action(gesture_map, button, direction);
     let observer = picker.view.clone();
     let on_pick: PickFn = Rc::new(move |action, _window, cx| {
@@ -473,12 +491,21 @@ fn gesture_inspector(
         });
     });
     let turn_off = picker.view.clone();
+    let overridden = data
+        .overridden
+        .as_ref()
+        .is_some_and(|overrides| overrides.contains_key(&button));
+    let status = match data.editing_app {
+        Some(app) if overridden => tr!("actions.overridden_in_app", app => app.to_string()),
+        Some(_) => tr!("profiles.inherited_from_default"),
+        None => tr!("actions.five_directions"),
+    };
 
     v_flex()
         .gap_3()
         .child(inspector_heading(
             tr!(button.translation_key()),
-            Some(tr!("actions.five_directions")),
+            Some(status),
             pal,
         ))
         .child(gesture_directions(
@@ -492,8 +519,26 @@ fn gesture_inspector(
         .when(offer_wheel_hold, |panel| {
             panel.child(wheel_hold_row(button, false, picker.view, pal))
         })
+        .when(data.editing_app.is_some() && overridden, |panel| {
+            let observer = picker.view.clone();
+            panel.child(
+                control_button("inspector-use-default")
+                    .debug_selector(|| "inspector-use-default".into())
+                    .w_full()
+                    .icon(IconName::Undo)
+                    .label(tr!("profiles.use_the_default_profile"))
+                    .on_click(move |_, _, cx| {
+                        AppState::apply(cx, |state| state.clear_app_binding(button));
+                        observer.update(cx, |view, cx| {
+                            view.close_action_picker();
+                            cx.notify();
+                        });
+                    }),
+            )
+        })
         .child(
             control_button("inspector-single-action")
+                .debug_selector(|| "inspector-single-action".into())
                 .w_full()
                 .label(tr!("actions.use_a_single_action"))
                 .on_click(move |_, _, cx| {
@@ -594,17 +639,10 @@ fn gesture_directions(
         )
 }
 
-/// Whether the default-profile inspector may promote `button` into gesture
-/// mode. Per-app bindings are single-action overrides, so they cannot carry a
-/// direction map.
-fn can_enable_gestures(button: ButtonId, editing_app: Option<&str>) -> bool {
-    editing_app.is_none() && button.supports_gesture_mode()
-}
-
 fn thumbwheel_inspector(
     bindings: &BTreeMap<ButtonId, Action>,
     editing_app: Option<&str>,
-    overridden: Option<&BTreeMap<ButtonId, Action>>,
+    overridden: Option<&BTreeMap<ButtonId, Binding>>,
     picker: ActionPickerContext<'_>,
     pal: Palette,
 ) -> gpui::Div {
@@ -1052,7 +1090,7 @@ mod tests {
     fn default_profile_offers_gestures_for_every_supported_button() {
         let supported: Vec<_> = ButtonId::ALL
             .into_iter()
-            .filter(|button| can_enable_gestures(*button, None))
+            .filter(|button| button.supports_gesture_mode())
             .collect();
 
         assert_eq!(
@@ -1066,14 +1104,6 @@ mod tests {
                 ButtonId::HapticPanel,
             ]
         );
-    }
-
-    #[test]
-    fn per_app_profile_does_not_offer_forward_gesture_mode() {
-        assert!(!can_enable_gestures(
-            ButtonId::Forward,
-            Some("com.apple.Safari")
-        ));
     }
 
     fn global_profile<'a>(
@@ -1092,6 +1122,7 @@ mod tests {
             virtual_thumbwheel: true,
             wheel_hold,
             editing_app: None,
+            layer: BindingLayer::Normal,
             overridden: None,
             press_force: None,
         }

@@ -1,4 +1,5 @@
 use crate::ui::theme::FocusRingStyle as _;
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::mem;
 use std::sync::Arc;
@@ -15,7 +16,7 @@ use gpui_kit::component::{
     input::{InputEvent, InputState},
     v_flex,
 };
-use openlogi_core::binding::{Action, ButtonId, GamingLayout, GestureDirection};
+use openlogi_core::binding::{Action, Binding, ButtonId, GamingLayout, GestureDirection};
 
 use super::editor_mode::{EditorMode, PickerDrafts};
 use super::force_sensing::{ForceSensingFacts, ForceSensingSlider, PressForce};
@@ -103,7 +104,8 @@ struct MouseWorkspaceData<'a> {
     virtual_thumbwheel: bool,
     wheel_hold: &'a BTreeSet<ButtonId>,
     editing_app: Option<String>,
-    overridden: Option<&'a BTreeMap<ButtonId, Action>>,
+    layer: BindingLayer,
+    overridden: Option<Cow<'a, BTreeMap<ButtonId, Binding>>>,
     /// Actions the picker offers beyond the catalog.
     extra_actions: &'static [Action],
     /// Catalog actions the picker leaves out.
@@ -143,6 +145,7 @@ impl<'a> MouseWorkspaceData<'a> {
             } else {
                 state.editing_app().map(|app| profile_name(state, app))
             },
+            layer: state.binding_layer(),
             overridden: state.editing_app_overrides(),
             extra_actions: held_actions(
                 state.current_gaming_layout().is_some()
@@ -176,6 +179,7 @@ impl<'a> MouseWorkspaceData<'a> {
             virtual_thumbwheel: false,
             wheel_hold: &NO_WHEEL_HOLD,
             editing_app: None,
+            layer: BindingLayer::Normal,
             overridden: None,
             extra_actions: &[],
             hidden_actions: &[],
@@ -520,17 +524,22 @@ impl Render for MouseModelView {
             virtual_thumbwheel,
             wheel_hold,
             editing_app,
+            layer,
             overridden,
             extra_actions,
             hidden_actions,
         } = MouseWorkspaceData::read(cx).unwrap_or_else(MouseWorkspaceData::empty);
 
+        // The G-Shift layer shows a button it overrides as that action, not
+        // as the normal layer's gestures.
         let gesture_buttons: Vec<ButtonId> = gesture_maps
             .keys()
             .copied()
             .filter(|button| {
-                editing_app.is_none()
-                    || !overridden.is_some_and(|overrides| overrides.contains_key(button))
+                layer == BindingLayer::Normal
+                    || !overridden
+                        .as_ref()
+                        .is_some_and(|overrides| overrides.contains_key(button))
             })
             .collect();
 
@@ -584,7 +593,7 @@ impl Render for MouseModelView {
         let canvas = model_canvas(model_band, canvas_w, canvas_h, mouse_top, mouse_h);
 
         let inspector = binding_inspector(
-            BindingInspectorData {
+            &BindingInspectorData {
                 selected: self.mode.selection(),
                 bindings,
                 layout,
@@ -593,6 +602,7 @@ impl Render for MouseModelView {
                 virtual_thumbwheel,
                 wheel_hold,
                 editing_app: editing_app.as_deref(),
+                layer,
                 overridden,
                 press_force: PressForce::of(force_sensing.as_ref(), self.press_force()),
                 extra_actions,

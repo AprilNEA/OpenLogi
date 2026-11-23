@@ -4,6 +4,43 @@ Durable "why we did it this way" records that are not obvious from the code.
 Add a dated entry when a non-obvious architectural or dependency decision is
 made or revisited.
 
+## 2026-11: An application profile holds whole bindings, with its own gesture stash
+
+A per-app profile could only replace a button with one action, so an
+application could not have its own gesture directions (#1818): Chrome's
+Hold+Left/Right could not switch tabs without changing every other
+application. The profile now has the shape the device-wide profile has, and
+the config format changes (schema 11 to 12; schema 11 went to `[flow]`).
+
+- **One dispatched map.** `per_app_bindings` values are `Binding`s, like
+  `bindings`. A single action still serializes as the bare action, so every
+  existing profile parses unchanged. A second map of per-app gesture
+  overrides was rejected: one (application, button) fact would live in two
+  places, and one map would silently win over the other.
+- **One stash that is never dispatched.** `per_app_disabled_gestures` keeps
+  the direction map of a button whose gesture mode the profile turned off, as
+  `disabled_gestures` does device-wide, so turning it back on restores the
+  user's directions. Resetting the button, or removing the profile, removes
+  it with the override.
+- **One matcher.** Both maps are keyed by the same selectors. Dispatch reads
+  only `per_app_bindings` through `openlogi_core::app::overlay_for`, so exact,
+  `exe:` and `app:<alias>` keys behave as for single actions. An undefined
+  alias in either map stops the load.
+- **The bump.** `RawDeviceConfig` denies unknown fields and a schema 11 build
+  cannot parse a gesture-shaped per-app value, so a file written now must fail
+  at that build's version check rather than halfway through parsing. Nothing
+  older needs migrating.
+- **The desktop app edits single actions and gesture maps.** Wheel hold stays
+  device-wide, and the G-Shift layer stays single actions: it shows a
+  gesturing button as inherited from the normal layer and offers no gesture
+  controls. Other shapes are accepted in TOML, and the runtime reads every
+  profile through the same effective map; a capture-plan test covers a
+  per-app long press, while per-app wheel hold has no test of its own.
+
+Verified with core, agent capture-plan, desktop state and GPUI view tests.
+Nobody has run an application gesture map on hardware against this exact
+build yet.
+
 ## 2026-11: The agent saves a paired Flow computer in `config.toml`
 
 Until now the agent only read `config.toml`; the GUI and `openlogi api` wrote

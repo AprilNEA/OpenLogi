@@ -676,6 +676,88 @@ mod tests {
     }
 
     #[test]
+    fn app_only_haptic_panel_gesture_requests_raw_motion_and_restores_global_ring() {
+        let mut cfg = Config::default();
+        cfg.set_binding(
+            "2b042",
+            ButtonId::HapticPanel,
+            Binding::Single(Action::ShowActionsRing),
+        );
+        cfg.enable_per_app_gestures("2b042", "com.mitchellh.ghostty", ButtonId::HapticPanel);
+        cfg.set_per_app_gesture_direction(
+            "2b042",
+            "com.mitchellh.ghostty",
+            ButtonId::HapticPanel,
+            GestureDirection::Up,
+            Action::Paste,
+        );
+        for app in [
+            None,
+            Some("com.mitchellh.ghostty"),
+            Some("com.example.Other"),
+        ] {
+            let active = app == Some("com.mitchellh.ghostty");
+            let plan = plan_for_device(&cfg, "2b042", route(), app, 0, false);
+            assert_eq!(
+                plan.dispatch
+                    .gesture_bindings
+                    .contains_key(&ButtonId::HapticPanel),
+                active
+            );
+            assert_eq!(
+                plan.target
+                    .spec
+                    .divert_gesture_sources
+                    .contains(&HAPTIC_PANEL_CID),
+                active
+            );
+            assert_eq!(
+                plan.target
+                    .spec
+                    .divert_buttons
+                    .iter()
+                    .any(|(cid, _)| *cid == HAPTIC_PANEL_CID),
+                !active
+            );
+        }
+    }
+
+    #[test]
+    fn app_single_action_stops_a_global_haptic_panel_gesture_only_in_that_app() {
+        let mut cfg = Config::default();
+        cfg.set_binding(
+            "2b042",
+            ButtonId::HapticPanel,
+            Binding::Single(Action::ShowActionsRing),
+        );
+        cfg.set_gesture_mode("2b042", ButtonId::HapticPanel, true);
+        cfg.disable_per_app_gestures("2b042", "com.mitchellh.ghostty", ButtonId::HapticPanel);
+        for app in [
+            None,
+            Some("com.mitchellh.ghostty"),
+            Some("com.example.Other"),
+        ] {
+            let gesturing = app != Some("com.mitchellh.ghostty");
+            let plan = plan_for_device(&cfg, "2b042", route(), app, 0, false);
+            assert_eq!(
+                plan.dispatch
+                    .gesture_bindings
+                    .contains_key(&ButtonId::HapticPanel),
+                gesturing,
+                "{app:?}"
+            );
+            assert_eq!(
+                plan.target
+                    .spec
+                    .divert_gesture_sources
+                    .contains(&HAPTIC_PANEL_CID),
+                gesturing,
+                "{app:?}"
+            );
+        }
+    }
+
+    #[test]
     fn both_hidpp_sources_gesture_when_both_are_in_gesture_mode() {
         // On MX Master 4 the dedicated button and the haptic panel can gesture
         // at the same time: the plan arms a raw-XY divert for each and keeps
@@ -761,6 +843,37 @@ mod tests {
                 .any(|&(_, button)| button == ButtonId::Back),
             "the runtime needs both edges even when the short action is native"
         );
+    }
+
+    #[test]
+    fn an_app_long_press_is_diverted_only_while_that_app_is_in_front() {
+        let mut cfg = Config::default();
+        cfg.devices
+            .entry("2b01a".into())
+            .or_default()
+            .per_app_bindings
+            .insert(
+                "com.example.Editor".into(),
+                BTreeMap::from([(
+                    ButtonId::Back,
+                    Binding::LongPress(LongPressBinding::new(
+                        default_binding(ButtonId::Back),
+                        Action::MissionControl,
+                    )),
+                )]),
+            );
+        for (app, diverted) in [(Some("com.example.Editor"), true), (None, false)] {
+            let plan = plan_for_device(&cfg, "2b01a", route(), app, 0, true);
+            assert_eq!(
+                plan.target
+                    .spec
+                    .divert_buttons
+                    .iter()
+                    .any(|&(_, button)| button == ButtonId::Back),
+                diverted,
+                "{app:?}"
+            );
+        }
     }
 
     fn wheel_diverts(plan: &DeviceCapturePlan, button: ButtonId) -> bool {

@@ -178,7 +178,7 @@ fn resetting_profiles_restores_inheritance_without_closing_the_editors() {
             .config
             .per_app_overrides(KNOWN_MOUSE_KEY, chrome)
             .unwrap()[&ButtonId::Back],
-        Action::Paste
+        Binding::Single(Action::Paste)
     );
 
     let _ = state.reset_action_ring_profile(&DeviceKey::from(KNOWN_MOUSE_KEY), safari);
