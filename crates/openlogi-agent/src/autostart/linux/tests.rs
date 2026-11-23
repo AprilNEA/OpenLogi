@@ -587,3 +587,66 @@ fn xdg_base_lists_expand_in_order() {
         "every expanded entry is an absolute unit directory: {dirs:?}"
     );
 }
+
+#[test]
+fn rendered_xdg_autostart_starts_systemd_unit_and_is_hidden() {
+    let body = render_xdg_autostart();
+    assert!(body.contains("[Desktop Entry]"));
+    assert!(body.contains("Type=Application"));
+    assert!(body.contains("Exec=systemctl --user start openlogi-agent.service"));
+    assert!(body.contains("X-GNOME-Autostart-enabled=true"));
+    assert!(body.contains("NoDisplay=true"));
+    assert!(is_generated_xdg_autostart(&body));
+}
+
+#[test]
+fn xdg_autostart_path_lives_under_xdg_config_autostart() {
+    let path = xdg_autostart_path().expect("autostart path resolves");
+    let config_home = openlogi_core::paths::xdg_config_home().expect("config home resolves");
+    assert!(path.starts_with(&config_home), "{}", path.display());
+    assert!(path.ends_with(AUTOSTART_ENTRY_NAME));
+    assert!(path.to_string_lossy().contains("autostart"));
+}
+
+#[test]
+fn xdg_autostart_reconcile_writes_and_removes_generated_entry() {
+    let dir = TempDir::new("xdg-autostart");
+    let entry = dir.path("autostart/openlogi-agent.desktop");
+
+    reconcile_xdg_autostart_at(&entry, true).expect("enable writes entry");
+    assert_eq!(
+        std::fs::read_to_string(&entry).expect("entry exists"),
+        render_xdg_autostart()
+    );
+
+    // Re-running while enabled is idempotent.
+    reconcile_xdg_autostart_at(&entry, true).expect("re-enable is idempotent");
+    assert!(entry.exists());
+
+    reconcile_xdg_autostart_at(&entry, false).expect("disable removes generated entry");
+    assert!(!entry.exists());
+
+    // Disabling again when already absent is a no-op.
+    reconcile_xdg_autostart_at(&entry, false).expect("disable when absent");
+    assert!(!entry.exists());
+}
+
+#[test]
+fn xdg_autostart_reconcile_leaves_hand_edited_entry_untouched() {
+    let dir = TempDir::new("xdg-autostart-custom");
+    let entry = dir.path("openlogi-agent.desktop");
+    let custom = "[Desktop Entry]\nType=Application\nExec=/usr/local/bin/openlogi-agent\n";
+    std::fs::write(&entry, custom).expect("write custom entry");
+
+    reconcile_xdg_autostart_at(&entry, true).expect("enable leaves custom entry");
+    assert_eq!(
+        std::fs::read_to_string(&entry).expect("custom entry preserved"),
+        custom
+    );
+
+    reconcile_xdg_autostart_at(&entry, false).expect("disable leaves custom entry");
+    assert_eq!(
+        std::fs::read_to_string(&entry).expect("custom entry still preserved"),
+        custom
+    );
+}
