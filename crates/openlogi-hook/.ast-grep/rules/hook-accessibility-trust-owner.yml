@@ -1,0 +1,21 @@
+# Owner: macos::Backend::accessibility_trusted — the single macOS trust-bit read.
+# Consumers take Hook::accessibility_trusted(); has_accessibility() composes it
+# with the tap probe. A direct AXIsProcessTrusted() elsewhere re-derives that
+# decision, and a caller that polls it with the probe re-opens the denied-tap
+# leak (#2623).
+id: hook-accessibility-trust-owner
+language: rust
+severity: error
+message: Read the macOS Accessibility trust bit through openlogi_hook::Hook::accessibility_trusted (owner macos::Backend::accessibility_trusted), never by calling AXIsProcessTrusted() here.
+files:
+  - crates/**/*.rs
+rule:
+  all:
+    - pattern: AXIsProcessTrusted()
+    - not:
+        inside:
+          kind: function_item
+          stopBy: end
+          has:
+            field: name
+            regex: '^accessibility_trusted$'

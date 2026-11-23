@@ -482,6 +482,12 @@ trait HookBackend {
         true
     }
 
+    /// See [`Hook::accessibility_trusted`]. Only macOS has a separate trust
+    /// bit; elsewhere it agrees with [`Self::has_accessibility`].
+    fn accessibility_trusted() -> bool {
+        true
+    }
+
     /// See [`Hook::prompt_accessibility`]. Nothing to prompt for by default.
     fn prompt_accessibility() {}
 
@@ -611,6 +617,22 @@ impl Hook {
     #[must_use]
     pub fn has_accessibility() -> bool {
         Backend::has_accessibility()
+    }
+
+    /// Read only the macOS Accessibility trust bit — no capability probe.
+    ///
+    /// [`Self::has_accessibility`] pairs the trust bit with a throwaway event
+    /// tap because the bit alone can go stale; creating a *denied* tap leaks
+    /// inside CoreGraphics/TCC, which grew a polled agent past 3 GB in days
+    /// (#2623). Callers that poll on a timer read this instead: `false` is
+    /// authoritative (no tap installs without the trust bit), but a `true`
+    /// may be stale after the row's deletion (#674) — anything load-bearing
+    /// about the live grant still goes through [`Self::has_accessibility`].
+    /// Linux and Windows always answer `true`, as they do for
+    /// [`Self::has_accessibility`].
+    #[must_use]
+    pub fn accessibility_trusted() -> bool {
+        Backend::accessibility_trusted()
     }
 
     /// Show the macOS Accessibility permission dialog and register this
