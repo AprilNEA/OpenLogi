@@ -380,7 +380,7 @@ impl DiagnosticsReport {
             let codename = d
                 .codename
                 .as_deref()
-                .map_or_else(Default::default, |c| format!(" (codename: {c})"));
+                .map_or_else(String::new, |c| format!(" (codename: {c})"));
             let _ = writeln!(
                 out,
                 "- {} — {}{codename}",

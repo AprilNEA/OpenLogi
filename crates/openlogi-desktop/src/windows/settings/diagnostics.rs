@@ -106,7 +106,7 @@ fn current_taps(cx: &App) -> Vec<openlogi_hook::EventTapInfo> {
 fn monitor_list(pal: Palette, cx: &mut App) -> impl IntoElement {
     let lines: Vec<String> = AppState::try_global(cx)
         .map(|state| state.read(cx))
-        .map_or_else(Default::default, |s| {
+        .map_or_else(Vec::new, |s| {
             s.monitor_events()
                 .iter()
                 .rev()

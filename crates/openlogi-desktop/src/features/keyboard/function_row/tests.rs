@@ -570,7 +570,6 @@ fn cards_sit_straight_above_or_beside_their_keys_when_there_is_room() {
     let layout = callout_layout(&markers, img_w, img_h);
 
     assert_clean_callouts(&layout);
-    assert_eq!(layout.cards.len(), markers.len());
     for (i, &(x, _)) in markers.iter().enumerate().take(top_xs.len()) {
         let card = layout.cards[i];
         assert!(
@@ -579,7 +578,14 @@ fn cards_sit_straight_above_or_beside_their_keys_when_there_is_room() {
         );
         assert_eq!(layout.leaders[i].len(), 2, "leader {i} is not straight");
     }
-    for (i, card) in layout.cards.iter().enumerate().skip(top_xs.len()) {
+    assert_eq!(layout.cards.len(), markers.len(), "every key needs a card");
+    for (i, card) in layout
+        .cards
+        .iter()
+        .enumerate()
+        .take(markers.len())
+        .skip(top_xs.len())
+    {
         assert!(card.left >= img_w, "card {i} is not beside the board");
     }
     assert!(layout.pane_w > img_w);

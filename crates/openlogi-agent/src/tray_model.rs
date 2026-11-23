@@ -561,7 +561,7 @@ impl Known {
         let route_key = stable.route_key();
         Controls {
             dpi: capabilities.pointer.then(|| DpiControl {
-                presets: key.map_or_else(Default::default, |key| config.dpi_presets(key)),
+                presets: key.map_or_else(Vec::new, |key| config.dpi_presets(key)),
                 saved: device.and_then(|device| device.effective_dpi(&route_key)),
             }),
             wheel: capabilities.pointer,
