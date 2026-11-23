@@ -1904,25 +1904,82 @@ fn a_notch_glide_eases_out_over_its_length() {
     assert!(glide.ease(2.0) <= 1.0, "clamped");
 }
 
+/// The ticks `engine`'s main wheel has emitted for notches at `notch_times`
+/// (ms after `start`), evaluated at `until` ms.
+fn ratchet_distance(
+    engine: &mut MomentumEngine,
+    start: Instant,
+    notch_times: &[u64],
+    until: u64,
+) -> f64 {
+    let source = hidpp_source("mouse", 1);
+    let mut frames = Vec::new();
+    let mut ms = 0;
+    for &at in notch_times {
+        while ms < at {
+            ms += 1;
+            engine.advance_due(start + Duration::from_millis(ms), &mut |frame| {
+                frames.push(frame);
+            });
+        }
+        engine.wheel_impulse(
+            source.clone(),
+            wheel(0.0, 1.0),
+            1.0,
+            start + Duration::from_millis(at),
+            &mut |frame| frames.push(frame),
+        );
+    }
+    while ms < until {
+        ms += 1;
+        engine.advance_due(start + Duration::from_millis(ms), &mut |frame| {
+            frames.push(frame);
+        });
+    }
+    frames.iter().map(in_ticks).sum()
+}
+
+fn momentum(change: impl FnOnce(&mut MomentumScrolling)) -> MomentumEngine {
+    let mut settings = MomentumScrolling {
+        enabled: true,
+        ..MomentumScrolling::default()
+    };
+    change(&mut settings);
+    MomentumEngine::new(settings)
+}
+
 #[test]
-fn momentum_steps_glide_only_with_a_notch_glide_set() {
-    let crisp = MomentumScrolling {
-        enabled: true,
-        ..MomentumScrolling::default()
-    }
-    .resolve()
-    .expect("enabled");
-    assert_eq!(
-        crisp.notch_glide(),
-        None,
-        "the crisp step stays the default"
-    );
-    let gliding = MomentumScrolling {
-        enabled: true,
-        notch_glide_ms: 300,
-        ..MomentumScrolling::default()
-    }
-    .resolve()
-    .expect("enabled");
-    assert_eq!(gliding.notch_glide(), Some(Duration::from_millis(300)));
+fn ratchet_notches_use_configured_glide() {
+    let start = Instant::now();
+    // The crisp default finishes a notch in 40 ms.
+    let crisp = ratchet_distance(&mut momentum(|_| {}), start, &[0], 40);
+    assert!((crisp - 1.0).abs() < 1e-6, "{crisp}");
+    // A 300 ms glide is about a third of the way there at 40 ms...
+    let glide = |m: &mut MomentumScrolling| m.notch_glide_ms = 300;
+    let early = ratchet_distance(&mut momentum(glide), start, &[0], 40);
+    assert!(early > 0.2 && early < 0.5, "{early}");
+    // ...and done at 300 ms.
+    let done = ratchet_distance(&mut momentum(glide), start, &[0], 300);
+    assert!((done - 1.0).abs() < 1e-6, "{done}");
+    // A notch landing mid-glide adds to the distance left: both arrive.
+    let two = ratchet_distance(&mut momentum(glide), start, &[0, 100], 400);
+    assert!((two - 2.0).abs() < 1e-6, "{two}");
+    let mid = ratchet_distance(&mut momentum(glide), start, &[0, 100], 150);
+    assert!(mid > 1.0 && mid < 2.0, "still gliding: {mid}");
+}
+
+#[test]
+fn isolated_ratchet_notches_keep_plain_distance() {
+    let start = Instant::now();
+    let accelerated = |m: &mut MomentumScrolling| m.acceleration = 300;
+    // A second apart: every notch scrolls its plain distance.
+    let slow = ratchet_distance(&mut momentum(accelerated), start, &[0, 1000, 2000], 2100);
+    assert!((slow - 3.0).abs() < 1e-6, "{slow}");
+    // 10 ms apart, a quick turn: the notches after the first go three
+    // times as far.
+    let quick = ratchet_distance(&mut momentum(accelerated), start, &[0, 10, 20], 200);
+    assert!((quick - 7.0).abs() < 1e-6, "{quick}");
+    // Off by default.
+    let plain = ratchet_distance(&mut momentum(|_| {}), start, &[0, 10, 20], 200);
+    assert!((plain - 3.0).abs() < 1e-6, "{plain}");
 }

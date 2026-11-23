@@ -492,6 +492,8 @@ struct WheelState {
     /// Spins chained onto the glide, like repeated trackpad flicks: each
     /// one speeds it up ([`glide::chain_boost`]).
     chain: u32,
+    /// When the last ratchet notch arrived, for acceleration's notch rate.
+    last_ratchet: Option<Instant>,
 }
 
 impl WheelState {
@@ -502,6 +504,7 @@ impl WheelState {
             detector: FreeSpinDetector::default(),
             glide: GlideState::default(),
             chain: 0,
+            last_ratchet: None,
         }
     }
 
@@ -881,8 +884,13 @@ impl ScrollEngine {
                 if let GlideState::Spent { last, .. } = state.glide {
                     state.glide = GlideState::Idle { last: Some(last) };
                 }
-                // A quick turn scrolls each notch farther.
-                let boost = glide::acceleration(state.detector.speed(at), &momentum);
+                // A quick turn scrolls each notch farther. The rate comes from
+                // the gap since the previous notch: the detector's windowed
+                // speed reads one isolated notch as a turn of several
+                // notches per second.
+                let rate = glide::notch_rate(state.last_ratchet, notches, at);
+                state.last_ratchet = Some(at);
+                let boost = glide::acceleration(rate, &momentum);
                 self.impulse(source.clone(), impulse.scale(boost), at, emit);
             }
             (WheelPhase::FreeSpin, &GlideState::Idle { last }, Some(direction)) => {

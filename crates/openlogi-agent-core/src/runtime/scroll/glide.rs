@@ -1,6 +1,8 @@
 //! The glide model of momentum scrolling: how fast a free spin sends the page
 //! gliding. How the glide then slows is the shared [`GlideCurve`].
 
+use std::time::Instant;
+
 use openlogi_core::config::MomentumParams;
 use openlogi_core::scroll::GlideCurve;
 
@@ -75,6 +77,20 @@ const ACCEL_SLOW: f64 = 5.0;
 /// sweep of a finger across the wheel. Mac Mouse Fix ramps its per-notch
 /// distance linearly with tick rate in the same way.
 const ACCEL_FAST: f64 = 30.0;
+
+/// The rate, in notches per second, of `notches` arriving `at` after the
+/// previous ratchet notch arrived `previous`; 0 for the first notch of a
+/// turn. Two notches in one instant read as a very fast turn.
+pub(super) fn notch_rate(previous: Option<Instant>, notches: f64, at: Instant) -> f64 {
+    let Some(previous) = previous else {
+        return 0.0;
+    };
+    let gap = at.saturating_duration_since(previous).as_secs_f64();
+    notches.abs() / gap.max(MIN_NOTCH_GAP_S)
+}
+
+/// The shortest gap between notches [`notch_rate`] divides by.
+const MIN_NOTCH_GAP_S: f64 = 0.001;
 
 /// The distance multiplier for one ratchet notch while the wheel turns at
 /// `wheel_speed` notches per second: ×1 up to [`ACCEL_SLOW`], rising linearly
