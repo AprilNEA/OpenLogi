@@ -576,6 +576,7 @@ impl Known {
             backlight: capabilities.backlight,
             disable_keys: capabilities.disable_keys,
             sidetone: capabilities.sidetone,
+            power_off_timeout: capabilities.power_off_timeout,
             light: None,
         }
     }

@@ -469,7 +469,7 @@ async fn read_device(shared: &SharedHandles, route: &DeviceRoute, reads: Reads) 
             Read::Unread
         }
     }
-    let (dpi, wheel, fn_lock, backlight, disabled_keys, sidetone) = tokio::join!(
+    let (dpi, wheel, fn_lock, backlight, disabled_keys, sidetone, power_off_timeout) = tokio::join!(
         when(reads.dpi, async {
             shared.read_dpi(route).await.map(|info| info.current)
         }),
@@ -480,6 +480,10 @@ async fn read_device(shared: &SharedHandles, route: &DeviceRoute, reads: Reads) 
         when(reads.backlight, shared.read_backlight(route)),
         when(reads.disabled_keys, shared.read_disable_keys(route)),
         when(reads.sidetone, shared.read_sidetone(route)),
+        when(
+            reads.power_off_timeout,
+            shared.read_power_off_timeout(route)
+        ),
     );
     Reading {
         dpi,
@@ -488,13 +492,15 @@ async fn read_device(shared: &SharedHandles, route: &DeviceRoute, reads: Reads) 
         backlight,
         disabled_keys,
         sidetone,
+        power_off_timeout,
     }
 }
 
 /// Make `change` to `device` as the settings app would: saved settings
-/// through the agent's device settings, the backlight and sidetone, which
-/// the device keeps itself, on the device alone. Answers the change the
-/// device took, or `None` when a newer write superseded it. A change reaches
+/// through the agent's device settings, the backlight, sidetone and
+/// automatic power-off, which the device keeps itself, on the device alone.
+/// Answers the change the device took, or `None` when a newer write
+/// superseded it. A change reaches
 /// only `device`: another device the agent knows on its route, or that
 /// answers there when the change is written, such as one paired into the
 /// receiver slot since the menu listed `device`, takes none of it.
@@ -545,6 +551,27 @@ async fn apply(
                 .map(|level| Some(Change::Sidetone(level)))
                 .map_err(|error| {
                     warn!(%route, %error, "menu-bar sidetone change failed");
+                    Failure::Device
+                });
+        }
+        Change::PowerOffTimeout(timeout) => {
+            let written = server
+                .shared
+                .reaching(device.unit)
+                .set_power_off_timeout(route, timeout)
+                .await;
+            // The settings app re-reads it, as it does after a backlight
+            // change the agent made.
+            server
+                .orchestrator
+                .lock()
+                .await
+                .announce_settings_changed(route);
+            // A superseded write answers the timeout the headset kept.
+            return written
+                .map(|timeout| Some(Change::PowerOffTimeout(timeout)))
+                .map_err(|error| {
+                    warn!(%route, %error, "menu-bar power-off change failed");
                     Failure::Device
                 });
         }
