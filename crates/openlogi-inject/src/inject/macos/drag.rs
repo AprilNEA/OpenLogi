@@ -163,10 +163,17 @@ impl Drag {
     /// Begin `kind` with the first motion, in sensor counts, whose report
     /// arrived `at`.
     pub(in crate::inject) fn begin(kind: HeldDrag, dx: f64, dy: f64, at: Instant) -> Self {
+        let bounds = CGDisplay::main().bounds();
+        Self::begin_on((bounds.size.width, bounds.size.height), kind, dx, dy, at)
+    }
+
+    /// [`Self::begin`] on a main display of `screen` points (width, height):
+    /// the one live lookup stays in `begin`, so tests pass a fixed size.
+    fn begin_on(screen: (f64, f64), kind: HeldDrag, dx: f64, dy: f64, at: Instant) -> Self {
         let (dx, dy) = (dx * POINTS_PER_COUNT, dy * POINTS_PER_COUNT);
         let gesture = match kind {
             HeldDrag::TwoFingerSwipe => Gesture::Scroll(ScrollDrag::begin(dx, dy, at)),
-            HeldDrag::ThreeFingerSwipe => Gesture::Dock(DockDrag::begin(dx, dy, at)),
+            HeldDrag::ThreeFingerSwipe => Gesture::Dock(DockDrag::begin(screen, dx, dy, at)),
         };
         Self { gesture }
     }
@@ -472,15 +479,14 @@ struct DockDrag {
 }
 
 impl DockDrag {
-    fn begin(dx: f64, dy: f64, at: Instant) -> Self {
-        let bounds = CGDisplay::main().bounds();
+    fn begin((width, height): (f64, f64), dx: f64, dy: f64, at: Instant) -> Self {
         let (axis, scale) = if dx.abs() >= dy.abs() {
             (
                 DockAxis::Horizontal,
-                -SPACE_OFFSET / (bounds.size.width + SPACE_SEPARATOR_WIDTH),
+                -SPACE_OFFSET / (width + SPACE_SEPARATOR_WIDTH),
             )
         } else {
-            (DockAxis::Vertical, 1.0 / bounds.size.height)
+            (DockAxis::Vertical, 1.0 / height)
         };
         let mut drag = Self {
             axis,
@@ -565,7 +571,8 @@ mod tests {
     fn play(kind: HeldDrag) {
         let start = Instant::now();
         let ms = |n| start + Duration::from_millis(n);
-        let mut drag = Drag::begin(kind, 20.0, 4.0, ms(0));
+        // A fixed screen: the test never reads the Mac's display geometry.
+        let mut drag = Drag::begin_on((1440.0, 900.0), kind, 20.0, 4.0, ms(0));
         drag.moved(10.0, 2.0, ms(8));
         drag.moved(12.0, 2.0, ms(16));
         if let Some(glide) = drag.release(ms(20)) {
