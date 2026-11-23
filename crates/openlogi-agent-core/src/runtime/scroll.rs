@@ -272,6 +272,11 @@ enum Easing {
     /// steps, kept short and direct so ratchet scrolling stays precise beside
     /// the glide.
     Crisp,
+    /// Cubic ease-out over the given length: momentum scrolling's notch
+    /// steps with a notch glide set. The page moves fastest as the notch
+    /// lands and coasts to a stop; a notch landing mid-glide restarts it from
+    /// there toward the summed target, so a steady turn reads as one motion.
+    Glide(Duration),
 }
 
 impl Easing {
@@ -279,6 +284,7 @@ impl Easing {
         match self {
             Self::Smooth => ANIMATION_DURATION,
             Self::Crisp => CRISP_STEP_DURATION,
+            Self::Glide(length) => length,
         }
     }
 
@@ -288,6 +294,7 @@ impl Easing {
         match self {
             Self::Smooth => p * p * (3.0 - 2.0 * p),
             Self::Crisp => p,
+            Self::Glide(_) => 1.0 - (1.0 - p).powi(3),
         }
     }
 }
@@ -757,6 +764,19 @@ impl ScrollEngine {
             .map(|state| state.momentum.pixels_per_notch())
     }
 
+    /// How `source`'s notch steps move: a smoothed wheel under momentum
+    /// scrolling steps crisply or glides per its notch glide; every other
+    /// wheel eases.
+    fn step_easing(&self, source: &ScrollSource) -> Easing {
+        match self.wheels.get(source) {
+            Some(state) => state
+                .momentum
+                .notch_glide()
+                .map_or(Easing::Crisp, Easing::Glide),
+            None => Easing::Smooth,
+        }
+    }
+
     /// One smoothed main-wheel impulse of `notches` raw wheel notches.
     ///
     /// `momentum` is the settings of the wheel's device, `None` while momentum
@@ -861,7 +881,9 @@ impl ScrollEngine {
                 if let GlideState::Spent { last, .. } = state.glide {
                     state.glide = GlideState::Idle { last: Some(last) };
                 }
-                self.impulse(source.clone(), impulse, at, emit);
+                // A quick turn scrolls each notch farther.
+                let boost = glide::acceleration(state.detector.speed(at), &momentum);
+                self.impulse(source.clone(), impulse.scale(boost), at, emit);
             }
             (WheelPhase::FreeSpin, &GlideState::Idle { last }, Some(direction)) => {
                 // `notches` is the raw count in the same direction as
@@ -1015,12 +1037,7 @@ impl ScrollEngine {
         emit: &mut impl FnMut(ScrollFrame),
     ) {
         let pixels = self.pixels_for(&source);
-        // Momentum scrolling's wheel steps crisply; every other wheel eases.
-        let easing = if pixels.is_some() {
-            Easing::Crisp
-        } else {
-            Easing::Smooth
-        };
+        let easing = self.step_easing(&source);
         if self
             .active
             .get(&source)

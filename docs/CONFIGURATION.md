@@ -57,7 +57,7 @@ parsing its fields. A v10 file without the section loads with Flow disabled.
 
 ## Shape
 
-`schema_version` is required and currently `11`. `selected_device` is an
+`schema_version` is required and currently `12`. `selected_device` is an
 optional physical device key.
 
 `[app_settings]` contains application-wide preferences:
@@ -97,6 +97,14 @@ optional physical device key.
     while the page still glides, or soon after it stopped, the same way,
     multiplies the glide by this much each time, up to 3× past
     `max_glide_speed`; `100` turns it off
+  - `notch_glide_ms`, `0` or `60` through `600` (default `0`): how long each
+    ratchet notch glides out. The page moves fastest as the notch lands and
+    coasts to a stop; a notch landing mid-glide adds to the distance left, so
+    a steady turn reads as one motion. `0` keeps the crisp 40 ms step
+  - `acceleration`, `100` through `300` percent (default `100`): how much
+    farther a notch scrolls while the wheel turns quickly. Notches at 5 per
+    second or slower scroll `pixels_per_notch`; the multiplier rises linearly
+    to this value at 30 per second. `100` turns it off
 - `mouse_profile_target`: `pointer` (default, including existing configs that
   omit this preference) or `focused`. Mouse button profiles follow the window
   under the pointer; the desktop uses the global bindings. Keyboard profiles

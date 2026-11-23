@@ -1892,3 +1892,37 @@ fn each_wheel_follows_its_own_devices_momentum_settings() {
     assert!(engine.pixels_for(&gliding).is_some());
     assert_eq!(engine.pixels_for(&plain), None);
 }
+
+#[test]
+fn a_notch_glide_eases_out_over_its_length() {
+    let glide = Easing::Glide(Duration::from_millis(300));
+    assert_eq!(glide.duration(), Duration::from_millis(300));
+    assert!(glide.ease(0.0).abs() < 1e-12);
+    assert!((glide.ease(1.0) - 1.0).abs() < 1e-12);
+    // Fastest as the notch lands, then coasting: past halfway by a quarter.
+    assert!(glide.ease(0.25) > 0.5, "{}", glide.ease(0.25));
+    assert!(glide.ease(2.0) <= 1.0, "clamped");
+}
+
+#[test]
+fn momentum_steps_glide_only_with_a_notch_glide_set() {
+    let crisp = MomentumScrolling {
+        enabled: true,
+        ..MomentumScrolling::default()
+    }
+    .resolve()
+    .expect("enabled");
+    assert_eq!(
+        crisp.notch_glide(),
+        None,
+        "the crisp step stays the default"
+    );
+    let gliding = MomentumScrolling {
+        enabled: true,
+        notch_glide_ms: 300,
+        ..MomentumScrolling::default()
+    }
+    .resolve()
+    .expect("enabled");
+    assert_eq!(gliding.notch_glide(), Some(Duration::from_millis(300)));
+}

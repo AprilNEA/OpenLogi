@@ -68,6 +68,25 @@ pub(super) fn chain_boost(params: &MomentumParams, chain: u32) -> f64 {
         .min(MAX_CHAIN_BOOST)
 }
 
+/// Ratchet speed, in notches per second, below which a notch scrolls its
+/// plain distance: a hand turning the wheel notch by notch.
+const ACCEL_SLOW: f64 = 5.0;
+/// Ratchet speed at which acceleration reaches its full multiplier: a quick
+/// sweep of a finger across the wheel. Mac Mouse Fix ramps its per-notch
+/// distance linearly with tick rate in the same way.
+const ACCEL_FAST: f64 = 30.0;
+
+/// The distance multiplier for one ratchet notch while the wheel turns at
+/// `wheel_speed` notches per second: ×1 up to [`ACCEL_SLOW`], rising linearly
+/// to the user's acceleration at [`ACCEL_FAST`] and above.
+pub(super) fn acceleration(wheel_speed: f64, params: &MomentumParams) -> f64 {
+    if !wheel_speed.is_finite() {
+        return 1.0;
+    }
+    let ramp = ((wheel_speed - ACCEL_SLOW) / (ACCEL_FAST - ACCEL_SLOW)).clamp(0.0, 1.0);
+    1.0 + (params.acceleration() - 1.0) * ramp
+}
+
 /// The glide curve from `speed`.
 pub(super) fn curve(speed: f64, params: &MomentumParams) -> GlideCurve {
     GlideCurve::new(speed.max(0.0), params.glide_shape(), params.glide_length())
@@ -77,7 +96,10 @@ pub(super) fn curve(speed: f64, params: &MomentumParams) -> GlideCurve {
 mod tests {
     use openlogi_core::config::MomentumScrolling;
 
-    use super::{FLICK_MAX, HARD_SPIN, chain_boost, curve, flick_response, launch_speed};
+    use super::{
+        ACCEL_FAST, ACCEL_SLOW, FLICK_MAX, HARD_SPIN, acceleration, chain_boost, curve,
+        flick_response, launch_speed,
+    };
 
     fn params() -> openlogi_core::config::MomentumParams {
         MomentumScrolling {
@@ -124,5 +146,30 @@ mod tests {
         assert!((chain_boost(&p, 1) - 1.35).abs() < 1e-9);
         assert!((chain_boost(&p, 2) - 1.35 * 1.35).abs() < 1e-9);
         assert!((chain_boost(&p, 10) - 3.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn acceleration_ramps_from_slow_notches_to_a_quick_turn() {
+        let twice = MomentumScrolling {
+            enabled: true,
+            acceleration: 200,
+            ..MomentumScrolling::default()
+        }
+        .resolve()
+        .expect("enabled");
+        assert!(
+            (acceleration(ACCEL_SLOW, &twice) - 1.0).abs() < 1e-9,
+            "slow notches scroll their plain distance"
+        );
+        assert!((acceleration(ACCEL_FAST, &twice) - 2.0).abs() < 1e-9);
+        assert!(
+            (acceleration(ACCEL_FAST * 4.0, &twice) - 2.0).abs() < 1e-9,
+            "capped"
+        );
+        let middle = acceleration(f64::midpoint(ACCEL_SLOW, ACCEL_FAST), &twice);
+        assert!((middle - 1.5).abs() < 1e-9, "linear between: {middle}");
+        assert!((acceleration(f64::NAN, &twice) - 1.0).abs() < 1e-9);
+        // Off by default.
+        assert!((acceleration(ACCEL_FAST, &params()) - 1.0).abs() < 1e-9);
     }
 }
