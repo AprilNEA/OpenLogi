@@ -9,6 +9,7 @@ use super::*;
 use crate::services::ipc::{Command, ReadPowerOffTimeout, SetPowerOffTimeout};
 use crate::state::PowerOffTimeoutLoad;
 use openlogi_core::hid::{DeviceRoute, PowerOffTimeout};
+use std::time::Duration;
 
 fn minutes(raw: u8) -> PowerOffTimeout {
     PowerOffTimeout::try_new(raw).expect("a timeout in range")
@@ -186,6 +187,8 @@ fn a_headset_that_refuses_the_read_is_unsupported(cx: &mut gpui::TestAppContext)
             feature_hex: 0x1f20,
         }),
     );
+    // Let any retry the read policy would schedule come due.
+    cx.executor().advance_clock(Duration::from_secs(60));
     cx.run_until_parked();
 
     let load = current_load(cx);
@@ -221,4 +224,32 @@ fn a_moved_settings_revision_reads_the_headset_again(cx: &mut gpui::TestAppConte
     assert_eq!(answer_read(&mut receiver, &Ok(minutes(60))), route);
     cx.run_until_parked();
     assert_eq!(current_load(cx), Load::Ready(Arc::new(minutes(60))));
+}
+
+/// The headset switched itself off after its own timeout and came back.
+/// The reading from before may be stale, so the slider reads it again.
+#[gpui::test]
+fn a_reconnect_reads_the_headset_again(cx: &mut gpui::TestAppContext) {
+    let (state, mut receiver) = headset_state(true);
+    install(state, cx);
+    let route = answer_read(&mut receiver, &Ok(minutes(15)));
+    cx.run_until_parked();
+
+    let mut offline = headset_inventory(true);
+    offline.paired[0].online = false;
+    for inventory in [offline, headset_inventory(true)] {
+        let _ = cx.update(|cx| {
+            AppState::update(cx, |state, _| {
+                state.refresh_inventories(&[inventory], &[], &AssetResolver::new(), &[])
+            })
+        });
+        cx.run_until_parked();
+    }
+    assert_eq!(
+        answer_read(&mut receiver, &Ok(minutes(30))),
+        route,
+        "the reconnect reads the headset again"
+    );
+    cx.run_until_parked();
+    assert_eq!(current_load(cx), Load::Ready(Arc::new(minutes(30))));
 }
