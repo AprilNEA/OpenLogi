@@ -932,8 +932,9 @@ impl DeviceReads {
     }
 
     /// Re-read `key`'s automatic power-off timeout from the headset, keeping
-    /// the last value on screen while it answers. The fallback after a write
-    /// the headset refused.
+    /// the last value on screen while it answers: after a write the headset
+    /// refused, or a change the agent announced, when the shown value is no
+    /// longer known to be its own.
     pub(crate) fn refresh_power_off_timeout(&mut self, key: &DeviceKey) {
         if let Some(read) = self.power_off_timeout.get_mut(key) {
             read.query.revalidate();
