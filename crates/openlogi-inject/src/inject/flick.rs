@@ -11,32 +11,53 @@ use std::time::{Duration, Instant};
 /// between them. The first sample has no step before it, so the velocity
 /// stays unmeasured until a second one arrives. A clock that steps backwards
 /// reads as no time passing, which measures nothing.
-#[derive(Debug, Default)]
-pub(crate) struct FlickVelocity {
-    last_at: Option<Instant>,
-    velocity: Option<(f64, f64)>,
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub(crate) enum FlickVelocity {
+    /// No sample yet.
+    #[default]
+    Unsampled,
+    /// One sample: no step to measure.
+    Sampled { last_at: Instant },
+    /// Two or more samples: the latest timed step's velocity.
+    Measured {
+        last_at: Instant,
+        velocity: (f64, f64),
+    },
 }
 
 impl FlickVelocity {
     /// Record a step of `dx`, `dy` whose report arrived `at`.
     pub(crate) fn sample(&mut self, dx: f64, dy: f64, at: Instant) {
-        if let Some(previous) = self.last_at {
-            let elapsed = at.saturating_duration_since(previous).as_secs_f64();
-            if elapsed > 0.0 {
-                self.velocity = Some((dx / elapsed, dy / elapsed));
+        *self = match *self {
+            Self::Unsampled => Self::Sampled { last_at: at },
+            Self::Sampled { last_at } | Self::Measured { last_at, .. } => {
+                let elapsed = at.saturating_duration_since(last_at).as_secs_f64();
+                let last_at = last_at.max(at);
+                match (*self, elapsed > 0.0) {
+                    (_, true) => Self::Measured {
+                        last_at,
+                        velocity: (dx / elapsed, dy / elapsed),
+                    },
+                    (Self::Measured { velocity, .. }, false) => {
+                        Self::Measured { last_at, velocity }
+                    }
+                    (_, false) => Self::Sampled { last_at },
+                }
             }
-        }
-        self.last_at = Some(self.last_at.map_or(at, |previous| previous.max(at)));
+        };
     }
 
     /// The velocity to glide on after a release `released_at`: `None` while
     /// unmeasured, or when the hand rested longer than `max_rest` before it.
     pub(crate) fn exit(&self, released_at: Instant, max_rest: Duration) -> Option<(f64, f64)> {
-        let last = self.last_at?;
-        if released_at.saturating_duration_since(last) > max_rest {
-            return None;
+        match *self {
+            Self::Measured { last_at, velocity }
+                if released_at.saturating_duration_since(last_at) <= max_rest =>
+            {
+                Some(velocity)
+            }
+            _ => None,
         }
-        self.velocity
     }
 }
 

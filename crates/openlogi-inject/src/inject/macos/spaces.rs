@@ -682,7 +682,7 @@ pub(super) fn post_dock_drag(
         );
         return;
     };
-    CGEvent::post(CGEventTapLocation::SessionEventTap, Some(&event));
+    super::drag::post(&event);
     if let Some(gesture) = CGEvent::new(None) {
         CGEvent::set_type(Some(&gesture), CGEventType(29));
         CGEvent::set_double_value_field(Some(&gesture), CGEventField(41), 33_231.0);
@@ -691,7 +691,7 @@ pub(super) fn post_dock_drag(
             CGEventField::EventSourceUserData,
             super::super::SYNTHETIC_EVENT_USER_DATA,
         );
-        CGEvent::post(CGEventTapLocation::SessionEventTap, Some(&gesture));
+        super::drag::post(&gesture);
     }
 }
 

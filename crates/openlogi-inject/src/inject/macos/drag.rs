@@ -358,7 +358,7 @@ fn post_scroll_frame(px: f64, py: f64, phase: ScrollPhase, natural: bool) {
         CGEvent::set_integer_value_field(Some(&scroll), CGEventField(field), value);
     }
     tag(&scroll);
-    CGEvent::post(CGEventTapLocation::SessionEventTap, Some(&scroll));
+    post(&scroll);
     if matches!(phase, ScrollPhase::Momentum(_)) {
         return;
     }
@@ -379,7 +379,73 @@ fn post_scroll_frame(px: f64, py: f64, phase: ScrollPhase, natural: bool) {
     CGEvent::set_double_value_field(Some(&gesture), CGEventField(119), gesture_delta(py));
     CGEvent::set_integer_value_field(Some(&gesture), CGEventField(132), scroll_phase);
     tag(&gesture);
-    CGEvent::post(CGEventTapLocation::SessionEventTap, Some(&gesture));
+    post(&gesture);
+}
+
+/// Post one drag event at the session tap: the single exit for every event a
+/// drag sends, so tests can record what a drag would post instead.
+pub(super) fn post(event: &CFRetained<CGEvent>) {
+    #[cfg(test)]
+    if recording::capture(event) {
+        return;
+    }
+    CGEvent::post(CGEventTapLocation::SessionEventTap, Some(event));
+}
+
+/// Records what drags post while a test holds a [`recording::Recording`],
+/// and posts nothing then.
+#[cfg(test)]
+pub(super) mod recording {
+    use std::sync::{Mutex, MutexGuard, PoisonError};
+
+    use objc2_core_foundation::CFRetained;
+    use objc2_core_graphics::{CGEvent, CGEventField};
+
+    /// The window-server type of each event posted while recording.
+    static POSTED: Mutex<Option<Vec<i64>>> = Mutex::new(None);
+    /// One recording at a time: tests run in parallel.
+    static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+
+    pub(in crate::inject) struct Recording {
+        _turn: MutexGuard<'static, ()>,
+    }
+
+    impl Recording {
+        pub(in crate::inject) fn start() -> Self {
+            let turn = ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
+            *POSTED.lock().unwrap_or_else(PoisonError::into_inner) = Some(Vec::new());
+            Self { _turn: turn }
+        }
+
+        /// The type (`kCGSEventTypeField`) of every event posted so far.
+        #[expect(
+            clippy::unused_self,
+            reason = "reading needs the recording held, so its events are this test's"
+        )]
+        pub(in crate::inject) fn types(&self) -> Vec<i64> {
+            POSTED
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()
+                .unwrap_or_default()
+        }
+    }
+
+    impl Drop for Recording {
+        fn drop(&mut self) {
+            *POSTED.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        }
+    }
+
+    /// Record `event` if a recording is on; `true` when it was.
+    pub(super) fn capture(event: &CFRetained<CGEvent>) -> bool {
+        let mut posted = POSTED.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(posted) = posted.as_mut() else {
+            return false;
+        };
+        posted.push(CGEvent::integer_value_field(Some(event), CGEventField(55)));
+        true
+    }
 }
 
 fn tag(event: &CFRetained<CGEvent>) {
@@ -490,6 +556,51 @@ impl DockDrag {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `kCGEventMouseMoved`: what a drag moving the pointer posts.
+    const MOUSE_MOVED: i64 = 5;
+
+    /// A drag of `kind`: begin, two moves, a quick release, and any glide it
+    /// launched, stopped after a few frames.
+    fn play(kind: HeldDrag) {
+        let start = Instant::now();
+        let ms = |n| start + Duration::from_millis(n);
+        let mut drag = Drag::begin(kind, 20.0, 4.0, ms(0));
+        drag.moved(10.0, 2.0, ms(8));
+        drag.moved(12.0, 2.0, ms(16));
+        if let Some(glide) = drag.release(ms(20)) {
+            thread::sleep(Duration::from_millis(40));
+            glide.stop();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while glide.is_running() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(5));
+            }
+            assert!(!glide.is_running(), "the glide stops");
+        }
+    }
+
+    /// The fix for the shaking pointer and the freeze after release: a drag
+    /// never moves the pointer. Reverting to the pointer-following drag of
+    /// 0374959d posts `MOUSE_MOVED` events here and fails.
+    #[test]
+    fn drag_pointer_stays_still() {
+        let recording = recording::Recording::start();
+        play(HeldDrag::TwoFingerSwipe);
+        play(HeldDrag::ThreeFingerSwipe);
+        let posted = recording.types();
+        assert!(
+            posted.contains(&22),
+            "the two-finger drag scrolled: {posted:?}"
+        );
+        assert!(
+            posted.contains(&30),
+            "the three-finger drag swiped: {posted:?}"
+        );
+        assert!(
+            !posted.contains(&MOUSE_MOVED),
+            "the pointer moved: {posted:?}"
+        );
+    }
 
     #[test]
     fn scroll_phases_never_mix_touch_and_momentum() {
