@@ -27,8 +27,8 @@ use openlogi_device::inventory::{Enumerator, InventoryError};
 use openlogi_device::pairing::PairingReceiver;
 use openlogi_device::write::{
     self as device, Dpi, DpiInfo, FeatureEntry, FirmwareEntity, HapticWaveform, LightingMethod,
-    LitraModel, PointerScaling, ReprogControlEntry, ScrollResolution, ScrollWheelMode,
-    SidetoneLevel,
+    LitraModel, PointerScaling, PowerOffTimeout, ReprogControlEntry, ScrollResolution,
+    ScrollWheelMode, SidetoneLevel,
 };
 use openlogi_device::{ButtonSpyError, ButtonSpyWatch, LightWatch};
 use openlogi_device::{DeviceIoGate, DeviceIoSignal, DeviceRoute};
@@ -83,6 +83,20 @@ pub async fn set_sidetone(
     level: SidetoneLevel,
 ) -> Result<SidetoneLevel, WriteError> {
     device::set_sidetone(&*native_backend(), route, level).await
+}
+
+/// Read the automatic power-off timeout of the headset `route` reaches.
+pub async fn get_power_off_timeout(route: &DeviceRoute) -> Result<PowerOffTimeout, WriteError> {
+    device::get_power_off_timeout(&*native_backend(), route).await
+}
+
+/// Write an automatic power-off timeout to the headset `route` reaches and
+/// return the timeout it confirms.
+pub async fn set_power_off_timeout(
+    route: &DeviceRoute,
+    timeout: PowerOffTimeout,
+) -> Result<PowerOffTimeout, WriteError> {
+    device::set_power_off_timeout(&*native_backend(), route, timeout).await
 }
 
 /// Read the pointer-motion scaling of the device `route` reaches.
