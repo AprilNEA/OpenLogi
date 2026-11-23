@@ -70,18 +70,20 @@ pub async fn set_power_off_timeout_on(
 }
 
 /// A device can list `0x1F20` for its battery without answering function
-/// `1`, and it refuses the call with a HID++ error, so a refused read is the
-/// feature being unsupported. `Busy` is a transient answer, not a refusal.
+/// `1`, and it refuses the call, so a refusal is the feature being
+/// unsupported: `InvalidFunctionId`, `InvalidArgument` or `Unsupported`.
+/// Every other HID++ error, `Busy` or `HwError` among them, may pass and
+/// stays a retryable read error.
 async fn read(feature: &AdcMeasurementFeature) -> Result<PowerOffTimeout, WriteError> {
     let raw = feature
         .get_power_off_timeout()
         .await
         .map_err(|error| match error {
-            Hidpp20Error::Feature(kind) if kind != ErrorType::Busy => {
-                WriteError::FeatureUnsupported {
-                    feature_hex: AdcMeasurementFeature::ID,
-                }
-            }
+            Hidpp20Error::Feature(
+                ErrorType::InvalidFunctionId | ErrorType::InvalidArgument | ErrorType::Unsupported,
+            ) => WriteError::FeatureUnsupported {
+                feature_hex: AdcMeasurementFeature::ID,
+            },
             error => classify(error, HidppOperation::ReadPowerOffTimeout),
         })?;
     parse(raw, HidppOperation::ReadPowerOffTimeout)

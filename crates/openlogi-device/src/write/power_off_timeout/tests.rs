@@ -6,14 +6,19 @@ use std::sync::{Arc, Mutex};
 use super::*;
 use crate::channel::route::DeviceRoute;
 use crate::channel::scripted::{ScriptedRawHidChannel, feature_error, scripted_channel};
+use crate::write::HidppFeatureErrorKind;
 
 /// The `0x1F20` feature index on a G933.
 const ADC_INDEX: u8 = 0x08;
 /// HID++ 2.0 `InvalidFunctionId`, what a device without functions `1`/`2`
 /// answers.
 const INVALID_FUNCTION_ID: u8 = 0x07;
+/// HID++ 2.0 `HwError`.
+const HW_ERROR: u8 = 0x04;
 /// HID++ 2.0 `Busy`.
 const BUSY: u8 = 0x08;
+/// HID++ 2.0 `Unsupported`.
+const UNSUPPORTED: u8 = 0x09;
 
 /// A G933 as measured: it echoes each write and reads the new timeout back.
 struct Headset {
@@ -149,21 +154,48 @@ async fn a_refused_read_means_the_device_does_not_support_the_timeout() {
 }
 
 #[tokio::test]
-async fn a_busy_read_stays_a_retryable_error() {
+async fn an_unsupported_answer_means_the_device_does_not_support_the_timeout() {
     let headset = Arc::new(Mutex::new(Headset {
-        read_error: Some(BUSY),
+        read_error: Some(UNSUPPORTED),
         ..Headset::g933(0)
     }));
     let shared = headset_channel(&headset).await;
 
     assert_matches!(
         get_power_off_timeout_on(&shared).await,
-        Err(WriteError::HidppFeature {
-            operation: HidppOperation::ReadPowerOffTimeout,
-            feature_hex: 0x1f20,
-            ..
+        Err(WriteError::FeatureUnsupported {
+            feature_hex: 0x1f20
         })
     );
+}
+
+/// A busy or faulting headset may answer next time. Reading it as
+/// unsupported would hide the setting until it reconnects.
+#[tokio::test]
+async fn a_busy_or_faulting_read_stays_a_retryable_error() {
+    for (code, kind) in [
+        (BUSY, HidppFeatureErrorKind::Busy),
+        (HW_ERROR, HidppFeatureErrorKind::HwError),
+    ] {
+        let headset = Arc::new(Mutex::new(Headset {
+            read_error: Some(code),
+            ..Headset::g933(0)
+        }));
+        let shared = headset_channel(&headset).await;
+
+        let result = get_power_off_timeout_on(&shared).await;
+        assert!(
+            matches!(
+                result,
+                Err(WriteError::HidppFeature {
+                    operation: HidppOperation::ReadPowerOffTimeout,
+                    feature_hex: 0x1f20,
+                    kind: found,
+                }) if found == kind
+            ),
+            "error {code:#04x} gave {result:?}"
+        );
+    }
 }
 
 #[tokio::test]
