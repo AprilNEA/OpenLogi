@@ -1586,6 +1586,38 @@ fn a_sidetone_headset_opens_on_the_audio_tab() {
     assert_eq!(DetailTab::default_for(&headset), DetailTab::Audio);
 }
 
+/// A headset with an automatic power-off but no sidetone still needs the
+/// Audio tab: the power-off row lives there.
+#[test]
+fn a_power_off_only_headset_opens_on_the_audio_tab() {
+    let caps = Some(Capabilities {
+        power_off_timeout: true,
+        ..Capabilities::default()
+    });
+    let headset = record(DeviceKind::Headset, caps);
+    assert_eq!(
+        DetailTab::tabs_for(&headset),
+        vec![DetailTab::Audio, DetailTab::Device]
+    );
+    assert_eq!(DetailTab::default_for(&headset), DetailTab::Audio);
+}
+
+/// A G933 has both settings; they share one Audio tab rather than adding a
+/// second.
+#[test]
+fn a_headset_with_sidetone_and_power_off_has_one_audio_tab() {
+    let caps = Some(Capabilities {
+        sidetone: true,
+        power_off_timeout: true,
+        ..Capabilities::default()
+    });
+    let headset = record(DeviceKind::Headset, caps);
+    assert_eq!(
+        DetailTab::tabs_for(&headset),
+        vec![DetailTab::Audio, DetailTab::Device]
+    );
+}
+
 /// An unprobed (offline) device has no measured capabilities and falls back
 /// to a kind presumption, so a sleeping mouse keeps its button/pointer tabs.
 #[test]

@@ -88,7 +88,7 @@ enum DetailTab {
     Camera,
     /// Standalone light controls driven by a raw-HID device driver.
     Light,
-    /// Headset audio — sidetone.
+    /// Headset audio — sidetone and automatic power-off.
     Audio,
     /// Device info and configuration.
     Device,
@@ -188,7 +188,7 @@ impl DetailTab {
         if record.light_capabilities.is_some() {
             tabs.push(Self::Light);
         }
-        if caps.sidetone {
+        if caps.sidetone || caps.power_off_timeout {
             tabs.push(Self::Audio);
         }
         tabs.push(Self::Device);

@@ -814,8 +814,8 @@ fn wheel_resolution_control(
         })
 }
 
-/// Audio tab: the headset's sidetone in one untitled card — the rail already
-/// names the page "Audio", as with Lighting.
+/// Audio tab: the headset's sidetone and automatic power-off in one untitled
+/// card — the rail already names the page "Audio", as with Lighting.
 fn audio_tab(audio_panel: &gpui::Entity<AudioPanel>) -> impl IntoElement {
     tab_body(
         DetailTab::Audio,
