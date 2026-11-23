@@ -364,6 +364,7 @@ async fn capture_hidpp_settings(
         force_sensing,
         disable_keys,
         sidetone,
+        power_off_timeout: ProfileSetting::Unsupported,
         lighting: profile_support(capabilities.lighting),
         light: ProfileSupport::Unsupported,
     })
@@ -446,6 +447,7 @@ fn capture_standalone(source: &StandaloneDevice) -> Result<ProfileCaptureParts> 
         force_sensing: ProfileSetting::Unsupported,
         disable_keys: ProfileSetting::Unsupported,
         sidetone: ProfileSetting::Unsupported,
+        power_off_timeout: ProfileSetting::Unsupported,
         lighting: ProfileSupport::Unsupported,
         light: profile_support(light_supported),
     };
