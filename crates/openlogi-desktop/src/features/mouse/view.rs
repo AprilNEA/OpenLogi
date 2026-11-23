@@ -76,6 +76,7 @@ const MODEL_VERTICAL_RESERVE: f32 = 154.;
 
 mod labels;
 use labels::{CardSize, MAX_VALUE_LINES, ValueMetrics, binding_label_for_control, label_control};
+pub(super) use labels::{drag_hold_icon, drag_hold_text};
 /// Floor for the scaled model height. Below this the evenly-slotted side labels
 /// (≈[`LABEL_H`](super::geometry::LABEL_H) each) start to overlap; the window's minimum height is sized to
 /// keep the viewport above [`MODEL_VERTICAL_RESERVE`] + this.
@@ -550,7 +551,9 @@ impl Render for MouseModelView {
             })
             .collect();
 
-        let value = |control| binding_label_for_control(control, bindings, &gesture_buttons).text;
+        let value = |control| {
+            binding_label_for_control(control, bindings, &gesture_buttons, drag_hold).text
+        };
         let ModelLayout {
             canvas_w,
             canvas_h,
@@ -585,7 +588,8 @@ impl Render for MouseModelView {
             .child(breathing_art)
             .child(leader_canvas)
             .children(labels_outer.iter().enumerate().map(|(idx, label)| {
-                let binding = binding_label_for_control(label.id, bindings, &gesture_buttons);
+                let binding =
+                    binding_label_for_control(label.id, bindings, &gesture_buttons, drag_hold);
                 label_control(
                     idx,
                     *label,

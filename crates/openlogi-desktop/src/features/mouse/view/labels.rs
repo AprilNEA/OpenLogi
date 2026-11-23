@@ -15,7 +15,7 @@ use gpui::{
 };
 use gpui_kit::base::Button as BaseButton;
 use gpui_kit::component::{Icon, IconName, h_flex};
-use openlogi_core::binding::{Action, ButtonId, default_binding};
+use openlogi_core::binding::{Action, ButtonId, HeldDrag, default_binding};
 
 use super::{ModelRect, MouseModelView, SIDE_GAP, set_control_hovered};
 
@@ -317,11 +317,37 @@ impl RenderOnce for LabelTrigger {
     }
 }
 
+/// The callout label of a drag-hold button: its swipe.
+fn drag_hold_label(drag: HeldDrag) -> BindingLabel {
+    BindingLabel {
+        text: drag_hold_text(drag),
+        icon: Some(drag_hold_icon(drag)),
+    }
+}
+
+/// A drag-hold swipe's name, on its callout and its inspector choice.
+pub(in crate::features::mouse) fn drag_hold_text(drag: HeldDrag) -> SharedString {
+    match drag {
+        HeldDrag::TwoFingerSwipe => tr!("actions.two_finger_swipe"),
+        HeldDrag::ThreeFingerSwipe => tr!("actions.three_finger_swipe"),
+    }
+}
+
+/// A drag-hold swipe's icon: scrolling for two fingers, the Spaces grid for
+/// three.
+pub(in crate::features::mouse) const fn drag_hold_icon(drag: HeldDrag) -> &'static str {
+    match drag {
+        HeldDrag::TwoFingerSwipe => "action-icons/scroll-text.svg",
+        HeldDrag::ThreeFingerSwipe => "action-icons/layout-grid.svg",
+    }
+}
+
 /// The label card's text and icon for one control.
 pub(super) fn binding_label_for_control(
     control: MouseControlId,
     bindings: &std::collections::BTreeMap<ButtonId, Action>,
     gesture_buttons: &[ButtonId],
+    drag_holds: &std::collections::BTreeMap<ButtonId, HeldDrag>,
 ) -> BindingLabel {
     if control
         .button()
@@ -331,6 +357,11 @@ pub(super) fn binding_label_for_control(
             text: tr!("actions.five_directions"),
             icon: Some(GESTURE_BUTTON_ICON),
         };
+    }
+    // A drag-hold button reads as its swipe, as a gesture button reads as
+    // its directions: the swipe is what holding it does.
+    if let Some(drag) = control.button().and_then(|button| drag_holds.get(&button)) {
+        return drag_hold_label(*drag);
     }
 
     match control {

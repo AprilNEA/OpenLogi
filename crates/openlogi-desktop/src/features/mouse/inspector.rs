@@ -24,7 +24,7 @@ use openlogi_core::binding::{
 use super::editor_mode::Selection;
 use super::force_sensing::{PressForce, force_sensing_row};
 use super::thumbwheel::ThumbwheelPreset;
-use super::view::MouseModelView;
+use super::view::{MouseModelView, drag_hold_icon, drag_hold_text};
 use crate::features::binding_editor::{
     ActionOffer, GESTURE_BUTTON_ICON, PickFn, action_icon_path, action_rows_with,
     application_editor, command_editor, editor_section, gesture_direction_icon,
@@ -232,6 +232,13 @@ fn button_inspector(
         .get(&button)
         .cloned()
         .unwrap_or_else(|| default_binding_on(data.layout, button));
+    // Drag-hold mode, like gesture mode, lives in the global profile only.
+    let drag = data
+        .editing_app
+        .is_none()
+        .then(|| data.drag_hold.get(&button).copied())
+        .flatten();
+    let offer_drag = drag.is_none() && data.editing_app.is_none() && offers_drag_hold(button, data);
     let observer = picker.view.clone();
     let on_pick: PickFn = Rc::new(move |action, _window, cx| {
         AppState::apply(cx, |state| state.commit_binding(button, action));
@@ -245,9 +252,20 @@ fn button_inspector(
         .gap_3()
         .child(inspector_heading(
             tr!(button.translation_key()),
-            Some(button_status(button, &action, data, overridden)),
+            Some(drag.map_or_else(
+                || button_status(button, &action, data, overridden),
+                |_| tr!("actions.hold_and_drag"),
+            )),
             pal,
         ))
+        .when_some(drag, |panel, drag| {
+            panel.child(drag_swipe_choice(button, drag, pal, cx)).child(
+                div()
+                    .text_caption()
+                    .text_color(pal.text_muted)
+                    .child(tr!("actions.drag_hold_click")),
+            )
+        })
         .child(current_action_card(&action, picker, pal))
         .children(wheel_hold_section(
             button,
@@ -256,14 +274,7 @@ fn button_inspector(
             picker.view,
             pal,
         ))
-        .children(drag_hold_section(
-            button,
-            data,
-            overridden,
-            picker.view,
-            pal,
-            cx,
-        ))
+        .children(drag_hold_app_note(button, data, overridden, pal))
         .when(overridden, |panel| {
             let observer = picker.view.clone();
             panel.child(
@@ -306,6 +317,19 @@ fn button_inspector(
                             .child(tr!("actions.dpi_gestures_unavailable")),
                     )
                 })
+        })
+        .when(offer_drag, |panel| {
+            panel.child(use_drag_hold_button(button, picker.view))
+        })
+        .when(drag.is_some(), |panel| {
+            panel.child(
+                control_button("inspector-drag-single-action")
+                    .w_full()
+                    .label(tr!("actions.use_a_single_action"))
+                    .on_click(move |_, _, cx| {
+                        AppState::apply(cx, |state| state.commit_drag_hold(button, None));
+                    }),
+            )
         })
         .children(
             data.press_force
@@ -417,67 +441,69 @@ fn offers_drag_hold(button: ButtonId, data: &BindingInspectorData<'_>) -> bool {
     cfg!(target_os = "macos") && button.supports_drag_hold() && data.drag_hold_capable
 }
 
-/// Back/Forward's hold-and-drag control: the swipe choice in the global
-/// profile, or, in an app profile that has not overridden the button, a note
-/// that an action picked there replaces it.
-fn drag_hold_section(
+/// In an app profile that has not overridden a drag-hold button, a note that
+/// an action picked there replaces the drag.
+fn drag_hold_app_note(
     button: ButtonId,
     data: &BindingInspectorData<'_>,
     overridden: bool,
-    view: &Entity<MouseModelView>,
     pal: Palette,
-    cx: &gpui::App,
 ) -> Option<gpui::AnyElement> {
-    let drag = data.drag_hold.get(&button).copied();
-    match data.editing_app {
-        // A swipe carried over from another platform can still be turned off.
-        None if offers_drag_hold(button, data) || drag.is_some() => {
-            Some(drag_hold_row(button, drag, view, pal, cx).into_any_element())
-        }
-        Some(app) if drag.is_some() && !overridden => Some(
-            div()
-                .debug_selector(|| "inspector-drag-hold-app-note".into())
-                .text_caption()
-                .text_color(pal.text_muted)
-                .child(tr!(
-                    "actions.app_profile_action_replaces_drag_hold",
-                    app => app.to_string()
-                ))
-                .into_any_element(),
-        ),
-        _ => None,
+    let app = data.editing_app?;
+    (data.drag_hold.contains_key(&button) && !overridden).then(|| {
+        div()
+            .debug_selector(|| "inspector-drag-hold-app-note".into())
+            .text_caption()
+            .text_color(pal.text_muted)
+            .child(tr!(
+                "actions.app_profile_action_replaces_drag_hold",
+                app => app.to_string()
+            ))
+            .into_any_element()
+    })
+}
+
+/// The swipe a drag-hold mode starts on: Back switches Spaces, Forward
+/// scrolls, as Mac Mouse Fix sets them up.
+const fn first_drag(button: ButtonId) -> HeldDrag {
+    match button {
+        ButtonId::Back => HeldDrag::ThreeFingerSwipe,
+        _ => HeldDrag::TwoFingerSwipe,
     }
 }
 
-/// Back/Forward's hold-and-drag choice: off, a two-finger swipe, or a
-/// three-finger swipe. Shown only in the global profile, like wheel-hold.
-/// The gesture inspector offers it too; picking a swipe there leaves gesture
-/// mode, so the selected direction goes back to Click.
-fn drag_hold_row(
+/// "Use hold and drag": puts Back/Forward in drag-hold mode, as "Use
+/// gestures" puts a button in gesture mode. From gesture mode it leaves the
+/// direction map stashed, so the selected direction goes back to Click.
+fn use_drag_hold_button(button: ButtonId, view: &Entity<MouseModelView>) -> impl IntoElement {
+    let observer = view.clone();
+    control_button("inspector-use-hold-and-drag")
+        .w_full()
+        .icon(Icon::empty().path(drag_hold_icon(first_drag(button))))
+        .label(tr!("actions.use_hold_and_drag"))
+        .on_click(move |_, _, cx| {
+            AppState::apply(cx, |state| {
+                state.commit_drag_hold(button, Some(first_drag(button)))
+            });
+            observer.update(cx, |view, cx| {
+                view.select_gesture_direction(GestureDirection::Click);
+                cx.notify();
+            });
+        })
+}
+
+/// Drag-hold mode's swipe: two or three fingers. Leaving the mode is "Use a
+/// single action", as in gesture mode.
+fn drag_swipe_choice(
     button: ButtonId,
-    current: Option<HeldDrag>,
-    view: &Entity<MouseModelView>,
+    current: HeldDrag,
     pal: Palette,
     cx: &gpui::App,
 ) -> impl IntoElement {
-    let choices: [(&'static str, Option<HeldDrag>, gpui::SharedString); 3] = [
-        (
-            "inspector-drag-hold-off",
-            None,
-            tr!("actions.drag_hold_off"),
-        ),
-        (
-            "inspector-drag-hold-two",
-            Some(HeldDrag::TwoFingerSwipe),
-            tr!("actions.two_finger_swipe"),
-        ),
-        (
-            "inspector-drag-hold-three",
-            Some(HeldDrag::ThreeFingerSwipe),
-            tr!("actions.three_finger_swipe"),
-        ),
+    let choices = [
+        ("inspector-drag-hold-two", HeldDrag::TwoFingerSwipe),
+        ("inspector-drag-hold-three", HeldDrag::ThreeFingerSwipe),
     ];
-    let view = view.clone();
     stacked_row(
         "inspector-drag-hold-row",
         pal,
@@ -485,22 +511,15 @@ fn drag_hold_row(
         tr!("actions.hold_and_drag_description"),
         ButtonGroup::new("inspector-drag-hold")
             .outline()
-            .children(choices.map(|(id, drag, label)| {
-                let observer = view.clone();
+            .children(choices.map(|(id, drag)| {
                 Button::new(id)
-                    .label(label)
+                    .label(drag_hold_text(drag))
                     .selected(current == drag)
                     .selected_segment(current == drag, cx)
                     .focus_visible(move |style| style.focus_ring(pal))
                     .debug_selector(move || id.into())
                     .on_click(move |_, _, cx| {
-                        AppState::apply(cx, |state| state.commit_drag_hold(button, drag));
-                        if drag.is_some() {
-                            observer.update(cx, |view, cx| {
-                                view.select_gesture_direction(GestureDirection::Click);
-                                cx.notify();
-                            });
-                        }
+                        AppState::apply(cx, |state| state.commit_drag_hold(button, Some(drag)));
                     })
             })),
     )
@@ -610,7 +629,7 @@ fn gesture_inspector(
             panel.child(wheel_hold_row(button, false, picker.view, pal))
         })
         .when(offers_drag_hold(button, data), |panel| {
-            panel.child(drag_hold_row(button, None, picker.view, pal, cx))
+            panel.child(use_drag_hold_button(button, picker.view))
         })
         .child(
             control_button("inspector-single-action")

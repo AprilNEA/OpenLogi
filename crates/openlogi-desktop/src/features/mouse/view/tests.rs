@@ -1222,3 +1222,22 @@ fn the_model_and_full_values_fit_the_canvas_area_below_the_chrome(cx: &mut TestA
     cx.update(|window, _| window.remove_window());
     cx.run_until_parked();
 }
+
+#[test]
+fn a_drag_hold_callout_names_its_swipe_like_a_gesture_callout() {
+    use openlogi_core::binding::HeldDrag;
+
+    let bindings = BTreeMap::from([(ButtonId::Back, Action::Paste)]);
+    let drags = BTreeMap::from([(ButtonId::Back, HeldDrag::ThreeFingerSwipe)]);
+    let back = MouseControlId::Button(ButtonId::Back);
+
+    let label = super::labels::binding_label_for_control(back, &bindings, &[], &drags);
+    assert_eq!(label.text, tr!("actions.three_finger_swipe"));
+
+    // Without a drag hold the callout shows the click action.
+    let plain = super::labels::binding_label_for_control(back, &bindings, &[], &BTreeMap::new());
+    assert_eq!(
+        plain.text,
+        crate::ui::action::localized_action_label(&Action::Paste)
+    );
+}
