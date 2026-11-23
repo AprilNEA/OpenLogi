@@ -308,15 +308,19 @@ pub struct PlanDevice<'a> {
 }
 
 /// The Back/Forward controls bound to a drag hold, to divert with raw XY. A
-/// drag hold streams its motion as a trackpad gesture, which works only while
-/// the agent can post events; raw XY also keeps the pointer still while the
-/// hand drags.
+/// drag hold streams its motion as a trackpad gesture, which only macOS
+/// plays, and only while the agent can post events. Elsewhere the binding is
+/// click-only: the control is plain-diverted, so its click still runs on
+/// release and no drag can swallow it.
 fn drag_hold_buttons(
     config: &Config,
     bindings: &BTreeMap<ButtonId, Binding>,
     os_mouse_hook_available: bool,
 ) -> Vec<(u16, ButtonId)> {
-    if !os_mouse_hook_available || !config.app_settings.capture_mouse_events {
+    if !cfg!(target_os = "macos")
+        || !os_mouse_hook_available
+        || !config.app_settings.capture_mouse_events
+    {
         return Vec::new();
     }
     DIVERTABLE_STANDARD_BUTTONS
@@ -886,6 +890,19 @@ mod tests {
             .any(|&(_, diverted)| diverted == button)
     }
 
+    #[test]
+    fn drag_hold_platform_fallback() {
+        // macOS plays the swipe from raw XY; every other platform keeps the
+        // binding click-only through a plain divert, hook or not.
+        let plan = plan_for_device(&drag_hold_config(true), "2b01a", route(), None, 0, true);
+        let plays_swipes = cfg!(target_os = "macos");
+        for button in [ButtonId::Back, ButtonId::Forward] {
+            assert_eq!(raw_xy_diverts(&plan, button), plays_swipes, "{button}");
+            assert_eq!(diverts(&plan, button), !plays_swipes, "{button}");
+        }
+    }
+
+    #[cfg(target_os = "macos")]
     #[test]
     fn drag_hold_thumb_buttons_divert_raw_xy_while_gestures_can_be_posted() {
         let plan = plan_for_device(&drag_hold_config(true), "2b01a", route(), None, 0, true);
