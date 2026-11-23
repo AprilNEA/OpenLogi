@@ -15,7 +15,7 @@ fn speed(raw: u16) -> PointerSpeed {
 /// An online mouse `a` whose speed `0x2205` scales.
 fn scaled_mouse() -> AgentDevice {
     let mut device = dev("a", 1, true);
-    device.capabilities = Some(Capabilities {
+    device.probe = ProbeState::Hidpp20(Capabilities {
         pointer_scaling: true,
         ..Capabilities::default()
     });
@@ -25,7 +25,7 @@ fn scaled_mouse() -> AgentDevice {
 /// An online mouse `a` whose sensor DPI sets its speed.
 fn dpi_mouse() -> AgentDevice {
     let mut device = dev("a", 1, true);
-    device.capabilities = Some(Capabilities {
+    device.probe = ProbeState::Hidpp20(Capabilities {
         pointer: true,
         ..Capabilities::default()
     });
@@ -66,7 +66,7 @@ fn saved_speed_follows_the_speed_feature_and_the_saved_value() {
     );
 
     // Sensor DPI sets the speed of a DPI mouse, even with `0x2205`.
-    device.capabilities = Some(Capabilities {
+    device.probe = ProbeState::Hidpp20(Capabilities {
         pointer: true,
         pointer_scaling: true,
         ..Capabilities::default()
@@ -79,9 +79,9 @@ fn saved_speed_follows_the_speed_feature_and_the_saved_value() {
     );
 
     // A mouse without either feature, or not yet probed, is never written.
-    device.capabilities = Some(Capabilities::default());
+    device.probe = ProbeState::Hidpp20(Capabilities::default());
     assert_eq!(saved_speed(&config, &device), None);
-    device.capabilities = None;
+    device.probe = ProbeState::Unprobed;
     assert_eq!(saved_speed(&config, &device), None);
 }
 

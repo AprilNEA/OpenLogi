@@ -11,7 +11,7 @@ use openlogi_core::device_order::{DeviceIdentity, DeviceStableId};
 use openlogi_hid::session::gesture::MainWheelDivert;
 use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute, Dpi, LeadCookie, ReportRate};
 
-use super::AgentDevice;
+use super::{AgentDevice, ProbeState};
 use crate::hardware::WheelModeChange;
 use crate::pointer_speed::SavedSpeed;
 use crate::watchers::host_switch::HostSwitchLink;
@@ -52,7 +52,10 @@ pub(super) fn main_wheel_divert(
         && config.app_settings.capture_mouse_events
         && config.device_enabled(&dev.config_key)
         && config.smooth_wheel(&dev.config_key)
-        && dev.capabilities.is_some_and(|caps| caps.hires_wheel);
+        && dev
+            .probe
+            .capabilities()
+            .is_some_and(|caps| caps.hires_wheel);
     if !wanted {
         return None;
     }
@@ -73,7 +76,7 @@ fn wheel_settings(
     config: &Config,
     dev: &AgentDevice,
 ) -> Option<(Option<ScrollResolution>, Option<bool>)> {
-    let capabilities = dev.capabilities?;
+    let capabilities = dev.probe.capabilities()?;
     let route_key = stable_id(dev).route_key();
     let device = config.devices.get(dev.config_key.as_str());
     let resolution = capabilities
@@ -94,7 +97,7 @@ fn wheel_settings(
 /// from the device-level setting (`Orchestrator::publish_scroll_inversion`).
 /// Unknown capabilities write and reverse nothing, so nothing is inverted.
 pub(super) fn wheel_inverted(config: &Config, dev: &AgentDevice) -> bool {
-    match dev.capabilities {
+    match dev.probe.capabilities() {
         Some(capabilities) if capabilities.scroll_inversion => config
             .devices
             .get(dev.config_key.as_str())
@@ -108,7 +111,8 @@ pub(super) fn wheel_inverted(config: &Config, dev: &AgentDevice) -> bool {
 /// report-rate feature, so a rate saved for a mouse is never written to
 /// whatever later answers under the same key without one.
 pub(super) fn configured_report_rate(config: &Config, dev: &AgentDevice) -> Option<ReportRate> {
-    dev.capabilities
+    dev.probe
+        .capabilities()
         .is_some_and(|caps| caps.report_rate)
         .then(|| config.report_rate(&dev.config_key))
         .flatten()
@@ -118,7 +122,8 @@ pub(super) fn configured_report_rate(config: &Config, dev: &AgentDevice) -> Opti
 /// the probe found a force-sensing button whose force software may change,
 /// so nothing is written to a device the user never set a force for.
 pub(super) fn configured_force_sensing(config: &Config, dev: &AgentDevice) -> Option<u16> {
-    dev.capabilities
+    dev.probe
+        .capabilities()
         .is_some_and(|caps| caps.force_sensing)
         .then(|| config.force_sensing(&dev.config_key))
         .flatten()
@@ -151,7 +156,7 @@ pub(super) fn changed_force_sensing(
 ///
 /// [`Capabilities::pointer_scaling`]: openlogi_core::device::Capabilities::pointer_scaling
 pub(super) fn saved_speed(config: &Config, dev: &AgentDevice) -> Option<SavedSpeed> {
-    let caps = dev.capabilities?;
+    let caps = dev.probe.capabilities()?;
     if caps.pointer {
         Some(SavedSpeed::Dpi(configured_dpi(config, dev)))
     } else if caps.pointer_scaling {
@@ -230,8 +235,7 @@ pub(super) fn build_devices(
                 slot: paired.slot,
                 serial: model.serial_number.clone(),
                 unit_id: model.unit_id,
-                capabilities: paired.capabilities,
-                hidpp10: paired.hidpp10,
+                probe: ProbeState::from_paired(paired.capabilities, paired.hidpp10),
                 kind: paired.kind,
                 light_capabilities: None,
                 online: paired.online,
@@ -262,8 +266,7 @@ pub(super) fn build_devices(
             slot: DIRECT_DEVICE_INDEX,
             serial: device.serial_number.clone(),
             unit_id: device.unit_id,
-            capabilities: device.capabilities,
-            hidpp10: false,
+            probe: ProbeState::from_paired(device.capabilities, false),
             kind: device.kind,
             light_capabilities: device.light_capabilities,
             online: device.online,
@@ -748,7 +751,8 @@ pub(super) fn settings_moved(prev: &[AgentDevice], next: &[AgentDevice]) -> Vec<
 /// keyboard whose feature walk failed until after its reconnect reapply. A
 /// device that just came online or changed route is reapplied instead.
 pub(super) fn os_layout_appeared(prev: &[AgentDevice], next: &[AgentDevice]) -> Vec<usize> {
-    let has_os_layout = |dev: &AgentDevice| dev.capabilities.is_some_and(|caps| caps.os_layout);
+    let has_os_layout =
+        |dev: &AgentDevice| dev.probe.capabilities().is_some_and(|caps| caps.os_layout);
     next.iter()
         .enumerate()
         .filter(|(_, dev)| dev.online && dev.route.is_some() && has_os_layout(dev))
@@ -771,7 +775,7 @@ pub(super) fn config_keeps_os_layout(config: &Config, key: &str) -> bool {
 /// Whether `config` keeps `dev`'s key layout on the host OS: a keyboard whose
 /// platform software can set, enabled, with the setting on.
 pub(super) fn keeps_os_layout(config: &Config, dev: &AgentDevice) -> bool {
-    dev.capabilities.is_some_and(|caps| caps.os_layout)
+    dev.probe.capabilities().is_some_and(|caps| caps.os_layout)
         && config_keeps_os_layout(config, &dev.config_key)
 }
 

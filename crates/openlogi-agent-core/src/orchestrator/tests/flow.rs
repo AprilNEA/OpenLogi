@@ -56,3 +56,14 @@ fn flow_learns_which_devices_can_switch_hosts() {
     assert!(!switches(None, true));
     assert!(switches(None, false), "not probed yet");
 }
+
+/// A HID++ 1.0 answer leaves no feature table, so capabilities arriving
+/// beside it are not taken as measured, and the device still can't switch.
+#[test]
+fn a_hidpp10_device_never_carries_measured_capabilities() {
+    let probe = ProbeState::from_paired(Some(Capabilities::from_feature_ids(&[0x1814])), true);
+
+    assert_eq!(probe, ProbeState::Hidpp10);
+    assert!(probe.capabilities().is_none());
+    assert!(!probe.switch_hosts());
+}

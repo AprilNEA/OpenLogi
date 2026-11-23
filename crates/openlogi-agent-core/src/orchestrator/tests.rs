@@ -2,7 +2,7 @@
 
 use super::{
     AgentDevice, FollowerCookieState, FollowerCookieWrite, InventoryHealth, Orchestrator,
-    RECONNECT_REAPPLY_CONFIRM_RETRIES, VOLATILE_REAPPLY_CONFIRM_RETRIES, build_devices,
+    ProbeState, RECONNECT_REAPPLY_CONFIRM_RETRIES, VOLATILE_REAPPLY_CONFIRM_RETRIES, build_devices,
     changed_follower_cookies, changed_force_sensing, configured_disabled_keys,
     configured_force_sensing, configured_report_rate, configured_wheel_mode, desktop_switch,
     host_switch_links, keeps_os_layout, main_wheel_divert, newly_kept_os_layouts,
@@ -64,8 +64,7 @@ fn dev(key: &str, slot: u8, online: bool) -> AgentDevice {
         slot,
         serial: None,
         unit_id: [0; 4],
-        capabilities: None,
-        hidpp10: false,
+        probe: ProbeState::Unprobed,
         kind: openlogi_core::device::DeviceKind::Mouse,
         light_capabilities: None,
         online,
