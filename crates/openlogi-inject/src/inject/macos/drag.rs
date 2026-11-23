@@ -38,6 +38,13 @@ const SPACE_SEPARATOR_WIDTH: f64 = 63.0;
 /// A release later than this after the last motion starts no momentum: the
 /// hand had stopped.
 const MOMENTUM_MAX_IDLE: Duration = Duration::from_millis(50);
+/// Weight of the newest raw-XY report in a three-finger drag's velocity: a
+/// short average, so one stray report as the hand lets go cannot flip it.
+const DOCK_VELOCITY_WEIGHT: f64 = 0.35;
+/// A three-finger drag whose hand rested this long before release ends with
+/// no exit velocity: the Dock then decides from how far it was dragged.
+const DOCK_REST: Duration = Duration::from_millis(60);
+
 /// Momentum decelerates as `dv/dt = -DRAG * v^DRAG_EXPONENT` (points/s), and
 /// stops below `STOP_SPEED`. Mac Mouse Fix's constants for its swipes.
 const DRAG: f64 = 30.0;
@@ -289,7 +296,9 @@ pub(in crate::inject) struct DockDrag {
     scale: f64,
     natural: bool,
     progress: f64,
-    last: f64,
+    /// Smoothed progress per report, signed like `progress`.
+    velocity: f64,
+    moved_at: Instant,
 }
 
 impl DockDrag {
@@ -308,7 +317,8 @@ impl DockDrag {
             scale,
             natural: spaces::natural_scrolling(),
             progress: 0.0,
-            last: 0.0,
+            velocity: 0.0,
+            moved_at: Instant::now(),
         };
         drag.post(dx, dy, PHASE_BEGAN);
         drag
@@ -327,7 +337,8 @@ impl DockDrag {
             return;
         }
         self.progress += delta;
-        self.last = delta;
+        self.velocity += DOCK_VELOCITY_WEIGHT * (delta - self.velocity);
+        self.moved_at = Instant::now();
         spaces::post_dock_drag(
             self.axis,
             phase_u32(phase),
@@ -338,18 +349,31 @@ impl DockDrag {
     }
 
     fn end(self) {
-        // The swipe completes when the hand was still moving the way it went;
-        // a hand moving back cancels it, as on a trackpad.
-        let phase = if self.last.signum() == self.progress.signum() {
-            PHASE_ENDED
+        // A hand that came to rest lets the Dock decide from the distance; a
+        // hand still moving back cancels the swipe, as on a trackpad. The
+        // velocity is averaged, so a wobble as the button lets go does not.
+        let velocity = if self.moved_at.elapsed() > DOCK_REST {
+            0.0
         } else {
-            PHASE_CANCELLED
+            self.velocity
         };
+        let phase = if velocity != 0.0 && velocity.signum() != self.progress.signum() {
+            PHASE_CANCELLED
+        } else {
+            PHASE_ENDED
+        };
+        tracing::debug!(
+            axis = ?self.axis,
+            progress = self.progress,
+            velocity,
+            cancelled = phase == PHASE_CANCELLED,
+            "three-finger drag ended"
+        );
         spaces::post_dock_drag(
             self.axis,
             phase_u32(phase),
             self.progress,
-            Some(self.last * 100.0),
+            Some(velocity * 100.0),
             self.natural,
         );
     }

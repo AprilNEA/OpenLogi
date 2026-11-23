@@ -518,6 +518,40 @@ fn pointer_change_retargets_a_gesture_hold_instead_of_canceling_it() {
 }
 
 #[test]
+fn pointer_change_keeps_a_used_hold_and_cancels_one_still_owing_its_click() {
+    use openlogi_hook::PointerTarget;
+    let old = PointerTarget::Window {
+        process_id: 41,
+        window_id: 7,
+    };
+    let current = PointerTarget::Desktop;
+    let pointer_press = |id, button| ActivePress {
+        token: PressToken::hook_for_test(id, button),
+        behavior: PressBehavior::new(Some(&drag_hold(Action::Paste)), Instant::now()),
+        target: ActionDispatchTarget::for_pointer(Some(PointerPress::distinct(old)), || None),
+    };
+    let mut state = ButtonState::default();
+    let dragging = pointer_press(1, ButtonId::Back);
+    let pending = pointer_press(2, ButtonId::Forward);
+    state.press(dragging.clone());
+    state.press(pending.clone());
+    // The drag switched Spaces, changing the hovered window.
+    state.hold_used(&dragging.token);
+
+    let canceled = state.cancel_pointer_except(current);
+
+    assert_eq!(canceled.len(), 1);
+    assert_eq!(
+        canceled[0].token, pending.token,
+        "an unused hold still owes its click"
+    );
+    assert!(
+        state.active(&dragging.token).is_some(),
+        "the drag survives the pointer change"
+    );
+}
+
+#[test]
 fn source_cancellation_invalidates_queued_gesture_work() {
     let (sent, received) = mpsc::channel();
     let mut owner = ButtonRuntimeOwner::spawn(move |event| {

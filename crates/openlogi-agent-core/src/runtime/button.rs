@@ -441,10 +441,14 @@ impl ButtonState {
         // A lifecycle-only press (a gesture hold) holds no output, and its own
         // swipe may be what changed the hovered window (Next Desktop). Follow
         // the pointer instead of canceling, so one hold can chain swipes; the
-        // press-time focus fallback stays with it.
+        // press-time focus fallback stays with it. A hold already used (a
+        // drag hold mid-swipe, a wheel hold that scrolled) owes no output
+        // either, and a drag through Spaces moves the window under it.
         for press in self.active.values_mut() {
-            if press.behavior == PressBehavior::LifecycleOnly
-                && let ActionDispatchTarget::Pointer { target, .. } = &mut press.target
+            if matches!(
+                press.behavior,
+                PressBehavior::LifecycleOnly | PressBehavior::HoldUsed
+            ) && let ActionDispatchTarget::Pointer { target, .. } = &mut press.target
             {
                 *target = current;
             }
