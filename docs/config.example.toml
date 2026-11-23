@@ -24,6 +24,9 @@ app_icon = "openlogi"
 # macOS only: Previous / Next Desktop slide like a three-finger swipe (default
 # true); false switches at once.
 animate_desktop_switch = true
+# Keep the pointer still while Back/Forward drag holds play a trackpad swipe
+# (macOS). Off lets it move with your hand.
+lock_pointer_during_drag = false
 
 # Momentum scrolling for every mouse whose smooth_wheel is on. A device's own
 # momentum_scrolling table overrides it.

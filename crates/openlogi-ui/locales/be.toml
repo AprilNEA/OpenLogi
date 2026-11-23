@@ -85,6 +85,8 @@ lock_key_notifications_description = "Ненадоўга паказваць на
 lock_key_notifications_description_macos = "Ненадоўга паказваць на экране, калі клавіятура ўключае або выключае Caps Lock."
 animate_desktop_switch = "Анімаваць пераключэнне працоўных сталоў"
 animate_desktop_switch_description = "«Папярэдні працоўны стол» і «Наступны працоўны стол» плаўна пераходзяць на суседні стол, як пры змахванні трыма пальцамі. Выключыце, каб пераключацца адразу."
+lock_pointer_during_drag = "Lock the pointer during hold and drag"
+lock_pointer_during_drag_description = "While Back or Forward plays a trackpad swipe, the pointer stays put. Turn off to let it move with your hand; the swipe stays on the window it started over."
 openlogi = "OpenLogi"
 
 [device]

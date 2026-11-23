@@ -427,6 +427,19 @@ impl AppState {
         self.persist_and_reload("desktop switch animation setting");
         StateEvent::SettingsChanged.into()
     }
+    /// Keep the pointer still during Back/Forward drag holds, or let it
+    /// travel with the hand. The agent publishes the value on config reload;
+    /// the next drag uses it.
+    pub fn commit_lock_pointer_during_drag(&mut self, locked: bool) -> StateEvents {
+        if self.config.app_settings.lock_pointer_during_drag == locked {
+            return StateEvent::SettingsChanged.into();
+        }
+        self.config
+            .edit(|config| config.app_settings.lock_pointer_during_drag = locked);
+        self.persist_and_reload("drag pointer lock setting");
+        StateEvent::SettingsChanged.into()
+    }
+
     /// Set traditional vertical mouse-wheel sensitivity and persist it. The
     /// agent publishes the value to its scroll worker on config reload. An
     /// already-set value writes nothing and is still reported; disk failures
