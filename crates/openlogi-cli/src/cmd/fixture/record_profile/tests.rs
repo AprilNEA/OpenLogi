@@ -10,8 +10,8 @@ use openlogi_core::device::DeviceInventory;
 use openlogi_core::hid::{
     BacklightChange, BacklightControls, BacklightMode, BacklightState, BacklightStatus,
     DisableKeysMask, DisableKeysState, Dpi, DpiInfo, EasySwitchHosts, EasySwitchSlot, FnLockState,
-    ForceSensingInfo, HostConnection, LightCommand, PasskeyMethod, PointerSpeed, ReceiverSelector,
-    ReportRate, ReportRateInfo, ScrollWheelMode, SidetoneLevel, SmartShiftStatus,
+    ForceSensingInfo, HostConnection, LightCommand, PasskeyMethod, PointerSpeed, PowerOffTimeout,
+    ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode, SidetoneLevel, SmartShiftStatus,
 };
 use openlogi_fixture::{
     CANONICAL_DEVICE_PROFILE_JSON, SyntheticIdentityKind, classify_synthetic_identity_bytes,
@@ -49,6 +49,7 @@ enum ReadFamily {
     ForceSensing,
     DisableKeys,
     Sidetone,
+    PowerOffTimeout,
 }
 
 #[derive(Clone)]
@@ -525,6 +526,28 @@ impl Agent for TestAgent {
         _level: SidetoneLevel,
     ) -> Result<SidetoneLevel, WriteError> {
         unreachable!("profile capture must never write the sidetone")
+    }
+
+    async fn read_power_off_timeout(
+        self,
+        _: TarpcContext,
+        route: DeviceRoute,
+    ) -> Result<PowerOffTimeout, WriteError> {
+        self.read(
+            ReadFamily::PowerOffTimeout,
+            &route,
+            |settings| &settings.power_off_timeout,
+            0x1f20,
+        )
+    }
+
+    async fn set_power_off_timeout(
+        self,
+        _: TarpcContext,
+        _route: DeviceRoute,
+        _timeout: PowerOffTimeout,
+    ) -> Result<PowerOffTimeout, WriteError> {
+        unreachable!("profile capture must never write the power-off timeout")
     }
 
     async fn read_disable_keys(
