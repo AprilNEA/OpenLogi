@@ -714,6 +714,7 @@ impl Enumerator {
                     registry.remove_node(&node);
                 }
                 if self.channels.evict(&node) {
+                    self.ledger.record_eviction(&node);
                     warn!("node probe keeps failing — retiring its channel before reopen");
                 }
             } else if let Some(registry) = &self.registry {

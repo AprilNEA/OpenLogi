@@ -45,6 +45,34 @@ const CHANNEL_EVICT_AFTER: u8 = 2;
 /// because the published device list may be stale.
 const ARRIVAL_REPLAY_EVICT_AFTER: u8 = NODE_MISS_GRACE + 1;
 
+/// Cap on how many times a node's eviction threshold doubles while the
+/// channels opened to replace a failed one keep failing too.
+///
+/// A replacement that fails the way its predecessor did is evidence that the
+/// channel was not the problem: the OS can keep listing a node it will not let
+/// this process talk to. While another process holds Secure Event Input,
+/// macOS refuses report transfers to a keyboard-class device, which includes
+/// a Bluetooth-direct keyboard's HID++ collection (`kIOReturnNotPermitted`,
+/// #1799). loginwindow holds it whenever the display is off or the screen is
+/// locked, which is hours; the very same handle answers again the moment it
+/// is released. Reopening on every threshold instead churned a fresh OS
+/// handle every few seconds for as long as it was held (#2617).
+///
+/// So every channel this ledger has evicted for failing doubles the threshold
+/// its replacement is held to: the first replacement already needs twice the
+/// base. The cap is `2^5` times the base, which at the recovery-scan cadence
+/// still replaces a channel that truly needs it every several minutes (longer
+/// on the arrival-replay path, whose base is higher). The first healthy probe
+/// clears the backoff.
+const MAX_REPLACEMENT_BACKOFF_DOUBLINGS: u8 = 5;
+
+// `evict_threshold` shifts and multiplies in `u8`: the largest capped
+// threshold must still fit, or it would saturate to one no count can reach.
+const _: () = assert!(
+    (ARRIVAL_REPLAY_EVICT_AFTER as u16) << MAX_REPLACEMENT_BACKOFF_DOUBLINGS <= u8::MAX as u16
+        && CHANNEL_EVICT_AFTER as u16 <= ARRIVAL_REPLAY_EVICT_AFTER as u16
+);
+
 /// What [`NodeLedger::settle`] decided for one node this tick.
 pub(crate) struct SettledNode {
     /// The inventory to report for the node: the live result, or the replayed
@@ -71,6 +99,24 @@ struct FailureCounts {
     arrival_replay: u8,
     /// Non-authoritative ticks since the last complete inventory.
     publication_misses: u8,
+    /// Whether the enumerator retired a serving channel because this ledger
+    /// asked it to. Failed opens and a channel still draining settle as
+    /// failures too, but retire nothing, so they never set this.
+    evicted: bool,
+    /// Consecutive channel generations evicted for failing, without a healthy
+    /// probe in between. Scales the eviction threshold; see
+    /// [`MAX_REPLACEMENT_BACKOFF_DOUBLINGS`].
+    failed_replacements: u8,
+}
+
+impl FailureCounts {
+    /// The failure count at which this generation's channel is evicted.
+    fn evict_threshold(&self, base: u8) -> u8 {
+        let doublings = self
+            .failed_replacements
+            .min(MAX_REPLACEMENT_BACKOFF_DOUBLINGS);
+        base.saturating_mul(1 << doublings)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -117,11 +163,25 @@ impl<K> Default for NodeLedger<K> {
 
 impl<K: Eq + Hash + Clone> NodeLedger<K> {
     /// Start channel-eviction accounting again after the enumerator opens a
-    /// replacement channel, without re-arming expired inventory replay.
+    /// replacement channel, without re-arming expired inventory replay. A
+    /// replacement for a channel evicted for failing raises the threshold the
+    /// new one is held to; only a healthy probe lowers it again.
     pub fn reset_channel_failures_after_open(&mut self, node: &K) {
         if let Some(counts) = self.failures.get_mut(node) {
             counts.probe = 0;
             counts.arrival_replay = 0;
+            if std::mem::take(&mut counts.evicted) {
+                counts.failed_replacements = counts.failed_replacements.saturating_add(1);
+            }
+        }
+    }
+
+    /// Record that the enumerator retired the node's serving channel on this
+    /// ledger's [`SettledNode::evict_channel`] request, so the channel opened
+    /// in its place is held to a raised threshold.
+    pub fn record_eviction(&mut self, node: &K) {
+        if let Some(counts) = self.failures.get_mut(node) {
+            counts.evicted = true;
         }
     }
 
@@ -182,6 +242,8 @@ impl<K: Eq + Hash + Clone> NodeLedger<K> {
         let counts = self.failures.entry(node.clone()).or_default();
         let channel_failures = failure_kind.record(counts);
         counts.publication_misses = counts.publication_misses.saturating_add(1);
+        let evict_channel = channel_failures >= counts.evict_threshold(evict_after);
+        let failed_replacements = counts.failed_replacements;
         let publication_misses = counts.publication_misses;
         let failure_kind = failure_kind.label();
         let inventory = if publication_misses <= NODE_MISS_GRACE {
@@ -189,6 +251,7 @@ impl<K: Eq + Hash + Clone> NodeLedger<K> {
                 debug!(
                     failures = publication_misses,
                     channel_failures,
+                    failed_replacements,
                     failure_kind,
                     "node check incomplete — replaying its last good inventory"
                 );
@@ -201,6 +264,7 @@ impl<K: Eq + Hash + Clone> NodeLedger<K> {
                 warn!(
                     failures = publication_misses,
                     channel_failures,
+                    failed_replacements,
                     failure_kind,
                     "node check failures exhausted the replay grace — surfacing the live result"
                 );
@@ -209,7 +273,7 @@ impl<K: Eq + Hash + Clone> NodeLedger<K> {
         };
         SettledNode {
             inventory,
-            evict_channel: channel_failures >= evict_after,
+            evict_channel,
         }
     }
 
@@ -245,7 +309,10 @@ impl<K: Eq + Hash + Clone> NodeLedger<K> {
 mod tests {
     use openlogi_core::device::{DeviceInventory, ReceiverInfo};
 
-    use super::{ARRIVAL_REPLAY_EVICT_AFTER, CHANNEL_EVICT_AFTER, NODE_MISS_GRACE, NodeLedger};
+    use super::{
+        ARRIVAL_REPLAY_EVICT_AFTER, CHANNEL_EVICT_AFTER, MAX_REPLACEMENT_BACKOFF_DOUBLINGS,
+        NODE_MISS_GRACE, NodeLedger,
+    };
 
     fn inventory(name: &str) -> DeviceInventory {
         DeviceInventory {
@@ -428,16 +495,130 @@ mod tests {
 
         for _ in 0..3 {
             ledger.reset_channel_failures_after_open(&1);
-            let first = ledger.settle(&1, false, None);
-            published.push(first.inventory.is_some());
-            assert!(!first.evict_channel);
-
-            let second = ledger.settle(&1, false, None);
-            published.push(second.inventory.is_some());
-            assert!(second.evict_channel);
+            loop {
+                let settled = ledger.settle(&1, false, None);
+                published.push(settled.inventory.is_some());
+                if settled.evict_channel {
+                    ledger.record_eviction(&1);
+                    break;
+                }
+            }
         }
 
-        assert_eq!(published, vec![true, true, true, false, false, false]);
+        let replayed = published.iter().filter(|&&shown| shown).count();
+        assert_eq!(
+            replayed,
+            usize::from(NODE_MISS_GRACE),
+            "replacement channels must not re-arm the replay grace"
+        );
+        assert!(published[..replayed].iter().all(|&shown| shown));
+    }
+
+    /// Failed probes it takes to evict the node's current channel, after the
+    /// enumerator opens a replacement; the eviction is carried out, as the
+    /// enumerator does when a channel was serving.
+    fn failures_until_eviction(ledger: &mut NodeLedger<i32>) -> u16 {
+        ledger.reset_channel_failures_after_open(&1);
+        for failures in 1..=u16::from(u8::MAX) {
+            if ledger.settle(&1, false, None).evict_channel {
+                ledger.record_eviction(&1);
+                return failures;
+            }
+        }
+        panic!("the channel was never evicted");
+    }
+
+    /// A channel opened to replace a failed one, which fails the same way, is
+    /// held to twice the previous threshold: a node the OS keeps listing but
+    /// that stops answering (a Bluetooth keyboard while the display is off)
+    /// is not reopened every few seconds for hours.
+    /// The backoff is capped so a node that does need a fresh channel gets one.
+    #[test]
+    fn replacements_that_keep_failing_back_off_eviction() {
+        let mut ledger = NodeLedger::default();
+        ledger.settle(&1, true, Some(inventory("craft")));
+
+        let thresholds: Vec<u16> = (0..8)
+            .map(|_| failures_until_eviction(&mut ledger))
+            .collect();
+
+        let base = u16::from(CHANNEL_EVICT_AFTER);
+        let cap = base << MAX_REPLACEMENT_BACKOFF_DOUBLINGS;
+        assert_eq!(
+            thresholds,
+            vec![base, base * 2, base * 4, base * 8, base * 16, cap, cap, cap]
+        );
+    }
+
+    #[test]
+    fn a_healthy_probe_clears_the_replacement_backoff() {
+        let mut ledger = NodeLedger::default();
+        ledger.settle(&1, true, Some(inventory("craft")));
+        for _ in 0..3 {
+            failures_until_eviction(&mut ledger);
+        }
+
+        ledger.settle(&1, true, Some(inventory("craft")));
+
+        assert_eq!(
+            failures_until_eviction(&mut ledger),
+            u16::from(CHANNEL_EVICT_AFTER),
+            "a node that answered again starts from the base threshold"
+        );
+    }
+
+    /// Opening a channel that did not replace a failed one (first sight, or a
+    /// node back from absence) is not evidence against the channel.
+    #[test]
+    fn an_open_without_a_failed_predecessor_keeps_the_base_threshold() {
+        let mut ledger = NodeLedger::default();
+        ledger.settle(&1, true, Some(inventory("craft")));
+        assert!(!ledger.settle(&1, false, None).evict_channel);
+
+        ledger.reset_channel_failures_after_open(&1);
+        ledger.reset_channel_failures_after_open(&1);
+
+        assert_eq!(
+            failures_until_eviction(&mut ledger),
+            u16::from(CHANNEL_EVICT_AFTER)
+        );
+    }
+
+    /// Failed opens and a retiring channel's passes settle as failures past
+    /// the threshold without any channel being retired: the channel that
+    /// finally opens did not replace a failed one.
+    #[test]
+    fn failures_with_no_channel_to_retire_do_not_back_off() {
+        let mut ledger = NodeLedger::default();
+        ledger.settle(&1, true, Some(inventory("craft")));
+        for _ in 0..CHANNEL_EVICT_AFTER * 4 {
+            ledger.settle(&1, false, None);
+        }
+
+        assert_eq!(
+            failures_until_eviction(&mut ledger),
+            u16::from(CHANNEL_EVICT_AFTER)
+        );
+    }
+
+    /// The arrival-replay path backs off from its own, longer base.
+    #[test]
+    fn arrival_replay_replacements_back_off_from_their_own_base() {
+        let mut ledger = NodeLedger::default();
+        ledger.settle(&1, true, Some(inventory("unifying")));
+        for _ in 1..ARRIVAL_REPLAY_EVICT_AFTER {
+            ledger.settle_arrival_replay_failure(&1);
+        }
+        assert!(ledger.settle_arrival_replay_failure(&1).evict_channel);
+        ledger.record_eviction(&1);
+
+        ledger.reset_channel_failures_after_open(&1);
+        let mut failures = 0;
+        while !ledger.settle_arrival_replay_failure(&1).evict_channel {
+            failures += 1;
+        }
+
+        assert_eq!(failures + 1, ARRIVAL_REPLAY_EVICT_AFTER * 2);
     }
 
     #[test]
