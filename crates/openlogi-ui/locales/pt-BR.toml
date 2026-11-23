@@ -85,8 +85,6 @@ lock_key_notifications_description = "Mostrar brevemente na tela quando um tecla
 lock_key_notifications_description_macos = "Mostrar brevemente na tela quando um teclado ativa ou desativa Caps Lock."
 animate_desktop_switch = "Animar a troca de mesa"
 animate_desktop_switch_description = "Mesa Anterior e Próxima Mesa deslizam para a mesa vizinha, como ao passar três dedos. Desative para trocar instantaneamente."
-lock_pointer_during_drag = "Lock the pointer during hold and drag"
-lock_pointer_during_drag_description = "While Back or Forward plays a trackpad swipe, the pointer stays put. Turn off to let it move with your hand; the swipe stays on the window it started over."
 openlogi = "OpenLogi"
 
 [device]

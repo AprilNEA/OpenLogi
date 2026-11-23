@@ -71,9 +71,9 @@ use crate::binding::{Binding, ButtonId, GestureDirection};
 /// before consuming the rest of the file.
 ///
 /// v12 adds `{ click = ..., drag = "TwoFingerSwipe" }` drag-hold button
-/// bindings and the app-wide `lock_pointer_during_drag` switch. Nothing older
-/// needs migrating; the bump makes a v11 build refuse a file that may hold
-/// either at the version check, instead of failing on the binding shape.
+/// bindings. Nothing older needs migrating; the bump makes a v11 build refuse
+/// a file that may hold one at the version check, instead of failing on the
+/// binding shape.
 ///
 /// v11 adds the `[flow]` section for cross-machine device handoff. Nothing
 /// older needs migrating, and a file without it loads as disabled Flow. The

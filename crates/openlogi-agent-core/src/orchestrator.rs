@@ -885,7 +885,6 @@ impl Orchestrator {
         let (host_switch_links_tx, host_switch_links) = watch::channel(Arc::new(Vec::new()));
         let (watched_lights_tx, watched_lights) = watch::channel(Arc::new(Vec::new()));
         openlogi_inject::set_desktop_switch(desktop_switch(&config.app_settings));
-        openlogi_inject::set_drag_pointer_lock(config.app_settings.lock_pointer_during_drag);
         let receiver_access = ReceiverAccess::default();
         let flow = FlowController::new(
             &config.flow,
@@ -2386,7 +2385,6 @@ impl Orchestrator {
             self.config.app_settings.vertical_scroll_sensitivity,
         );
         openlogi_inject::set_desktop_switch(desktop_switch(&self.config.app_settings));
-        openlogi_inject::set_drag_pointer_lock(self.config.app_settings.lock_pointer_during_drag);
         self.observable
             .set_launch_at_login(self.config.app_settings.launch_at_login);
         let retained_overrides: HashSet<String> = self

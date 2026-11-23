@@ -316,12 +316,6 @@ pub struct AppSettings {
     /// Logi Options+; off switches instantly. Only macOS reads it.
     #[serde(default = "default_true")]
     pub animate_desktop_switch: bool,
-    /// Whether the pointer stays where it is while a Back/Forward drag hold
-    /// plays its trackpad swipe. **Off by default**, as in Mac Mouse Fix: the
-    /// pointer travels with the hand while the swipe stays on the window it
-    /// began over. Only macOS reads it.
-    #[serde(default)]
-    pub lock_pointer_during_drag: bool,
 }
 
 const SENSITIVITY_MIN: u8 = 1;
@@ -529,7 +523,6 @@ impl Default for AppSettings {
             low_battery_notifications: true,
             lock_key_notifications: true,
             animate_desktop_switch: true,
-            lock_pointer_during_drag: false,
         }
     }
 }

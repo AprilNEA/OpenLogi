@@ -5,10 +5,10 @@
 //! and `TouchSimulator`, which have driven these gestures from a mouse for
 //! years: <https://github.com/noah-nuebling/mac-mouse-fix>.
 //!
-//! Raw-XY diversion keeps the system pointer still, so the drag moves it
-//! itself unless the user locked it, as Mac Mouse Fix does. Scroll events
-//! stay pinned to where the drag began, so the view under the start point
-//! keeps scrolling while the pointer travels.
+//! Raw-XY diversion keeps the system pointer still during the drag, as a
+//! trackpad's swipes do: OpenLogi cannot tell when a page has stopped
+//! scrolling, so a pointer following the hand would run off the page at its
+//! end. Scroll events go where the pointer is.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,8 +16,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use core_graphics::display::CGDisplay;
-use objc2_core_foundation::{CFRetained, CGPoint};
-use objc2_core_graphics::{CGEvent, CGEventField, CGEventTapLocation, CGEventType, CGMouseButton};
+use objc2_core_foundation::CFRetained;
+use objc2_core_graphics::{CGEvent, CGEventField, CGEventTapLocation, CGEventType};
 use openlogi_core::binding::HeldDrag;
 
 use super::super::flick::FlickVelocity;
@@ -27,11 +27,6 @@ use super::spaces::{self, DockAxis};
 /// sensor's own counts, unaccelerated; one count per point makes the content
 /// follow the hand at the sensor resolutions MX mice ship with.
 const POINTS_PER_COUNT: f64 = 1.0;
-
-/// Pointer points per raw-XY sensor count while a drag moves the pointer.
-/// Raw XY skips the system's pointer acceleration, so this is a fixed speed
-/// near the default tracking speed.
-const POINTER_POINTS_PER_COUNT: f64 = 0.5;
 
 /// How much faster a two-finger swipe's gesture deltas run than its scroll
 /// deltas. Mac Mouse Fix found 1.67 makes swiping between pages in Safari as
@@ -63,14 +58,6 @@ const DRAG: f64 = 30.0;
 const DRAG_EXPONENT: f64 = 0.7;
 const STOP_SPEED: f64 = 1.0;
 const MOMENTUM_FRAME: Duration = Duration::from_micros(8_333);
-
-/// Whether drags keep the pointer still; the host publishes the user's
-/// choice through [`set_drag_pointer_lock`].
-static POINTER_LOCK: AtomicBool = AtomicBool::new(false);
-
-pub(in crate::inject) fn set_drag_pointer_lock(locked: bool) {
-    POINTER_LOCK.store(locked, Ordering::Relaxed);
-}
 
 /// The phase a two-finger frame carries. Touch, momentum and rest frames are
 /// distinct variants, so a frame can never pair a touch phase with a momentum
@@ -162,12 +149,9 @@ impl Glide {
     }
 }
 
-/// One held-button drag in progress: the gesture it plays, and the pointer
-/// it moves.
+/// One held-button drag in progress.
 pub(in crate::inject) struct Drag {
     gesture: Gesture,
-    /// `None` while the pointer is locked for this drag.
-    pointer: Option<Pointer>,
 }
 
 enum Gesture {
@@ -179,25 +163,16 @@ impl Drag {
     /// Begin `kind` with the first motion, in sensor counts, whose report
     /// arrived `at`.
     pub(in crate::inject) fn begin(kind: HeldDrag, dx: f64, dy: f64, at: Instant) -> Self {
-        let mut pointer = Pointer::current();
-        let origin = pointer.at;
-        let pointer = (!POINTER_LOCK.load(Ordering::Relaxed)).then(|| {
-            pointer.moved(dx, dy);
-            pointer
-        });
         let (dx, dy) = (dx * POINTS_PER_COUNT, dy * POINTS_PER_COUNT);
         let gesture = match kind {
-            HeldDrag::TwoFingerSwipe => Gesture::Scroll(ScrollDrag::begin(dx, dy, origin, at)),
+            HeldDrag::TwoFingerSwipe => Gesture::Scroll(ScrollDrag::begin(dx, dy, at)),
             HeldDrag::ThreeFingerSwipe => Gesture::Dock(DockDrag::begin(dx, dy, at)),
         };
-        Self { gesture, pointer }
+        Self { gesture }
     }
 
     /// Follow further motion, in sensor counts, whose report arrived `at`.
     pub(in crate::inject) fn moved(&mut self, dx: f64, dy: f64, at: Instant) {
-        if let Some(pointer) = &mut self.pointer {
-            pointer.moved(dx, dy);
-        }
         let (dx, dy) = (dx * POINTS_PER_COUNT, dy * POINTS_PER_COUNT);
         match &mut self.gesture {
             Gesture::Scroll(drag) => drag.moved(dx, dy, at),
@@ -228,70 +203,17 @@ impl Drag {
     }
 }
 
-/// The system pointer a drag moves, kept inside the displays.
-struct Pointer {
-    at: CGPoint,
-    /// The union of every display's bounds: `(min_x, min_y, max_x, max_y)`.
-    bounds: (f64, f64, f64, f64),
-}
-
-impl Pointer {
-    fn current() -> Self {
-        let at = CGEvent::new(None).map_or(CGPoint::new(0.0, 0.0), |event| {
-            CGEvent::location(Some(&event))
-        });
-        let bounds = CGDisplay::active_displays()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|id| CGDisplay::new(id).bounds())
-            .fold(None, |union: Option<(f64, f64, f64, f64)>, rect| {
-                let (x0, y0) = (rect.origin.x, rect.origin.y);
-                let (x1, y1) = (x0 + rect.size.width, y0 + rect.size.height);
-                Some(union.map_or((x0, y0, x1, y1), |(a, b, c, d)| {
-                    (a.min(x0), b.min(y0), c.max(x1), d.max(y1))
-                }))
-            })
-            .unwrap_or((at.x, at.y, at.x, at.y));
-        Self { at, bounds }
-    }
-
-    /// Move the pointer by `dx`, `dy` sensor counts.
-    fn moved(&mut self, dx: f64, dy: f64) {
-        let (min_x, min_y, max_x, max_y) = self.bounds;
-        let (dx, dy) = (dx * POINTER_POINTS_PER_COUNT, dy * POINTER_POINTS_PER_COUNT);
-        let to = CGPoint::new(
-            (self.at.x + dx).clamp(min_x, (max_x - 1.0).max(min_x)),
-            (self.at.y + dy).clamp(min_y, (max_y - 1.0).max(min_y)),
-        );
-        self.at = to;
-        let Some(event) =
-            CGEvent::new_mouse_event(None, CGEventType::MouseMoved, to, CGMouseButton::Left)
-        else {
-            return;
-        };
-        #[expect(clippy::cast_possible_truncation, reason = "one report's travel")]
-        let (delta_x, delta_y) = (dx.round() as i64, dy.round() as i64);
-        CGEvent::set_integer_value_field(Some(&event), CGEventField::MouseEventDeltaX, delta_x);
-        CGEvent::set_integer_value_field(Some(&event), CGEventField::MouseEventDeltaY, delta_y);
-        tag(&event);
-        CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&event));
-    }
-}
-
 /// A two-finger swipe: continuous scroll that follows the hand.
 struct ScrollDrag {
-    target: ScrollTarget,
+    natural: bool,
     pixels: SubPixel,
     flick: FlickVelocity,
 }
 
 impl ScrollDrag {
-    fn begin(dx: f64, dy: f64, origin: CGPoint, at: Instant) -> Self {
+    fn begin(dx: f64, dy: f64, at: Instant) -> Self {
         let mut drag = Self {
-            target: ScrollTarget {
-                natural: spaces::natural_scrolling(),
-                at: origin,
-            },
+            natural: spaces::natural_scrolling(),
             pixels: SubPixel::default(),
             flick: FlickVelocity::default(),
         };
@@ -309,20 +231,20 @@ impl ScrollDrag {
         if touch == Touch::Changed && px == 0.0 && py == 0.0 {
             return;
         }
-        post_scroll_frame(px, py, ScrollPhase::Touch(touch), self.target);
+        post_scroll_frame(px, py, ScrollPhase::Touch(touch), self.natural);
     }
 
     fn release(self, at: Instant) -> Option<Glide> {
-        post_scroll_frame(0.0, 0.0, ScrollPhase::Touch(Touch::Ended), self.target);
+        post_scroll_frame(0.0, 0.0, ScrollPhase::Touch(Touch::Ended), self.natural);
         let velocity = self.flick.exit(at, MOMENTUM_MAX_IDLE)?;
         let stop = Arc::new(AtomicBool::new(false));
         let done = Arc::new(AtomicBool::new(false));
         let (thread_stop, thread_done) = (Arc::clone(&stop), Arc::clone(&done));
-        let target = self.target;
+        let natural = self.natural;
         let spawned = thread::Builder::new()
             .name("openlogi-drag-momentum".into())
             .spawn(move || {
-                glide(velocity, &thread_stop, target);
+                glide(velocity, &thread_stop, natural);
                 thread_done.store(true, Ordering::Relaxed);
             });
         match spawned {
@@ -335,14 +257,14 @@ impl ScrollDrag {
     }
 
     fn cancel(self) {
-        post_scroll_frame(0.0, 0.0, ScrollPhase::Touch(Touch::Cancelled), self.target);
+        post_scroll_frame(0.0, 0.0, ScrollPhase::Touch(Touch::Cancelled), self.natural);
     }
 }
 
 /// Post the momentum glide after a two-finger swipe, as a trackpad driver
 /// does: apps that leave momentum to the OS (Safari) keep moving, and the
 /// glide ends with the MayBegin/Cancelled pair a trackpad sends at rest.
-fn glide(velocity: (f64, f64), stop: &AtomicBool, target: ScrollTarget) {
+fn glide(velocity: (f64, f64), stop: &AtomicBool, natural: bool) {
     let speed = velocity.0.hypot(velocity.1);
     if speed <= STOP_SPEED {
         return;
@@ -355,7 +277,7 @@ fn glide(velocity: (f64, f64), stop: &AtomicBool, target: ScrollTarget) {
     loop {
         thread::sleep(MOMENTUM_FRAME);
         if stop.load(Ordering::Relaxed) {
-            post_scroll_frame(0.0, 0.0, ScrollPhase::Momentum(Momentum::End), target);
+            post_scroll_frame(0.0, 0.0, ScrollPhase::Momentum(Momentum::End), natural);
             return;
         }
         speed -= DRAG * speed.powf(DRAG_EXPONENT) * dt;
@@ -363,12 +285,12 @@ fn glide(velocity: (f64, f64), stop: &AtomicBool, target: ScrollTarget) {
             break;
         }
         let (px, py) = pixels.take(unit.0 * speed * dt, unit.1 * speed * dt);
-        post_scroll_frame(px, py, ScrollPhase::Momentum(phase), target);
+        post_scroll_frame(px, py, ScrollPhase::Momentum(phase), natural);
         phase = Momentum::Continue;
     }
-    post_scroll_frame(0.0, 0.0, ScrollPhase::Momentum(Momentum::End), target);
-    post_scroll_frame(0.0, 0.0, ScrollPhase::Rest(Rest::MayBegin), target);
-    post_scroll_frame(0.0, 0.0, ScrollPhase::Rest(Rest::Cancelled), target);
+    post_scroll_frame(0.0, 0.0, ScrollPhase::Momentum(Momentum::End), natural);
+    post_scroll_frame(0.0, 0.0, ScrollPhase::Rest(Rest::MayBegin), natural);
+    post_scroll_frame(0.0, 0.0, ScrollPhase::Rest(Rest::Cancelled), natural);
 }
 
 /// Whole-point deltas out of fractional travel, carrying the remainder.
@@ -389,18 +311,11 @@ impl SubPixel {
     }
 }
 
-/// Where a two-finger swipe's scroll lands: the point it began at, read with
-/// the natural-scrolling flag a trackpad stamps.
-#[derive(Clone, Copy)]
-struct ScrollTarget {
-    natural: bool,
-    at: CGPoint,
-}
-
 /// One continuous scroll event plus, inside a touch or rest phase, the
 /// gesture event that marks it as trackpad input. Positive deltas move the
 /// content right and down, with the hand.
-fn post_scroll_frame(px: f64, py: f64, phase: ScrollPhase, target: ScrollTarget) {
+/// `natural` is the natural-scrolling flag a trackpad stamps on its events.
+fn post_scroll_frame(px: f64, py: f64, phase: ScrollPhase, natural: bool) {
     let Some(scroll) = CGEvent::new(None) else {
         return;
     };
@@ -429,8 +344,8 @@ fn post_scroll_frame(px: f64, py: f64, phase: ScrollPhase, target: ScrollTarget)
     let point = |points: f64| points as i64;
     let (scroll_phase, momentum_phase) = phase.fields();
     for (field, value) in [
-        (88, 1),                          // kCGScrollWheelEventIsContinuous
-        (137, i64::from(target.natural)), // directionInvertedFromDevice
+        (88, 1),                   // kCGScrollWheelEventIsContinuous
+        (137, i64::from(natural)), // directionInvertedFromDevice
         (11, line_int(py)),
         (96, point(py)),
         (93, fixed(py)),
@@ -443,7 +358,6 @@ fn post_scroll_frame(px: f64, py: f64, phase: ScrollPhase, target: ScrollTarget)
         CGEvent::set_integer_value_field(Some(&scroll), CGEventField(field), value);
     }
     tag(&scroll);
-    CGEvent::set_location(Some(&scroll), target.at);
     CGEvent::post(CGEventTapLocation::SessionEventTap, Some(&scroll));
     if matches!(phase, ScrollPhase::Momentum(_)) {
         return;
@@ -465,7 +379,6 @@ fn post_scroll_frame(px: f64, py: f64, phase: ScrollPhase, target: ScrollTarget)
     CGEvent::set_double_value_field(Some(&gesture), CGEventField(119), gesture_delta(py));
     CGEvent::set_integer_value_field(Some(&gesture), CGEventField(132), scroll_phase);
     tag(&gesture);
-    CGEvent::set_location(Some(&gesture), target.at);
     CGEvent::post(CGEventTapLocation::SessionEventTap, Some(&gesture));
 }
 

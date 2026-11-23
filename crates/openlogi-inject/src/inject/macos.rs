@@ -87,7 +87,7 @@ mod virtual_keyboard;
 use app_services::symbol as app_services_symbol;
 pub(super) use browser::ax_browser_navigate;
 use dock::{app_expose, launchpad, mission_control, show_desktop};
-pub(super) use drag::{Drag, Glide, set_drag_pointer_lock};
+pub(super) use drag::{Drag, Glide};
 use keyboard_layout::layout_key;
 use keycode::hid_usage_to_macos;
 pub(super) use keycode::pressed_usage;

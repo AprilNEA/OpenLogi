@@ -516,20 +516,6 @@ pub fn set_desktop_switch(switch: DesktopSwitch) {
     }
 }
 
-/// Whether later [`TrackpadDrag`]s keep the pointer still. Off until a host
-/// calls this: the pointer travels with the hand, and the swipe stays on the
-/// window it began over. A drag already under way keeps its choice.
-pub fn set_drag_pointer_lock(locked: bool) {
-    cfg_select! {
-        target_os = "macos" => {
-            macos::set_drag_pointer_lock(locked);
-        }
-        _ => {
-            let _ = locked;
-        }
-    }
-}
-
 /// One synthetic held chord, released exactly once when dropped.
 ///
 /// Keep this value with the physical press lifecycle. Replacing its chord

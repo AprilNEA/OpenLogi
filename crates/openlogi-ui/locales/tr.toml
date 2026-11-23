@@ -85,8 +85,6 @@ lock_key_notifications_description = "Bir klavye Caps Lock, Num Lock veya Scroll
 lock_key_notifications_description_macos = "Bir klavye Caps Lock'u açtığında ya da kapattığında ekranda kısa süre göster."
 animate_desktop_switch = "Masaüstü geçişini canlandır"
 animate_desktop_switch_description = "Önceki Masaüstü ve Sonraki Masaüstü, üç parmakla kaydırma gibi yandaki masaüstüne kayar. Anında geçmek için kapatın."
-lock_pointer_during_drag = "Lock the pointer during hold and drag"
-lock_pointer_during_drag_description = "While Back or Forward plays a trackpad swipe, the pointer stays put. Turn off to let it move with your hand; the swipe stays on the window it started over."
 openlogi = "OpenLogi"
 
 [device]

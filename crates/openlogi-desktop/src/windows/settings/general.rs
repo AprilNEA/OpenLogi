@@ -54,9 +54,7 @@ pub(super) fn general_page(
     // Only macOS animates a desktop switch, so only macOS shows the switch.
     // `cfg!` keeps the item and its setter compiled, and used, everywhere.
     let group = if cfg!(target_os = "macos") {
-        group
-            .item(animate_desktop_switch_item())
-            .item(lock_pointer_during_drag_item())
+        group.item(animate_desktop_switch_item())
     } else {
         group
     };
@@ -177,20 +175,6 @@ fn animate_desktop_switch_item() -> SettingItem {
         ),
     )
     .description(tr!("app.animate_desktop_switch_description"))
-}
-
-/// The switch that keeps the pointer still during Back/Forward drag holds.
-fn lock_pointer_during_drag_item() -> SettingItem {
-    SettingItem::new(
-        tr!("app.lock_pointer_during_drag"),
-        SettingField::switch(
-            |cx| AppState::try_read(cx).is_some_and(|s| s.app_settings().lock_pointer_during_drag),
-            |locked, cx| {
-                AppState::apply(cx, |state| state.commit_lock_pointer_during_drag(locked));
-            },
-        ),
-    )
-    .description(tr!("app.lock_pointer_during_drag_description"))
 }
 
 /// The switch for the overlay's low-battery notices.

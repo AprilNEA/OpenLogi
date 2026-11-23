@@ -85,8 +85,6 @@ lock_key_notifications_description = "Näytä hetken näytöllä, kun näppäimi
 lock_key_notifications_description_macos = "Näytä hetken näytöllä, kun näppäimistö ottaa Caps Lockin käyttöön tai poistaa sen käytöstä."
 animate_desktop_switch = "Animoi työpöydän vaihto"
 animate_desktop_switch_description = "Edellinen työpöytä ja Seuraava työpöytä liukuvat viereiselle työpöydälle kuin kolmen sormen pyyhkäisyllä. Kun asetus on pois päältä, työpöytä vaihtuu heti."
-lock_pointer_during_drag = "Lock the pointer during hold and drag"
-lock_pointer_during_drag_description = "While Back or Forward plays a trackpad swipe, the pointer stays put. Turn off to let it move with your hand; the swipe stays on the window it started over."
 openlogi = "OpenLogi"
 
 [device]

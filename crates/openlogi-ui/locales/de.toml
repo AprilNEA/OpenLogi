@@ -85,8 +85,6 @@ lock_key_notifications_description = "Kurz auf dem Bildschirm anzeigen, wenn ein
 lock_key_notifications_description_macos = "Kurz auf dem Bildschirm anzeigen, wenn eine Tastatur die Feststelltaste ein- oder ausschaltet."
 animate_desktop_switch = "Schreibtischwechsel animieren"
 animate_desktop_switch_description = "Vorheriger Schreibtisch und Nächster Schreibtisch gleiten wie beim Streichen mit drei Fingern zum benachbarten Schreibtisch. Ausschalten, um sofort zu wechseln."
-lock_pointer_during_drag = "Lock the pointer during hold and drag"
-lock_pointer_during_drag_description = "While Back or Forward plays a trackpad swipe, the pointer stays put. Turn off to let it move with your hand; the swipe stays on the window it started over."
 openlogi = "OpenLogi"
 
 [device]
