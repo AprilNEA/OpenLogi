@@ -93,6 +93,54 @@ impl WheelHoldBinding {
     }
 }
 
+/// The trackpad gesture a [`DragHoldBinding`] button plays while it is held
+/// and the mouse moves.
+///
+/// Variant identifiers are TOML-stable: renames are migration events.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum HeldDrag {
+    /// A two-finger trackpad swipe: content scrolls with the hand, and a
+    /// sideways drag swipes between pages where the app supports it.
+    TwoFingerSwipe,
+    /// A three-finger trackpad swipe: sideways moves between Spaces, up opens
+    /// Mission Control, down opens App Exposé, each following the hand.
+    ThreeFingerSwipe,
+}
+
+/// A button that plays a trackpad gesture while it is held and the mouse
+/// moves, and runs its own action when clicked without moving. Mac Mouse Fix
+/// calls this click and drag. It needs the button diverted with HID++
+/// `0x1b04` raw-XY reporting, so the pointer stays put while the hand moves.
+///
+/// `click` fires on release, and only when the mouse did not drag during the
+/// press: a press that dragged fires nothing else.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DragHoldBinding {
+    click: Action,
+    drag: HeldDrag,
+}
+
+impl DragHoldBinding {
+    /// Play `drag` while held, and run `click` on a plain click.
+    #[must_use]
+    pub const fn new(click: Action, drag: HeldDrag) -> Self {
+        Self { click, drag }
+    }
+
+    /// Action fired by a release when the mouse did not drag during the press.
+    #[must_use]
+    pub const fn click(&self) -> &Action {
+        &self.click
+    }
+
+    /// The gesture the drag plays.
+    #[must_use]
+    pub const fn drag(&self) -> HeldDrag {
+        self.drag
+    }
+}
+
 /// What a single rebindable [`ButtonId`](crate::binding::ButtonId) does: one
 /// immediate [`Action`], an independent short/long action pair, a wheel-hold
 /// click action, or — for a raw-XY-capable button placed in gesture mode — a
@@ -110,12 +158,13 @@ impl WheelHoldBinding {
 /// table keyed by [`GestureDirection`] names (`Up`/`Down`/`Left`/`Right`/
 /// `Click`), [`LongPress`](Binding::LongPress) as the structurally distinct
 /// `{ short = ..., long = ... }` table, and [`WheelHold`](Binding::WheelHold)
-/// as `{ click = ..., wheel = "HorizontalScroll" }`.
+/// as `{ click = ..., wheel = "HorizontalScroll" }`, and
+/// [`DragHold`](Binding::DragHold) as `{ click = ..., drag = "TwoFingerSwipe" }`.
 ///
 /// The arms are disambiguated structurally: action variant names and gesture
 /// direction names have zero overlap, while a long press requires both
 /// lowercase `short` and `long` fields, a wheel hold both lowercase `click`
-/// and `wheel` fields, and each rejects unknown fields. The
+/// and `wheel` fields, a drag hold both lowercase `click` and `drag` fields, and each rejects unknown fields. The
 /// `binding_untagged_*` tests guard these routing invariants.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -131,6 +180,9 @@ pub enum Binding {
     /// The main wheel scrolls horizontally while the button is held; a click
     /// without wheel movement runs the click action.
     WheelHold(WheelHoldBinding),
+    /// A trackpad gesture plays while the button is held and the mouse
+    /// moves; a click without movement runs the click action.
+    DragHold(DragHoldBinding),
 }
 
 impl Binding {
@@ -152,6 +204,7 @@ impl Binding {
                 .unwrap_or(Action::None),
             Binding::LongPress(binding) => binding.short().clone(),
             Binding::WheelHold(binding) => binding.click().clone(),
+            Binding::DragHold(binding) => binding.click().clone(),
         }
     }
 
@@ -179,7 +232,10 @@ impl Binding {
     #[must_use]
     pub fn direction_action(&self, direction: GestureDirection) -> Option<&Action> {
         match self {
-            Binding::Single(_) | Binding::LongPress(_) | Binding::WheelHold(_) => None,
+            Binding::Single(_)
+            | Binding::LongPress(_)
+            | Binding::WheelHold(_)
+            | Binding::DragHold(_) => None,
             Binding::Gesture(map) => map.get(&direction),
         }
     }
@@ -198,6 +254,23 @@ impl Binding {
         matches!(self, Binding::WheelHold(_))
     }
 
+    /// Whether this binding needs the button diverted with raw-XY reporting
+    /// to stream its drag (the [`DragHold`](Binding::DragHold) arm).
+    #[must_use]
+    pub fn is_drag_hold(&self) -> bool {
+        matches!(self, Binding::DragHold(_))
+    }
+
+    /// Whether the press decides on release whether its click runs, which
+    /// only the shared button runtime can do.
+    #[must_use]
+    pub fn decides_on_release(&self) -> bool {
+        matches!(
+            self,
+            Binding::LongPress(_) | Binding::WheelHold(_) | Binding::DragHold(_)
+        )
+    }
+
     /// Whether the press holds the G-Shift layer. Only a plain binding does:
     /// the other shapes decide what the press was after it starts.
     #[must_use]
@@ -210,13 +283,14 @@ impl Binding {
     /// [`GestureDirection::Click`] entry and leaving the swipe arms unbound.
     /// A long-press binding keeps its short action as `Click`; its long action
     /// is discarded because gesture and threshold modes are mutually exclusive.
-    /// A wheel-hold binding keeps its click action the same way.
+    /// A wheel-hold or drag-hold binding keeps its click action the same way.
     /// A no-op when this is already a [`Gesture`](Binding::Gesture).
     pub fn upgrade_to_gesture(&mut self) {
         let click = match self {
             Binding::Single(action) => action.clone(),
             Binding::LongPress(binding) => binding.short().clone(),
             Binding::WheelHold(binding) => binding.click().clone(),
+            Binding::DragHold(binding) => binding.click().clone(),
             Binding::Gesture(_) => return,
         };
         *self = Binding::Gesture(BTreeMap::from([(GestureDirection::Click, click)]));

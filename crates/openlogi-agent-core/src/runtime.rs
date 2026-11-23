@@ -886,10 +886,10 @@ impl ActionDispatcher {
         self.buttons.try_trigger_while_pressed(press, action)
     }
 
-    /// Record that the wheel moved while `press` was down, so a wheel-hold
-    /// button's release does not also fire its click.
-    pub(crate) fn try_wheel_while_pressed(&self, press: &PressToken) -> bool {
-        self.buttons.try_wheel_while_pressed(press)
+    /// Record that `press` used its hold (the wheel moved or the mouse
+    /// dragged), so a hold button's release does not also fire its click.
+    pub(crate) fn try_hold_used_while_pressed(&self, press: &PressToken) -> bool {
+        self.buttons.try_hold_used_while_pressed(press)
     }
 
     /// End a gesture hold whose release was lost before another button takes

@@ -2,7 +2,7 @@
 
 use std::time::Instant;
 
-use openlogi_core::binding::{LongPressBinding, WheelHoldBinding};
+use openlogi_core::binding::{DragHoldBinding, HeldDrag, LongPressBinding, WheelHoldBinding};
 
 use super::*;
 use crate::runtime::PointerPress;
@@ -21,6 +21,10 @@ fn long_press(short: Action, long: Action) -> Binding {
 
 fn wheel_hold(click: Action) -> Binding {
     Binding::WheelHold(WheelHoldBinding::horizontal_scroll(click))
+}
+
+fn drag_hold(click: Action) -> Binding {
+    Binding::DragHold(DragHoldBinding::new(click, HeldDrag::ThreeFingerSwipe))
 }
 
 fn hook_press_bound(id: u64, binding: &Binding) -> ActivePress {
@@ -55,7 +59,7 @@ fn up(press: &ActivePress) -> ButtonInput {
 }
 
 fn wheel(press: &ActivePress) -> ButtonInput {
-    ButtonInput::WheelWhilePressed {
+    ButtonInput::HoldUsedWhilePressed {
         token: press.token.clone(),
     }
 }
@@ -139,6 +143,23 @@ fn wheel_movement_for_a_replaced_press_cannot_suppress_the_live_click() {
 }
 
 #[test]
+fn a_drag_hold_press_without_a_drag_clicks_on_release() {
+    let events = events_after_press(&drag_hold(Action::Paste), |press| vec![up(press)]);
+    assert_eq!(triggered(&events), [&Action::Paste]);
+}
+
+#[test]
+fn a_dragged_drag_hold_press_ends_without_its_click() {
+    let events = events_after_press(&drag_hold(Action::Paste), |press| {
+        vec![wheel(press), up(press)]
+    });
+    assert!(
+        triggered(&events).is_empty(),
+        "a press that dragged must not click"
+    );
+}
+
+#[test]
 fn wheel_movement_leaves_a_long_press_alone() {
     let events = events_after_press(&long_press(Action::Copy, Action::Paste), |press| {
         vec![wheel(press), up(press)]
@@ -169,7 +190,7 @@ fn a_scrolled_hidpp_wheel_hold_press_ends_without_its_click() {
         recv_event(&received),
         ButtonRuntimeEvent::Started(_)
     ));
-    assert!(input.try_wheel_while_pressed(&press));
+    assert!(input.try_hold_used_while_pressed(&press));
     assert!(input.try_hidpp_up(&session, ButtonId::Back));
     assert!(matches!(
         recv_event(&received),
@@ -586,7 +607,7 @@ fn invalidation_rejects_old_tokens_and_cancels_active_presses() {
     input.invalidate_all();
     assert!(!input.try_trigger_while_pressed(&token, &Action::Copy));
     // The dispatcher posts a held-wheel scroll only for an accepted token.
-    assert!(!input.try_wheel_while_pressed(&token));
+    assert!(!input.try_hold_used_while_pressed(&token));
     assert!(matches!(
         recv_event(&received),
         ButtonRuntimeEvent::Ended {

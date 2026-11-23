@@ -231,6 +231,16 @@ impl ButtonId {
         matches!(self, ButtonId::Back | ButtonId::Forward)
     }
 
+    /// Whether holding this button may play a trackpad gesture as the mouse
+    /// moves ([`Binding::DragHold`](super::Binding::DragHold)). Back and
+    /// Forward are eligible: they are the side buttons devices divert with
+    /// raw-XY (`0x1b04` `RAW_XY`), which keeps the pointer still while the
+    /// hand moves.
+    #[must_use]
+    pub fn supports_drag_hold(self) -> bool {
+        matches!(self, ButtonId::Back | ButtonId::Forward)
+    }
+
     /// Whether this button is a HID++ gesture source — a control that is
     /// captured over HID++ raw-XY diversion (never the OS hook) and can
     /// therefore own the gesture role with swipe directions: DPI/ModeShift,

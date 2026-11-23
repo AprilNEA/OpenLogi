@@ -44,6 +44,9 @@ mod browser;
     reason = "the private CoreDockSendNotification SPI is only reachable via dlopen/dlsym FFI"
 )]
 mod dock;
+/// Trackpad gestures a held button's drag plays: two-finger scroll and
+/// three-finger Dock swipes that follow the hand.
+mod drag;
 #[expect(
     unsafe_code,
     reason = "Text Input Source Services and UCKeyTranslate have no objc2 bindings"
@@ -84,6 +87,7 @@ mod virtual_keyboard;
 use app_services::symbol as app_services_symbol;
 pub(super) use browser::ax_browser_navigate;
 use dock::{app_expose, launchpad, mission_control, show_desktop};
+pub(super) use drag::Drag;
 use keyboard_layout::layout_key;
 use keycode::hid_usage_to_macos;
 pub(super) use keycode::pressed_usage;

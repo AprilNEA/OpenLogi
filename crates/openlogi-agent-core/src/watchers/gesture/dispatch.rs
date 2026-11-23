@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU8;
 use std::time::Instant;
 
-use openlogi_core::binding::{Action, Binding, ButtonId, HeldWheel, default_binding};
+use openlogi_core::binding::{Action, Binding, ButtonId, HeldDrag, HeldWheel, default_binding};
 use openlogi_core::config::ThumbwheelSensitivity;
 use openlogi_core::scroll::ScrollDelta;
 use openlogi_hid::CapturedInput;
@@ -80,6 +80,49 @@ impl HeldPresses {
     }
 }
 
+/// Raw-XY travel, in sensor counts, before a drag-hold press counts as a
+/// drag: below it the press is still a click, as a hand never holds a mouse
+/// perfectly still.
+const DRAG_START_COUNTS: f64 = 12.0;
+
+/// One drag-hold press's drag: travel gathered until it starts, then the
+/// trackpad gesture it plays.
+enum HeldDragState {
+    Pending {
+        kind: HeldDrag,
+        dx: f64,
+        dy: f64,
+    },
+    Active(openlogi_inject::TrackpadDrag),
+    /// The platform cannot play the gesture; the press already gave up its
+    /// click.
+    Unsupported,
+}
+
+/// Drag-hold presses in progress, per capture session and button.
+#[derive(Default)]
+struct HeldDrags(HashMap<(HidppSessionId, ButtonId), HeldDragState>);
+
+impl HeldDrags {
+    fn end(&mut self, session: &HidppSessionId, button: ButtonId) {
+        if let Some(HeldDragState::Active(drag)) = self.0.remove(&(session.clone(), button)) {
+            drag.end();
+        }
+    }
+
+    fn cancel_session(&mut self, session: &HidppSessionId) {
+        let ended: Vec<_> = self
+            .0
+            .keys()
+            .filter(|(candidate, _)| candidate == session)
+            .cloned()
+            .collect();
+        for (session, button) in ended {
+            self.end(&session, button);
+        }
+    }
+}
+
 /// Wheel state scoped to exact capture-session incarnations. Keying by session
 /// rather than device prevents a replacement epoch from inheriting progress or
 /// having its state removed by a stale completion from the previous epoch.
@@ -103,6 +146,7 @@ pub(super) struct InputDispatcher {
     outputs: GestureOutputs,
     wheels: SessionWheels,
     held_presses: HeldPresses,
+    held_drags: HeldDrags,
     shift_held: HeldShift,
 }
 
@@ -114,6 +158,7 @@ impl InputDispatcher {
             outputs,
             wheels: SessionWheels::default(),
             held_presses: HeldPresses::default(),
+            held_drags: HeldDrags::default(),
             shift_held: HeldShift::default(),
         }
     }
@@ -129,6 +174,7 @@ impl InputDispatcher {
         self.outputs.cancel_session(session);
         self.wheels.cancel_session(session);
         self.held_presses.cancel_session(session);
+        self.held_drags.cancel_session(session);
         self.shift_held.0.remove(session);
         self.publish_shift(session);
     }
@@ -238,7 +284,9 @@ impl InputDispatcher {
                 let is_gesture = plan.gesture_bindings.contains_key(&button)
                     || plan.side_gesture_bindings.contains_key(&button);
                 let (binding, pointer) = self.binding_for(session, plan, button, is_gesture);
-                let tracks_hold = is_gesture || binding.is_some_and(Binding::is_wheel_hold);
+                let tracks_hold = is_gesture
+                    || binding
+                        .is_some_and(|binding| binding.is_wheel_hold() || binding.is_drag_hold());
                 if let Some(binding) = binding {
                     debug!(key, ?button, action = %binding.click_action().label(), "HID++ button → binding");
                 } else {
@@ -260,10 +308,14 @@ impl InputDispatcher {
                 if self.end_gshift(session, button) {
                     return;
                 }
+                self.held_drags.end(session, button);
                 self.outputs.actions.try_hidpp_button_up(session, button);
                 self.held_presses.end(session, button);
             }
             CapturedInput::ButtonPulse(button) => self.dispatch_button_pulse(session, plan, button),
+            CapturedInput::Motion { button, dx, dy } => {
+                self.dispatch_motion(session, plan, button, dx, dy);
+            }
             CapturedInput::Scroll {
                 increments,
                 resolution,
@@ -330,7 +382,7 @@ impl InputDispatcher {
             debug!(key, %button, delta, "held wheel from a canceled button lifecycle — ignored");
             return;
         };
-        if !self.outputs.actions.try_wheel_while_pressed(press) {
+        if !self.outputs.actions.try_hold_used_while_pressed(press) {
             debug!(key, %button, delta, "held wheel after the press ended — ignored");
             return;
         }
@@ -343,6 +395,61 @@ impl InputDispatcher {
                 session,
                 held_wheel_scroll(delta, per_notch, plan.invert_wheel),
             ),
+        }
+    }
+
+    /// Raw-XY motion under a held source. A drag-hold press gathers travel
+    /// until it is a drag, then gives up its click and plays its trackpad
+    /// gesture, following every further report. Motion under any other
+    /// binding belongs to swipe recognition and is ignored here.
+    fn dispatch_motion(
+        &mut self,
+        session: &HidppSessionId,
+        plan: &DispatchPlan,
+        button: ButtonId,
+        dx: i16,
+        dy: i16,
+    ) {
+        let Some(Binding::DragHold(binding)) = plan.bindings.get(&button) else {
+            return;
+        };
+        let key = session.device_key();
+        let Some(press) = self.held_presses.get(session, button) else {
+            debug!(key, %button, "drag from a canceled button lifecycle — ignored");
+            return;
+        };
+        let (dx, dy) = (f64::from(dx), f64::from(dy));
+        let entry = self
+            .held_drags
+            .0
+            .entry((session.clone(), button))
+            .or_insert_with(|| HeldDragState::Pending {
+                kind: binding.drag(),
+                dx: 0.0,
+                dy: 0.0,
+            });
+        match entry {
+            HeldDragState::Active(drag) => drag.moved(dx, dy),
+            HeldDragState::Unsupported => {}
+            HeldDragState::Pending {
+                kind,
+                dx: total_x,
+                dy: total_y,
+            } => {
+                *total_x += dx;
+                *total_y += dy;
+                if total_x.hypot(*total_y) < DRAG_START_COUNTS {
+                    return;
+                }
+                let (kind, total_x, total_y) = (*kind, *total_x, *total_y);
+                if !self.outputs.actions.try_hold_used_while_pressed(press) {
+                    debug!(key, %button, "drag after the press ended — ignored");
+                    return;
+                }
+                debug!(key, %button, ?kind, "drag hold → trackpad gesture");
+                *entry = openlogi_inject::TrackpadDrag::begin(kind, total_x, total_y)
+                    .map_or(HeldDragState::Unsupported, HeldDragState::Active);
+            }
         }
     }
 

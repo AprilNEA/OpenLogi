@@ -48,7 +48,7 @@ impl Config {
         self.set_binding(device_key, button, binding);
     }
 
-    fn stored_binding(&self, device_key: &str, button: ButtonId) -> Option<&Binding> {
+    pub(super) fn stored_binding(&self, device_key: &str, button: ButtonId) -> Option<&Binding> {
         self.devices
             .get(device_key)
             .and_then(|device| device.bindings.get(&button))

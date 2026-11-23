@@ -782,6 +782,56 @@ pub fn post_scroll(delta: ScrollDelta) {
     }
 }
 
+/// A trackpad gesture played by a held button's drag (a
+/// [`HeldDrag`](openlogi_core::binding::HeldDrag)): content or the Dock
+/// follows the hand from [`begin`](Self::begin) until [`end`](Self::end).
+///
+/// macOS only. Elsewhere [`begin`](Self::begin) returns `None`, and the
+/// button keeps its click.
+pub struct TrackpadDrag {
+    #[cfg(target_os = "macos")]
+    inner: macos::Drag,
+}
+
+impl TrackpadDrag {
+    /// Begin `kind` with its first motion, in raw sensor counts (positive
+    /// right and down). `None` where the platform cannot play it.
+    #[must_use]
+    pub fn begin(kind: openlogi_core::binding::HeldDrag, dx: f64, dy: f64) -> Option<Self> {
+        cfg_select! {
+            target_os = "macos" => {
+                Some(Self { inner: macos::Drag::begin(kind, dx, dy) })
+            }
+            _ => {
+                let _ = (kind, dx, dy);
+                None
+            }
+        }
+    }
+
+    /// Follow further motion, in raw sensor counts.
+    pub fn moved(&mut self, dx: f64, dy: f64) {
+        cfg_select! {
+            target_os = "macos" => {
+                self.inner.moved(dx, dy);
+            }
+            _ => {
+                let _ = (dx, dy);
+            }
+        }
+    }
+
+    /// End the gesture: the button was released, or its press canceled.
+    pub fn end(self) {
+        cfg_select! {
+            target_os = "macos" => {
+                self.inner.end();
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Lifecycle phase of one synthetic smooth-scroll frame.
 ///
 /// Part of the runtime contract — the motion engine emits a balanced

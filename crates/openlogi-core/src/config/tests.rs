@@ -8,6 +8,7 @@ use crate::hid::{Dpi, ReportRate, SmartShiftAutoDisengage, SmartShiftThreshold, 
 
 mod app_settings;
 mod device_settings;
+mod drag_hold;
 mod files;
 mod flow;
 mod gestures;
