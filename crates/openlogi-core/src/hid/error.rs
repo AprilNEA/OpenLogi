@@ -362,9 +362,15 @@ pub enum HidppOperation {
     /// Read the `0x8300` sidetone level. Appended after `ChangeHost` —
     /// variant order is wire format.
     ReadSidetone,
-    /// Write the `0x8300` sidetone level. Appended last — variant order is
-    /// wire format.
+    /// Write the `0x8300` sidetone level. Appended after `ReadSidetone` —
+    /// variant order is wire format.
     WriteSidetone,
+    /// Read the `0x1F20` automatic power-off timeout. Appended after
+    /// `WriteSidetone` — variant order is wire format.
+    ReadPowerOffTimeout,
+    /// Write the `0x1F20` automatic power-off timeout. Appended last —
+    /// variant order is wire format.
+    WritePowerOffTimeout,
 }
 
 /// HID++ feature error kind in a serializable wire-safe form.
