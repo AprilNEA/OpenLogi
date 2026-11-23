@@ -1,6 +1,6 @@
 //! SWR-backed device-setting reads (DPI, SmartShift, Fn lock, report rate,
-//! pointer speed, sidetone, press force, backlight, Easy-Switch hosts) keyed by device
-//! identity.
+//! pointer speed, sidetone, automatic power-off, press force, backlight,
+//! Easy-Switch hosts) keyed by device identity.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -9,8 +9,8 @@ use std::time::Duration;
 use gpui::{Context, Subscription};
 use openlogi_core::hid::{
     BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
-    ForceSensingInfo, OnboardState, PointerSpeed, ReportRateInfo, SidetoneLevel, SmartShiftStatus,
-    WriteError,
+    ForceSensingInfo, OnboardState, PointerSpeed, PowerOffTimeout, ReportRateInfo, SidetoneLevel,
+    SmartShiftStatus, WriteError,
 };
 use swr_core::{
     MaybeSend, MaybeSync, QueryHandle, QueryOptions, QueryState, Retry, RetryPolicy, Runtime,
@@ -21,12 +21,13 @@ use tokio::sync::mpsc;
 
 use super::ipc::{
     Command, ReadBacklight, ReadDpi, ReadEasySwitchHosts, ReadFnLock, ReadForceSensing,
-    ReadOnboard, ReadPointerSpeed, ReadReportRate, ReadSidetone, ReadSmartShift,
+    ReadOnboard, ReadPointerSpeed, ReadPowerOffTimeout, ReadReportRate, ReadSidetone,
+    ReadSmartShift,
 };
 use crate::state::{
     AppState, BacklightLoad, DeviceKey, DpiLoad, EasySwitchLoad, FnLockLoad, ForceSensingLoad,
-    HostRenameRefusal, Load, OnboardLoad, PointerSpeedLoad, ReportRateLoad, SidetoneLoad,
-    SmartShiftLoad, StateEvent,
+    HostRenameRefusal, Load, OnboardLoad, PointerSpeedLoad, PowerOffTimeoutLoad, ReportRateLoad,
+    SidetoneLoad, SmartShiftLoad, StateEvent,
 };
 
 const ROOT: &str = "device-read";
@@ -36,6 +37,7 @@ const FN_LOCK: &str = "fn-lock";
 const REPORT_RATE: &str = "report-rate";
 const POINTER_SPEED: &str = "pointer-speed";
 const SIDETONE: &str = "sidetone";
+const POWER_OFF_TIMEOUT: &str = "power-off-timeout";
 const FORCE_SENSING: &str = "force-sensing";
 const BACKLIGHT: &str = "backlight";
 const EASY_SWITCH: &str = "easy-switch";
@@ -77,6 +79,7 @@ pub(crate) struct DeviceReads {
     report_rate: BTreeMap<DeviceKey, DeviceRead<ReportRateInfo>>,
     pointer_speed: BTreeMap<DeviceKey, DeviceRead<PointerSpeed>>,
     sidetone: BTreeMap<DeviceKey, DeviceRead<SidetoneLevel>>,
+    power_off_timeout: BTreeMap<DeviceKey, DeviceRead<PowerOffTimeout>>,
     force_sensing: BTreeMap<DeviceKey, DeviceRead<ForceSensingInfo>>,
     backlight: BTreeMap<DeviceKey, DeviceRead<BacklightState>>,
     /// The backlight changes sent per keyboard, for the read on the route
@@ -839,6 +842,122 @@ impl DeviceReads {
         self.sidetone.get(key).map(|read| &read.load)
     }
 
+    /// Start the automatic power-off query unless the same headset route is
+    /// already subscribed. A write answers through
+    /// [`Self::set_power_off_timeout_ready`], or
+    /// [`Self::refresh_power_off_timeout`] when the headset refused it.
+    pub(crate) fn ensure_power_off_timeout(
+        &mut self,
+        key: DeviceKey,
+        route: DeviceRoute,
+        commands: mpsc::UnboundedSender<Command>,
+        cx: &mut Context<AppState>,
+    ) {
+        if self
+            .power_off_timeout
+            .get(&key)
+            .is_some_and(|read| read.route == route)
+        {
+            return;
+        }
+        self.remove_power_off_timeout(&key);
+        let Some((client, runtime)) = self.cache() else {
+            return;
+        };
+        let flight = self.take_flight();
+        let fetch_route = route.clone();
+        let fetcher = Retry::new(
+            runtime,
+            move |_| {
+                let commands = commands.clone();
+                let route = fetch_route.clone();
+                read_ipc(
+                    move |reply| ReadPowerOffTimeout { route, reply }.into(),
+                    commands,
+                )
+            },
+            READ_RETRY_POLICY,
+        )
+        .retry_if(|error| !unsupported_error_is_permanent(error));
+        let handle = client.subscribe(
+            query_key(POWER_OFF_TIMEOUT, &key),
+            fetcher,
+            QueryOptions::immutable(),
+        );
+        read_through(&client, POWER_OFF_TIMEOUT, &key, &handle);
+        let query = Query::new(&client, handle, cx);
+        let load = project_load(query.read(cx), unsupported_error_is_permanent);
+        let observed_key = key.clone();
+        let observer = cx.observe(query.state(), move |state, query_state, cx| {
+            let load = project_load(query_state.read(cx), unsupported_error_is_permanent);
+            if state
+                .device_reads_mut()
+                .update_power_off_timeout(&observed_key, flight, load)
+            {
+                cx.emit(StateEvent::PowerOffTimeoutChanged(observed_key.clone()));
+            }
+        });
+        self.power_off_timeout.insert(
+            key,
+            DeviceRead {
+                route,
+                flight,
+                load,
+                query,
+                _observer: observer,
+            },
+        );
+    }
+
+    /// Show `timeout` as `key`'s automatic power-off reading now: the timeout
+    /// the GUI just asked for, then what the headset read back. Like
+    /// [`Self::set_sidetone_ready`], a local write supersedes a fetch still in
+    /// flight, and an answer from a route the headset has since left still
+    /// holds.
+    pub(crate) fn set_power_off_timeout_ready(
+        &mut self,
+        key: &DeviceKey,
+        timeout: PowerOffTimeout,
+    ) {
+        let value = Arc::new(timeout);
+        if let Some(client) = &self.client {
+            client.set::<_, Cached<PowerOffTimeout>, WriteError>(
+                query_key(POWER_OFF_TIMEOUT, key),
+                Some(value.clone()),
+            );
+        }
+        if let Some(read) = self.power_off_timeout.get_mut(key) {
+            read.load = Load::Ready(value);
+        }
+    }
+
+    /// Re-read `key`'s automatic power-off timeout from the headset, keeping
+    /// the last value on screen while it answers. The fallback after a write
+    /// the headset refused.
+    pub(crate) fn refresh_power_off_timeout(&mut self, key: &DeviceKey) {
+        if let Some(read) = self.power_off_timeout.get_mut(key) {
+            read.query.revalidate();
+        }
+    }
+
+    /// Retry an exhausted automatic power-off query.
+    pub(crate) fn retry_power_off_timeout(&mut self, key: &DeviceKey) {
+        let Some(read) = self.power_off_timeout.get_mut(key) else {
+            return;
+        };
+        if !matches!(read.load, Load::Ready(_)) {
+            read.load = Load::Loading;
+        }
+        read.query.revalidate();
+    }
+
+    /// `key`'s automatic power-off load, or `None` while nothing has
+    /// subscribed to it.
+    #[must_use]
+    pub(crate) fn power_off_timeout_load(&self, key: &DeviceKey) -> Option<&PowerOffTimeoutLoad> {
+        self.power_off_timeout.get(key).map(|read| &read.load)
+    }
+
     /// Start the press-force query unless the same device route is already
     /// subscribed. A write answers through [`Self::set_force_sensing_ready`],
     /// or [`Self::refresh_force_sensing`] when the device refused it.
@@ -1311,7 +1430,7 @@ impl DeviceReads {
     /// Re-read `key`'s settings after the device or agent announced a change,
     /// keeping the shown values while it answers. Covers the settings
     /// such a report can concern — DPI, Fn lock, report rate, backlight,
-    /// sidetone and the SmartShift wheel mode (see
+    /// sidetone, automatic power-off and the SmartShift wheel mode (see
     /// [`PairedDevice::settings_revision`]); a read nothing subscribed to
     /// stays unsubscribed.
     ///
@@ -1330,6 +1449,7 @@ impl DeviceReads {
         }
         self.refresh_fn_lock(key);
         self.refresh_sidetone(key);
+        self.refresh_power_off_timeout(key);
         if let Some(read) = self.report_rate.get_mut(key) {
             read.query.revalidate();
         }
@@ -1439,6 +1559,7 @@ impl DeviceReads {
         self.remove_report_rate(key);
         self.remove_pointer_speed(key);
         self.remove_sidetone(key);
+        self.remove_power_off_timeout(key);
         self.remove_force_sensing(key);
         self.remove_backlight(key);
         self.remove_easy_switch(key);
@@ -1494,6 +1615,13 @@ impl DeviceReads {
         }
     }
 
+    fn remove_power_off_timeout(&mut self, key: &DeviceKey) {
+        if let Some(read) = self.power_off_timeout.remove(key) {
+            drop(read);
+            self.clear::<PowerOffTimeout>(POWER_OFF_TIMEOUT, key);
+        }
+    }
+
     fn remove_force_sensing(&mut self, key: &DeviceKey) {
         if let Some(read) = self.force_sensing.remove(key) {
             drop(read);
@@ -1527,6 +1655,7 @@ impl DeviceReads {
             .chain(self.report_rate.keys())
             .chain(self.pointer_speed.keys())
             .chain(self.sidetone.keys())
+            .chain(self.power_off_timeout.keys())
             .chain(self.force_sensing.keys())
             .chain(self.backlight.keys())
             .chain(self.easy_switch.keys())
@@ -1631,6 +1760,26 @@ impl DeviceReads {
     fn update_sidetone(&mut self, key: &DeviceKey, flight: u64, load: SidetoneLoad) -> bool {
         let Some(read) = self
             .sidetone
+            .get_mut(key)
+            .filter(|read| read.flight == flight)
+        else {
+            return false;
+        };
+        if read.load == load {
+            return false;
+        }
+        read.load = load;
+        true
+    }
+
+    fn update_power_off_timeout(
+        &mut self,
+        key: &DeviceKey,
+        flight: u64,
+        load: PowerOffTimeoutLoad,
+    ) -> bool {
+        let Some(read) = self
+            .power_off_timeout
             .get_mut(key)
             .filter(|read| read.flight == flight)
         else {

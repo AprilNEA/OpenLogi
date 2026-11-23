@@ -428,6 +428,7 @@ impl AppView {
             | StateEvent::ReportRateChanged(_)
             | StateEvent::PointerSpeedChanged(_)
             | StateEvent::SidetoneChanged(_)
+            | StateEvent::PowerOffTimeoutChanged(_)
             | StateEvent::ForceSensingChanged(_)
             | StateEvent::DeviceRemovalFailed { .. }
             | StateEvent::StalePairingRemovalFailed { .. }
