@@ -37,6 +37,7 @@ mod litra;
 mod onboard;
 mod os_layout;
 mod pointer_scaling;
+mod power_off_timeout;
 mod report_rate;
 mod sidetone;
 mod smartshift;
@@ -96,12 +97,16 @@ pub use openlogi_core::hid::{
     EasySwitchHosts, EasySwitchSlot, HostConnection, HostOsInfo, HostOsKind,
 };
 pub use openlogi_core::hid::{
-    ForceSensingInfo, PointerSpeed, ReportRate, ReportRateInfo, SidetoneLevel,
+    ForceSensingInfo, PointerSpeed, PowerOffTimeout, ReportRate, ReportRateInfo, SidetoneLevel,
 };
 pub use os_layout::{HostOs, OsLayoutOutcome, OsVersion, keep_os_layout_on};
 pub use pointer_scaling::{
     PointerScaling, get_pointer_scaling, get_pointer_speed_on, set_pointer_scaling,
     set_pointer_speed_on,
+};
+pub use power_off_timeout::{
+    get_power_off_timeout, get_power_off_timeout_on, set_power_off_timeout,
+    set_power_off_timeout_on,
 };
 pub(crate) use report_rate::set_report_rate_on_channel;
 pub use report_rate::{
