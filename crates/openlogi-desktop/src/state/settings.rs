@@ -94,17 +94,18 @@ impl AppState {
         self.persist_config("auto-install setting");
         StateEvent::SettingsChanged.into()
     }
-    /// Persist the light/dark appearance preference. The caller re-applies the
-    /// live theme via [`crate::ui::theme::apply_from_settings`]; this only
-    /// writes the choice. An already-set value writes nothing and is still
-    /// reported.
+    /// Persist the light/dark appearance preference and reload the agent so
+    /// native tray surfaces tracking the panel theme (the Windows popup menu)
+    /// update live without restarting the agent. The caller re-applies the live
+    /// GUI theme via [`crate::ui::theme::apply_from_settings`]. An already-set
+    /// value writes nothing and is still reported.
     pub fn commit_appearance(&mut self, appearance: Appearance) -> StateEvents {
         if self.config.app_settings.appearance == appearance {
             return StateEvent::SettingsChanged.into();
         }
         self.config
             .edit(|config| config.app_settings.appearance = appearance);
-        self.persist_config("appearance setting");
+        self.persist_and_reload("appearance setting");
         StateEvent::SettingsChanged.into()
     }
     /// Persist the text and interface scale. Open window roots apply the new

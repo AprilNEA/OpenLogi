@@ -160,6 +160,7 @@ fn main() {
         // (message pump included); the async core keeps the main thread.
         #[cfg(target_os = "windows")]
         {
+            tray_windows::set_appearance(config.app_settings.appearance);
             tray_windows::spawn(config.app_settings.show_in_menu_bar, shutdown_tx.clone());
             // Native resume notifications feed the same event seam as macOS
             // and Linux: inventory wakes immediately and replays volatile
