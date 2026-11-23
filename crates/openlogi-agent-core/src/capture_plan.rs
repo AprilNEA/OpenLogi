@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use openlogi_core::binding::{
-    Action, Binding, ButtonId, GamingLayout, GestureDirection, default_binding,
+    Action, Binding, ButtonId, GamingLayout, GestureDirection, GesturePolicy, default_binding,
 };
 use openlogi_core::bindings::{button_bindings_for, hidpp_gesture_maps_for, oshook_gestures_for};
 use openlogi_core::config::{Config, MomentumScrolling, OnboardMemory, ThumbwheelSensitivity};
@@ -307,6 +307,20 @@ pub struct PlanDevice<'a> {
     pub layout: Option<&'a GamingLayout>,
 }
 
+fn thumbwheel_bindings_nondefault(bindings: &BTreeMap<ButtonId, Binding>) -> bool {
+    [
+        ButtonId::Thumbwheel,
+        ButtonId::ThumbwheelScrollUp,
+        ButtonId::ThumbwheelScrollDown,
+    ]
+    .iter()
+    .any(|button| {
+        bindings
+            .get(button)
+            .is_some_and(|binding| binding.click_action() != default_binding(*button))
+    })
+}
+
 /// Build one device's plan from the config (per-app effective for `app`).
 #[must_use]
 pub fn plan_for_device(
@@ -327,9 +341,8 @@ pub fn plan_for_device(
     // macOS uses it exclusively, while Windows keeps the hook as fallback.
     let oshook = oshook_gestures_for(config, Some(config_key), app);
     let side_gesture_bindings = hidpp_side_gesture_maps_for(config, config_key, app);
-    // One direction map per HID++ source in gesture mode — several may
-    // gesture at once, each armed with its own raw-XY divert (the capture
-    // target below derives the CIDs to divert from this map's keys).
+    // One direction map per HID++ source in gesture mode; the capture target
+    // below derives each source's raw-XY divert from this map's keys.
     let gesture_bindings = hidpp_gesture_maps_for(config, Some(config_key), app);
     let mut divert_gesture_buttons = Vec::new();
     if os_mouse_hook_available {
@@ -397,23 +410,16 @@ pub fn plan_for_device(
             })
         })
         .collect();
-    let thumbwheel_bindings_nondefault = [
-        ButtonId::Thumbwheel,
-        ButtonId::ThumbwheelScrollUp,
-        ButtonId::ThumbwheelScrollDown,
-    ]
-    .iter()
-    .any(|button| {
-        bindings
-            .get(button)
-            .is_some_and(|binding| binding.click_action() != default_binding(*button))
-    });
+    let thumbwheel_bindings_nondefault = thumbwheel_bindings_nondefault(&bindings);
     let thumbwheel_sensitivity = config.thumbwheel_sensitivity(config_key);
     DeviceCapturePlan {
         target: CaptureTarget {
             physical_key,
             route,
             spec: CaptureSpec {
+                gesture_policies: GesturePolicy::for_maps(
+                    gesture_bindings.iter().chain(&side_gesture_bindings),
+                ),
                 capture_thumbwheel: thumbwheel_sensitivity != ThumbwheelSensitivity::DEFAULT
                     || thumbwheel_bindings_nondefault,
                 divert_gesture_sources: GESTURE_SOURCE_BUTTONS

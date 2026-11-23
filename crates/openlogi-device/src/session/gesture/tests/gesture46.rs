@@ -161,7 +161,7 @@ async fn a_wheel_without_0x2150_is_captured_through_gesture46() {
     assert!(matches!(device.armed.thumb, Some(ArmedThumb::Gesture46(_))));
     assert_eq!(diversion_writes(&device.handle, ARMED_INDEX), vec![DIVERT]);
 
-    let capture = GestureCapture::new(device.armed);
+    let capture = GestureCapture::new(device.armed, thumbwheel_spec().gesture_policies);
     let (sink, mut inputs) = mpsc::unbounded_channel();
     let handler = capture.report_handler(0xff, sink);
     // The roll's start marker carries no step.
