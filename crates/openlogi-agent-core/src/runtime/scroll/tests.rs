@@ -1983,3 +1983,39 @@ fn isolated_ratchet_notches_keep_plain_distance() {
     let plain = ratchet_distance(&mut momentum(|_| {}), start, &[0, 10, 20], 200);
     assert!((plain - 3.0).abs() < 1e-6, "{plain}");
 }
+
+#[test]
+fn released_reversal_keeps_original_acceleration_rate() {
+    // Two notches held back as a possible spring-back, 60 ms apart, both
+    // replayed at one later instant: the second is measured at 1/0.06 s,
+    // not as instantaneous.
+    let mut engine = momentum(|m| m.acceleration = 300);
+    let source = hidpp_source("mouse", 1);
+    let start = Instant::now();
+    let replay = start + Duration::from_millis(100);
+    let momentum = engine.momentum.expect("enabled");
+    let mut frames = Vec::new();
+    for reported in [0, 60] {
+        engine.engine.wheel_tick(
+            &source,
+            WheelTick {
+                impulse: wheel(0.0, -1.0),
+                notches: -1.0,
+                at: start + Duration::from_millis(reported),
+            },
+            replay,
+            momentum,
+            &mut |frame| frames.push(frame),
+        );
+    }
+    engine.advance_due(replay + Duration::from_millis(100), &mut |frame| {
+        frames.push(frame);
+    });
+    let distance: f64 = frames.iter().map(in_ticks).sum();
+    // 1 + the ramp at 16.7 notches/s: 1 + 2 × (16.7 - 5) / 25 ≈ 1.93.
+    let expected = -(1.0 + 1.0 + 2.0 * ((1.0 / 0.06) - 5.0) / 25.0);
+    assert!(
+        (distance - expected).abs() < 1e-6,
+        "{distance} vs {expected}"
+    );
+}

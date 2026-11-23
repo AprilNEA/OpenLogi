@@ -624,6 +624,9 @@ impl Direction {
 struct WheelTick {
     impulse: WheelDelta,
     notches: f64,
+    /// When the report arrived. A tick held back as a possible spring-back
+    /// is replayed later, but its notch rate is measured from this.
+    at: Instant,
 }
 
 /// A free-spinning wheel's glide: one [`GlideCurve`], relaunched from where
@@ -821,10 +824,16 @@ impl ScrollEngine {
         } else {
             SPRING_BACK
         };
-        match state
-            .spring_back
-            .admit(notches, at, lock, WheelTick { impulse, notches })
-        {
+        match state.spring_back.admit(
+            notches,
+            at,
+            lock,
+            WheelTick {
+                impulse,
+                notches,
+                at,
+            },
+        ) {
             Admit::Pass(tick) => self.wheel_tick(&source, tick, at, momentum, emit),
             Admit::Hold => {}
             // Released now: replayed at their own, older instants the held
@@ -843,7 +852,11 @@ impl ScrollEngine {
     fn wheel_tick(
         &mut self,
         source: &ScrollSource,
-        WheelTick { impulse, notches }: WheelTick,
+        WheelTick {
+            impulse,
+            notches,
+            at: reported_at,
+        }: WheelTick,
         at: Instant,
         momentum: MomentumParams,
         emit: &mut impl FnMut(ScrollFrame),
@@ -888,8 +901,8 @@ impl ScrollEngine {
                 // the gap since the previous notch: the detector's windowed
                 // speed reads one isolated notch as a turn of several
                 // notches per second.
-                let rate = glide::notch_rate(state.last_ratchet, notches, at);
-                state.last_ratchet = Some(at);
+                let rate = glide::notch_rate(state.last_ratchet, notches, reported_at);
+                state.last_ratchet = Some(reported_at);
                 let boost = glide::acceleration(rate, &momentum);
                 self.impulse(source.clone(), impulse.scale(boost), at, emit);
             }
