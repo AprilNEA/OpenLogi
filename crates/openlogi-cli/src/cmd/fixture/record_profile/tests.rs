@@ -1203,8 +1203,9 @@ async fn capture_reads_the_press_force_of_a_force_sensing_mouse() {
     assert_eq!(*captured, force);
 }
 
-/// Advertise `0x1F20` on the synthetic mouse and give it `timeout` as its
-/// power-off setting.
+/// Advertise `0x1F20` on the synthetic mouse, which stands in for a headset:
+/// the capture keys on the capability, not the kind. Give it `timeout` as
+/// its power-off setting.
 fn power_off_agent(timeout: ProfileSetting<PowerOffTimeout>) -> TestAgent {
     fixture_agent_with(move |profile| {
         let mouse = profile.inventories[0]
@@ -1260,7 +1261,7 @@ async fn captured_power_off_timeout(
 }
 
 #[tokio::test]
-async fn capture_reads_the_power_off_timeout_of_a_headset() {
+async fn capture_reads_the_power_off_timeout_when_advertised() {
     let timeout = PowerOffTimeout::try_new(15).expect("a timeout in range");
     let (setting, families) =
         captured_power_off_timeout(power_off_agent(ProfileSetting::Supported(timeout))).await;
