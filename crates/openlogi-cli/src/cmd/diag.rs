@@ -23,6 +23,7 @@ pub mod lighting;
 pub mod mouse_buttons;
 pub mod onboard;
 pub mod pointer_speed;
+pub mod power_off;
 pub mod sidetone;
 pub mod smartshift;
 pub mod wheel;
@@ -56,6 +57,8 @@ pub enum DiagCmd {
     HostSwitch(host_switch::HostSwitchArgs),
     /// Read a headset's HID++ 0x8300 sidetone level, or set it.
     Sidetone(sidetone::SidetoneArgs),
+    /// Read a headset's HID++ 0x1F20 automatic power-off timeout, or set it.
+    PowerOff(power_off::PowerOffArgs),
     /// Light each HID++ 0x8081 zone of a keyboard alone and record its key.
     Zones(zones::ZonesArgs),
 }
@@ -81,6 +84,7 @@ impl DiagCmd {
             Self::MouseButtons(args) => mouse_buttons::run(args).await,
             Self::HostSwitch(args) => host_switch::run(args).await,
             Self::Sidetone(args) => sidetone::run(args).await,
+            Self::PowerOff(args) => power_off::run(args).await,
             Self::Zones(args) => zones::run(args).await,
         }
     }
