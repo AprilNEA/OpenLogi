@@ -1203,6 +1203,83 @@ async fn capture_reads_the_press_force_of_a_force_sensing_mouse() {
     assert_eq!(*captured, force);
 }
 
+/// Advertise `0x1F20` on the synthetic mouse and give it `timeout` as its
+/// power-off setting.
+fn power_off_agent(timeout: ProfileSetting<PowerOffTimeout>) -> TestAgent {
+    fixture_agent_with(move |profile| {
+        let mouse = profile.inventories[0]
+            .paired
+            .iter_mut()
+            .find(|device| device.slot == 1)
+            .expect("mouse");
+        mouse
+            .capabilities
+            .as_mut()
+            .expect("mouse capabilities")
+            .power_off_timeout = true;
+        let settings = profile
+            .settings
+            .iter_mut()
+            .find(|settings| matches!(settings.route, DeviceRoute::Bolt { slot: 1, .. }))
+            .expect("mouse settings");
+        settings.power_off_timeout = timeout;
+    })
+}
+
+async fn captured_power_off_timeout(
+    agent: TestAgent,
+) -> (ProfileSetting<PowerOffTimeout>, Vec<ReadFamily>) {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let output = directory.path().join("profile.json");
+    let inspection = agent.clone();
+    capture_connected(
+        args(output.clone(), Some("synthetic performance mouse")),
+        test_client(agent),
+    )
+    .await
+    .expect("semantic capture succeeds");
+    let profile: DeviceProfile =
+        serde_json::from_slice(&std::fs::read(output).expect("profile output"))
+            .expect("typed profile");
+    profile.validate().expect("published profile validates");
+    let setting = profile
+        .settings
+        .iter()
+        .find(|settings| matches!(settings.route, DeviceRoute::Bolt { slot: 1, .. }))
+        .expect("mouse settings")
+        .power_off_timeout
+        .clone();
+    let families = inspection
+        .calls
+        .lock()
+        .expect("calls lock")
+        .iter()
+        .map(|(family, _)| *family)
+        .collect();
+    (setting, families)
+}
+
+#[tokio::test]
+async fn capture_reads_the_power_off_timeout_of_a_headset() {
+    let timeout = PowerOffTimeout::try_new(15).expect("a timeout in range");
+    let (setting, families) =
+        captured_power_off_timeout(power_off_agent(ProfileSetting::Supported(timeout))).await;
+
+    assert!(families.contains(&ReadFamily::PowerOffTimeout));
+    assert_eq!(setting, ProfileSetting::Supported(timeout));
+}
+
+#[tokio::test]
+async fn a_refused_power_off_read_is_recorded_unsupported() {
+    // `0x1F20` is listed for the battery, but the device refuses function 1,
+    // which the agent answers as an unsupported feature.
+    let (setting, families) =
+        captured_power_off_timeout(power_off_agent(ProfileSetting::Unsupported)).await;
+
+    assert!(families.contains(&ReadFamily::PowerOffTimeout));
+    assert_eq!(setting, ProfileSetting::Unsupported);
+}
+
 #[tokio::test]
 async fn receiver_capture_drops_a_sibling_device_with_no_identity() {
     let directory = tempfile::tempdir().expect("tempdir");
