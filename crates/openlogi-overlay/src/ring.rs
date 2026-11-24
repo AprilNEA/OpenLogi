@@ -41,10 +41,6 @@ pub(crate) struct Geometry {
     selected_glyph: f32,
     cancel: f32,
     cancel_glyph: f32,
-    /// How far the pointer must move from the centre before it aims at a
-    /// slot. Inside it nothing is chosen: a click there, or a held trigger
-    /// released there, closes the ring.
-    dead_zone: f32,
 }
 
 impl Geometry {
@@ -63,7 +59,6 @@ impl Geometry {
                 selected_glyph: 18.0,
                 cancel: 24.0,
                 cancel_glyph: 12.0,
-                dead_zone: 20.0,
             },
             ActionRingSize::Medium => Self {
                 window: 360.0,
@@ -75,7 +70,6 @@ impl Geometry {
                 selected_glyph: 22.0,
                 cancel: 28.0,
                 cancel_glyph: 14.0,
-                dead_zone: 24.0,
             },
             ActionRingSize::Large => Self {
                 window: 400.0,
@@ -87,9 +81,16 @@ impl Geometry {
                 selected_glyph: 26.0,
                 cancel: 32.0,
                 cancel_glyph: 16.0,
-                dead_zone: 28.0,
             },
         }
+    }
+
+    /// How far the pointer must move from the centre before it aims at a
+    /// slot: out to the edge of the centre circle, so a slot lights up as
+    /// the pointer leaves the circle. Inside it nothing is chosen: a click
+    /// there, or a held trigger released there, closes the ring.
+    fn dead_zone(self) -> f32 {
+        self.cancel / 2.0
     }
 
     /// The ring's footprint, out to a hovered slot's edge plus a margin.
@@ -203,7 +204,7 @@ fn aimed_slot(
     x: f32,
     y: f32,
 ) -> Option<ActionRingSlot> {
-    if x.hypot(y) < geometry.dead_zone {
+    if x.hypot(y) < geometry.dead_zone() {
         return None;
     }
     let aimed = ActionRingSlot::toward(x, y);
@@ -1172,8 +1173,9 @@ mod tests {
             assert_eq!(hovered(&mut ring_cx), Some(ActionRingSlot::Top), "{size:?}");
             assert_eq!(sent.try_recv().ok(), Some(hover(Some(ActionRingSlot::Top))));
 
-            // Straight up toward the top slot, just inside this size's dead zone.
-            let edge = geometry.dead_zone;
+            // Straight up toward the top slot, either side of the centre
+            // circle's drawn edge.
+            let edge = geometry.cancel / 2.0;
             ring_cx.simulate_mouse_move(at(0.0, 2.0 - edge), None, Modifiers::default());
             assert_eq!(
                 hovered(&mut ring_cx),
