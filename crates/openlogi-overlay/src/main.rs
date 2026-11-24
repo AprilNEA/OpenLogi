@@ -23,6 +23,8 @@ mod notice;
 mod platform;
 mod ring;
 mod session;
+#[cfg(target_os = "macos")]
+mod warm_up;
 mod windowing;
 
 use std::cell::RefCell;
@@ -84,6 +86,8 @@ fn main() -> Result<()> {
         // NSApplication before GPUI has installed its subclass.
         platform::configure_application();
         windowing::install(cx);
+        #[cfg(target_os = "macos")]
+        warm_up::warm_up(cx);
         let live_session = Arc::new(ClickAwaySession::new());
         spawn_click_away_dismissal(cx, Arc::clone(&live_session));
         let shelf = Rc::new(RefCell::new(NoticeShelf::default()));
