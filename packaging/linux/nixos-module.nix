@@ -35,6 +35,9 @@ in
         ExecStart = lib.getExe' cfg.package "openlogi-agent";
         Restart = "on-failure";
         RestartSec = 5;
+        # Same cap as the packaged unit: a runaway helper must not fill the logs.
+        LogRateLimitIntervalSec = "30s";
+        LogRateLimitBurst = 2000;
       };
     };
   };

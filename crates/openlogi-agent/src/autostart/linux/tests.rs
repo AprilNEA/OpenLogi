@@ -589,16 +589,29 @@ fn xdg_base_lists_expand_in_order() {
 }
 
 /// A unit an older release wrote stays ours, so `apply` upgrades it to the
-/// current template instead of leaving it in place as the user's.
+/// current template instead of leaving it in place as the user's. The fixture
+/// is the unit 0.9.0 wrote, kept literal so that editing or dropping its entry
+/// in `UNIT_TAILS` fails here.
 #[test]
-fn a_unit_from_every_shipped_template_is_ours() {
-    for tail in UNIT_TAILS {
-        let old = render_with_tail("/usr/bin/openlogi-agent", tail);
-        assert!(
-            is_generated_unit(&old),
-            "template should stay recognised:\n{old}"
-        );
-    }
+fn a_unit_written_by_0_9_0_is_ours() {
+    let old = "[Unit]\n\
+        Description=OpenLogi background agent (Logitech HID++ device control)\n\
+        After=graphical-session.target\n\
+        \n\
+        [Service]\n\
+        Type=simple\n\
+        ExecStart=/home/user/OpenLogi/target/release/openlogi-agent\n\
+        Restart=on-failure\n\
+        RestartSec=5\n\
+        \n\
+        [Install]\n\
+        WantedBy=graphical-session.target\n";
+    assert!(is_generated_unit(old));
+}
+
+#[test]
+fn the_current_template_is_ours() {
+    assert!(is_generated_unit(&render_unit("/usr/bin/openlogi-agent")));
 }
 
 #[test]

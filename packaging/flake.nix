@@ -75,6 +75,9 @@
         assert
           enabled.systemd.user.services.openlogi-agent.serviceConfig.ExecStart
           == "${package}/bin/openlogi-agent";
+        assert
+          enabled.systemd.user.services.openlogi-agent.serviceConfig.LogRateLimitIntervalSec == "30s";
+        assert enabled.systemd.user.services.openlogi-agent.serviceConfig.LogRateLimitBurst == 2000;
         pkgs.runCommand "openlogi-nixos-module-check" { } ''
           touch "$out"
         '';
