@@ -342,6 +342,30 @@ pub(in crate::features::mouse) const fn drag_hold_icon(drag: HeldDrag) -> &'stat
     }
 }
 
+/// The held modes the callouts show: the gesture buttons and the drag-hold
+/// swipes. In an app profile a button the app overrides runs the app's
+/// action instead, so its global held mode is left out.
+pub(super) fn callout_held_modes<G>(
+    gesture_maps: &std::collections::BTreeMap<ButtonId, G>,
+    drag_holds: &std::collections::BTreeMap<ButtonId, HeldDrag>,
+    editing_app: bool,
+    overridden: Option<&std::collections::BTreeMap<ButtonId, Action>>,
+) -> (
+    Vec<ButtonId>,
+    std::collections::BTreeMap<ButtonId, HeldDrag>,
+) {
+    let shown = |button: &ButtonId| {
+        !editing_app || !overridden.is_some_and(|overrides| overrides.contains_key(button))
+    };
+    let gesture_buttons = gesture_maps.keys().copied().filter(shown).collect();
+    let drags = drag_holds
+        .iter()
+        .filter(|(button, _)| shown(button))
+        .map(|(button, drag)| (*button, *drag))
+        .collect();
+    (gesture_buttons, drags)
+}
+
 /// The label card's text and icon for one control.
 pub(super) fn binding_label_for_control(
     control: MouseControlId,

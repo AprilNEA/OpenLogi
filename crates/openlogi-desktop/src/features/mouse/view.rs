@@ -75,7 +75,10 @@ fn held_actions(offer_gshift: bool) -> &'static [Action] {
 const MODEL_VERTICAL_RESERVE: f32 = 154.;
 
 mod labels;
-use labels::{CardSize, MAX_VALUE_LINES, ValueMetrics, binding_label_for_control, label_control};
+use labels::{
+    CardSize, MAX_VALUE_LINES, ValueMetrics, binding_label_for_control, callout_held_modes,
+    label_control,
+};
 pub(super) use labels::{drag_hold_icon, drag_hold_text};
 /// Floor for the scaled model height. Below this the evenly-slotted side labels
 /// (≈[`LABEL_H`](super::geometry::LABEL_H) each) start to overlap; the window's minimum height is sized to
@@ -542,17 +545,11 @@ impl Render for MouseModelView {
             hidden_actions,
         } = MouseWorkspaceData::read(cx).unwrap_or_else(MouseWorkspaceData::empty);
 
-        let gesture_buttons: Vec<ButtonId> = gesture_maps
-            .keys()
-            .copied()
-            .filter(|button| {
-                editing_app.is_none()
-                    || !overridden.is_some_and(|overrides| overrides.contains_key(button))
-            })
-            .collect();
+        let (gesture_buttons, shown_drags) =
+            callout_held_modes(gesture_maps, drag_hold, editing_app.is_some(), overridden);
 
         let value = |control| {
-            binding_label_for_control(control, bindings, &gesture_buttons, drag_hold).text
+            binding_label_for_control(control, bindings, &gesture_buttons, &shown_drags).text
         };
         let ModelLayout {
             canvas_w,
@@ -589,7 +586,7 @@ impl Render for MouseModelView {
             .child(leader_canvas)
             .children(labels_outer.iter().enumerate().map(|(idx, label)| {
                 let binding =
-                    binding_label_for_control(label.id, bindings, &gesture_buttons, drag_hold);
+                    binding_label_for_control(label.id, bindings, &gesture_buttons, &shown_drags);
                 label_control(
                     idx,
                     *label,

@@ -1227,6 +1227,7 @@ fn the_model_and_full_values_fit_the_canvas_area_below_the_chrome(cx: &mut TestA
 fn a_drag_hold_callout_names_its_swipe_like_a_gesture_callout() {
     use openlogi_core::binding::HeldDrag;
 
+    let _locale = LOCALE_LOCK.lock().unwrap();
     let bindings = BTreeMap::from([(ButtonId::Back, Action::Paste)]);
     let drags = BTreeMap::from([(ButtonId::Back, HeldDrag::ThreeFingerSwipe)]);
     let back = MouseControlId::Button(ButtonId::Back);
@@ -1239,5 +1240,46 @@ fn a_drag_hold_callout_names_its_swipe_like_a_gesture_callout() {
     assert_eq!(
         plain.text,
         crate::ui::action::localized_action_label(&Action::Paste)
+    );
+}
+
+#[test]
+fn drag_hold_callout_app_override() {
+    use openlogi_core::binding::{GestureDirection, HeldDrag};
+
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    let no_gestures: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>> = BTreeMap::new();
+    let drags = BTreeMap::from([
+        (ButtonId::Back, HeldDrag::ThreeFingerSwipe),
+        (ButtonId::Forward, HeldDrag::TwoFingerSwipe),
+    ]);
+    // The app maps Back to Copy and leaves Forward to the global profile.
+    let overrides = BTreeMap::from([(ButtonId::Back, Action::Copy)]);
+    let label = |button, editing_app| {
+        let (gestures, shown) =
+            super::labels::callout_held_modes(&no_gestures, &drags, editing_app, Some(&overrides));
+        super::labels::binding_label_for_control(
+            MouseControlId::Button(button),
+            &overrides,
+            &gestures,
+            &shown,
+        )
+        .text
+    };
+
+    assert_eq!(
+        label(ButtonId::Back, true),
+        crate::ui::action::localized_action_label(&Action::Copy),
+        "an overridden button shows the app's action"
+    );
+    assert_eq!(
+        label(ButtonId::Forward, true),
+        tr!("actions.two_finger_swipe"),
+        "an inherited button still shows its swipe"
+    );
+    assert_eq!(
+        label(ButtonId::Back, false),
+        tr!("actions.three_finger_swipe"),
+        "the global profile shows the swipe"
     );
 }
