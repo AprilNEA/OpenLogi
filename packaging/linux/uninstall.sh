@@ -26,6 +26,23 @@ done
 
 BINDIR="${PREFIX}/bin"
 
+# Whether an installed system package (not this script) owns $1 — so removing
+# a path both a package and this installer can write to never strands a
+# package-managed file still in place (dpkg/rpm, or pacman on an AUR build
+# of the .deb).
+owned_by_package() {
+  if command -v dpkg >/dev/null 2>&1 && dpkg -S "$1" >/dev/null 2>&1; then
+    return 0
+  fi
+  if command -v rpm >/dev/null 2>&1 && rpm -qf "$1" >/dev/null 2>&1; then
+    return 0
+  fi
+  if command -v pacman >/dev/null 2>&1 && pacman -Qo "$1" >/dev/null 2>&1; then
+    return 0
+  fi
+  return 1
+}
+
 # ── stop and disable the agent ────────────────────────────────────────────────
 
 # systemctl --user targets the session of whichever user is running this script.
@@ -51,7 +68,17 @@ sudo rm -f "${BINDIR}/openlogi" "${BINDIR}/openlogi-desktop" \
 # ── udev rules ────────────────────────────────────────────────────────────────
 
 echo "Removing udev rules …"
-sudo rm -f /etc/udev/rules.d/70-openlogi.rules
+# Both the current location and the pre-migration one (#1545): an installed
+# package still owns either path independently and keeps it on uninstall.
+for rule_path in /usr/lib/udev/rules.d/70-openlogi.rules /etc/udev/rules.d/70-openlogi.rules; do
+  if [ -e "$rule_path" ]; then
+    if owned_by_package "$rule_path"; then
+      echo "Keeping $rule_path — owned by an installed package" >&2
+    else
+      sudo rm -f "$rule_path"
+    fi
+  fi
+done
 if command -v udevadm >/dev/null 2>&1; then
   sudo udevadm control --reload-rules
   sudo udevadm trigger --subsystem-match=hidraw

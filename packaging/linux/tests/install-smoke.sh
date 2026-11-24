@@ -355,7 +355,7 @@ dash "${SOURCE_REPO}/packaging/linux/install.sh" \
 for binary in openlogi openlogi-desktop openlogi-overlay openlogi-agent; do
   assert_contains "$MOCK_LOG" "/target/release/${binary} ${SOURCE_PREFIX}/bin/${binary}"
 done
-assert_contains "$MOCK_LOG" '/etc/udev/rules.d/70-openlogi.rules'
+assert_contains "$MOCK_LOG" '/usr/lib/udev/rules.d/70-openlogi.rules'
 assert_contains "$MOCK_LOG" '/usr/lib/systemd/user/openlogi-agent.service'
 assert_contains "$MOCK_LOG" '/usr/share/applications/openlogi.desktop'
 assert_contains "$MOCK_LOG" '/usr/share/icons/hicolor/1024x1024/apps/openlogi.png'
