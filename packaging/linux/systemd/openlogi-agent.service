@@ -19,6 +19,8 @@ Type=simple
 ExecStart=/usr/bin/openlogi-agent
 Restart=on-failure
 RestartSec=5
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=2000
 
 [Install]
 WantedBy=graphical-session.target

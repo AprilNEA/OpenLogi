@@ -344,9 +344,10 @@ fn legacy_unit_path() -> io::Result<PathBuf> {
 /// `ExecStart` pointing at a binary that no longer exists.
 ///
 /// Only a file this app generated is removed, and provenance is exact rather
-/// than heuristic. One template has ever shipped, parameterised solely by
-/// `ExecStart`, so splicing a file's own `ExecStart` line back into that
-/// template reproduces the file byte for byte if and only if we rendered it.
+/// than heuristic. Every template that has shipped ([`UNIT_TAILS`]) is
+/// parameterised solely by `ExecStart`, so splicing a file's own `ExecStart`
+/// line back into one of them reproduces the file byte for byte if and only if
+/// we rendered it.
 /// Anything carrying another directive is the user's: it is left in place and
 /// keeps winning, which is the right outcome for a unit they chose to author.
 fn migrate_legacy_unit() {
@@ -378,7 +379,11 @@ fn migrate_legacy_unit() {
 
 /// Whether `contents` is a unit this app rendered, for *any* executable path.
 fn is_generated_unit(contents: &str) -> bool {
-    exec_start_value(contents).is_some_and(|value| render_unit_with_exec(value) == contents)
+    exec_start_value(contents).is_some_and(|value| {
+        UNIT_TAILS
+            .iter()
+            .any(|tail| render_with_tail(value, tail) == contents)
+    })
 }
 
 /// The verbatim, still-escaped value of the file's single `ExecStart=` line.
@@ -492,21 +497,50 @@ fn render_unit(exe: &str) -> String {
 /// value would double `%%` into `%%%%`, and a unit this app wrote would fail to
 /// match itself.
 fn render_unit_with_exec(exec_start: &str) -> String {
-    format!(
-        "[Unit]\n\
-        Description=OpenLogi background agent (Logitech HID++ device control)\n\
-        After=graphical-session.target\n\
-        \n\
-        [Service]\n\
-        Type=simple\n\
-        ExecStart={exec_start}\n\
-        Restart=on-failure\n\
-        RestartSec=5\n\
-        \n\
-        [Install]\n\
-        WantedBy=graphical-session.target\n"
-    )
+    render_with_tail(exec_start, CURRENT_TAIL)
 }
+
+fn render_with_tail(exec_start: &str, tail: &str) -> String {
+    format!("{UNIT_HEAD}{exec_start}{tail}")
+}
+
+/// Everything up to the `ExecStart` value; shared by every template shipped.
+const UNIT_HEAD: &str = "[Unit]\n\
+    Description=OpenLogi background agent (Logitech HID++ device control)\n\
+    After=graphical-session.target\n\
+    \n\
+    [Service]\n\
+    Type=simple\n\
+    ExecStart=";
+
+/// Everything after the `ExecStart` value, for each template this app has ever
+/// written, oldest first; the last is the one rendered now. Never edit or drop
+/// a shipped entry: [`is_generated_unit`] recognises a unit by reproducing it
+/// byte for byte, so a removed tail turns that version's units into the
+/// user's, and they are never upgraded or cleaned up again.
+const UNIT_TAILS: [&str; 2] = [
+    "\n\
+    Restart=on-failure\n\
+    RestartSec=5\n\
+    \n\
+    [Install]\n\
+    WantedBy=graphical-session.target\n",
+    // The journal rate limit covers the overlay helper too, which inherits the
+    // agent's stderr: a helper spinning on a dead display connection once wrote
+    // ~4,700 lines a second until the disk filled. The agent keeps its own
+    // log file, so the cap costs it nothing.
+    "\n\
+    Restart=on-failure\n\
+    RestartSec=5\n\
+    LogRateLimitIntervalSec=30s\n\
+    LogRateLimitBurst=2000\n\
+    \n\
+    [Install]\n\
+    WantedBy=graphical-session.target\n",
+];
+
+/// The template rendered now: the newest entry of [`UNIT_TAILS`].
+const CURRENT_TAIL: &str = UNIT_TAILS[UNIT_TAILS.len() - 1];
 
 /// Escape a string for use as `ExecStart` in a systemd unit file.
 ///

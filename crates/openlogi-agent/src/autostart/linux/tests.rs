@@ -587,3 +587,36 @@ fn xdg_base_lists_expand_in_order() {
         "every expanded entry is an absolute unit directory: {dirs:?}"
     );
 }
+
+/// A unit an older release wrote stays ours, so `apply` upgrades it to the
+/// current template instead of leaving it in place as the user's.
+#[test]
+fn a_unit_from_every_shipped_template_is_ours() {
+    for tail in UNIT_TAILS {
+        let old = render_with_tail("/usr/bin/openlogi-agent", tail);
+        assert!(
+            is_generated_unit(&old),
+            "template should stay recognised:\n{old}"
+        );
+    }
+}
+
+#[test]
+fn rendered_unit_caps_the_journal_rate() {
+    let body = render_unit("/usr/bin/openlogi-agent");
+    assert!(body.contains("\nLogRateLimitIntervalSec=30s\n"));
+    assert!(body.contains("\nLogRateLimitBurst=2000\n"));
+}
+
+/// The packaged unit and the generated one describe the same service; once
+/// its leading comment is dropped, the package must be exactly the unit this
+/// app renders for the packaged binary path.
+#[test]
+fn the_packaged_unit_matches_the_rendered_one() {
+    let packaged = include_str!("../../../../../packaging/linux/systemd/openlogi-agent.service");
+    let body = packaged
+        .split_once("\n[Unit]\n")
+        .map(|(_, rest)| format!("[Unit]\n{rest}"))
+        .expect("packaged unit has a [Unit] section");
+    assert_eq!(body, render_unit("/usr/bin/openlogi-agent"));
+}
