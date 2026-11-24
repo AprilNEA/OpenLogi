@@ -93,55 +93,155 @@ pub(crate) struct NodeLedger<K> {
 
 #[derive(Default)]
 struct FailureCounts {
-    /// Consecutive probes that produced no liveness evidence.
-    probe: u8,
-    /// Failed arrival replays on the current channel generation.
-    arrival_replay: u8,
     /// Non-authoritative ticks since the last complete inventory.
     publication_misses: u8,
-    /// Whether the enumerator retired a serving channel because this ledger
-    /// asked it to. Failed opens and a channel still draining settle as
-    /// failures too, but retire nothing, so they never set this.
-    evicted: bool,
-    /// Consecutive channel generations evicted for failing, without a healthy
-    /// probe in between. Scales the eviction threshold; see
-    /// [`MAX_REPLACEMENT_BACKOFF_DOUBLINGS`].
-    failed_replacements: u8,
+    /// Where the node's channel is in its eviction lifecycle. Changed only
+    /// through [`Self::step`].
+    channel: ChannelPhase,
 }
 
 impl FailureCounts {
-    /// The failure count at which this generation's channel is evicted.
-    fn evict_threshold(&self, base: u8) -> u8 {
-        let doublings = self
-            .failed_replacements
-            .min(MAX_REPLACEMENT_BACKOFF_DOUBLINGS);
+    /// Apply one channel lifecycle event; the only writer of `channel`.
+    /// Returns the failure count a `Failed` event reached on a serving
+    /// channel.
+    fn step(&mut self, event: ChannelEvent) -> Option<u8> {
+        let (next, failures) = self.channel.step(event);
+        self.channel = next;
+        failures
+    }
+}
+
+/// The node's channel, as far as eviction accounting goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChannelPhase {
+    /// A channel serves the node, or none has been opened yet. Its failures
+    /// count toward evicting it, against a threshold raised by `backoff`.
+    Serving {
+        /// Consecutive probes that produced no liveness evidence.
+        probe: u8,
+        /// Failed arrival replays on this channel.
+        arrival_replay: u8,
+        /// Consecutive channels evicted for failing, without a healthy probe
+        /// in between; see [`MAX_REPLACEMENT_BACKOFF_DOUBLINGS`].
+        backoff: u8,
+    },
+    /// The enumerator retired the serving channel at this ledger's request,
+    /// and the node waits for a replacement. Nothing serves, so failed opens
+    /// and passes over the draining channel count for nothing, and the
+    /// channel cannot be retired a second time.
+    AwaitingReplacement { backoff: u8 },
+}
+
+impl Default for ChannelPhase {
+    fn default() -> Self {
+        Self::Serving {
+            probe: 0,
+            arrival_replay: 0,
+            backoff: 0,
+        }
+    }
+}
+
+/// What can happen to a node's channel, as the ledger sees it.
+#[derive(Clone, Copy, Debug)]
+enum ChannelEvent {
+    /// One check of this kind failed.
+    Failed(FailureKind),
+    /// The enumerator retired the serving channel at this ledger's request.
+    Retired,
+    /// The enumerator opened a channel for the node.
+    Opened,
+}
+
+impl ChannelPhase {
+    /// The one transition function. Returns the next phase and, for a
+    /// `Failed` event on a serving channel, the failure count it reached.
+    const fn step(self, event: ChannelEvent) -> (Self, Option<u8>) {
+        match (self, event) {
+            (
+                Self::Serving {
+                    probe,
+                    arrival_replay,
+                    backoff,
+                },
+                ChannelEvent::Failed(FailureKind::Probe),
+            ) => {
+                let probe = probe.saturating_add(1);
+                let next = Self::Serving {
+                    probe,
+                    arrival_replay,
+                    backoff,
+                };
+                (next, Some(probe))
+            }
+            (
+                Self::Serving {
+                    arrival_replay,
+                    backoff,
+                    ..
+                },
+                ChannelEvent::Failed(FailureKind::ArrivalReplay),
+            ) => {
+                // The pairing-count response proves transport liveness, so a
+                // later ordinary failure must start its own streak again.
+                let arrival_replay = arrival_replay.saturating_add(1);
+                let next = Self::Serving {
+                    probe: 0,
+                    arrival_replay,
+                    backoff,
+                };
+                (next, Some(arrival_replay))
+            }
+            (Self::Serving { backoff, .. }, ChannelEvent::Retired) => {
+                (Self::AwaitingReplacement { backoff }, None)
+            }
+            // A channel opened without a failed predecessor (first sight, a
+            // node back from absence) is not evidence against the channel.
+            (Self::Serving { backoff, .. }, ChannelEvent::Opened) => (
+                Self::Serving {
+                    probe: 0,
+                    arrival_replay: 0,
+                    backoff,
+                },
+                None,
+            ),
+            (Self::AwaitingReplacement { backoff }, ChannelEvent::Opened) => (
+                Self::Serving {
+                    probe: 0,
+                    arrival_replay: 0,
+                    backoff: backoff.saturating_add(1),
+                },
+                None,
+            ),
+            (
+                state @ Self::AwaitingReplacement { .. },
+                ChannelEvent::Failed(_) | ChannelEvent::Retired,
+            ) => (state, None),
+        }
+    }
+
+    /// Consecutive channels evicted for failing, in either phase.
+    const fn backoff(self) -> u8 {
+        match self {
+            Self::Serving { backoff, .. } | Self::AwaitingReplacement { backoff } => backoff,
+        }
+    }
+
+    /// The failure count at which a serving channel is evicted, for a
+    /// failure kind whose unscaled threshold is `base`.
+    fn evict_threshold(self, base: u8) -> u8 {
+        let doublings = self.backoff().min(MAX_REPLACEMENT_BACKOFF_DOUBLINGS);
         base.saturating_mul(1 << doublings)
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum FailureKind {
     Probe,
     ArrivalReplay,
 }
 
 impl FailureKind {
-    fn record(self, counts: &mut FailureCounts) -> u8 {
-        match self {
-            Self::Probe => {
-                counts.probe = counts.probe.saturating_add(1);
-                counts.probe
-            }
-            Self::ArrivalReplay => {
-                // The pairing-count response proves transport liveness, so a
-                // later ordinary failure must start its own streak again.
-                counts.probe = 0;
-                counts.arrival_replay = counts.arrival_replay.saturating_add(1);
-                counts.arrival_replay
-            }
-        }
-    }
-
     const fn label(self) -> &'static str {
         match self {
             Self::Probe => "probe",
@@ -168,11 +268,7 @@ impl<K: Eq + Hash + Clone> NodeLedger<K> {
     /// new one is held to; only a healthy probe lowers it again.
     pub fn reset_channel_failures_after_open(&mut self, node: &K) {
         if let Some(counts) = self.failures.get_mut(node) {
-            counts.probe = 0;
-            counts.arrival_replay = 0;
-            if std::mem::take(&mut counts.evicted) {
-                counts.failed_replacements = counts.failed_replacements.saturating_add(1);
-            }
+            counts.step(ChannelEvent::Opened);
         }
     }
 
@@ -181,7 +277,7 @@ impl<K: Eq + Hash + Clone> NodeLedger<K> {
     /// in its place is held to a raised threshold.
     pub fn record_eviction(&mut self, node: &K) {
         if let Some(counts) = self.failures.get_mut(node) {
-            counts.evicted = true;
+            counts.step(ChannelEvent::Retired);
         }
     }
 
@@ -240,17 +336,18 @@ impl<K: Eq + Hash + Clone> NodeLedger<K> {
         failure_kind: FailureKind,
     ) -> SettledNode {
         let counts = self.failures.entry(node.clone()).or_default();
-        let channel_failures = failure_kind.record(counts);
+        let channel_failures = counts.step(ChannelEvent::Failed(failure_kind));
         counts.publication_misses = counts.publication_misses.saturating_add(1);
-        let evict_channel = channel_failures >= counts.evict_threshold(evict_after);
-        let failed_replacements = counts.failed_replacements;
+        let evict_channel =
+            channel_failures.is_some_and(|n| n >= counts.channel.evict_threshold(evict_after));
+        let failed_replacements = counts.channel.backoff();
         let publication_misses = counts.publication_misses;
         let failure_kind = failure_kind.label();
         let inventory = if publication_misses <= NODE_MISS_GRACE {
             if let Some(previous) = self.last_good.get(node) {
                 debug!(
                     failures = publication_misses,
-                    channel_failures,
+                    ?channel_failures,
                     failed_replacements,
                     failure_kind,
                     "node check incomplete — replaying its last good inventory"
@@ -263,7 +360,7 @@ impl<K: Eq + Hash + Clone> NodeLedger<K> {
             if self.last_good.remove(node).is_some() {
                 warn!(
                     failures = publication_misses,
-                    channel_failures,
+                    ?channel_failures,
                     failed_replacements,
                     failure_kind,
                     "node check failures exhausted the replay grace — surfacing the live result"
@@ -310,8 +407,8 @@ mod tests {
     use openlogi_core::device::{DeviceInventory, ReceiverInfo};
 
     use super::{
-        ARRIVAL_REPLAY_EVICT_AFTER, CHANNEL_EVICT_AFTER, MAX_REPLACEMENT_BACKOFF_DOUBLINGS,
-        NODE_MISS_GRACE, NodeLedger,
+        ARRIVAL_REPLAY_EVICT_AFTER, CHANNEL_EVICT_AFTER, ChannelEvent, ChannelPhase, FailureKind,
+        MAX_REPLACEMENT_BACKOFF_DOUBLINGS, NODE_MISS_GRACE, NodeLedger,
     };
 
     fn inventory(name: &str) -> DeviceInventory {
@@ -599,6 +696,104 @@ mod tests {
             failures_until_eviction(&mut ledger),
             u16::from(CHANNEL_EVICT_AFTER)
         );
+    }
+
+    /// Every phase against every event: the whole transition function.
+    #[test]
+    fn channel_phase_transitions() {
+        use ChannelEvent::{Failed, Opened, Retired};
+        use ChannelPhase::{AwaitingReplacement, Serving};
+        use FailureKind::{ArrivalReplay, Probe};
+
+        let serving = Serving {
+            probe: 1,
+            arrival_replay: 2,
+            backoff: 3,
+        };
+        let awaiting = AwaitingReplacement { backoff: 3 };
+        let fresh = |backoff| Serving {
+            probe: 0,
+            arrival_replay: 0,
+            backoff,
+        };
+        let table = [
+            (
+                serving,
+                Failed(Probe),
+                Serving {
+                    probe: 2,
+                    arrival_replay: 2,
+                    backoff: 3,
+                },
+                Some(2),
+            ),
+            (
+                serving,
+                Failed(ArrivalReplay),
+                Serving {
+                    probe: 0,
+                    arrival_replay: 3,
+                    backoff: 3,
+                },
+                Some(3),
+            ),
+            (serving, Retired, awaiting, None),
+            (serving, Opened, fresh(3), None),
+            (awaiting, Failed(Probe), awaiting, None),
+            (awaiting, Failed(ArrivalReplay), awaiting, None),
+            (awaiting, Retired, awaiting, None),
+            (awaiting, Opened, fresh(4), None),
+        ];
+        for (from, event, to, failures) in table {
+            assert_eq!(from.step(event), (to, failures), "{from:?} on {event:?}");
+        }
+    }
+
+    /// A channel the enumerator reports retired twice is one retirement.
+    #[test]
+    fn a_duplicate_retirement_is_refused() {
+        let mut ledger = NodeLedger::default();
+        ledger.settle(&1, true, Some(inventory("craft")));
+        while !ledger.settle(&1, false, None).evict_channel {}
+        ledger.record_eviction(&1);
+        ledger.record_eviction(&1);
+
+        assert_eq!(
+            failures_until_eviction(&mut ledger),
+            u16::from(CHANNEL_EVICT_AFTER) * 2,
+            "one retirement doubles the threshold once"
+        );
+    }
+
+    /// Opening twice after one retirement replaces the failed channel once.
+    #[test]
+    fn a_duplicate_replacement_open_is_refused() {
+        let mut ledger = NodeLedger::default();
+        ledger.settle(&1, true, Some(inventory("craft")));
+        while !ledger.settle(&1, false, None).evict_channel {}
+        ledger.record_eviction(&1);
+        ledger.reset_channel_failures_after_open(&1);
+
+        assert_eq!(
+            failures_until_eviction(&mut ledger),
+            u16::from(CHANNEL_EVICT_AFTER) * 2,
+            "the second open does not count as another replacement"
+        );
+    }
+
+    /// Nothing serves while the node waits for its replacement, so failed
+    /// opens and draining passes never ask for an eviction.
+    #[test]
+    fn failures_while_awaiting_a_replacement_request_no_eviction() {
+        let mut ledger = NodeLedger::default();
+        ledger.settle(&1, true, Some(inventory("craft")));
+        while !ledger.settle(&1, false, None).evict_channel {}
+        ledger.record_eviction(&1);
+
+        for _ in 0..u16::from(CHANNEL_EVICT_AFTER) * 8 {
+            assert!(!ledger.settle(&1, false, None).evict_channel);
+            assert!(!ledger.settle_arrival_replay_failure(&1).evict_channel);
+        }
     }
 
     /// The arrival-replay path backs off from its own, longer base.
