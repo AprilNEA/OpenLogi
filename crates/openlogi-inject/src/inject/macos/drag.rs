@@ -59,6 +59,13 @@ const DRAG_EXPONENT: f64 = 0.7;
 const STOP_SPEED: f64 = 1.0;
 const MOMENTUM_FRAME: Duration = Duration::from_micros(8_333);
 
+/// Travel, in points, a two-finger drag makes before it has a heading to turn
+/// back from.
+const TURN_MIN_LEG: f64 = 8.0;
+/// Travel, in points, back against the heading that counts as turning round
+/// rather than a wobble of the hand.
+const TURN_BACK: f64 = 6.0;
+
 /// The phase a two-finger frame carries. Touch, momentum and rest frames are
 /// distinct variants, so a frame can never pair a touch phase with a momentum
 /// phase.
@@ -215,6 +222,7 @@ struct ScrollDrag {
     natural: bool,
     pixels: SubPixel,
     flick: FlickVelocity,
+    turn: Turn,
 }
 
 impl ScrollDrag {
@@ -223,13 +231,26 @@ impl ScrollDrag {
             natural: spaces::natural_scrolling(),
             pixels: SubPixel::default(),
             flick: FlickVelocity::default(),
+            turn: Turn::default(),
         };
+        drag.turn.reversed(dx, dy);
         drag.post(dx, dy, Touch::Began, at);
         drag
     }
 
+    /// A turn back against the heading lifts the "fingers" and puts them down
+    /// again. An app ties a touch to the scroll view that takes its first
+    /// motion, so a drag that starts by pushing into a page's end is tied to
+    /// a view that cannot move, and pulling back never scrolls the page. On
+    /// a trackpad the fingers lift soon; a held button may never let go.
     fn moved(&mut self, dx: f64, dy: f64, at: Instant) {
-        self.post(dx, dy, Touch::Changed, at);
+        if self.turn.reversed(dx, dy) {
+            post_scroll_frame(0.0, 0.0, ScrollPhase::Touch(Touch::Ended), self.natural);
+            self.pixels = SubPixel::default();
+            self.post(dx, dy, Touch::Began, at);
+        } else {
+            self.post(dx, dy, Touch::Changed, at);
+        }
     }
 
     fn post(&mut self, dx: f64, dy: f64, touch: Touch, at: Instant) {
@@ -298,6 +319,42 @@ fn glide(velocity: (f64, f64), stop: &AtomicBool, natural: bool) {
     post_scroll_frame(0.0, 0.0, ScrollPhase::Momentum(Momentum::End), natural);
     post_scroll_frame(0.0, 0.0, ScrollPhase::Rest(Rest::MayBegin), natural);
     post_scroll_frame(0.0, 0.0, ScrollPhase::Rest(Rest::Cancelled), natural);
+}
+
+/// Tells a two-finger drag turning back from one moving on or wobbling. The
+/// heading is the drag's travel since its touch began. A motion against it
+/// counts toward turning back, and one with it clears the count.
+#[derive(Default)]
+struct Turn {
+    leg: (f64, f64),
+    back: f64,
+}
+
+impl Turn {
+    /// Take one motion; `true` when it completes a turn back, which starts a
+    /// new leg heading the new way.
+    fn reversed(&mut self, dx: f64, dy: f64) -> bool {
+        let length = self.leg.0.hypot(self.leg.1);
+        if length < TURN_MIN_LEG {
+            self.leg = (self.leg.0 + dx, self.leg.1 + dy);
+            return false;
+        }
+        let along = (dx * self.leg.0 + dy * self.leg.1) / length;
+        if along >= 0.0 {
+            self.back = 0.0;
+            self.leg = (self.leg.0 + dx, self.leg.1 + dy);
+            return false;
+        }
+        self.back -= along;
+        if self.back < TURN_BACK {
+            return false;
+        }
+        *self = Self {
+            leg: (dx, dy),
+            back: 0.0,
+        };
+        true
+    }
 }
 
 /// Whole-point deltas out of fractional travel, carrying the remainder.
@@ -408,8 +465,9 @@ pub(super) mod recording {
     use objc2_core_foundation::CFRetained;
     use objc2_core_graphics::{CGEvent, CGEventField};
 
-    /// The window-server type of each event posted while recording.
-    static POSTED: Mutex<Option<Vec<i64>>> = Mutex::new(None);
+    /// The window-server type and scroll phase of each event posted while
+    /// recording.
+    static POSTED: Mutex<Option<Vec<(i64, i64)>>> = Mutex::new(None);
     /// One recording at a time: tests run in parallel.
     static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
 
@@ -425,11 +483,25 @@ pub(super) mod recording {
         }
 
         /// The type (`kCGSEventTypeField`) of every event posted so far.
+        pub(in crate::inject) fn types(&self) -> Vec<i64> {
+            self.posted().into_iter().map(|(kind, _)| kind).collect()
+        }
+
+        /// The scroll phase (`kCGScrollWheelEventScrollPhase`) of every scroll
+        /// event posted so far.
+        pub(in crate::inject) fn scroll_phases(&self) -> Vec<i64> {
+            self.posted()
+                .into_iter()
+                .filter(|(kind, _)| *kind == 22)
+                .map(|(_, phase)| phase)
+                .collect()
+        }
+
         #[expect(
             clippy::unused_self,
             reason = "reading needs the recording held, so its events are this test's"
         )]
-        pub(in crate::inject) fn types(&self) -> Vec<i64> {
+        fn posted(&self) -> Vec<(i64, i64)> {
             POSTED
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -450,7 +522,10 @@ pub(super) mod recording {
         let Some(posted) = posted.as_mut() else {
             return false;
         };
-        posted.push(CGEvent::integer_value_field(Some(event), CGEventField(55)));
+        posted.push((
+            CGEvent::integer_value_field(Some(event), CGEventField(55)),
+            CGEvent::integer_value_field(Some(event), CGEventField(99)),
+        ));
         true
     }
 }
@@ -607,6 +682,47 @@ mod tests {
             !posted.contains(&MOUSE_MOVED),
             "the pointer moved: {posted:?}"
         );
+    }
+
+    /// The fix for a page that would not scroll back after the drag pushed
+    /// past its end: turning back starts a new touch (Ended, then Began).
+    /// Without it the whole drag is one touch and this fails.
+    #[test]
+    fn a_two_finger_drag_turning_back_starts_a_new_touch() {
+        let recording = recording::Recording::start();
+        let start = Instant::now();
+        let ms = |n| start + Duration::from_millis(n);
+        let mut drag = Drag::begin_on((1440.0, 900.0), HeldDrag::TwoFingerSwipe, 0.0, 20.0, ms(0));
+        drag.moved(0.0, 40.0, ms(8));
+        drag.moved(0.0, -20.0, ms(16));
+        drag.moved(0.0, -20.0, ms(24));
+        drag.cancel();
+        // 1 Began, 2 Changed, 4 Ended, 8 Cancelled.
+        assert_eq!(recording.scroll_phases(), [1, 2, 4, 1, 2, 8]);
+    }
+
+    #[test]
+    fn a_turn_is_a_clear_turn_back_not_a_wobble() {
+        // Moving on, or drifting sideways, never turns.
+        let mut turn = Turn::default();
+        assert!(!turn.reversed(0.0, 10.0));
+        assert!(!turn.reversed(0.0, 30.0));
+        assert!(!turn.reversed(25.0, 0.0));
+        // A small wobble back is not a turn, and moving on clears it.
+        assert!(!turn.reversed(0.0, -4.0));
+        assert!(!turn.reversed(0.0, 2.0));
+        assert!(!turn.reversed(0.0, -4.0));
+        // A clear pull back is, once.
+        assert!(turn.reversed(0.0, -4.0));
+        assert!(!turn.reversed(0.0, -40.0));
+        // Turning round again is a second turn.
+        assert!(!turn.reversed(0.0, 3.0));
+        assert!(turn.reversed(0.0, 5.0));
+
+        // Before the drag has a heading, nothing is a turn.
+        let mut start = Turn::default();
+        assert!(!start.reversed(0.0, 3.0));
+        assert!(!start.reversed(0.0, -10.0));
     }
 
     #[test]
