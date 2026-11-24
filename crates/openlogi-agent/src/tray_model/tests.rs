@@ -1153,6 +1153,25 @@ mod controls {
         let entries = row.entries(&memory);
         assert_eq!(choice(&entries, "Never"), (true, timeout(0)));
 
+        // The settings app sets any minute. A timeout between the steps still
+        // shows, checked in its place, so the menu never hides what the
+        // headset holds; picking it again would change nothing, so it is
+        // greyed out.
+        memory.reading.power_off_timeout = Read::Value(PowerOffTimeout::clamped(20));
+        let entries = row.entries(&memory);
+        assert_eq!(
+            choices(&entries),
+            [
+                ("Never".to_owned(), false, timeout(0)),
+                ("5 min".to_owned(), false, timeout(5)),
+                ("15 min".to_owned(), false, timeout(15)),
+                ("20 min".to_owned(), true, None),
+                ("30 min".to_owned(), false, timeout(30)),
+                ("60 min".to_owned(), false, timeout(60)),
+                ("90 min".to_owned(), false, timeout(90)),
+            ]
+        );
+
         // Unread or unanswered, nothing can be changed: there is no saved
         // timeout to fall back on.
         memory.reading.power_off_timeout = Read::Failed;

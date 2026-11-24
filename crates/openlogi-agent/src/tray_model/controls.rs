@@ -768,15 +768,25 @@ impl DeviceRow {
             return Vec::new();
         }
         let read = reading.power_off_timeout.value();
+        // The settings app sets any minute; one between the steps joins them
+        // in its place, so the checkmark always shows what the headset holds.
+        let between = read
+            .map(PowerOffTimeout::minutes)
+            .filter(|minutes| !POWER_OFF_TIMEOUTS.contains(minutes));
+        let mut steps = POWER_OFF_TIMEOUTS.to_vec();
+        if let Some(minutes) = between {
+            steps.insert(steps.partition_point(|&step| step < minutes), minutes);
+        }
         let mut group = vec![Entry::Header(t!("audio.power_off").into_owned())];
-        group.extend(POWER_OFF_TIMEOUTS.map(|minutes| Entry::Choice {
+        group.extend(steps.into_iter().map(|minutes| Entry::Choice {
             title: if minutes == 0 {
                 t!("audio.power_off_never").into_owned()
             } else {
                 t!("audio.power_off_minutes", minutes => minutes).into_owned()
             },
             checked: read.is_some_and(|timeout| timeout.minutes() == minutes),
-            change: read.and_then(|_| {
+            // Picking the timeout between the steps again would change nothing.
+            change: read.filter(|_| between != Some(minutes)).and_then(|_| {
                 self.live(Change::PowerOffTimeout(PowerOffTimeout::clamped(minutes)))
             }),
         }));
