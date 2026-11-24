@@ -371,5 +371,5 @@ use the keyboard fallbacks above.
 
 | Limitation | Status |
 |---|---|
-| Wayland: per-application profile switching | Native on wlroots compositors (sway, Hyprland, …); GNOME needs the [companion extension](../crates/openlogi-hook/gnome-shell-extension/README.md); KDE falls back to XWayland. wlroots reports the xdg-shell `app_id` while X11 and GNOME report `WM_CLASS`, so a profile keyed under one does not match under the other |
+| Wayland: per-application profile switching | Native on wlroots compositors (sway, Hyprland, …); GNOME needs the [companion extension](../crates/openlogi-hook/gnome-shell-extension/README.md), which the packages install to `/usr/share/gnome-shell/extensions/` but you still enable (`gnome-extensions enable openlogi-frontmost@openlogi.dev`) and then log out and back in; KDE falls back to XWayland. wlroots reports the xdg-shell `app_id` while X11 and GNOME report `WM_CLASS`, so a profile keyed under one does not match under the other |
 | Button capture: middle / mode-shift / thumbwheel | Side buttons only today |

@@ -63,6 +63,14 @@ fi
 echo "Removing systemd user unit …"
 sudo rm -f /usr/lib/systemd/user/openlogi-agent.service
 
+# ── GNOME Shell extension ─────────────────────────────────────────────────────
+
+echo "Removing GNOME Shell extension …"
+for extension_file in metadata.json extension.js ringAnimation.js; do
+  sudo rm -f "/usr/share/gnome-shell/extensions/openlogi-frontmost@openlogi.dev/${extension_file}"
+done
+sudo rmdir /usr/share/gnome-shell/extensions/openlogi-frontmost@openlogi.dev 2>/dev/null || true
+
 # ── desktop entry + icon ──────────────────────────────────────────────────────
 
 echo "Removing desktop entry and icon …"

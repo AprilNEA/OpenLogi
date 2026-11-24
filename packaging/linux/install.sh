@@ -403,6 +403,11 @@ install_source() {
   [ -f "${SCRIPT_DIR}/systemd/openlogi-agent.service" ] || die "repository systemd unit is missing"
   [ -f "${SCRIPT_DIR}/desktop/openlogi.desktop" ] || die "repository desktop entry is missing"
   [ -f "${REPO_ROOT}/design/icon/openlogi.png" ] || die "repository app icon is missing"
+  GNOME_EXTENSION_SRC=${REPO_ROOT}/crates/openlogi-hook/gnome-shell-extension/openlogi-frontmost@openlogi.dev
+  for extension_file in metadata.json extension.js ringAnimation.js; do
+    [ -f "${GNOME_EXTENSION_SRC}/${extension_file}" ] ||
+      die "repository GNOME Shell extension file ${extension_file} is missing"
+  done
 
   if [ "$PREFIX" = / ]; then
     BINDIR=/bin
@@ -428,6 +433,10 @@ install_source() {
     /usr/share/applications/openlogi.desktop
   install_source_file 644 "${REPO_ROOT}/design/icon/openlogi.png" \
     /usr/share/icons/hicolor/1024x1024/apps/openlogi.png
+  for extension_file in metadata.json extension.js ringAnimation.js; do
+    install_source_file 644 "${GNOME_EXTENSION_SRC}/${extension_file}" \
+      "/usr/share/gnome-shell/extensions/openlogi-frontmost@openlogi.dev/${extension_file}"
+  done
   for size in 512 256 128 64 48 32 16; do
     sized_icon=${REPO_ROOT}/design/icon/openlogi-${size}.png
     [ -f "$sized_icon" ] || continue

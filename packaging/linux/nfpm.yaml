@@ -59,6 +59,24 @@ contents:
     file_info:
       mode: 0644
 
+  # ── GNOME Shell extension ───────────────────────────────────────────────────
+  # Mutter exposes no focused-window protocol, so per-app profiles and the
+  # Actions Ring placement on GNOME Wayland need this companion. The package
+  # only ships it: enabling it (and a re-login, as Wayland cannot reload the
+  # shell) stays with the user. See crates/openlogi-hook/gnome-shell-extension.
+  - src: crates/openlogi-hook/gnome-shell-extension/openlogi-frontmost@openlogi.dev/metadata.json
+    dst: /usr/share/gnome-shell/extensions/openlogi-frontmost@openlogi.dev/metadata.json
+    file_info:
+      mode: 0644
+  - src: crates/openlogi-hook/gnome-shell-extension/openlogi-frontmost@openlogi.dev/extension.js
+    dst: /usr/share/gnome-shell/extensions/openlogi-frontmost@openlogi.dev/extension.js
+    file_info:
+      mode: 0644
+  - src: crates/openlogi-hook/gnome-shell-extension/openlogi-frontmost@openlogi.dev/ringAnimation.js
+    dst: /usr/share/gnome-shell/extensions/openlogi-frontmost@openlogi.dev/ringAnimation.js
+    file_info:
+      mode: 0644
+
   # ── icon ────────────────────────────────────────────────────────────────────
   # Every standard indexed hicolor size, not just the 1024 master: a stock
   # `hicolor/index.theme` stops at 512x512, so a launcher that resolves icons
