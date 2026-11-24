@@ -992,6 +992,12 @@ fn the_mode_list_moves_between_hold_and_drag_and_sideways_scrolling(cx: &mut Tes
         drag_hold_of(cx, ButtonId::Back),
         Some(HeldDrag::TwoFingerSwipe)
     );
+    click_picker_control(cx, "inspector-mode-hold-and-drag");
+    assert_eq!(
+        drag_hold_of(cx, ButtonId::Back),
+        Some(HeldDrag::TwoFingerSwipe),
+        "picking the current mode keeps the chosen swipe"
+    );
 
     click_picker_control(cx, "inspector-mode-scroll-sideways");
     assert!(holds_the_wheel(cx, ButtonId::Back));

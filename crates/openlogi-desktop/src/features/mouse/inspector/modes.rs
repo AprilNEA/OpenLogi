@@ -131,8 +131,9 @@ pub(super) const fn first_drag(button: ButtonId) -> HeldDrag {
     }
 }
 
-/// Put `button` in `to`, keeping its click action. Each commit is a no-op
-/// when the button is already in that mode.
+/// Put `button` in `to`, keeping its click action. The list never calls it
+/// with the current mode: entering hold and drag again would reset its swipe
+/// to the button's first one.
 fn commit_mode(
     state: &mut AppState,
     button: ButtonId,
@@ -178,6 +179,11 @@ pub(super) fn mode_list(
             pal,
         )
         .on_click(move |_, _, cx| {
+            // Picking the current mode changes nothing, and keeps its
+            // settings and the selected gesture direction.
+            if mode == current {
+                return;
+            }
             AppState::apply(cx, |state| commit_mode(state, button, current, mode));
             observer.update(cx, |view, cx| {
                 view.close_action_picker();
