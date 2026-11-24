@@ -325,8 +325,17 @@ fn drag_hold_label(drag: HeldDrag) -> BindingLabel {
     }
 }
 
-/// A drag-hold swipe's name, on its callout and its inspector choice.
+/// A drag-hold swipe's name, on its callout and its inspector choice: what
+/// the drag does.
 pub(in crate::features::mouse) fn drag_hold_text(drag: HeldDrag) -> SharedString {
+    match drag {
+        HeldDrag::TwoFingerSwipe => tr!("actions.drag_swipe_pages"),
+        HeldDrag::ThreeFingerSwipe => tr!("actions.drag_swipe_spaces"),
+    }
+}
+
+/// The trackpad fingers a drag-hold swipe stands for, its choice's hint.
+pub(in crate::features::mouse) fn drag_hold_fingers(drag: HeldDrag) -> SharedString {
     match drag {
         HeldDrag::TwoFingerSwipe => tr!("actions.two_finger_swipe"),
         HeldDrag::ThreeFingerSwipe => tr!("actions.three_finger_swipe"),

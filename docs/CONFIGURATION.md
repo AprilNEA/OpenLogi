@@ -670,15 +670,17 @@ OpenLogi, so OpenLogi hands both back to the firmware when the binding changes,
 the device disconnects, or the agent exits. It never sets the firmware's
 persistent flag, so the diversion does not outlive a device power cycle.
 
-In the desktop app, select `Back` or `Forward` in the default profile and turn
-on **Hold to scroll sideways**. The switch appears only on mice that report raw
-wheel on that button; a binding carried over to another mouse still shows it,
-so it can be turned off. Picking a different action for the button keeps the
-wheel hold and changes `click`. A button in gesture mode offers the switch too:
-turning it on leaves gesture mode with the gesture map's `Click` as the press,
-and turning gestures back on restores the saved directions. The setting is per
-device, not per application: an app profile that gives the button its own
-action replaces the wheel hold in that application.
+In the desktop app, select `Back` or `Forward` in the default profile and pick
+**Hold to scroll sideways** in the **Mode** list. The list shows one row per
+way the button can behave: **Single action**, **Gestures**, **Hold to scroll
+sideways** and **Hold and drag**, each only on mice that can run it. A mode
+carried over to another mouse stays listed while the button is in it, so it can
+be left. Picking a mode keeps the button's click action: leaving gesture mode
+keeps the gesture map's `Click` as the press, and picking **Gestures** again
+restores the saved directions. Picking a different action for the button keeps
+the wheel hold and changes `click`. The setting is per device, not per
+application, so the list shows only in the default profile: an app profile that
+gives the button its own action replaces the wheel hold in that application.
 
 A drag-hold binding on `Back` or `Forward` plays a trackpad swipe while the
 button is held and the mouse moves, as Mac Mouse Fix's click and drag does:
@@ -706,12 +708,14 @@ following the hand would run off the page at its end. Canceling the press, by a 
 a binding reload, ends the swipe without a glide, and a session that ends
 stops a glide still running.
 
-In the desktop app, select `Back` or `Forward` in the default profile and pick
-**Two fingers** or **Three fingers** under **Hold and drag**. The choice
-appears only on macOS, on mice that report raw XY on that button; a binding
-carried over still shows it, so it can be turned off. Picking a different
-action keeps the drag and changes `click`. Like wheel hold it is per device:
-an app profile that gives the button its own action replaces it there.
+In the desktop app, select `Back` or `Forward` in the default profile, pick
+**Hold and drag** in the **Mode** list, and choose what the drag plays:
+**Scroll and swipe pages** (`TwoFingerSwipe`) or **Spaces and Mission Control**
+(`ThreeFingerSwipe`). The mode appears only on macOS, on mice that report raw
+XY on that button; a binding carried over still shows it, so it can be left.
+Picking a different action keeps the drag and changes `click`. Like wheel hold
+it is per device: an app profile that gives the button its own action replaces
+it there.
 
 An Actions Ring entry wraps the action and may add an icon or literal label:
 

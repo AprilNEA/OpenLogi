@@ -79,7 +79,7 @@ use labels::{
     CardSize, MAX_VALUE_LINES, ValueMetrics, binding_label_for_control, callout_held_modes,
     label_control,
 };
-pub(super) use labels::{drag_hold_icon, drag_hold_text};
+pub(super) use labels::{drag_hold_fingers, drag_hold_icon, drag_hold_text};
 /// Floor for the scaled model height. Below this the evenly-slotted side labels
 /// (≈[`LABEL_H`](super::geometry::LABEL_H) each) start to overlap; the window's minimum height is sized to
 /// keep the viewport above [`MODEL_VERTICAL_RESERVE`] + this.
