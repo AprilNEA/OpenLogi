@@ -30,6 +30,18 @@ const SIDETONE_LEVELS: [u8; 5] = [0, 25, 50, 75, 100];
 /// The brightness levels the submenu offers a light, in percent of its range.
 const LIGHT_BRIGHTNESS_LEVELS: [u8; 4] = [25, 50, 75, 100];
 
+/// `steps` with `current` added in its place when it falls between them, and
+/// that added value. The settings app sets values the submenu does not offer;
+/// showing one in its place keeps the checkmark on what the device holds.
+fn with_between(steps: &[u8], current: Option<u8>) -> (Vec<u8>, Option<u8>) {
+    let between = current.filter(|value| !steps.contains(value));
+    let mut all = steps.to_vec();
+    if let Some(value) = between {
+        all.insert(all.partition_point(|&step| step < value), value);
+    }
+    (all, between)
+}
+
 /// What a device's submenu offers to change, and what the config holds for
 /// it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -722,15 +734,21 @@ impl DeviceRow {
             return Vec::new();
         }
         let read = reading.sidetone.value();
+        let (levels, between) = with_between(&SIDETONE_LEVELS, read.map(SidetoneLevel::percent));
         let mut group = vec![Entry::Header(t!("audio.sidetone").into_owned())];
-        group.extend(SIDETONE_LEVELS.map(|percent| Entry::Choice {
-            title: if percent == 0 {
-                t!("common.off").into_owned()
-            } else {
-                t!("tray.percent", percent => percent).into_owned()
-            },
-            checked: read.is_some_and(|level| level.percent() == percent),
-            change: read.and_then(|_| self.live(Change::Sidetone(SidetoneLevel::clamped(percent)))),
+        group.extend(levels.into_iter().map(|percent| {
+            Entry::Choice {
+                title: if percent == 0 {
+                    t!("common.off").into_owned()
+                } else {
+                    t!("tray.percent", percent => percent).into_owned()
+                },
+                checked: read.is_some_and(|level| level.percent() == percent),
+                // Picking the level between the steps again would change nothing.
+                change: read
+                    .filter(|_| between != Some(percent))
+                    .and_then(|_| self.live(Change::Sidetone(SidetoneLevel::clamped(percent)))),
+            }
         }));
         group
     }
