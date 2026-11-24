@@ -24,21 +24,21 @@
 //! cleanly. A holder new enough to handle SIGTERM releases its event tap and
 //! exits 0, which launchd leaves alone, so the lock falls to us. Either way
 //! exactly one up-to-date agent survives.
+//!
+//! Windows has no signals, so the holder is terminated outright
+//! (`TerminateProcess`). Nothing respawns it there — the Run key fires once
+//! per login — and the OS drops its file lock and named-pipe instance with
+//! the process, so the lock retry below picks the lock up and `server::run`
+//! binds the pipe fresh.
 
-#[cfg(unix)]
 use std::time::Duration;
 
-use openlogi_core::single_instance::InstanceGuard;
-#[cfg(unix)]
-use openlogi_core::single_instance::{self, InstanceError, Role};
-use tracing::info;
-#[cfg(unix)]
-use tracing::warn;
+use openlogi_core::single_instance::{self, InstanceError, InstanceGuard, Role};
+use tracing::{info, warn};
 
 /// How long to wait for the singleton lock after terminating the stale
 /// holder (20 × 200 ms). SIGTERM delivery and process teardown are fast; the
 /// budget mostly covers a slow exit under load.
-#[cfg(unix)]
 const LOCK_RETRY: (u32, Duration) = (20, Duration::from_millis(200));
 
 /// Try to replace the agent currently holding `agent.lock`, returning the
@@ -55,11 +55,9 @@ pub fn try_replace_stale() -> Option<InstanceGuard> {
     replace_stale()
 }
 
-#[cfg(unix)]
 fn replace_stale() -> Option<InstanceGuard> {
     use openlogi_ipc::client::{self, ProtocolSkew};
-    use std::ffi::OsStr;
-    use sysinfo::{Pid, ProcessesToUpdate, Signal, System};
+    use sysinfo::{Pid, ProcessesToUpdate, System};
 
     let rt = openlogi_core::worker::runtime().ok()?;
     // The probe carries the shared handshake deadline: a holder that cannot
@@ -79,30 +77,36 @@ fn replace_stale() -> Option<InstanceGuard> {
     let mut system = System::new();
     system.refresh_processes(ProcessesToUpdate::All, true);
     let own_pid = Pid::from_u32(std::process::id());
+    // sysinfo names a Windows process by its image file, `.exe` included.
+    let agent_name = format!(
+        "{}{}",
+        openlogi_core::brand::Helper::Agent.executable(),
+        std::env::consts::EXE_SUFFIX
+    );
     let stale_agents = system
-        .processes_by_exact_name(OsStr::new(openlogi_core::brand::Helper::Agent.executable()))
+        .processes_by_exact_name(std::ffi::OsStr::new(&agent_name))
         .filter(|process| process.pid() != own_pid);
 
     let mut found = false;
-    let mut signalled = false;
+    let mut terminated = false;
     for process in stale_agents {
         found = true;
         let pid = process.pid().as_u32();
-        if process.kill_with(Signal::Term) == Some(true) {
-            info!(pid, "sent SIGTERM to the stale agent");
-            signalled = true;
+        if terminate(process) {
+            info!(pid, "terminated the stale agent");
+            terminated = true;
         } else {
-            warn!(pid, "could not signal the stale agent");
+            warn!(pid, "could not terminate the stale agent");
         }
     }
 
     if !found {
         // The holder answered the handshake a moment ago but no process is
-        // findable now: it exited on its own. Nothing to signal either way —
+        // findable now: it exited on its own. Nothing to terminate either way —
         // let the lock retry below decide whether the lock is actually free,
         // instead of exiting as a duplicate.
         info!("stale agent already gone — trying for its lock");
-    } else if !signalled {
+    } else if !terminated {
         return None;
     }
 
@@ -121,11 +125,13 @@ fn replace_stale() -> Option<InstanceGuard> {
     None
 }
 
-/// No Windows release has ever shipped (or auto-started) the agent, so there
-/// is no pre-watcher population to migrate; from the first shipped build
-/// onward, `binary_watch` exits on update and the GUI's spawn retry starts
-/// the new binary.
-#[cfg(windows)]
-fn replace_stale() -> Option<InstanceGuard> {
-    None
+/// Ask `process` to exit: SIGTERM on Unix, so a holder new enough to handle
+/// it shuts down cleanly; `TerminateProcess` on Windows, which has no signals
+/// (sysinfo answers `kill_with(Signal::Term)` with `None` there).
+fn terminate(process: &sysinfo::Process) -> bool {
+    if cfg!(windows) {
+        process.kill()
+    } else {
+        process.kill_with(sysinfo::Signal::Term) == Some(true)
+    }
 }
