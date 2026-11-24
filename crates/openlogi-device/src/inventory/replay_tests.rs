@@ -656,6 +656,19 @@ async fn a_direct_channel_capture_reports_dead_retires_on_the_next_pass() {
         .expect("the initial probe cassette is consumed");
 }
 
+/// Upper bound on one enumeration pass in the channel-replacement tests
+/// below, so a pass that stops returning fails the test instead of hanging
+/// it. A failing pass over the replay backend takes milliseconds.
+const PASS_DEADLINE: Duration = Duration::from_secs(10);
+
+/// One enumeration pass, bounded by [`PASS_DEADLINE`].
+async fn bounded_pass(enumerator: &mut Enumerator) {
+    tokio::time::timeout(PASS_DEADLINE, enumerator.enumerate())
+        .await
+        .expect("an enumeration pass stalled past its deadline")
+        .expect("a pass still yields a snapshot");
+}
+
 /// A probed direct node on a replay backend, with its last-good inventory
 /// established, for the channel-replacement tests below.
 async fn probed_direct_node() -> (
@@ -683,10 +696,7 @@ async fn probed_direct_node() -> (
     );
     let registry = ChannelRegistry::default();
     let mut enumerator = Enumerator::with_backend(backend.clone()).with_registry(registry.clone());
-    enumerator
-        .enumerate()
-        .await
-        .expect("initial probe succeeds");
+    bounded_pass(&mut enumerator).await;
     (backend, registry, enumerator, node_id, route)
 }
 
@@ -701,10 +711,7 @@ async fn failed_passes_until_retired(
 ) -> usize {
     let mut failed = 0;
     for _ in 0..64 {
-        enumerator
-            .enumerate()
-            .await
-            .expect("a failed probe still yields a snapshot");
+        bounded_pass(enumerator).await;
         if backend.open_count(node_id).expect("known node") < opens {
             continue;
         }
@@ -750,10 +757,7 @@ async fn a_capture_reported_retirement_does_not_raise_the_threshold() {
     backend
         .set_channel_connection(DIRECT_CHANNEL, ChannelConnection::Disconnected)
         .expect("known channel");
-    enumerator
-        .enumerate()
-        .await
-        .expect("one failed probe replays");
+    bounded_pass(&mut enumerator).await;
     assert!(
         !enumerator.channels.is_retiring(&node_id),
         "one failure is below the threshold"
@@ -762,10 +766,7 @@ async fn a_capture_reported_retirement_does_not_raise_the_threshold() {
     tokio::time::timeout(Duration::from_secs(1), enumerator.dead_channel_reported())
         .await
         .expect("a report wakes the inventory watcher");
-    enumerator
-        .enumerate()
-        .await
-        .expect("the reporting pass replays");
+    bounded_pass(&mut enumerator).await;
     assert!(enumerator.channels.is_retiring(&node_id));
     drop(stale);
 
