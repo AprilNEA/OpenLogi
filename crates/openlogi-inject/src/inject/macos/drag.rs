@@ -324,35 +324,57 @@ fn glide(velocity: (f64, f64), stop: &AtomicBool, natural: bool) {
 /// Tells a two-finger drag turning back from one moving on or wobbling. The
 /// heading is the drag's travel since its touch began. A motion against it
 /// counts toward turning back, and one with it clears the count.
-#[derive(Default)]
-struct Turn {
-    leg: (f64, f64),
-    back: f64,
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Turn {
+    /// Under [`TURN_MIN_LEG`] of travel: no heading to turn back from yet.
+    Gathering { leg: (f64, f64) },
+    /// Moving along `leg`.
+    Heading { leg: (f64, f64) },
+    /// Moved `back` points against `leg`, short of [`TURN_BACK`].
+    TurningBack { leg: (f64, f64), back: f64 },
+}
+
+impl Default for Turn {
+    fn default() -> Self {
+        Self::Gathering { leg: (0.0, 0.0) }
+    }
 }
 
 impl Turn {
+    /// The state for a leg of `leg` travel: gathering until it is long
+    /// enough to have a heading.
+    fn leg(leg: (f64, f64)) -> Self {
+        if leg.0.hypot(leg.1) < TURN_MIN_LEG {
+            Self::Gathering { leg }
+        } else {
+            Self::Heading { leg }
+        }
+    }
+
     /// Take one motion; `true` when it completes a turn back, which starts a
-    /// new leg heading the new way.
+    /// new leg heading the new way. The only writer of the state.
     fn reversed(&mut self, dx: f64, dy: f64) -> bool {
-        let length = self.leg.0.hypot(self.leg.1);
-        if length < TURN_MIN_LEG {
-            self.leg = (self.leg.0 + dx, self.leg.1 + dy);
-            return false;
-        }
-        let along = (dx * self.leg.0 + dy * self.leg.1) / length;
-        if along >= 0.0 {
-            self.back = 0.0;
-            self.leg = (self.leg.0 + dx, self.leg.1 + dy);
-            return false;
-        }
-        self.back -= along;
-        if self.back < TURN_BACK {
-            return false;
-        }
-        *self = Self {
-            leg: (dx, dy),
-            back: 0.0,
+        let (leg, back) = match *self {
+            Self::Gathering { leg } => {
+                *self = Self::leg((leg.0 + dx, leg.1 + dy));
+                return false;
+            }
+            Self::Heading { leg } => (leg, 0.0),
+            Self::TurningBack { leg, back } => (leg, back),
         };
+        let along = (dx * leg.0 + dy * leg.1) / leg.0.hypot(leg.1);
+        if along >= 0.0 {
+            *self = Self::Heading {
+                leg: (leg.0 + dx, leg.1 + dy),
+            };
+            return false;
+        }
+        let back = back - along;
+        if back < TURN_BACK {
+            *self = Self::TurningBack { leg, back };
+            return false;
+        }
+        *self = Self::leg((dx, dy));
         true
     }
 }
@@ -708,12 +730,16 @@ mod tests {
         assert!(!turn.reversed(0.0, 10.0));
         assert!(!turn.reversed(0.0, 30.0));
         assert!(!turn.reversed(25.0, 0.0));
+        assert!(matches!(turn, Turn::Heading { .. }));
         // A small wobble back is not a turn, and moving on clears it.
         assert!(!turn.reversed(0.0, -4.0));
+        assert!(matches!(turn, Turn::TurningBack { .. }));
         assert!(!turn.reversed(0.0, 2.0));
+        assert!(matches!(turn, Turn::Heading { .. }));
         assert!(!turn.reversed(0.0, -4.0));
-        // A clear pull back is, once.
+        // A clear pull back is, once, and starts gathering the new leg.
         assert!(turn.reversed(0.0, -4.0));
+        assert_eq!(turn, Turn::Gathering { leg: (0.0, -4.0) });
         assert!(!turn.reversed(0.0, -40.0));
         // Turning round again is a second turn.
         assert!(!turn.reversed(0.0, 3.0));
@@ -723,6 +749,7 @@ mod tests {
         let mut start = Turn::default();
         assert!(!start.reversed(0.0, 3.0));
         assert!(!start.reversed(0.0, -10.0));
+        assert!(matches!(start, Turn::Gathering { .. }));
     }
 
     #[test]
