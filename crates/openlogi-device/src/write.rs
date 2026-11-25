@@ -40,6 +40,7 @@ mod pointer_scaling;
 mod report_rate;
 mod sidetone;
 mod smartshift;
+mod unit_id;
 
 pub use backlight::{get_backlight, get_backlight_on, update_backlight, update_backlight_on};
 pub use button_spy::{ButtonSpyError, ButtonSpyWatch, watch_button_spy};
@@ -111,6 +112,7 @@ pub use smartshift::{
     get_smartshift_status, get_smartshift_status_on, set_smartshift, set_smartshift_on,
     set_smartshift_sensitivity, set_smartshift_torque, toggle_smartshift, toggle_smartshift_on,
 };
+pub use unit_id::get_unit_id_on;
 
 // commands_for_light_settings operates purely on openlogi_core config/device
 // types with no HID++ I/O, so it lives in `openlogi_core::hid::light`; this

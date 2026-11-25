@@ -1,11 +1,14 @@
 //! Per-device settings the orchestrator derives: wheel mode, host-switch links and the DPI cycle.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
+use openlogi_core::hid::{HidppOperation, WriteError};
 use openlogi_hid::reprog_controls::BACK_CIDS;
 use openlogi_hid::session::gesture::MainWheelDivert;
 
 use super::*;
+use crate::receiver_access::ExclusiveAccessReason;
 use crate::test_support::publish_dpi_mouse;
 
 /// A wheel-hold button scrolls sideways the way its main wheel scrolls: with
@@ -802,6 +805,43 @@ async fn a_rejected_panel_dpi_write_keeps_a_preset_picked_meanwhile() {
         panic!("DPI cycle lock should not be poisoned");
     };
     assert_eq!(dpi.by_key["mouse"].current, Some(Dpi::new(800)));
+}
+
+/// A DPI write a newer one superseded before its turn writes nothing and
+/// says so, so the caller does not save a DPI the mouse never took.
+#[tokio::test]
+async fn a_superseded_dpi_write_answers_superseded_without_writing() {
+    let mouse = dev("mouse", 1, true);
+    let route = mouse.route.clone().unwrap();
+    let mut orch = orchestrator(Config::default());
+    orch.devices = vec![mouse];
+    orch.rebuild();
+    let writes = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&writes);
+    publish_dpi_mouse(&orch.shared.channel_registry, route.clone(), move || {
+        counted.fetch_add(1, Ordering::SeqCst);
+        true
+    })
+    .await;
+    let lease = orch
+        .shared
+        .receiver_access
+        .acquire_exclusive(ExclusiveAccessReason::Pairing)
+        .await;
+    let mut old = std::pin::pin!(orch.shared.set_dpi(&route, Dpi::new(800)));
+    assert!(futures_lite::future::poll_once(&mut old).await.is_none());
+    let mut new = std::pin::pin!(orch.shared.set_dpi(&route, Dpi::new(1600)));
+    assert!(futures_lite::future::poll_once(&mut new).await.is_none());
+    drop(lease);
+
+    assert_eq!(
+        old.await.expect_err("superseded"),
+        WriteError::WriteSuperseded {
+            operation: HidppOperation::WriteDpi,
+        }
+    );
+    new.await.expect("the newer write");
+    assert_eq!(writes.load(Ordering::SeqCst), 1);
 }
 
 /// A mouse that reconnects is back at its onboard DPI, so a DPI shift reads

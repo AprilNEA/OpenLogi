@@ -423,10 +423,8 @@ impl ArmedCapture for GestureCapture {
     }
 
     fn reset_input_state(&self) {
-        self.accum
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .reset();
+        let mut accum = self.accum.lock().unwrap_or_else(PoisonError::into_inner);
+        let had_press = accum.reset();
         // A power cycle ends any roll in progress; carrying it over would
         // swallow the first tap after the reconnect.
         *self
@@ -436,7 +434,7 @@ impl ArmedCapture for GestureCapture {
         self.spy_edges
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .interrupt();
+            .interrupt(had_press);
     }
 
     async fn rearm(&self) -> bool {

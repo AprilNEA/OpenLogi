@@ -1,0 +1,24 @@
+# Owner: openlogi_core::config::LightSettings::apply — what a standalone
+# light's saved settings become once it took a LightCommand.
+id: core-light-command-owner
+language: rust
+severity: error
+message: Apply a LightCommand to LightSettings with openlogi_core::config::LightSettings::apply; do not map its variants onto the settings' fields here.
+note: |
+  The settings app kept a light's accepted commands in its settings itself.
+  The agent saves the same settings when the menu bar changes a light, so
+  the mapping moved to core: two copies could save a command differently,
+  for instance one clamping a brightness the other keeps. See "Single source
+  of truth" in AGENTS.md.
+files:
+  - crates/**/*.rs
+ignores:
+  - crates/openlogi-core/src/config/settings.rs
+# A light driver matches the same commands onto its own LightState, whose
+# brightness is native; only the saved settings hold a percentage.
+rule:
+  kind: match_expression
+  all:
+    - regex: 'LightCommand::TemperatureKelvin\b'
+    - regex: '\.brightness_percent\s*=[^=]'
+    - regex: '\.temperature_kelvin\s*=\s*Some\b'

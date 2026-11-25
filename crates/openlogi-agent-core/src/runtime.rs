@@ -82,6 +82,14 @@ pub enum ActionRequest {
         /// Which way.
         turn: PageTurn,
     },
+    /// Move the pressing device to Easy-Switch `slot`
+    /// ([`Action::easy_switch_host`]).
+    SwitchHost {
+        /// The pressing device.
+        device_key: Option<String>,
+        /// The zero-based channel.
+        slot: u8,
+    },
     /// A DPI or pointer-speed write an action made to the mouse at `route`
     /// settled. The mouse broadcasts nothing for a host write, so the agent
     /// announces it and clients read the mouse's settings again instead of
@@ -211,7 +219,9 @@ fn agent_request(action: &Action, device_key: Option<&str>) -> Option<ActionRequ
             device_key,
             turn: PageTurn::Next,
         }),
-        _ => None,
+        _ => action
+            .easy_switch_host()
+            .map(|slot| ActionRequest::SwitchHost { device_key, slot }),
     }
 }
 

@@ -356,24 +356,23 @@ fn tab_body(
         .child(div().w_full().max_w(width.rems()).child(content))
 }
 
-/// Keys tab: the function-row remapper for a keyboard. A keypad's keys all
-/// bind per app profile, so it gets the Buttons tab's profile selector; a
-/// keyboard's F-row binds globally and a selector there would mislead.
+/// Keys tab: the function-row remapper for a keyboard, with the Buttons tab's
+/// profile selector when [`DetailTab::edits_app_profiles`] says a keypad's
+/// keys bind per app.
 fn keys_tab(
     keyboard_model: &gpui::Entity<FunctionRowView>,
     profile_icons: &ProfileIconCache,
     app_catalog: &gpui::Entity<AppCatalogPicker>,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
-    let keypad = AppState::try_read(cx)
-        .and_then(AppState::current_keypad)
-        .is_some();
+    let profiles =
+        AppState::try_read(cx).is_some_and(|state| DetailTab::Keys.edits_app_profiles(state));
     v_flex()
         .flex_1()
         .w_full()
         .min_w_0()
         .min_h_0()
-        .when(keypad, |tab| {
+        .when(profiles, |tab| {
             tab.children(button_profile_scope_bar(profile_icons, app_catalog, cx))
         })
         .child(

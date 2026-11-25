@@ -99,6 +99,7 @@ fn snapshot() -> AgentSnapshot {
             ],
             pairing: None,
         },
+        config_revision: openlogi_core::config::ConfigRevision::default(),
     }
 }
 

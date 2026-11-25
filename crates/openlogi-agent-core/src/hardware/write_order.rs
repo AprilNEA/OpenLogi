@@ -138,6 +138,13 @@ impl<T: Clone + Default + Eq> WriteOrder<T> {
         self.queue(route).reserve()
     }
 
+    /// How many intents were published for `route`, so a test can tell a
+    /// request was made before it requests a newer one.
+    #[cfg(test)]
+    pub(crate) fn requested(&self, route: &DeviceRoute) -> u64 {
+        self.queue(route).state().next
+    }
+
     fn queue(&self, route: &DeviceRoute) -> Arc<Queue<T>> {
         Arc::clone(
             self.0

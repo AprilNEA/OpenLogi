@@ -365,6 +365,21 @@ pub fn enumerate_cameras() -> Vec<Camera> {
         .collect()
 }
 
+/// The capture ids ([`Camera::unique_id`]) of the cameras another process is
+/// capturing from right now. Metadata only: opens no camera and needs no
+/// Camera permission. Empty where the platform cannot tell.
+#[must_use]
+pub fn cameras_in_use() -> std::collections::HashSet<String> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::in_use().into_iter().collect()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        std::collections::HashSet::new()
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn enumerate_all() -> Vec<Camera> {
     // Wait out any in-flight control seize so the scan can't land in the

@@ -192,7 +192,7 @@ pub(crate) fn spawn(startup: Startup, cx: &mut gpui::App) {
                 // per-key in-flight state makes the exclusion the cache's job.
                 Some(()) = sync_done.recv() => rt.on_sync_finished(cx),
                 Some(cmd) = deeplinks.recv() => {
-                    cx.update(|cx| app::deeplink::dispatch(cmd, cx));
+                    cx.update(|cx| rt.deeplinks.dispatch(cmd, cx));
                 }
                 else => break,
             }
@@ -259,6 +259,9 @@ struct Runtime {
     /// sync the current devices without waiting for the next snapshot.
     inventories: Vec<DeviceInventory>,
     standalone: Vec<StandaloneDevice>,
+    /// `openlogi://` commands, including a link waiting for the device list
+    /// each snapshot refreshes.
+    deeplinks: app::deeplink::Deeplinks,
 }
 
 impl Runtime {
@@ -280,6 +283,7 @@ impl Runtime {
             sync_tx,
             inventories: Vec::new(),
             standalone: Vec::new(),
+            deeplinks: app::deeplink::Deeplinks::default(),
         }
     }
 
@@ -463,6 +467,7 @@ impl Runtime {
             if changes.inventory_changed() {
                 app::menu::rebuild(cx);
             }
+            self.deeplinks.retry(cx);
             (auto_download, asset_source, models)
         });
         // Offer the merged set to the cache on every snapshot and let it decide:

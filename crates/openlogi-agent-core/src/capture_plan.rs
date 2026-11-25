@@ -331,13 +331,16 @@ pub fn plan_for_device(
     // gesture at once, each armed with its own raw-XY divert (the capture
     // target below derives the CIDs to divert from this map's keys).
     let gesture_bindings = hidpp_gesture_maps_for(config, Some(config_key), app);
+    let shift_bindings = shift_bindings_for(config, config_key);
     let pinch_zoom = cfg!(target_os = "macos")
         && os_mouse_hook_available
         && config.app_settings.capture_mouse_events
-        && matches!(
-            bindings.get(&ButtonId::DpiToggle),
-            Some(Binding::Single(Action::PinchZoom))
-        );
+        && [&bindings, &shift_bindings].into_iter().any(|layer| {
+            matches!(
+                layer.get(&ButtonId::DpiToggle),
+                Some(Binding::Single(Action::PinchZoom))
+            )
+        });
     let divert_gesture_buttons = gesture_button_diverts(
         &side_gesture_bindings,
         os_mouse_hook_available,
@@ -438,7 +441,7 @@ pub fn plan_for_device(
             invert_wheel: false,
             momentum: config.momentum_scrolling(config_key),
             pointer: None,
-            shift_bindings: shift_bindings_for(config, config_key),
+            shift_bindings,
         },
     }
 }

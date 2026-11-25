@@ -11,7 +11,7 @@ use gpui_kit::component::{
     spinner::Spinner,
     v_flex,
 };
-use openlogi_ipc::{AgentStatus, SecureInput};
+use openlogi_ipc::AgentStatus;
 
 use crate::app::menu::open_config_folder;
 use crate::state::AppState;
@@ -207,12 +207,9 @@ impl Attention {
         if !status.accessibility_granted {
             return Some(Self::Accessibility);
         }
-        match &status.secure_input {
-            SecureInput::On(app) if has_key_bindings && status.hook_installed => Some(
-                Self::SecureInput(app.as_ref().map(|app| app.display_name.clone().into())),
-            ),
-            SecureInput::On(_) | SecureInput::Off => None,
-        }
+        status
+            .secure_input_pausing_keys(has_key_bindings)
+            .map(|app| Self::SecureInput(app.map(|app| app.display_name.clone().into())))
     }
 
     /// Whether adding the first key binding or removing the last one shows

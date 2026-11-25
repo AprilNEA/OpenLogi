@@ -5,9 +5,7 @@
 use std::num::NonZeroU8;
 use std::time::Instant;
 
-use openlogi_core::binding::{
-    ButtonId, GESTURE_SWIPE_THRESHOLD, GestureDirection, SwipeAccumulator,
-};
+use openlogi_core::binding::{ButtonId, GestureDirection, SwipeAccumulator};
 use tokio::sync::mpsc;
 use tracing::{debug, trace};
 
@@ -32,8 +30,6 @@ enum HoldState {
         button: ButtonId,
         /// Mid-swipe travel accumulated over this hold.
         swipe: SwipeAccumulator,
-        /// Signed vertical travel before pinch starts. Once it starts, every nonzero update counts.
-        pinch_start_travel: Option<i32>,
         /// A second armed source is held alongside the holder. Overlap motion
         /// could belong to either control — dropped until the overlap ends.
         overlap: bool,
@@ -56,7 +52,6 @@ fn begin_hold(cid: u16, button: ButtonId, overlap: bool, skip_first_raw_xy: bool
         cid,
         button,
         swipe,
-        pinch_start_travel: Some(0),
         overlap,
         skip_first_raw_xy,
     }
@@ -90,11 +85,15 @@ impl CaptureAccum {
         }
     }
 
-    pub(super) fn reset(&mut self) {
+    /// Forget the current reports and tell the caller if a press was lost.
+    pub(super) fn reset(&mut self) -> bool {
+        let had_press =
+            self.dpi_down || !self.gestures_down.is_empty() || !self.buttons_down.is_empty();
         *self = Self {
             pinch_zoom: self.pinch_zoom,
             ..Self::default()
         };
+        had_press
     }
 }
 
@@ -169,14 +168,12 @@ impl CaptureAccum {
                         cid,
                         button,
                         swipe,
-                        pinch_start_travel,
                         skip_first_raw_xy,
                         ..
                     } if cids.contains(&cid) => HoldState::Holding {
                         cid,
                         button,
                         swipe,
-                        pinch_start_travel,
                         overlap: held.len() > 1,
                         skip_first_raw_xy,
                     },
@@ -186,7 +183,6 @@ impl CaptureAccum {
                         if let HoldState::Holding {
                             button, mut swipe, ..
                         } = previous
-                            && !(self.pinch_zoom && button == ButtonId::DpiToggle)
                             && swipe.end()
                         {
                             debug!(%button, "gesture click");
@@ -259,7 +255,6 @@ impl CaptureAccum {
         let HoldState::Holding {
             button,
             swipe,
-            pinch_start_travel,
             overlap,
             skip_first_raw_xy,
             ..
@@ -280,22 +275,14 @@ impl CaptureAccum {
         if *overlap {
             return;
         }
-        if self.pinch_zoom && *button == ButtonId::DpiToggle {
-            if let Some(travel) = pinch_start_travel {
-                *travel += i32::from(dy);
-                if travel.abs() < GESTURE_SWIPE_THRESHOLD {
-                    return;
-                }
-                *pinch_start_travel = None;
-            }
-            if dy != 0 {
-                let _ = sink.send(CapturedInput::PinchMotion {
-                    dy,
-                    captured_at: Instant::now(),
-                });
-            }
-            return;
+        if self.pinch_zoom && *button == ButtonId::DpiToggle && dy != 0 {
+            let _ = sink.send(CapturedInput::PinchMotion {
+                dy,
+                captured_at: Instant::now(),
+            });
         }
+        // A shifted pinch and an unshifted swipe can share this button. The
+        // dispatcher admits exactly one interpretation on the down edge.
         // Commit the instant a clean direction emerges (mid-swipe, repeatable per hold);
         // the accumulator gates on hold duration internally and drops travel that
         // arrives outside a hold.

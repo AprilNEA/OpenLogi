@@ -30,9 +30,9 @@ use openlogi_core::device::{
 use openlogi_core::device_order::{DeviceIdentity, DeviceStableId, PhysicalDeviceKey};
 use openlogi_hid::{
     BacklightChange, BacklightState, CaptureChannelSlot, ChannelPool, ChannelRegistry,
-    DeviceIoGate, DeviceRoute, DisableKeysMask, Dpi, EasySwitchHosts, FnLockState,
+    DeviceIoGate, DeviceRoute, DisableKeysMask, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
     ForceSensingInfo, GamingWanted, HidppOperation, HostOs, PointerSpeed, ReportRate,
-    ReportRateInfo, SidetoneLevel, WriteError, commands_for_light_settings,
+    ReportRateInfo, SidetoneLevel, SmartShiftStatus, WriteError, commands_for_light_settings,
     is_reserved_keyboard_control, key_display_for,
 };
 #[cfg(test)]
@@ -58,7 +58,7 @@ use crate::receiver_access::ReceiverAccess;
 use crate::runtime::hook::{HookMaps, SharedHookMaps};
 use crate::runtime::scroll::ScrollPreferences;
 use crate::runtime::{PageTurn, PointerSelection};
-use crate::watchers::host_switch::{HostSwitchLink, HostSwitchLinks};
+use crate::watchers::host_switch::{HostSwitchLink, HostSwitchLinks, LinkedHostSwitch};
 use crate::watchers::inventory::InventoryRefresh;
 use crate::watchers::key_display::{KeyDisplaySpec, KeyFace, SharedKeyDisplaySpecs};
 use crate::watchers::keyboard::{KeyboardSpec, SharedKeyboardSpecs};
@@ -67,8 +67,12 @@ use crate::{DpiCycleState, DpiCycles, PointerSpeeds};
 
 mod devices;
 mod lights;
+mod settings;
 
-pub use lights::{ConfigSource, LightWriteClaim, TakenLightChange, write_light};
+pub use lights::{
+    ConfigSource, LightWriteClaim, TakenLightChange, write_light, write_manual_light_power,
+};
+pub use settings::{ConfigReload, DeviceSettings, RoutedDevice, SettingError};
 
 use devices::reapply_targets;
 use devices::{
@@ -179,6 +183,9 @@ pub struct SharedHandles {
     transport_turns: crate::hardware::TransportTurns,
     /// Keyboard → pointing-device routes resolved from `config.toml`.
     pub host_switch_links: HostSwitchLinks,
+    /// Moves a linked keyboard and its pointing devices together, for an
+    /// Easy-Switch action fired on either.
+    pub linked_host_switch: LinkedHostSwitch,
     /// The online lights to watch for changes made on the light itself.
     pub watched_lights: WatchedLights,
     /// Orders every path's Fn-lock writes per keyboard.
@@ -197,6 +204,9 @@ pub struct SharedHandles {
     backlight_order: WriteOrder,
     /// Orders host renames per device.
     host_name_order: WriteOrder,
+    /// Orders the Easy-Switch actions' channel switches per device, so a
+    /// later request never lands before an earlier one.
+    host_switch_order: WriteOrder,
     /// Orders the `ChangeHost` cookie writes per linked device.
     follower_cookie_order: WriteOrder,
     /// Saved policy and manual writes share intent identity, not retry order.
@@ -204,6 +214,10 @@ pub struct SharedHandles {
     /// The running inventory watcher's refresh handle, published at arming;
     /// `None` while no watcher runs.
     inventory_refresh: Arc<RwLock<Option<InventoryRefresh>>>,
+    /// The `0x0003` unit ID of the one device these handles' device
+    /// operations reach (see [`Self::reaching`]); `None` for the agent's own
+    /// handles, which reach whichever device is on a route.
+    reaching: Option<[u8; 4]>,
 }
 
 impl SharedHandles {
@@ -239,16 +253,32 @@ impl SharedHandles {
         }
     }
 
+    /// These handles, with every device operation built through
+    /// [`Self::device`] and [`Self::keyboard_device`] bound to the device
+    /// that reports `unit` through HID++ `0x0003`, for a change asked for
+    /// one device: a write confirms that device is still the one on the
+    /// route before it writes, and refuses another one with
+    /// [`WriteError::DeviceNotFound`] (see `DeviceOp::confirming`). An
+    /// all-zero `unit`, which a device never probed has, names no device:
+    /// the operations then reach whichever device is on the route.
+    #[must_use]
+    pub fn reaching(&self, unit: [u8; 4]) -> Self {
+        Self {
+            reaching: crate::hardware::known_unit(unit),
+            ..self.clone()
+        }
+    }
+
     /// Bind a device operation to `route` through [`Self::device_access`].
     #[must_use]
     pub fn device(&self, route: &DeviceRoute) -> DeviceOp {
-        self.device_access().op(route)
+        self.device_access().op(route).confirming(self.reaching)
     }
 
     /// Bind a device operation to `route` through [`Self::keyboard_access`].
     #[must_use]
     pub fn keyboard_device(&self, route: &DeviceRoute) -> DeviceOp {
-        self.keyboard_access().op(route)
+        self.keyboard_access().op(route).confirming(self.reaching)
     }
 
     /// Return the `0x8071` software control this session's lighting writes
@@ -260,11 +290,61 @@ impl SharedHandles {
         crate::hardware::release_session_rgb_control(&self.device_access()).await;
     }
 
+    /// Read the Fn-lock state of the keyboard at `route`, through the
+    /// keyboard's own capture channel, as its writes go.
+    pub async fn read_fn_lock(&self, route: &DeviceRoute) -> Result<FnLockState, WriteError> {
+        self.keyboard_device(route)
+            .run(HidppOperation::ReadFnLock, |c| async move {
+                openlogi_hid::get_fn_lock_on(&c).await
+            })
+            .await
+    }
+
+    /// Read the backlight of the keyboard at `route`.
+    pub async fn read_backlight(&self, route: &DeviceRoute) -> Result<BacklightState, WriteError> {
+        self.device(route)
+            .run(HidppOperation::ReadBacklight, |c| async move {
+                openlogi_hid::get_backlight_on(&c).await
+            })
+            .await
+    }
+
+    /// Read the sidetone level of the headset at `route`.
+    pub async fn read_sidetone(&self, route: &DeviceRoute) -> Result<SidetoneLevel, WriteError> {
+        self.device(route)
+            .run(HidppOperation::ReadSidetone, |c| async move {
+                openlogi_hid::get_sidetone_on(&c).await
+            })
+            .await
+    }
+
+    /// Read the DPI and the DPI values of the mouse at `route`.
+    pub async fn read_dpi(&self, route: &DeviceRoute) -> Result<DpiInfo, WriteError> {
+        self.device(route)
+            .run(HidppOperation::ReadDpiCapabilities, |c| async move {
+                openlogi_hid::get_dpi_info_on(&c).await
+            })
+            .await
+    }
+
+    /// Read the SmartShift wheel of the mouse at `route`.
+    pub async fn read_smartshift(
+        &self,
+        route: &DeviceRoute,
+    ) -> Result<SmartShiftStatus, WriteError> {
+        self.device(route)
+            .run(HidppOperation::ReadSmartShift, |c| async move {
+                openlogi_hid::get_smartshift_status_on(&c).await
+            })
+            .await
+    }
+
     /// Write `fn_lock` to the keyboard at `route` and return its echo. When a
     /// newer Fn-lock write for the keyboard is requested before this one gets
-    /// its turn, this one reads the keyboard instead of writing a value that
-    /// is about to be replaced. Waiting for the turn does not count against
-    /// the write's deadline.
+    /// its turn, this one writes nothing and answers
+    /// [`WriteError::WriteSuperseded`], so its caller saves nothing: the
+    /// newer write decides the state. Waiting for the turn does not count
+    /// against the write's deadline.
     pub async fn set_fn_lock(
         &self,
         route: &DeviceRoute,
@@ -276,7 +356,11 @@ impl SharedHandles {
                 HidppOperation::WriteFnLock,
                 &ticket,
                 |c| async move { openlogi_hid::set_fn_lock_on(&c, fn_lock).await },
-                |c| async move { openlogi_hid::get_fn_lock_on(&c).await },
+                |_| async {
+                    Err(WriteError::WriteSuperseded {
+                        operation: HidppOperation::WriteFnLock,
+                    })
+                },
             )
             .await
     }
@@ -390,7 +474,8 @@ impl SharedHandles {
     /// shows, and darkens the DPI LED when the precision speed ends with it.
     /// It is ordered with the precision button, the DPI preset actions and
     /// the reconnect reapply. A write superseded before its turn writes
-    /// nothing.
+    /// nothing and answers [`WriteError::WriteSuperseded`], so its caller
+    /// saves nothing: the newer write decides the DPI.
     pub async fn set_dpi(&self, route: &DeviceRoute, dpi: Dpi) -> Result<(), WriteError> {
         let AppWrite { ticket, restore } = self
             .pointer_speeds
@@ -416,17 +501,35 @@ impl SharedHandles {
                     }
                     Ok(())
                 },
-                |_| async { Ok(()) },
+                |_| async {
+                    Err(WriteError::WriteSuperseded {
+                        operation: HidppOperation::WriteDpi,
+                    })
+                },
             )
             .await;
-        // A rejected write leaves the mouse where it was, which only a
-        // reading of it can tell.
+        // A rejected write leaves the mouse where it was, and a superseded
+        // one where the newer write puts it, which only a reading of it can
+        // tell.
         if result.is_err()
             && let Ok(mut cycles) = self.dpi_cycle.write()
         {
             cycles.rejected_at(route, dpi);
         }
         result
+    }
+
+    /// Write `status` to the SmartShift wheel of the mouse at `route`.
+    pub async fn set_smartshift(
+        &self,
+        route: &DeviceRoute,
+        status: SmartShiftStatus,
+    ) -> Result<(), WriteError> {
+        self.device(route)
+            .run(HidppOperation::WriteSmartShift, |c| async move {
+                openlogi_hid::set_smartshift_on(&c, status).await
+            })
+            .await
     }
 
     /// Apply `change` to the backlight of the keyboard at `route` and return
@@ -811,6 +914,7 @@ impl Orchestrator {
             receiver_access,
             flow,
             transport_turns: crate::hardware::TransportTurns::default(),
+            linked_host_switch: LinkedHostSwitch::new(&host_switch_links),
             host_switch_links,
             watched_lights,
             fn_lock_order: WriteOrder::default(),
@@ -820,9 +924,11 @@ impl Orchestrator {
             sidetone_order: WriteOrder::default(),
             backlight_order: WriteOrder::default(),
             host_name_order: WriteOrder::default(),
+            host_switch_order: WriteOrder::default(),
             follower_cookie_order: WriteOrder::default(),
             disabled_keys_order: WriteOrder::default(),
             inventory_refresh: Arc::new(RwLock::new(None)),
+            reaching: None,
         };
         let orch = Self {
             config,
@@ -959,9 +1065,9 @@ impl Orchestrator {
                 gestures.remove(button);
             }
         }
-        let shift_bindings = key
-            .map(|key| shift_bindings_for(&self.config, key))
-            .unwrap_or_default();
+        let shift_bindings = key.map_or_else(Default::default, |key| {
+            shift_bindings_for(&self.config, key)
+        });
         HookMaps {
             bindings,
             gestures,
@@ -1159,6 +1265,46 @@ impl Orchestrator {
         self.publish_device_runtime();
     }
 
+    /// Move the device that fired an Easy-Switch action to `slot`, as its own
+    /// channel key would. A keyboard with linked pointing devices, or a
+    /// device linked to a keyboard, moves with the rest of its link, as when
+    /// the keyboard's host key is pressed: `slot` is then the keyboard's.
+    ///
+    /// A press the OS input hook delivers names no device: the hook's maps
+    /// are the selected device's, so the selected device is the one that
+    /// fired. A global function key reaches the hook too, but its binding
+    /// never carries these actions (`Action::needs_firing_device`).
+    pub fn switch_host_for_action(&self, device_key: Option<&str>, slot: u8) {
+        let Some(key) = device_key.or_else(|| self.current_key()) else {
+            debug!(slot, "Easy-Switch action without a device — ignored");
+            return;
+        };
+        let Some((route, unit_id)) = self
+            .devices
+            .iter()
+            .find(|device| device.config_key == key && device.online)
+            .and_then(|device| Some((device.route.clone()?, device.unit_id)))
+        else {
+            debug!(
+                key,
+                slot, "Easy-Switch action for an offline device — ignored"
+            );
+            return;
+        };
+        if self.shared.linked_host_switch.request(&route, slot) {
+            info!(key, slot, "Easy-Switch action → switching linked devices");
+            return;
+        }
+        debug!(key, slot, "Easy-Switch action → switching host");
+        let ticket = self.shared.host_switch_order.request(&route);
+        crate::hardware::switch_host_in_background(
+            self.shared.device(&route),
+            ticket,
+            slot,
+            unit_id,
+        );
+    }
+
     /// Rewrite every shared map from the current config + selected device.
     fn rebuild(&self) {
         let key = self.current_key();
@@ -1323,8 +1469,7 @@ impl Orchestrator {
             let before_shift = guard
                 .by_key
                 .get(&dev.config_key)
-                .map(|state| state.before_shift.clone())
-                .unwrap_or_default();
+                .map_or_else(Default::default, |state| state.before_shift.clone());
             let nearest = current.and_then(|dpi| crate::dpi::nearest_preset(&presets, dpi));
             let same_presets = previous.filter(|state| state.presets == presets);
             by_key.insert(

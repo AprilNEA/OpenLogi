@@ -1,0 +1,21 @@
+# Owner: openlogi_core::config::DisableKey::disabled_in — which known keys a
+# HID++ 0x4521 mask disables, in the shape config.toml saves them.
+id: core-disabled-key-set-owner
+language: rust
+severity: error
+message: Turn a DisableKeys mask into the saved key set with openlogi_core::config::DisableKey::disabled_in; do not filter DisableKey::ALL against a mask here.
+note: |
+  The settings app built the saved set from the keyboard's confirmed state
+  itself. The agent saves the same set when the menu bar changes a key, so
+  the conversion moved to core: a second copy could save a key the other
+  leaves out. See "Single source of truth" in AGENTS.md.
+files:
+  - crates/**/*.rs
+ignores:
+  - crates/openlogi-core/src/config/device.rs
+  - "**/tests.rs"
+  - "**/tests/**"
+rule:
+  any:
+    - pattern: DisableKey::ALL.into_iter().filter($$$).collect()
+    - pattern: DisableKey::ALL.into_iter().filter($$$).collect::<$T>()

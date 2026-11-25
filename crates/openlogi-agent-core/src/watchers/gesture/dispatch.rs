@@ -8,6 +8,8 @@ use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU8;
 use std::time::Instant;
 
+#[cfg(target_os = "macos")]
+use openlogi_core::binding::GESTURE_SWIPE_THRESHOLD;
 use openlogi_core::binding::{Action, Binding, ButtonId, HeldWheel, default_binding};
 use openlogi_core::config::ThumbwheelSensitivity;
 use openlogi_core::scroll::ScrollDelta;
@@ -111,14 +113,16 @@ pub(super) struct InputDispatcher {
     held_presses: HeldPresses,
     shift_held: HeldShift,
     #[cfg(target_os = "macos")]
-    pinch: Option<ActivePinch>,
+    pinch_presses: HashMap<HidppSessionId, PinchPress>,
 }
 
 #[cfg(target_os = "macos")]
-struct ActivePinch {
-    owner: HidppSessionId,
-    gesture: PinchGesture,
-    ramp: PinchRamp,
+enum PinchPress {
+    Pending(i32),
+    Active {
+        gesture: PinchGesture,
+        ramp: PinchRamp,
+    },
 }
 
 impl InputDispatcher {
@@ -131,7 +135,7 @@ impl InputDispatcher {
             held_presses: HeldPresses::default(),
             shift_held: HeldShift::default(),
             #[cfg(target_os = "macos")]
-            pinch: None,
+            pinch_presses: HashMap::new(),
         }
     }
 
@@ -144,7 +148,7 @@ impl InputDispatcher {
     /// Cancel every input lifecycle retained for one capture session.
     pub(super) fn cancel_session(&mut self, session: &HidppSessionId) {
         #[cfg(target_os = "macos")]
-        self.end_pinch(session);
+        self.pinch_presses.remove(session);
         self.outputs.cancel_session(session);
         self.wheels.cancel_session(session);
         self.held_presses.cancel_session(session);
@@ -225,33 +229,8 @@ impl InputDispatcher {
         let key = session.device_key();
         match input {
             CapturedInput::Gesture(button, direction) => {
-                let Some(press) = self.held_presses.get(session, button) else {
-                    debug!(key, %button, ?direction, "gesture from a canceled button lifecycle — ignored");
-                    return;
-                };
-                if let Some(action) = plan
-                    .gesture_bindings
-                    .get(&button)
-                    .or_else(|| plan.side_gesture_bindings.get(&button))
-                    .and_then(|map| map.get(&direction))
-                {
-                    debug!(key, %button, ?direction, action = %action.label(), "gesture → action");
-                    if !self
-                        .outputs
-                        .actions
-                        .try_dispatch_while_pressed(press, action)
-                    {
-                        debug!(key, %button, ?direction, "gesture press no longer active — ignored");
-                    }
-                } else {
-                    debug!(key, %button, ?direction, "gesture with no binding — ignored");
-                }
+                self.dispatch_swipe(session, plan, button, direction);
             }
-            CapturedInput::ButtonDown(ButtonId::DpiToggle)
-                if matches!(
-                    plan.bindings.get(&ButtonId::DpiToggle),
-                    Some(Binding::Single(Action::PinchZoom))
-                ) => {}
             CapturedInput::ButtonDown(button) => {
                 if self.start_gshift(session, plan, button) {
                     return;
@@ -259,9 +238,21 @@ impl InputDispatcher {
                 // A raw-XY gesture source owns its click/swipe map; its physical
                 // lifecycle is still tracked, but it must not also fire the
                 // single-action projection on down.
-                let is_gesture = plan.gesture_bindings.contains_key(&button)
-                    || plan.side_gesture_bindings.contains_key(&button);
+                let dpi_override = button == ButtonId::DpiToggle
+                    && shift_binding(plan, button, self.shift_held.active(session)).is_some();
+                let is_gesture = !dpi_override
+                    && (plan.gesture_bindings.contains_key(&button)
+                        || plan.side_gesture_bindings.contains_key(&button));
                 let (binding, pointer) = self.binding_for(session, plan, button, is_gesture);
+                #[cfg(target_os = "macos")]
+                if button == ButtonId::DpiToggle
+                    && matches!(binding, Some(Binding::Single(Action::PinchZoom)))
+                {
+                    self.pinch_presses
+                        .entry(session.clone())
+                        .or_insert(PinchPress::Pending(0));
+                    return;
+                }
                 let tracks_hold = is_gesture || binding.is_some_and(Binding::is_wheel_hold);
                 if let Some(binding) = binding {
                     debug!(key, ?button, action = %binding.click_action().label(), "HID++ button → binding");
@@ -283,7 +274,7 @@ impl InputDispatcher {
             CapturedInput::ButtonUp(button) => {
                 #[cfg(target_os = "macos")]
                 if button == ButtonId::DpiToggle {
-                    self.end_pinch(session);
+                    self.pinch_presses.remove(session);
                 }
                 if self.end_gshift(session, button) {
                     return;
@@ -325,33 +316,59 @@ impl InputDispatcher {
         }
     }
 
-    #[cfg(target_os = "macos")]
-    fn dispatch_pinch(&mut self, session: &HidppSessionId, dy: i16, captured_at: Instant) {
-        match &mut self.pinch {
-            Some(active) if &active.owner == session => {
-                active.gesture.update(active.ramp.advance(dy, captured_at));
+    fn dispatch_swipe(
+        &self,
+        session: &HidppSessionId,
+        plan: &DispatchPlan,
+        button: ButtonId,
+        direction: openlogi_core::binding::GestureDirection,
+    ) {
+        let key = session.device_key();
+        let Some(press) = self.held_presses.get(session, button) else {
+            debug!(key, %button, ?direction, "gesture from a canceled button lifecycle — ignored");
+            return;
+        };
+        if let Some(action) = plan
+            .gesture_bindings
+            .get(&button)
+            .or_else(|| plan.side_gesture_bindings.get(&button))
+            .and_then(|map| map.get(&direction))
+        {
+            debug!(key, %button, ?direction, action = %action.label(), "gesture → action");
+            if !self
+                .outputs
+                .actions
+                .try_dispatch_while_pressed(press, action)
+            {
+                debug!(key, %button, ?direction, "gesture press no longer active — ignored");
             }
-            Some(_) => {}
-            None => {
-                let mut ramp = PinchRamp::default();
-                let amount = ramp.advance(dy, captured_at);
-                self.pinch = PinchGesture::begin(amount).map(|gesture| ActivePinch {
-                    owner: session.clone(),
-                    gesture,
-                    ramp,
-                });
-            }
+        } else {
+            debug!(key, %button, ?direction, "gesture with no binding — ignored");
         }
     }
 
     #[cfg(target_os = "macos")]
-    fn end_pinch(&mut self, session: &HidppSessionId) {
-        if self
-            .pinch
-            .as_ref()
-            .is_some_and(|active| &active.owner == session)
-        {
-            self.pinch = None;
+    fn dispatch_pinch(&mut self, session: &HidppSessionId, dy: i16, captured_at: Instant) {
+        let other_active = self
+            .pinch_presses
+            .iter()
+            .any(|(owner, press)| owner != session && matches!(press, PinchPress::Active { .. }));
+        let Some(press) = self.pinch_presses.get_mut(session) else {
+            return;
+        };
+        match press {
+            PinchPress::Pending(travel) => {
+                *travel = travel.saturating_add(i32::from(dy));
+                if travel.unsigned_abs() < GESTURE_SWIPE_THRESHOLD.unsigned_abs() || other_active {
+                    return;
+                }
+                let mut ramp = PinchRamp::default();
+                let amount = ramp.advance(dy, captured_at);
+                if let Some(gesture) = PinchGesture::begin(amount) {
+                    *press = PinchPress::Active { gesture, ramp };
+                }
+            }
+            PinchPress::Active { gesture, ramp } => gesture.update(ramp.advance(dy, captured_at)),
         }
     }
 

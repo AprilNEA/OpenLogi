@@ -131,3 +131,46 @@ fn hash_prefixed_lighting_color_migrates_to_canonical_hex() {
     assert!(saved.contains("color = \"ff0000\""));
     assert!(!saved.contains("color = \"#"));
 }
+
+/// A light that takes a command outside the settings app keeps it in the
+/// settings saved for it. A light with none stays without: the agent writes
+/// nothing to it when it reconnects, so saving defaults alongside the one
+/// command would change the controls the user left alone.
+#[test]
+fn a_light_command_is_saved_only_in_settings_the_light_already_has() {
+    use crate::device_order::{DeviceIdentity as Identity, DeviceStableId};
+    use crate::hid::{DIRECT_DEVICE_INDEX, DeviceRoute, LightCommand};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    let route = DeviceRoute::RawHid {
+        vendor_id: 0x046d,
+        product_id: 0xc900,
+        usage_page: 0xff43,
+        usage_id: 0x0202,
+        identity: "serial:glow".to_owned(),
+    };
+    let stable =
+        DeviceStableId::from_parts(Some(&route), DIRECT_DEVICE_INDEX, Some("glow"), [0; 4]);
+    let identity = Identity::from_parts(Some("glow"), [0; 4]);
+    let key = Config::default()
+        .resolve_device_key(&stable, Some(&identity))
+        .expect("a serial names the light");
+    let dim = |path: &std::path::Path| {
+        let mut edit = DeviceEdit::load(path, &stable, Some(&identity)).expect("load");
+        edit.set(DeviceSetting::Light(LightCommand::BrightnessPercent(40)))
+            .expect("a light command is never refused");
+        edit.commit().expect("save");
+        Config::load_from_path(path)
+            .expect("reload")
+            .light(key.as_str())
+    };
+
+    Config::default().save_to_path(&path).expect("save");
+    assert_eq!(dim(&path), None);
+
+    let mut config = Config::default();
+    config.set_light(key.as_str(), LightSettings::new(false, 80, Some(4000)));
+    config.save_to_path(&path).expect("save");
+    assert_eq!(dim(&path), Some(LightSettings::new(false, 40, Some(4000))));
+}

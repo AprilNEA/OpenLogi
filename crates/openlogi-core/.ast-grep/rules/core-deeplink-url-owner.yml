@@ -1,0 +1,31 @@
+# Owner: openlogi_core::brand::DeeplinkCommand — how an `openlogi://` URL
+# names its command and escapes the command's argument. Prose that merely
+# mentions the scheme is not a URL. Tests may pin a literal URL as an oracle;
+# production code builds and reads them through DeeplinkCommand.
+id: core-deeplink-url-owner
+language: rust
+severity: error
+message: DeeplinkCommand (openlogi-core brand.rs) builds and parses openlogi:// URLs; construct the command and call to_url() or parse_url() instead of spelling the URL here.
+note: |
+  The agent's tray writes these URLs and the GUI reads them. A URL written by
+  hand can name a command the GUI does not know or leave an argument
+  unescaped, and the GUI then drops the click. See "Single source of truth"
+  in AGENTS.md.
+files:
+  - crates/**/*.rs
+  - xtask/**/*.rs
+ignores:
+  - crates/openlogi-core/src/brand.rs
+  - "**/tests.rs"
+  - "**/tests/**"
+rule:
+  all:
+    - kind: string_literal
+    - regex: 'openlogi://\S'
+    - not:
+        inside:
+          kind: mod_item
+          stopBy: end
+          has:
+            field: name
+            regex: '^tests$'

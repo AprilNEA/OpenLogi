@@ -1,0 +1,36 @@
+# Owner: openlogi_core::diagnostics::ConnectionKind::of — how a device reaches
+# the host, from its route, its receiver's brand, and its model info. The
+# settings app's diagnostics report and the menu bar's ⌥ connection rows both
+# ask it, so the two never describe one device's link differently.
+id: core-connection-kind-owner
+language: rust
+severity: error
+message: How a device reaches the host is openlogi_core::diagnostics::ConnectionKind::of's; call it instead of choosing a ConnectionKind variant here. Matching on a ConnectionKind it returned is fine.
+note: |
+  The rule lived in the settings app's diagnostics service until the menu bar
+  needed it too. Deriving the variant from a route a second time would repeat
+  #1218, where a USB-connected multi-transport device was labeled Bluetooth.
+  See "Single source of truth" in AGENTS.md.
+files:
+  - crates/**/*.rs
+ignores:
+  - crates/openlogi-core/src/diagnostics.rs
+  - "**/tests.rs"
+  - "**/tests/**"
+rule:
+  all:
+    - pattern: ConnectionKind::$VARIANT
+    - not:
+        inside:
+          kind: match_pattern
+          stopBy: end
+    - not:
+        inside:
+          kind: mod_item
+          has:
+            field: name
+            regex: '(^|_)tests$'
+          stopBy: end
+constraints:
+  VARIANT:
+    regex: '^[A-Z]'

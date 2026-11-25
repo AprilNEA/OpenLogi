@@ -81,6 +81,37 @@ fn an_empty_link_table_survives_a_save_and_reload() {
     );
 }
 
+/// A receiver device saved while online and then while asleep keeps both
+/// changes in one entry, even when the settings app never indexed its route:
+/// the identity entry wins once it reconnects, so a save made while asleep
+/// that went to the route's own key would be ignored.
+#[test]
+fn a_save_while_the_device_sleeps_reaches_its_online_settings() {
+    use crate::device_order::{DeviceIdentity, DeviceStableId};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    Config::default().save_to_path(&path).expect("save");
+    let stable = DeviceStableId::Bolt {
+        receiver_uid: "82839805".to_owned(),
+        slot: 1,
+    };
+    let identity = DeviceIdentity::Unit([0x6b, 0xe9, 0xd3, 0x00]);
+    let save = |identity: Option<&DeviceIdentity>, setting| {
+        let mut edit = DeviceEdit::load(&path, &stable, identity).expect("load");
+        edit.set(setting).expect("set");
+        edit.commit().expect("save");
+    };
+
+    save(Some(&identity), DeviceSetting::FnLock(true));
+    save(None, DeviceSetting::Enabled(false));
+
+    let config = Config::load_from_path(&path).expect("reload");
+    let device = &config.devices["unit:6be9d300"];
+    assert_eq!(device.fn_lock, Some(true));
+    assert!(!device.enabled);
+}
+
 #[test]
 fn a_link_override_shadows_the_device_value() {
     let mut device = DeviceConfig {
