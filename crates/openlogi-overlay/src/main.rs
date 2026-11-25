@@ -28,12 +28,11 @@ mod windowing;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::Result;
 use gpui::AppContext as _;
 use tracing::{debug, warn};
-
-use openlogi_core::action_ring::DISPLAY_LIFETIME;
 
 use crate::backlight::BacklightView;
 use crate::ipc::OverlayCommand;
@@ -199,8 +198,19 @@ fn main() -> Result<()> {
                         let _ = timeout_commands.send(OverlayCommand::Cancel { session_id });
                         return;
                     }
+                    // The ring closes DISPLAY_LIFETIME after it opened, or after
+                    // the pointer last moved onto or off a slot.
+                    let opened = Instant::now();
                     cx.spawn(async move |cx| {
-                        cx.background_executor().timer(DISPLAY_LIFETIME).await;
+                        loop {
+                            let closes = cx.update(|cx| pointer.read(cx).closes_at(opened));
+                            match closes.checked_duration_since(Instant::now()) {
+                                Some(left) if !left.is_zero() => {
+                                    cx.background_executor().timer(left).await;
+                                }
+                                _ => break,
+                            }
+                        }
                         if cx.update(|cx| close_ring_windows(cx, session_id)) {
                             let _ = timeout_commands.send(OverlayCommand::Cancel { session_id });
                         }

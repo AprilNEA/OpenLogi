@@ -13,11 +13,13 @@ use gpui::{
     WindowBackgroundAppearance, WindowId, WindowKind, WindowOptions, canvas, div,
     linear_color_stop, linear_gradient, point, prelude::FluentBuilder as _, px, svg,
 };
+use openlogi_core::action_ring::DISPLAY_LIFETIME;
 use openlogi_core::binding::{Action, ActionRingSize, ActionRingSlot};
 use openlogi_ipc::ActionRingInvocation;
 use openlogi_ui::action_icons::RING_CANCEL_ICON;
 use openlogi_ui::color::{self, neutral};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::mpsc;
 
 use crate::ipc::OverlayCommand;
@@ -381,6 +383,8 @@ pub(crate) enum Placement {
 #[derive(Debug, Default)]
 pub(crate) struct RingPointer {
     heard: Option<(WindowId, Point<Pixels>)>,
+    /// When the pointer last moved onto or off a slot, in any of the windows.
+    used: Option<Instant>,
 }
 
 impl RingPointer {
@@ -396,6 +400,18 @@ impl RingPointer {
         }
         self.heard = Some((window, position));
         true
+    }
+
+    /// Record that the pointer moved onto or off a slot at `now`, which keeps
+    /// the ring up for another [`DISPLAY_LIFETIME`].
+    pub(crate) fn use_at(&mut self, now: Instant) {
+        self.used = Some(now);
+    }
+
+    /// When a ring that opened at `opened` closes: [`DISPLAY_LIFETIME`] after
+    /// it opened, or after it was last used if that is later.
+    pub(crate) fn closes_at(&self, opened: Instant) -> Instant {
+        self.used.map_or(opened, |used| used.max(opened)) + DISPLAY_LIFETIME
     }
 
     /// Where `window` centres the panel: nowhere unless it heard the pointer last.
@@ -439,7 +455,7 @@ impl RingView {
                 .center_in(window.window_handle().window_id())
                 .is_none()
             {
-                let _ = this.hover(None);
+                let _ = this.hover(None, cx);
             }
             cx.notify();
         });
@@ -468,9 +484,10 @@ impl RingView {
     }
 
     /// Highlight `slot`, or none, and tell the agent when that changes: a
-    /// held trigger's release chooses what the agent last heard. Answers
-    /// whether it changed.
-    fn hover(&mut self, slot: Option<ActionRingSlot>) -> bool {
+    /// held trigger's release chooses what the agent last heard. A change
+    /// also keeps the ring up for another [`DISPLAY_LIFETIME`], as the agent
+    /// keeps its session. Answers whether it changed.
+    fn hover(&mut self, slot: Option<ActionRingSlot>, cx: &mut Context<Self>) -> bool {
         if self.hovered == slot {
             return false;
         }
@@ -479,6 +496,8 @@ impl RingView {
             session_id: self.invocation.session_id,
             slot,
         });
+        self.pointer
+            .update(cx, |pointer, _| pointer.use_at(Instant::now()));
         true
     }
 
@@ -789,7 +808,7 @@ impl Render for RingView {
                     return;
                 };
                 let aimed = aimed_slot(this.invocation.slots.keys().copied(), geometry, x, y);
-                if this.hover(aimed) {
+                if this.hover(aimed, cx) {
                     cx.notify();
                 }
             }))
@@ -974,6 +993,20 @@ mod tests {
             ),
             Some(point(px(0.0), px(720.0)))
         );
+    }
+
+    #[test]
+    fn a_ring_closes_its_lifetime_after_it_opened_or_was_last_used() {
+        let opened = Instant::now();
+        let mut pointer = RingPointer::default();
+        assert_eq!(pointer.closes_at(opened), opened + DISPLAY_LIFETIME);
+        let used = opened + std::time::Duration::from_secs(10);
+        pointer.use_at(used);
+        assert_eq!(pointer.closes_at(opened), used + DISPLAY_LIFETIME);
+        // A hover heard while the window was still being placed, before the
+        // clock started, does not shorten the ring.
+        let started = used + std::time::Duration::from_secs(1);
+        assert_eq!(pointer.closes_at(started), started + DISPLAY_LIFETIME);
     }
 
     #[test]

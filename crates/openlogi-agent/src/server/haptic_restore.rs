@@ -85,6 +85,18 @@ impl<R> RestoreLedger<R> {
         }
     }
 
+    /// Session `session` was used at `now`, which keeps it alive for another
+    /// [`SESSION_LIFETIME`]: a restore owed for it waits at least that long
+    /// for its close. A restore that is already due stays due.
+    pub(super) fn used(&mut self, session: u64, now: Instant) {
+        let ends = now + SESSION_LIFETIME;
+        for owed in &mut self.owed {
+            if owed.session == session && owed.due > now {
+                owed.due = owed.due.max(ends);
+            }
+        }
+    }
+
     /// Session `session` closed. Restores owed for it, or for an older
     /// session, are due at `now`. A newer session's restore waits: a close
     /// that arrives late must not turn off the engine the next session plays
@@ -217,6 +229,25 @@ mod tests {
             due(&mut ledger, start + SESSION_LIFETIME),
             vec![(mouse(), 7)]
         );
+    }
+
+    #[test]
+    fn a_session_in_use_keeps_the_engine_past_its_first_lifetime() {
+        let start = Instant::now();
+        let mut ledger = RestoreLedger::default();
+        ledger.opened(1, mouse(), Some(7), start);
+        let used = start + Duration::from_secs(10);
+        ledger.used(1, used);
+        assert_eq!(due(&mut ledger, start + SESSION_LIFETIME), vec![], "in use");
+        assert_eq!(ledger.next_due(), Some(used + SESSION_LIFETIME));
+        ledger.used(2, used + Duration::from_secs(1));
+        assert_eq!(
+            ledger.next_due(),
+            Some(used + SESSION_LIFETIME),
+            "another session's use moves nothing"
+        );
+        ledger.closed(1, used);
+        assert_eq!(due(&mut ledger, used), vec![(mouse(), 7)]);
     }
 
     #[test]

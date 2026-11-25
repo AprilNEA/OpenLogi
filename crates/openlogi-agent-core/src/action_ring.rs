@@ -32,12 +32,13 @@ use tokio::time::Instant;
 /// round-trip back.
 const SESSION_GRACE: Duration = Duration::from_secs(3);
 
-/// How long a session lives after [`ActionRingManager::begin`] opens it.
+/// How long a session lives after it was last used: opened by
+/// [`ActionRingManager::begin`], or its pointer moved onto or off a slot.
 ///
 /// No session outlives this: hover, activation, and cancel all find an older
 /// one expired. Work that must not outlast a session, but may never hear it
 /// close (the overlay can exit without cancelling), ends this long after the
-/// session opened.
+/// session was last used.
 pub const SESSION_LIFETIME: Duration = DISPLAY_LIFETIME.saturating_add(SESSION_GRACE);
 
 /// How long the trigger must stay down after the ring opens for its release
@@ -107,6 +108,9 @@ struct Session {
     /// The trigger that opened this ring has not been released yet.
     trigger_held: bool,
     opened_at: Instant,
+    /// When the session opened, or its pointer last moved onto or off a
+    /// slot. It expires [`SESSION_LIFETIME`] after this.
+    used_at: Instant,
 }
 
 impl Session {
@@ -131,7 +135,7 @@ impl State {
         if self
             .active
             .as_ref()
-            .is_some_and(|session| session.opened_at.elapsed() > SESSION_LIFETIME)
+            .is_some_and(|session| session.used_at.elapsed() > SESSION_LIFETIME)
         {
             self.active = None;
         }
@@ -209,6 +213,7 @@ impl ActionRingManager {
             hovered: None,
             trigger_held: true,
             opened_at: Instant::now(),
+            used_at: Instant::now(),
         });
         self.publish(&state);
         invocation
@@ -282,7 +287,8 @@ impl ActionRingManager {
     }
 
     /// Record a changed highlighted slot. Repeated hover reports are ignored so
-    /// one stationary pointer cannot flood the HID++ haptic queue.
+    /// one stationary pointer cannot flood the HID++ haptic queue. Any hover
+    /// keeps the session alive for another [`SESSION_LIFETIME`].
     pub fn hover(
         &self,
         session_id: u64,
@@ -291,6 +297,7 @@ impl ActionRingManager {
         let mut state = self.state();
         self.expire_and_publish(&mut state);
         let session = state.active_session(session_id)?;
+        session.used_at = Instant::now();
         if !session.actions.contains_key(&slot) {
             return Err(ActionRingCommandError::SlotEmpty);
         }
@@ -304,11 +311,14 @@ impl ActionRingManager {
     }
 
     /// Record that the pointer left every slot, so releasing the held trigger
-    /// now cancels rather than choosing the slot it last passed over.
+    /// now cancels rather than choosing the slot it last passed over. This
+    /// keeps the session alive for another [`SESSION_LIFETIME`] too.
     pub fn unhover(&self, session_id: u64) -> Result<(), ActionRingCommandError> {
         let mut state = self.state();
         self.expire_and_publish(&mut state);
-        state.active_session(session_id)?.hovered = None;
+        let session = state.active_session(session_id)?;
+        session.hovered = None;
+        session.used_at = Instant::now();
         Ok(())
     }
 
@@ -653,6 +663,38 @@ mod tests {
         );
         assert!(ring.has_changed().unwrap(), "expiration must notify");
         assert_eq!(ring.borrow_and_update().invocation, None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_ring_in_use_outlives_its_first_lifetime() {
+        let manager = ActionRingManager::default();
+        let invocation = manager.begin(spec());
+        let id = invocation.session_id;
+        let step = SESSION_LIFETIME.saturating_sub(Duration::from_secs(1));
+        tokio::time::advance(step).await;
+        assert_eq!(manager.unhover(id), Ok(()));
+        tokio::time::advance(step).await;
+        manager
+            .hover(id, ActionRingSlot::Top)
+            .expect("unhover kept it");
+        tokio::time::advance(step).await;
+        manager
+            .activate(id, ActionRingSlot::Top)
+            .map(drop)
+            .expect("hover kept it");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_ring_left_alone_after_use_expires() {
+        let manager = ActionRingManager::default();
+        let id = manager.begin(spec()).session_id;
+        tokio::time::advance(Duration::from_secs(5)).await;
+        manager.hover(id, ActionRingSlot::Top).expect("open");
+        tokio::time::advance(SESSION_LIFETIME + Duration::from_secs(1)).await;
+        assert!(matches!(
+            manager.activate(id, ActionRingSlot::Top),
+            Err(ActionRingCommandError::SessionNotFound)
+        ));
     }
 
     #[tokio::test(start_paused = true)]

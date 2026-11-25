@@ -541,7 +541,9 @@ impl Agent for AgentServer {
         session_id: u64,
         slot: ActionRingSlot,
     ) -> Result<(), ActionRingCommandError> {
-        if let Some(hover) = self.action_ring.hover(session_id, slot)? {
+        let hover = self.action_ring.hover(session_id, slot)?;
+        self.ring_haptics.use_session(session_id);
+        if let Some(hover) = hover {
             self.ring_haptics
                 .play(hover.haptic_route, HapticWaveform::SubtleCollision, "hover");
         }
@@ -597,7 +599,9 @@ impl Agent for AgentServer {
         _: Context,
         session_id: u64,
     ) -> Result<(), ActionRingCommandError> {
-        self.action_ring.unhover(session_id)
+        self.action_ring.unhover(session_id)?;
+        self.ring_haptics.use_session(session_id);
+        Ok(())
     }
 }
 
@@ -662,6 +666,8 @@ struct Sessions {
 struct SessionNews {
     /// The newest session that opened with haptic feedback, and its device.
     opened: Option<(u64, DeviceRoute)>,
+    /// The newest session whose pointer moved onto or off a slot.
+    used: Option<u64>,
     /// The newest session that closed.
     closed: Option<u64>,
     /// Hand every engine back now, then answer here.
@@ -1023,6 +1029,9 @@ impl RingHapticPlayer {
                         }
                     }
                 }
+                if let Some(session) = news.used {
+                    ledger.used(session, Instant::now());
+                }
                 if let Some(session) = news.closed {
                     ledger.closed(session, Instant::now());
                 }
@@ -1059,6 +1068,19 @@ impl RingHapticPlayer {
         };
         self.sessions().news.opened = Some((session, route));
         let _ = self.tx.send(None);
+    }
+
+    /// Report that ring session `session` was used, which keeps it alive for
+    /// another [`SESSION_LIFETIME`]: an enable its arming made is not handed
+    /// back before then unless the session closes.
+    ///
+    /// [`SESSION_LIFETIME`]: openlogi_agent_core::action_ring::SESSION_LIFETIME
+    pub fn use_session(&self, session: u64) {
+        {
+            let mut sessions = self.sessions();
+            sessions.news.used = sessions.news.used.max(Some(session));
+        }
+        let _ = self.closed.send(());
     }
 
     /// Report that ring session `session` closed, after queueing any buzz it
