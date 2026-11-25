@@ -9,6 +9,7 @@ use crate::services::ipc::{Command, ReadBacklight, SetBacklight};
 use crate::state::backlight::change_target;
 use crate::state::events::StateEvents;
 use crate::state::{BacklightLoad, DurationSteps};
+use openlogi_core::config::ConfigFile;
 use openlogi_core::hid::{
     BacklightChange, BacklightControls, BacklightDuration, BacklightMode, BacklightState,
     BacklightStatus, DeviceRoute,
@@ -558,17 +559,26 @@ fn the_answer_to_a_change_shows_what_the_keyboard_holds(cx: &mut gpui::TestAppCo
 /// steps (#2520). It writes nothing to the keyboard.
 #[test]
 fn the_extended_timer_choice_survives_a_restart() {
-    let (mut state, mut receiver) = keyboard_state(true);
-    assert_eq!(state.duration_steps(), DurationSteps::Short);
+    let dir = tempfile::tempdir().expect("temporary config directory");
+    let path = dir.path().join(openlogi_core::paths::CONFIG_FILE);
+    let launch = |path: &std::path::Path| {
+        let (config, file) = ConfigFile::load_from_path(path).expect("config file");
+        let resolver = AssetResolver::new();
+        let (commands, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let state = AppState::new(Sources {
+            inventories: &[keyboard_inventory(true)],
+            persistence: ConfigPersistence::UserFile(file),
+            ..Sources::in_memory(config, &resolver, commands)
+        });
+        (state, receiver)
+    };
 
+    let (mut state, mut receiver) = launch(&path);
+    assert_eq!(state.duration_steps(), DurationSteps::Short);
     let _ = state.set_duration_steps(DurationSteps::Extended);
     assert!(writes(drain(&mut receiver)).is_empty());
+    drop(state);
 
-    let resolver = AssetResolver::new();
-    let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
-    let restarted = AppState::new(Sources {
-        inventories: &[keyboard_inventory(true)],
-        ..Sources::in_memory((*state.config).clone(), &resolver, commands)
-    });
+    let (restarted, _receiver) = launch(&path);
     assert_eq!(restarted.duration_steps(), DurationSteps::Extended);
 }
