@@ -143,6 +143,7 @@ impl TryFrom<KeyComboWire> for KeyCombo {
 
     fn try_from(value: KeyComboWire) -> Result<Self, Self::Error> {
         let modifiers = Modifiers::from_bits(value.modifiers)
+            .filter(|modifiers| !modifiers.contains(Modifiers::RIGHT_CONTROL))
             .ok_or(KeyComboParseError::InvalidModifiers(value.modifiers))?;
         Ok(Self {
             modifiers,

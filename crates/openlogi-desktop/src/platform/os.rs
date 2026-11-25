@@ -1,7 +1,43 @@
 //! Best-effort host OS version string for the diagnostics report, plus syncing
-//! the native window chrome (titlebar) to the in-app appearance preference.
+//! the native window chrome (titlebar) to the in-app appearance preference,
+//! and reading raw event details that GPUI does not expose.
 
 use openlogi_core::config::Appearance;
+
+#[cfg(target_os = "macos")]
+fn current_modifier_event() -> Option<objc2::rc::Retained<objc2_app_kit::NSEvent>> {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSApplication, NSEventType};
+
+    NSApplication::sharedApplication(MainThreadMarker::new()?)
+        .currentEvent()
+        .filter(|event| event.r#type() == NSEventType::FlagsChanged)
+}
+
+/// Whether AppKit is dispatching the right Control key's modifier event.
+pub(crate) fn current_event_is_right_control() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        current_modifier_event().is_some_and(|event| event.keyCode() == 0x3e)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
+/// Whether the right Control key is currently down during a modifier event.
+pub(crate) fn current_event_has_right_control() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        // NX_DEVICERCTLKEYMASK from IOLLEvent.h, below the independent flags.
+        current_modifier_event().is_some_and(|event| event.modifierFlags().bits() & 0x2000 != 0)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
 
 /// The OS product version (e.g. `"15.5"` on macOS), or `None` when unavailable.
 #[must_use]

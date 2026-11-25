@@ -188,6 +188,7 @@ fn needs_focus(action: &Action) -> bool {
         Effect::Shortcut(_)
         | Effect::Key(_)
         | Effect::HeldKey(_)
+        | Effect::TapModifier(_)
         | Effect::Text(_)
         | Effect::Script(_)
         | Effect::Native(NativeAction::AppExpose) => true,
@@ -218,12 +219,13 @@ mod tests {
         PointerPress { target, focus }
     }
 
-    fn keyboard_actions() -> [Action; 6] {
+    fn keyboard_actions() -> [Action; 7] {
         let shortcut = "Ctrl+Tab".parse().expect("valid shortcut");
         [
             Action::BrowserForward,
             Action::CustomShortcut(shortcut),
             Action::HoldModifier("Ctrl".parse().expect("valid modifier")),
+            Action::TapModifier("Ctrl".parse().expect("valid modifier")),
             Action::TypeText("hello".into()),
             Action::AppExpose,
             Action::Copy,

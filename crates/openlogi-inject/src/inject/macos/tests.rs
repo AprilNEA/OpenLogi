@@ -82,6 +82,22 @@ fn held_edges_carry_the_aggregate_modifier_state() {
     assert!(flags.contains(CGEventFlags::CGEventFlagControl));
 }
 
+#[test]
+fn right_control_fallback_events_keep_the_physical_key_and_flags() {
+    let mut held = HeldModifiers::default();
+    held_key_event(HeldKey::Control, KeyPhase::Down, &mut held).unwrap();
+    for (phase, expected_flags) in [(KeyPhase::Down, 0x42001), (KeyPhase::Up, 0x40001)] {
+        let (keycode, flags) = held_key_event(HeldKey::RightControl, phase, &mut held).unwrap();
+        let event = key_event(keycode, flags, phase).unwrap();
+        assert_eq!(event.get_type() as u32, CGEventType::FlagsChanged as u32);
+        assert_eq!(
+            event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE),
+            0x3e
+        );
+        assert_eq!(event.get_flags().bits(), expected_flags);
+    }
+}
+
 /// A key-down with no key-up leaves its key logically down, and an event
 /// that inherits a held modifier types a shortcut instead of text.
 #[test]

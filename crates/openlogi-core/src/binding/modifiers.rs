@@ -2,8 +2,7 @@
 //! with.
 //!
 //! [`Modifiers`] is the set a [`super::KeyCombo`] carries beside its key.
-//! [`BareModifiers`] is a non-empty set held with no key at all, the payload
-//! of `Action::HoldModifier`.
+//! [`BareModifiers`] is a non-empty set for modifier-only taps and holds.
 
 use std::str::FromStr;
 
@@ -31,6 +30,8 @@ bitflags::bitflags! {
         /// the Windows key, `KEY_LEFTMETA` on Linux. Unlike
         /// [`Self::COMMAND`], it never becomes Control.
         const SUPER = 1 << 4;
+        /// The physical right Control key, supported by modifier-only bindings.
+        const RIGHT_CONTROL = 1 << 5;
     }
 }
 
@@ -60,6 +61,9 @@ impl Modifiers {
         if self.contains(Self::CONTROL) {
             parts.push("Ctrl");
         }
+        if self.contains(Self::RIGHT_CONTROL) {
+            parts.push("RightCtrl");
+        }
         if self.contains(Self::OPTION) {
             parts.push("Alt");
         }
@@ -70,8 +74,7 @@ impl Modifiers {
     }
 }
 
-/// One or more modifiers held with no ordinary key: the payload of
-/// `Action::HoldModifier`.
+/// One or more modifiers with no ordinary key, used by modifier-only bindings.
 ///
 /// Never empty, so a binding cannot hold nothing. Human-readable formats store
 /// the canonical label (`"Ctrl+Shift"`); binary IPC stores the validated
@@ -166,8 +169,13 @@ impl FromStr for BareModifiers {
         let mut modifiers = Modifiers::empty();
         for raw in input.split('+') {
             let token = raw.trim();
-            let Some(modifier) = Modifiers::from_token(token) else {
-                return Err(BareModifiersParseError::UnknownToken(token.to_string()));
+            let modifier = if token.eq_ignore_ascii_case("RightCtrl") {
+                Modifiers::RIGHT_CONTROL
+            } else if token.eq_ignore_ascii_case("LeftCtrl") {
+                Modifiers::CONTROL
+            } else {
+                Modifiers::from_token(token)
+                    .ok_or_else(|| BareModifiersParseError::UnknownToken(token.to_string()))?
             };
             modifiers |= modifier;
         }
@@ -209,6 +217,18 @@ mod tests {
         let logo = "Win+Ctrl".parse::<BareModifiers>().expect("Super is valid");
         assert_eq!(logo.modifiers(), Modifiers::SUPER | Modifiers::CONTROL);
         assert_eq!(logo.rendered_label(), "Super+Ctrl");
+    }
+
+    #[test]
+    fn bare_control_holds_keep_their_physical_side() {
+        let ctrl = "Ctrl".parse::<BareModifiers>().unwrap();
+        let left = "LeftCtrl".parse::<BareModifiers>().unwrap();
+        let right = "rightctrl".parse::<BareModifiers>().unwrap();
+
+        assert_eq!(left, ctrl);
+        assert_eq!(right.modifiers(), Modifiers::RIGHT_CONTROL);
+        assert_eq!(right.rendered_label(), "RightCtrl");
+        assert_ne!(left, right);
     }
 
     #[test]

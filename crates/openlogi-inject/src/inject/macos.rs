@@ -118,6 +118,7 @@ pub(super) fn execute(action: &Action) {
         }
         Effect::Shortcut(shortcut) => press_combo(&combo(shortcut)),
         Effect::Key(combo) | Effect::HeldKey(combo) => press_combo(combo),
+        Effect::TapModifier(modifiers) => super::tap_modifier(modifiers),
         Effect::Scroll { dx, dy } => dispatch_scroll(dx, dy),
         // Media/volume controls are NX system-defined keys, not ordinary
         // keyboard virtual-key events. Posting kVK_Volume* through
@@ -537,6 +538,7 @@ fn held_key_event(
         HeldKey::Shift => 0x38,
         HeldKey::Alt => 0x3a,
         HeldKey::Control => 0x3b,
+        HeldKey::RightControl => 0x3e,
         HeldKey::Key(usage) => held_key(usage, phase, *modifiers)?,
     };
     Some((vk, held_modifier_flags(*modifiers)))
@@ -568,6 +570,12 @@ fn held_key_down(vk: u16) -> bool {
         .any(|&held| held == vk)
 }
 
+// IOLLEvent.h's device-dependent flags accompany the aggregate Control flag.
+const LEFT_CONTROL_FLAGS: CGEventFlags =
+    CGEventFlags::from_bits_retain(CGEventFlags::CGEventFlagControl.bits() | 0x0001);
+const RIGHT_CONTROL_FLAGS: CGEventFlags =
+    CGEventFlags::from_bits_retain(CGEventFlags::CGEventFlagControl.bits() | 0x2000);
+
 fn held_modifier_flags(modifiers: HeldModifiers) -> CGEventFlags {
     let mut flags = CGEventFlags::CGEventFlagNull;
     if modifiers.contains(HeldKey::Command) {
@@ -577,7 +585,10 @@ fn held_modifier_flags(modifiers: HeldModifiers) -> CGEventFlags {
         flags |= CGEventFlags::CGEventFlagShift;
     }
     if modifiers.contains(HeldKey::Control) {
-        flags |= CGEventFlags::CGEventFlagControl;
+        flags |= LEFT_CONTROL_FLAGS;
+    }
+    if modifiers.contains(HeldKey::RightControl) {
+        flags |= RIGHT_CONTROL_FLAGS;
     }
     if modifiers.contains(HeldKey::Alt) {
         flags |= CGEventFlags::CGEventFlagAlternate;

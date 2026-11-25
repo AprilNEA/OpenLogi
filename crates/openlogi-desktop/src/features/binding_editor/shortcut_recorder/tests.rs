@@ -158,6 +158,40 @@ fn probe_window(cx: &mut TestAppContext) -> (Entity<Probe>, &mut VisualTestConte
 }
 
 #[gpui::test]
+fn releasing_control_alone_records_a_modifier_hold(cx: &mut TestAppContext) {
+    let (probe, cx) = probe_window(cx);
+
+    cx.simulate_modifiers_change(Modifiers {
+        control: true,
+        ..Modifiers::default()
+    });
+    probe.read_with(cx, |probe, _| assert!(probe.recordings.is_empty()));
+
+    cx.simulate_modifiers_change(Modifiers::default());
+    probe.read_with(cx, |probe, _| {
+        assert_eq!(
+            probe.recordings,
+            [Recording::Modifier("Ctrl".parse().unwrap())]
+        );
+    });
+}
+
+#[test]
+fn solitary_shift_alt_and_the_platform_key_record_without_a_letter() {
+    for (key, expected) in [("shift", "Shift"), ("alt", "Alt"), ("platform", logo())] {
+        let keystroke = reported(key);
+        let keystroke = Keystroke {
+            modifiers: Modifiers::default(),
+            ..keystroke
+        };
+        assert_eq!(
+            Recording::from_press(&keystroke, Modifiers::default()),
+            Recording::Modifier(expected.parse().unwrap())
+        );
+    }
+}
+
+#[gpui::test]
 fn a_recording_takes_one_key_press_ahead_of_key_bindings(cx: &mut TestAppContext) {
     let (probe, cx) = probe_window(cx);
 

@@ -1,7 +1,9 @@
 //! Records a custom shortcut from the next key the user presses.
 
 use gpui::{Context, FocusHandle, Keystroke, Modifiers, Subscription, Window};
-use openlogi_core::binding::KeyCombo;
+use openlogi_core::binding::{BareModifiers, KeyCombo};
+
+use crate::platform::os::{current_event_has_right_control, current_event_is_right_control};
 
 #[cfg(test)]
 mod tests;
@@ -11,6 +13,8 @@ mod tests;
 pub(crate) enum Recording {
     /// A chord a custom shortcut can send.
     Chord(KeyCombo),
+    /// A modifier pressed and released on its own.
+    Modifier(BareModifiers),
     /// The recording stopped without a chord: Escape without modifiers, or
     /// focus left the recording area.
     Cancelled,
@@ -37,6 +41,25 @@ impl Recording {
         if held.shift && !keystroke.modifiers.shift && is_symbol(&keystroke.key) {
             return Self::ShiftedSymbol;
         }
+        // GPUI emits a synthetic modifier keystroke on release when no
+        // ordinary key was pressed. The original event still carries Ctrl's side.
+        if !keystroke.modifiers.modified() {
+            let modifiers = [
+                ("control", "Ctrl"),
+                ("alt", "Alt"),
+                ("shift", "Shift"),
+                ("platform", platform_modifier_name()),
+            ];
+            if let Some((key, name)) = modifiers.into_iter().find(|(key, _)| *key == keystroke.key)
+            {
+                let name = if key == "control" && current_event_is_right_control() {
+                    "RightCtrl"
+                } else {
+                    name
+                };
+                return name.parse().map_or(Self::Unsupported, Self::Modifier);
+            }
+        }
         Self::from(keystroke)
     }
 }
@@ -53,38 +76,37 @@ fn is_symbol(key: &str) -> bool {
 }
 
 impl From<&Keystroke> for Recording {
-    /// Lone modifier presses never get here: GPUI reports them as modifier
-    /// changes, not as key presses.
     fn from(keystroke: &Keystroke) -> Self {
         let modifiers = keystroke.modifiers;
         if keystroke.key == "escape" && !modifiers.modified() {
             return Self::Cancelled;
         }
-        let mut tokens = Vec::with_capacity(5);
-        if modifiers.platform {
-            // GPUI's platform modifier is Command on macOS and the logo key
-            // elsewhere, which a chord writes as `Super`.
-            tokens.push(if cfg!(target_os = "macos") {
-                "Cmd"
-            } else {
-                "Super"
-            });
-        }
-        if modifiers.control {
-            tokens.push("Ctrl");
-        }
-        if modifiers.alt {
-            tokens.push("Alt");
-        }
-        if modifiers.shift {
-            tokens.push("Shift");
-        }
+        let mut tokens: Vec<&str> = modifier_names(modifiers).collect();
         tokens.push(&keystroke.key);
         tokens
             .join("+")
             .parse::<KeyCombo>()
             .map_or(Self::Unsupported, Self::Chord)
     }
+}
+
+const fn platform_modifier_name() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "Cmd"
+    } else {
+        "Super"
+    }
+}
+
+fn modifier_names(modifiers: Modifiers) -> impl Iterator<Item = &'static str> {
+    [
+        (modifiers.platform, platform_modifier_name()),
+        (modifiers.control, "Ctrl"),
+        (modifiers.alt, "Alt"),
+        (modifiers.shift, "Shift"),
+    ]
+    .into_iter()
+    .filter_map(|(pressed, name)| pressed.then_some(name))
 }
 
 /// A view that owns a [`ShortcutRecorder`].
@@ -113,6 +135,21 @@ pub(crate) struct ShortcutRecorder {
 }
 
 impl ShortcutRecorder {
+    /// Names of the currently pressed modifiers, in shortcut order.
+    pub(crate) fn preview(modifiers: Modifiers) -> String {
+        let right_control = modifiers.control && current_event_has_right_control();
+        modifier_names(modifiers)
+            .map(|name| {
+                if right_control && name == "Ctrl" {
+                    "RightCtrl"
+                } else {
+                    name
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("+")
+    }
+
     /// Start recording for the view `cx` belongs to.
     pub(crate) fn start<V: RecordsShortcut>(
         focus: &FocusHandle,

@@ -622,7 +622,12 @@ and reject a bare modifier string, so this is the shape that binds a button to
 Ctrl, Shift, Alt, Cmd, or Super alone. The held modifier composes with input
 from other devices: hold it on the mouse, type on the keyboard, and the
 keystroke arrives modified. Combine modifiers with `+`, as in `HoldModifier =
-"Ctrl+Shift"`, using the chord modifier names above.
+"Ctrl+Shift"`, using the chord modifier names above. `Ctrl` (also spelled
+`LeftCtrl`) holds the left Control key. Use `HoldModifier = "RightCtrl"` for
+the right Control key. `TapModifier` uses the same names and sends a single
+press and release. In the mouse button picker, select Tap or Hold, then record
+a standalone Control, Shift, Option/Alt, or Command (the logo key elsewhere).
+On macOS, recording either Control key preserves its side.
 
 On macOS the held modifier composes through the virtual HID keyboard that
 release builds type synthesized keys on: a modifier it holds is part of the

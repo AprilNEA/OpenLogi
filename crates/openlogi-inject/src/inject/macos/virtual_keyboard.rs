@@ -83,11 +83,12 @@ const REPORT_LEN: usize = 2 + KEY_SLOTS;
 /// The usages of the modifier bitmap's bits, Left Control through Right GUI.
 const MODIFIER_USAGES: std::ops::RangeInclusive<u8> = 0xe0..=0xe7;
 
-/// Modifier bitmap bits, as the usages `0xe0..=0xe3` number them.
+/// Modifier bitmap bits, as the HID usages number them.
 const LEFT_CONTROL: u8 = 1 << 0;
 const LEFT_SHIFT: u8 = 1 << 1;
 const LEFT_OPTION: u8 = 1 << 2;
 const LEFT_COMMAND: u8 = 1 << 3;
+const RIGHT_CONTROL: u8 = 1 << 4;
 
 /// Each `CGEvent` modifier flag and the modifier bitmap bit of its left key.
 const MODIFIER_FLAGS: [(CGEventFlags, u8); 4] = [
@@ -223,7 +224,11 @@ fn repress_edges(stranded: Pressed) -> Vec<(u16, CGEventFlags)> {
             continue;
         };
         if let Some(bit) = modifier_bit(usage) {
-            flags |= modifier_flags(bit);
+            flags |= match bit {
+                LEFT_CONTROL => super::LEFT_CONTROL_FLAGS,
+                RIGHT_CONTROL => super::RIGHT_CONTROL_FLAGS,
+                _ => modifier_flags(bit),
+            };
         }
         edges.push((vk, flags));
     }

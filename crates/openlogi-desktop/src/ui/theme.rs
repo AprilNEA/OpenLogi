@@ -174,7 +174,7 @@ pub struct Palette {
     pub text_danger: Hsla,
 }
 
-fn contrast_ratio(foreground: Hsla, background: Hsla) -> f32 {
+pub(crate) fn contrast_ratio(foreground: Hsla, background: Hsla) -> f32 {
     fn luminance(color: Rgba) -> f32 {
         let linear = |channel: f32| {
             if channel <= 0.04045 {
