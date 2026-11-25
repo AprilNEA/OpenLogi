@@ -1358,13 +1358,19 @@ fn find_entry(name: &str) -> Option<PathBuf> {
 /// GLib's `gio launch`, then KDE's `kioclient exec` (`kioclient5` on Plasma
 /// 5). `false` when none is, so the caller falls back to the opener.
 fn launch_entry(entry: &Path) -> bool {
+    launch_entry_with(entry, on_path)
+}
+
+/// [`launch_entry`] with the launcher lookup injected, so tests can point it
+/// at stand-in launchers.
+fn launch_entry_with(entry: &Path, find: impl Fn(&str) -> Option<PathBuf>) -> bool {
     const LAUNCHERS: &[(&str, &str)] = &[
         ("gio", "launch"),
         ("kioclient", "exec"),
         ("kioclient5", "exec"),
     ];
     for (launcher, verb) in LAUNCHERS {
-        let Some(program) = on_path(launcher) else {
+        let Some(program) = find(launcher) else {
             continue;
         };
         match std::process::Command::new(&program)
@@ -1534,9 +1540,9 @@ mod tests {
         capture_region_mods, classify, combo, desktop_switch_mods, find_entry_in,
         generic_linux_lock_fallback_chord, hid_usage_to_linux, hyprland_helper,
         hyprland_lock_fallback_chord, hyprland_lock_helper, hyprland_session_from_signature,
-        is_executable, key_ev, key_phase_events, launch_program, modifiers_to_keycodes, on_path,
-        rel_ev, resolve_allowlisted_under, scroll_events, spawn_first, syn, unheld_modifiers,
-        wait_with_retry,
+        is_executable, key_ev, key_phase_events, launch_entry_with, launch_program,
+        modifiers_to_keycodes, on_path, rel_ev, resolve_allowlisted_under, scroll_events,
+        spawn_first, syn, unheld_modifiers, wait_with_retry,
     };
     use crate::inject::{HeldChordKind, HeldOutput, KeyPhase};
 
@@ -1883,6 +1889,54 @@ mod tests {
             "the user's entry wins"
         );
         assert_eq!(find_entry_in(&dirs, "konsole"), None);
+    }
+
+    /// A desktop entry is handed to the first launcher installed — `gio
+    /// launch`, else `kioclient exec` — and with none the caller is told to
+    /// fall back to the opener.
+    #[test]
+    fn a_desktop_entry_goes_to_the_first_installed_launcher() {
+        let bin = TempDir::new("launchers");
+        let log = bin.0.join("ran");
+        for name in ["gio", "kioclient"] {
+            let path = bin.0.join(name);
+            std::fs::write(
+                &path,
+                format!(
+                    "#!/bin/sh\nprintf '%s %s %s' \"$(basename \"$0\")\" \"$1\" \"$2\" > {}\n",
+                    log.display()
+                ),
+            )
+            .expect("write launcher");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("make launcher executable");
+        }
+        let entry = Path::new("/usr/share/applications/org.kde.dolphin.desktop");
+        let ran = || {
+            for _ in 0..100 {
+                if let Ok(text) = std::fs::read_to_string(&log)
+                    && !text.is_empty()
+                {
+                    std::fs::remove_file(&log).ok();
+                    return text;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            panic!("no launcher ran");
+        };
+
+        let installed = |names: &'static [&'static str]| {
+            let bin = bin.0.clone();
+            move |name: &str| names.contains(&name).then(|| bin.join(name))
+        };
+        assert!(launch_entry_with(entry, installed(&["gio", "kioclient"])));
+        assert_eq!(ran(), format!("gio launch {}", entry.display()));
+        assert!(launch_entry_with(entry, installed(&["kioclient"])));
+        assert_eq!(ran(), format!("kioclient exec {}", entry.display()));
+        assert!(
+            !launch_entry_with(entry, installed(&[])),
+            "no launcher sends the entry to the opener"
+        );
     }
 
     #[test]

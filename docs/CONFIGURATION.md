@@ -566,6 +566,21 @@ MiddleClick = { OpenApplication = { path = "~/Downloads", display_name = "Downlo
 DpiToggle = { short = "ShowDesktop", long = "MissionControl" }
 ```
 
+On Linux, `OpenApplication` decides how to run `path` in this order:
+
+- A URL (`scheme://…`) goes to `xdg-open`.
+- A `.desktop` file is activated with the first launcher installed: `gio
+  launch`, then `kioclient exec`, then `kioclient5 exec`. With none
+  installed it goes to `xdg-open`.
+- A path containing `/` runs directly when it is an executable file;
+  anything else, such as a folder or a document, goes to `xdg-open`.
+- A bare name runs the program of that name on `PATH`. When there is none,
+  it is matched, ignoring case, against the desktop entries in
+  `$XDG_DATA_HOME/applications` and each `$XDG_DATA_DIRS/applications`, by
+  file name (`dolphin` for `org.kde.dolphin.desktop`) or untranslated
+  `Name=`; the first match is activated as above. With no match it goes to
+  `xdg-open`.
+
 Chord modifiers are `Cmd`, `Ctrl`, `Alt`, `Shift`, and `Super`. `Cmd` is the
 cross-platform primary modifier: Command on macOS, Control on Linux and Windows,
 so `Cmd+C` copies everywhere. `Super` (aliases `Win`, `Meta`) always presses the
