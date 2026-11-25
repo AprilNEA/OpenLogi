@@ -211,8 +211,8 @@ fn g700_like() -> Sim {
     let mut sim = Sim::new(27);
     sim.pages[0] = *pattern_page(0x90).as_bytes();
     sim.pages[1] = *directory_page(&[2, 3, 4]).as_bytes();
-    for page in 2..=5 {
-        sim.pages[page] = *pattern_page(u8::try_from(page).unwrap()).as_bytes();
+    for (fill, page) in (2..=5).zip(&mut sim.pages[2..=5]) {
+        *page = *pattern_page(fill).as_bytes();
     }
     sim
 }

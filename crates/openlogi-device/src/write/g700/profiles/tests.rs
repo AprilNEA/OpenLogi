@@ -489,8 +489,8 @@ async fn a_copy_lands_on_the_first_erased_profile_page_before_it_is_listed() {
 #[tokio::test]
 async fn a_copy_needs_a_free_slot_and_a_free_page() {
     let mut flash = dumped();
-    for number in 8..=24 {
-        flash.pages[number] = named_profile_page(first_bindings(), "x");
+    for page in &mut flash.pages[8..=24] {
+        *page = named_profile_page(first_bindings(), "x");
     }
     let (shared, handle, _flash) = g700(flash).await;
 

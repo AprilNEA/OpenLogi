@@ -95,9 +95,7 @@ impl FlashRecords {
                     None => intents.iter().any(|intent| *intent != SlotIntent::Keep),
                 };
                 let request = ProfileRequest {
-                    owned: record
-                        .map(|record| record.routed.clone())
-                        .unwrap_or_default(),
+                    owned: record.map_or_default(|record| record.routed.clone()),
                     sync: if changed {
                         FlashSync::Write
                     } else {

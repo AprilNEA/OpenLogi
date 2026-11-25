@@ -327,8 +327,7 @@ impl FlashQueue {
         } = self.queued.remove(&route)?.job;
         let bindings = bindings
             .or_else(|| self.asked.get(&route).cloned())
-            .map(|asked| self.records.requests(&asked.owner, &asked.pages))
-            .unwrap_or_default();
+            .map_or_default(|asked| self.records.requests(&asked.owner, &asked.pages));
         self.running = Some(route.clone());
         Some((
             route,
