@@ -6,11 +6,12 @@
 //! in sibling crates.
 //!
 //! The exceptions are feature-gated: reading and writing that config file
-//! (`fs`) and locale negotiation (`locale`), which reads the host's language
-//! preference, both on by default; and, off by default, the dedicated tokio
-//! worker thread the host crates run async work on (`worker`) and the `tracing`
-//! filter every process installs (`logging`). Without them this crate touches
-//! no host at all, which is what the `wasm (portable crates)` CI job checks.
+//! (`fs`, which on Linux also reads udev's record of an input node) and locale
+//! negotiation (`locale`), which reads the host's language preference, both on
+//! by default; and, off by default, the dedicated tokio worker thread the host
+//! crates run async work on (`worker`) and the `tracing` filter every process
+//! installs (`logging`). Without them this crate touches no host at all, which
+//! is what the `wasm (portable crates)` CI job checks.
 
 #![deny(missing_docs)]
 
@@ -35,6 +36,8 @@ pub mod paths;
 pub mod scroll;
 #[cfg(feature = "fs")]
 pub mod single_instance;
+#[cfg(all(target_os = "linux", feature = "fs"))]
+pub mod udev;
 pub mod uinput;
 pub mod update_feed;
 #[cfg(feature = "worker")]

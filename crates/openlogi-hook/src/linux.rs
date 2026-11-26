@@ -1,9 +1,9 @@
 //! Linux `evdev` + `uinput` implementation of the OS-level mouse hook.
 //!
-//! Each physical mouse — a relative pointer with buttons — found under
-//! `/dev/input/` is grabbed exclusively; a paired `uinput` virtual device
-//! re-injects events the callback marks
-//! [`crate::EventDisposition::PassThrough`]. Events marked
+//! Each physical mouse — a relative pointer with buttons that udev does not
+//! classify as something else — found under `/dev/input/` is grabbed
+//! exclusively; a paired `uinput` virtual device re-injects events the
+//! callback marks [`crate::EventDisposition::PassThrough`]. Events marked
 //! [`crate::EventDisposition::Suppress`] are consumed and never reach the desktop.
 //!
 //! Touch-driven devices (touchpads, touchscreens) and pointing sticks are
@@ -50,6 +50,7 @@ use evdev::{
     AbsoluteAxisCode, AttributeSetRef, Device, EventSummary, EventType, InputEvent, KeyCode,
     PropType, RelativeAxisCode,
 };
+use openlogi_core::udev::UdevMouse;
 use openlogi_inject::uinput;
 use tracing::{debug, error, warn};
 use x11rb::protocol::xproto::ConnectionExt as _;
@@ -179,6 +180,10 @@ fn find_mouse_devices() -> Vec<(std::path::PathBuf, Device)> {
         })
         .filter(|(path, d)| {
             let vendor = u32::from(d.input_id().vendor());
+            let udev = path
+                .file_name()
+                .and_then(|node| node.to_str())
+                .map_or(UdevMouse::Unrecorded, UdevMouse::of_event_node);
             let hookable = is_hookable_mouse(
                 d.name(),
                 d.supported_keys(),
@@ -186,13 +191,14 @@ fn find_mouse_devices() -> Vec<(std::path::PathBuf, Device)> {
                 d.supported_absolute_axes(),
                 d.properties(),
                 vendor,
+                udev,
             );
             if !hookable
                 && d.supported_keys()
                     .is_some_and(|keys| keys.contains(KeyCode::BTN_LEFT))
             {
                 debug!(
-                    "not hooking {} ({}): has mouse buttons but is not a managed Logitech relative-pointer mouse",
+                    "not hooking {} ({}): has mouse buttons but is not a managed Logitech relative-pointer mouse (udev: {udev:?})",
                     path.display(),
                     d.name().unwrap_or("unnamed"),
                 );
@@ -216,6 +222,13 @@ fn find_mouse_devices() -> Vec<(std::path::PathBuf, Device)> {
 /// Only Logitech devices are grabbed: OpenLogi remaps Logitech mice, and an
 /// exclusive grab on any other vendor's pointer (or a misclassified built-in
 /// trackpad) would leave that device dead for the life of the agent (#484).
+///
+/// Clicking and moving does not make a mouse when udev says otherwise. An MX
+/// Keys or a Craft on a Unifying receiver reports `BTN_LEFT`, `REL_X` and
+/// `REL_Y` on its keyboard node, and systemd's hwdb sets `ID_INPUT_MOUSE=0`
+/// for it. Where that node is readable (the `input`-group setup), the hook
+/// grabbed the keyboard and re-injected every keystroke (#2367).
+/// [`UdevMouse::allows_mouse`] decides, as it does for the input access probe.
 fn is_hookable_mouse(
     name: Option<&str>,
     keys: Option<&AttributeSetRef<KeyCode>>,
@@ -223,6 +236,7 @@ fn is_hookable_mouse(
     abs_axes: Option<&AttributeSetRef<AbsoluteAxisCode>>,
     props: &AttributeSetRef<PropType>,
     vendor_id: u32,
+    udev: UdevMouse,
 ) -> bool {
     // Never hook one of our own uinput devices: the pass-through mice and
     // the action injector, which also advertises mouse buttons. An unnamed
@@ -242,6 +256,9 @@ fn is_hookable_mouse(
         r.contains(RelativeAxisCode::REL_X) && r.contains(RelativeAxisCode::REL_Y)
     });
     if !clicks || !moves {
+        return false;
+    }
+    if !udev.allows_mouse() {
         return false;
     }
     // Combo devices that qualify as relative pointers but also expose a touch
@@ -1003,6 +1020,7 @@ mod tests {
         abs: Option<AttributeSet<AbsoluteAxisCode>>,
         props: AttributeSet<PropType>,
         vendor_id: u32,
+        udev: UdevMouse,
     }
 
     impl Caps {
@@ -1026,6 +1044,30 @@ mod tests {
                 abs: None,
                 props: AttributeSet::new(),
                 vendor_id: LOGITECH_VENDOR_ID,
+                udev: UdevMouse::Mouse,
+            }
+        }
+
+        /// An MX Keys on a Unifying receiver: its keyboard node reports
+        /// `BTN_LEFT`, `REL_X` and `REL_Y` beside its keys, and systemd's hwdb
+        /// sets `ID_INPUT_MOUSE=0` for it.
+        fn mx_keys() -> Self {
+            Self {
+                name: Some("Logitech MX Keys"),
+                keys: Some(
+                    [
+                        KeyCode::KEY_ESC,
+                        KeyCode::KEY_A,
+                        KeyCode::KEY_LEFTCTRL,
+                        KeyCode::BTN_LEFT,
+                        KeyCode::BTN_RIGHT,
+                        KeyCode::BTN_MIDDLE,
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+                udev: UdevMouse::NotMouse,
+                ..Self::mouse()
             }
         }
 
@@ -1037,6 +1079,7 @@ mod tests {
                 self.abs.as_deref(),
                 &self.props,
                 self.vendor_id,
+                self.udev,
             )
         }
     }
@@ -1044,6 +1087,25 @@ mod tests {
     #[test]
     fn plain_mouse_is_hookable() {
         assert!(Caps::mouse().is_hookable());
+    }
+
+    #[test]
+    fn a_keyboard_udev_does_not_call_a_mouse_is_not_hookable() {
+        assert!(
+            !Caps::mx_keys().is_hookable(),
+            "the hook must not grab a keyboard because its node clicks and moves"
+        );
+    }
+
+    /// Without udev's database the capabilities decide alone, as they did
+    /// before udev was consulted, so a mouse is still hooked there.
+    #[test]
+    fn without_a_udev_record_the_capabilities_decide() {
+        let mut caps = Caps::mouse();
+        caps.udev = UdevMouse::Unrecorded;
+        assert!(caps.is_hookable());
+        caps.udev = UdevMouse::NotMouse;
+        assert!(!caps.is_hookable());
     }
 
     #[test]
