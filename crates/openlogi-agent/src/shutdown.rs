@@ -82,6 +82,7 @@ pub(crate) fn request_tray_quit(
     }
     #[cfg(target_os = "macos")]
     crate::lifecycle::armed_session::clear();
+    crate::logging::flush();
     #[expect(
         clippy::exit,
         reason = "fallback only: a missing or unwound core cannot return a status through an AppKit or win32 tray callback"
@@ -168,6 +169,7 @@ pub(crate) fn release_hook_and_exit(
     drop(hook);
     inputs.shutdown();
     virtual_keyboard.release();
+    crate::logging::flush();
     #[expect(
         clippy::exit,
         reason = "a signalled shutdown must end the process, and the loop that observed it runs off the main thread"
