@@ -695,9 +695,9 @@ mod tests {
         KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, Key, ModifiersDown, VK_BROWSER_BACK,
         VK_BROWSER_FORWARD, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_HOME, VK_INSERT, VK_LEFT,
         VK_LWIN, VK_MEDIA_NEXT_TRACK, VK_MEDIA_PLAY_PAUSE, VK_MEDIA_PREV_TRACK, VK_MENU, VK_NEXT,
-        VK_PRIOR, VK_RIGHT, VK_SHIFT, VK_SNAPSHOT, VK_UP, VK_VOLUME_DOWN, VK_VOLUME_MUTE,
-        VK_VOLUME_UP, chord_inputs, combo, combo_inputs, held_key, is_extended_key, key_input,
-        send_inputs, shell_command,
+        VK_PRIOR, VK_RCONTROL, VK_RIGHT, VK_SHIFT, VK_SNAPSHOT, VK_UP, VK_VOLUME_DOWN,
+        VK_VOLUME_MUTE, VK_VOLUME_UP, chord_inputs, combo, combo_inputs, held_key, is_extended_key,
+        key_input, send_inputs, shell_command,
     };
 
     fn usage(label: &str) -> KeyboardUsage {
@@ -1131,6 +1131,7 @@ mod tests {
         (VK_INSERT, 0x52),
         (VK_DELETE, 0x53),
         (VK_LWIN, 0x5B),
+        (VK_RCONTROL, 0x1D),
     ];
 
     /// Every extended key has to be flagged and to carry the scan code of the
@@ -1193,6 +1194,22 @@ mod tests {
         );
         assert_ne!(up_ki.dwFlags & KEYEVENTF_KEYUP, 0);
         assert_eq!(up_ki.wScan, down_ki.wScan);
+    }
+
+    #[test]
+    fn held_right_control_carries_its_scan_code_and_flags_on_both_edges() {
+        let key = held_key(HeldKey::RightControl, ForegroundLayout::current())
+            .expect("right Control is a Windows key");
+        for (up, flags) in [
+            (false, KEYEVENTF_EXTENDEDKEY),
+            (true, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP),
+        ] {
+            // SAFETY: key_input initializes the keyboard arm of the union.
+            let input = unsafe { key_input(key, up).Anonymous.ki };
+            assert_eq!(input.wVk, VK_RCONTROL);
+            assert_eq!(input.wScan, 0x1D);
+            assert_eq!(input.dwFlags, flags);
+        }
     }
 
     /// The navigation keys a shortcut can name, with the virtual key each one

@@ -487,6 +487,44 @@ fn key_for(usage: KeyboardUsage, command: bool) -> Option<u16> {
         .or_else(|| hid_usage_to_macos(usage.code()))
 }
 
+/// Tap modifier keys while their existing owners stay down.
+pub(super) fn tap_modifiers(keys: &[HeldKey], held: HeldModifiers) {
+    post_modifier_tap(keys, held, key_event, |vk, phase, event| {
+        if !virtual_keyboard::edge(vk, phase) {
+            event.post(CGEventTapLocation::HID);
+        }
+    });
+}
+
+fn post_modifier_tap<E>(
+    keys: &[HeldKey],
+    held: HeldModifiers,
+    mut build: impl FnMut(u16, CGEventFlags, KeyPhase) -> Option<E>,
+    mut post: impl FnMut(u16, KeyPhase, E),
+) {
+    let edges = keys
+        .iter()
+        .map(|&key| (key, KeyPhase::Down))
+        .chain(keys.iter().rev().map(|&key| (key, KeyPhase::Up)));
+    // Prepare the fallback for every edge before offering any to HID. The
+    // virtual keyboard can disappear between edges, and a missing fallback
+    // release after a posted press would leave a modifier down.
+    let mut modifiers = held;
+    let Some(events) = edges
+        .map(|(key, phase)| {
+            let (vk, flags) = held_key_event(key, phase, &mut modifiers)?;
+            Some((vk, phase, build(vk, flags, phase)?))
+        })
+        .collect::<Option<Vec<_>>>()
+    else {
+        return;
+    };
+    debug_assert_eq!(modifiers, held);
+    for (vk, phase, event) in events {
+        post(vk, phase, event);
+    }
+}
+
 /// Emit the physical-key edges whose shared ownership changed, preserving the
 /// aggregate synthetic modifier state on every event.
 pub(super) fn hold_keys(

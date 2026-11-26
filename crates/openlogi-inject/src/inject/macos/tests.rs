@@ -5,7 +5,7 @@ use openlogi_core::binding::{KeyboardUsage, Shortcut};
 
 use super::{
     HELD_KEY_PRESSES, LOCK_SCREEN_CHORD, TYPED_TEXT_KEYS, combo, held_key_event,
-    hid_usage_to_macos, key_event, text_events, typed_text_key,
+    hid_usage_to_macos, key_event, post_modifier_tap, text_events, typed_text_key,
 };
 use crate::inject::{HeldKey, HeldModifiers, KeyPhase, parse_shortcut};
 
@@ -96,6 +96,61 @@ fn right_control_fallback_events_keep_the_physical_key_and_flags() {
         );
         assert_eq!(event.get_flags().bits(), expected_flags);
     }
+}
+
+#[test]
+fn modifier_tap_build_failure_posts_nothing() {
+    let keys = [HeldKey::RightControl, HeldKey::Shift];
+
+    for fail_at in 0..keys.len() * 2 {
+        let mut builds = 0;
+        let mut posted = Vec::new();
+        post_modifier_tap(
+            &keys,
+            HeldModifiers::default(),
+            |vk, _, _| {
+                let built = (builds != fail_at).then_some(vk);
+                builds += 1;
+                built
+            },
+            |vk, phase, event| posted.push((vk, phase, event)),
+        );
+
+        assert!(
+            posted.is_empty(),
+            "event {fail_at} failed to build: {posted:?}"
+        );
+        assert_eq!(builds, fail_at + 1);
+    }
+}
+
+#[test]
+fn modifier_tap_posts_balanced_edges_with_existing_modifiers_down() {
+    let mut held = HeldModifiers::default();
+    held.set(HeldKey::Command, true);
+    let mut posted = Vec::new();
+    post_modifier_tap(
+        &[HeldKey::RightControl, HeldKey::Shift],
+        held,
+        key_event,
+        |vk, phase, event| {
+            assert_eq!(event.get_type() as u32, CGEventType::FlagsChanged as u32);
+            assert_eq!(
+                event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE),
+                i64::from(vk)
+            );
+            posted.push((vk, phase, event.get_flags().bits()));
+        },
+    );
+    assert_eq!(
+        posted,
+        [
+            (0x3e, KeyPhase::Down, 0x0014_2000),
+            (0x38, KeyPhase::Down, 0x0016_2000),
+            (0x38, KeyPhase::Up, 0x0014_2000),
+            (0x3e, KeyPhase::Up, 0x0010_0000),
+        ]
+    );
 }
 
 /// A key-down with no key-up leaves its key logically down, and an event

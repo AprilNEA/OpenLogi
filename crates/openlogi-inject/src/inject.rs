@@ -615,10 +615,7 @@ fn tap_modifier(modifiers: BareModifiers) {
         let keys = output.modifiers_to_tap(modifiers, &already_down);
         cfg_select! {
             target_os = "macos" => {
-                let held = output.modifiers();
-                let pressed = macos::hold_keys(&keys, KeyPhase::Down, held);
-                let released = macos::hold_keys(&keys, KeyPhase::Up, pressed);
-                debug_assert_eq!(released, held);
+                macos::tap_modifiers(&keys, output.modifiers());
             }
             target_os = "linux" => {
                 linux::hold_keys(&keys, KeyPhase::Down);
