@@ -168,7 +168,13 @@ impl Device {
         );
         let mut features = Vec::with_capacity(count as usize);
         for i in 1..=count {
-            let info = read_feature_entry(&feature_set_feature, self.device_index, i).await?;
+            let info = read_feature_entry(
+                &feature_set_feature,
+                feature_set_info.version,
+                self.device_index,
+                i,
+            )
+            .await?;
             trace!(
                 index = self.device_index,
                 slot = i,
@@ -240,12 +246,13 @@ const FEATURE_READ_BACKOFF: Duration = Duration::from_millis(120);
 /// change the answer. Only transport failures are retried.
 async fn read_feature_entry(
     feature_set: &FeatureSetFeature,
+    feature_set_version: u8,
     device_index: u8,
     index: u8,
 ) -> Result<FeatureInformation, Hidpp20Error> {
     let mut last_error = None;
     for attempt in 1..=FEATURE_READ_ATTEMPTS {
-        let mut read = std::pin::pin!(feature_set.get_feature(index).fuse());
+        let mut read = std::pin::pin!(feature_set.get_feature(index, feature_set_version).fuse());
         let outcome = select! {
             result = read => Some(result),
             () = futures_timer::Delay::new(FEATURE_READ_TIMEOUT).fuse() => None,
@@ -293,7 +300,9 @@ mod tests {
             // The mock answers nothing, so every attempt runs to its deadline.
             let feature_set = FeatureSetFeature::new(Arc::clone(&channel), 0xff, 0x01);
 
-            let err = read_feature_entry(&feature_set, 0xff, 1).await.unwrap_err();
+            let err = read_feature_entry(&feature_set, 1, 0xff, 1)
+                .await
+                .unwrap_err();
 
             assert!(
                 matches!(err, Hidpp20Error::Channel(_)),
