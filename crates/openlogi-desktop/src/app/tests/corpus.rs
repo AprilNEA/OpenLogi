@@ -140,6 +140,14 @@ fn reviewed_detail_tabs(id: &str) -> Vec<DetailTab> {
             DetailTab::Lighting,
             DetailTab::Device,
         ],
+        // The G502 X has no 0x1b04, but its 0x8100/0x8110 gaming tables give
+        // it the Buttons panel (the OS hook remaps middle, back and forward)
+        // and, being a gaming mouse, no ring. Its DPI feature adds Pointer.
+        "g502-x-lightspeed-001" => vec![DetailTab::Buttons, DetailTab::Pointer, DetailTab::Device],
+        // The PRO keyboard has the G512's 0x8070/0x8080 lighting pair but no
+        // 0x1b04, so it has no HID++ controls for a Keys tab. Once its asset
+        // depot is downloaded, Keys (the OS-hook F-row) and the ring follow.
+        "pro-gaming-keyboard-001" => vec![DetailTab::Lighting, DetailTab::Device],
         id => panic!("{id}: add reviewed desktop panel expectations"),
     }
 }

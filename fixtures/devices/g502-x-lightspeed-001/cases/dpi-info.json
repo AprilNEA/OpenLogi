@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "name": "dpi-info",
+  "channel": "target",
+  "report_support": "short_and_long",
+  "exchanges": [
+    {
+      "request_match": "exact",
+      "request": "10ff83b5030000",
+      "response": "11ff83b5034f4c5201010207ff00000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "10010010000000",
+      "response": "1101001004020000000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "10010000220100",
+      "response": "1101000000000000000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "10010000220200",
+      "response": "1101000007000000000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "10010700000000",
+      "response": "1101070001000000000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "10010750000000",
+      "response": "1101075000064006400640ffff00000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "10010720000000",
+      "response": "110107200000000064e00100c8e00201f4e00503",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "10010720000001",
+      "response": "11010720000001e8e00a07d0e0141388e0322710",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "10010720000002",
+      "response": "11010720000002e0644e20e07d7d00e0c8abe000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "10010720000003",
+      "response": "1101072000000300000000000000000000000000",
+      "required": true
+    }
+  ]
+}
