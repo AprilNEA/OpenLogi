@@ -10,8 +10,11 @@ fn contributed_corpus_projects_identity_battery_capabilities_and_detail_tabs() {
     let Some(corpus) = openlogi_fixture::fs::repository_corpus().expect("valid corpus") else {
         return;
     };
+    // No downloaded depots: a keyboard without HID++ controls gets its Keys
+    // tab from one, and the developer's cache must not decide the result.
+    let assets = tempfile::tempdir().expect("asset root");
     for fixture in corpus {
-        let resolver = AssetResolver::new();
+        let resolver = AssetResolver::isolated(assets.path());
         let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
         let mut state = AppState::new(Sources::in_memory(Config::ephemeral(), &resolver, commands));
         let mut snapshot = snapshot_candidate(fixture.profile());

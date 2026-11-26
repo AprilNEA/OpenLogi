@@ -233,6 +233,20 @@ pub struct AssetResolver {
 }
 
 impl AssetResolver {
+    /// A resolver that reads and writes only `root`: no bundle and no user
+    /// cache, so a test's outcome does not depend on what the machine has
+    /// downloaded.
+    #[cfg(test)]
+    pub(crate) fn isolated(root: &Path) -> Self {
+        Self {
+            read_roots: vec![root.to_path_buf()],
+            write_root: root.to_path_buf(),
+            has_bundle: false,
+            index: None,
+            resolved: RefCell::default(),
+        }
+    }
+
     pub fn new() -> Self {
         let write_root = user_cache_root();
         let bundle = bundle_assets_root();
