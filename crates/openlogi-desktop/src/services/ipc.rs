@@ -203,7 +203,10 @@ pub enum GuiUpdate {
     PowerOffTimeoutWritten {
         /// The headset that was written.
         key: DeviceKey,
-        /// The confirmed timeout, or why the write did not land.
+        /// Which write this answers: [`SetPowerOffTimeout::write`].
+        write: u64,
+        /// The confirmed timeout, or why the write did not land. A write the
+        /// agent superseded before its turn answers with a plain read.
         result: Result<PowerOffTimeout, WriteError>,
     },
     /// What a force-sensing button reports after a press-force write the GUI

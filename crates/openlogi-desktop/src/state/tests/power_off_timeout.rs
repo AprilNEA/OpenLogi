@@ -55,6 +55,31 @@ fn answer_read(
     answered.expect("the state asked the headset for its power-off timeout")
 }
 
+fn with_state<R>(cx: &mut gpui::TestAppContext, f: impl FnOnce(&mut AppState) -> R) -> R {
+    cx.update(|cx| AppState::update(cx, |state, _| f(state)))
+}
+
+/// Release the slider at `timeout` and return the number of the write it
+/// sent.
+fn release(
+    cx: &mut gpui::TestAppContext,
+    receiver: &mut tokio::sync::mpsc::UnboundedReceiver<Command>,
+    timeout: PowerOffTimeout,
+) -> u64 {
+    let _ = with_state(cx, |state| state.commit_power_off_timeout(timeout));
+    let writes: Vec<u64> = drain(receiver)
+        .into_iter()
+        .filter_map(|command| match command {
+            Command::SetPowerOffTimeout(SetPowerOffTimeout { write, .. }) => Some(write),
+            _ => None,
+        })
+        .collect();
+    let [write] = writes[..] else {
+        panic!("expected one power-off write, got {writes:?}");
+    };
+    write
+}
+
 fn current_load(cx: &gpui::TestAppContext) -> PowerOffTimeoutLoad {
     cx.read(|cx| {
         AppState::try_read(cx)
@@ -80,6 +105,7 @@ fn a_release_writes_the_headset_and_saves_nothing() {
             route: written_route,
             timeout: written,
             key: written_key,
+            ..
         }),
     ] = commands.as_slice()
     else {
@@ -150,18 +176,16 @@ fn the_reading_lands_and_a_refusal_reads_the_headset_again(cx: &mut gpui::TestAp
     cx.run_until_parked();
     assert_eq!(current_load(cx), Load::Ready(Arc::new(minutes(15))));
 
-    let events = cx.update(|cx| {
-        AppState::update(cx, |state, _| {
-            state.apply_power_off_timeout_written(&key, Ok(minutes(30)))
-        })
+    let write = release(cx, &mut receiver, minutes(30));
+    let events = with_state(cx, |state| {
+        state.apply_power_off_timeout_written(&key, write, Ok(minutes(30)))
     });
     assert_eq!(events, [StateEvent::PowerOffTimeoutChanged(key.clone())]);
     assert_eq!(current_load(cx), Load::Ready(Arc::new(minutes(30))));
 
-    let events = cx.update(|cx| {
-        AppState::update(cx, |state, _| {
-            state.apply_power_off_timeout_written(&key, Err(WriteError::AgentUnavailable))
-        })
+    let write = release(cx, &mut receiver, minutes(45));
+    let events = with_state(cx, |state| {
+        state.apply_power_off_timeout_written(&key, write, Err(WriteError::AgentUnavailable))
     });
     assert_eq!(events, [StateEvent::PowerOffTimeoutChanged(key)]);
     cx.run_until_parked();
@@ -172,6 +196,60 @@ fn the_reading_lands_and_a_refusal_reads_the_headset_again(cx: &mut gpui::TestAp
     );
     cx.run_until_parked();
     assert_eq!(current_load(cx), Load::Ready(Arc::new(minutes(30))));
+}
+
+/// The agent answers a write that a newer one superseded before its turn
+/// with a plain read of the headset, which still holds its old timeout. That
+/// answer must not move the slider off the newer release, and an older
+/// failure must not send the read back to the headset; only the newest
+/// write's answer counts.
+#[gpui::test]
+fn an_answer_to_a_superseded_write_does_not_move_the_slider(cx: &mut gpui::TestAppContext) {
+    let (state, mut receiver) = headset_state(true);
+    let key = state.current_record().expect("headset").device_key();
+    install(state, cx);
+    answer_read(&mut receiver, &Ok(minutes(15)));
+    cx.run_until_parked();
+
+    let older = release(cx, &mut receiver, minutes(30));
+    let newer = release(cx, &mut receiver, minutes(60));
+    let pending = Load::Ready(Arc::new(minutes(60)));
+
+    // The superseded write read the headset, which still ran 15 minutes.
+    let events = with_state(cx, |state| {
+        state.apply_power_off_timeout_written(&key, older, Ok(minutes(15)))
+    });
+    assert!(events.is_empty(), "an older answer announces nothing");
+    assert_eq!(
+        current_load(cx),
+        pending,
+        "the slider stays on the newer release"
+    );
+
+    // Even an older answer that happens to confirm its own timeout.
+    let _ = with_state(cx, |state| {
+        state.apply_power_off_timeout_written(&key, older, Ok(minutes(30)))
+    });
+    assert_eq!(current_load(cx), pending);
+
+    // Nor does an older failure read the headset again.
+    let _ = with_state(cx, |state| {
+        state.apply_power_off_timeout_written(&key, older, Err(WriteError::AgentUnavailable))
+    });
+    cx.run_until_parked();
+    assert!(
+        drain(&mut receiver)
+            .iter()
+            .all(|command| !matches!(command, Command::ReadPowerOffTimeout(_))),
+        "an older failure sends no read"
+    );
+    assert_eq!(current_load(cx), pending);
+
+    let events = with_state(cx, |state| {
+        state.apply_power_off_timeout_written(&key, newer, Ok(minutes(60)))
+    });
+    assert_eq!(events, [StateEvent::PowerOffTimeoutChanged(key)]);
+    assert_eq!(current_load(cx), pending, "the newest answer lands");
 }
 
 /// Some headsets list `0x1F20` for the battery but refuse the timeout

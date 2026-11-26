@@ -375,10 +375,10 @@ impl Runtime {
                     AppState::apply(cx, |state| state.apply_sidetone_written(&key, result));
                 });
             }
-            ipc::GuiUpdate::PowerOffTimeoutWritten { key, result } => {
+            ipc::GuiUpdate::PowerOffTimeoutWritten { key, write, result } => {
                 cx.update(|cx| {
                     AppState::apply(cx, |state| {
-                        state.apply_power_off_timeout_written(&key, result)
+                        state.apply_power_off_timeout_written(&key, write, result)
                     });
                 });
             }

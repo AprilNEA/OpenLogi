@@ -5,9 +5,11 @@
 //! nothing is persisted here. The reading is the swr-backed device query the
 //! device-read service owns, and the slider shows it.
 //!
-//! A release of the slider writes the headset. Its answer is the timeout the
-//! headset confirms. A refusal reads the headset again, so the slider returns
-//! to the headset's own timeout, as for sidetone.
+//! A release of the slider writes the headset. Only the answer to the newest
+//! write counts: the agent answers a write that a newer one superseded with a
+//! plain read, which would move the slider back off the newer release. Its
+//! answer is the timeout the headset confirms. A refusal reads the headset
+//! again, so the slider returns to the headset's own timeout.
 
 use openlogi_core::hid::{DeviceRoute, PowerOffTimeout, WriteError};
 use tracing::{debug, warn};
@@ -70,23 +72,37 @@ impl AppState {
         self.pointer
             .reads
             .set_power_off_timeout_ready(&key, timeout);
+        let write = self.pointer.next_power_off_timeout_write;
+        self.pointer.next_power_off_timeout_write = write.saturating_add(1);
+        self.pointer
+            .pending_power_off_timeout_writes
+            .insert(key.clone(), write);
         self.send_ipc(crate::services::ipc::SetPowerOffTimeout {
             route,
             timeout,
             key,
+            write,
         });
         events
     }
 
-    /// The headset's answer to a [`Self::commit_power_off_timeout`] write:
-    /// show the confirmed timeout, or — when the headset refused or could not
-    /// be reached — read it again so the optimistic value does not stand in
-    /// for its own.
+    /// The headset's answer to the [`Self::commit_power_off_timeout`] write
+    /// numbered `write`: show the confirmed timeout, or — when the headset
+    /// refused or could not be reached — read it again so the optimistic
+    /// value does not stand in for its own. Only the newest write's answer
+    /// counts; an older one changes nothing, so the slider stays on the newer
+    /// release.
     pub fn apply_power_off_timeout_written(
         &mut self,
         key: &DeviceKey,
+        write: u64,
         result: Result<PowerOffTimeout, WriteError>,
     ) -> StateEvents {
+        if self.pointer.pending_power_off_timeout_writes.get(key) != Some(&write) {
+            debug!(key = %key, write, "a newer power-off timeout write is pending — ignoring this answer");
+            return StateEvents::none();
+        }
+        self.pointer.pending_power_off_timeout_writes.remove(key);
         match result {
             Ok(timeout) => self.pointer.reads.set_power_off_timeout_ready(key, timeout),
             Err(error) => {
