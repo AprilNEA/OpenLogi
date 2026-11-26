@@ -28,10 +28,57 @@ pub(super) struct Owed<R> {
     pub(super) route: DeviceRoute,
     /// What arming proved, for the restore to check the device against.
     pub(super) restore: R,
-    /// The newest session that may still play on the engine.
-    session: u64,
-    /// When the restore is attempted without waiting any longer for a close.
-    due: Instant,
+    /// Whether the session that may still play on the engine is over.
+    phase: Phase,
+}
+
+/// Where one owed restore stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Phase {
+    /// Waiting for `session`, the newest that may play on the engine, to
+    /// close. A session that never reports its close is over at `ends`,
+    /// and each use of it moves `ends` later.
+    Open { session: u64, ends: Instant },
+    /// `session` is over, and the restore is attempted at `at`.
+    Ended { session: u64, at: Instant },
+}
+
+impl Phase {
+    const fn session(self) -> u64 {
+        match self {
+            Self::Open { session, .. } | Self::Ended { session, .. } => session,
+        }
+    }
+
+    /// When the restore is attempted without waiting any longer.
+    const fn due(self) -> Instant {
+        match self {
+            Self::Open { ends, .. } => ends,
+            Self::Ended { at, .. } => at,
+        }
+    }
+
+    /// The session is over at `now`: the restore is due then, or sooner if
+    /// it already was.
+    fn end(self, now: Instant) -> Self {
+        Self::Ended {
+            session: self.session(),
+            at: self.due().min(now),
+        }
+    }
+
+    /// The session was used at `now`, which keeps it alive for another
+    /// [`SESSION_LIFETIME`]. Only a session still open lives longer: one that
+    /// closed, expired, or is waiting to retry its restore stays as it is.
+    fn used(self, now: Instant) -> Self {
+        match self {
+            Self::Open { session, ends } if ends > now => Self::Open {
+                session,
+                ends: ends.max(now + SESSION_LIFETIME),
+            },
+            other => other,
+        }
+    }
 }
 
 /// The enables still owed back, at most one per device.
@@ -63,15 +110,17 @@ impl<R> RestoreLedger<R> {
         restore: Option<R>,
         now: Instant,
     ) {
-        let ends = now + SESSION_LIFETIME;
+        let open = Phase::Open {
+            session,
+            ends: now + SESSION_LIFETIME,
+        };
         for owed in &mut self.owed {
             if owed.route != route {
-                owed.due = owed.due.min(now);
+                owed.phase = owed.phase.end(now);
             }
         }
         if let Some(owed) = self.owed.iter_mut().find(|owed| owed.route == route) {
-            owed.session = session;
-            owed.due = ends;
+            owed.phase = open;
             if let Some(restore) = restore {
                 owed.restore = restore;
             }
@@ -79,20 +128,18 @@ impl<R> RestoreLedger<R> {
             self.owed.push(Owed {
                 route,
                 restore,
-                session,
-                due: ends,
+                phase: open,
             });
         }
     }
 
     /// Session `session` was used at `now`, which keeps it alive for another
     /// [`SESSION_LIFETIME`]: a restore owed for it waits at least that long
-    /// for its close. A restore that is already due stays due.
+    /// for its close. A session already over stays over.
     pub(super) fn used(&mut self, session: u64, now: Instant) {
-        let ends = now + SESSION_LIFETIME;
         for owed in &mut self.owed {
-            if owed.session == session && owed.due > now {
-                owed.due = owed.due.max(ends);
+            if owed.phase.session() == session {
+                owed.phase = owed.phase.used(now);
             }
         }
     }
@@ -103,8 +150,8 @@ impl<R> RestoreLedger<R> {
     /// on.
     pub(super) fn closed(&mut self, session: u64, now: Instant) {
         for owed in &mut self.owed {
-            if owed.session <= session {
-                owed.due = owed.due.min(now);
+            if owed.phase.session() <= session {
+                owed.phase = owed.phase.end(now);
             }
         }
     }
@@ -113,19 +160,19 @@ impl<R> RestoreLedger<R> {
     /// every session: every restore is due at `now`.
     pub(super) fn leaving(&mut self, now: Instant) {
         for owed in &mut self.owed {
-            owed.due = owed.due.min(now);
+            owed.phase = owed.phase.end(now);
         }
     }
 
     /// When the next restore is due, or `None` when nothing is owed.
     pub(super) fn next_due(&self) -> Option<Instant> {
-        self.owed.iter().map(|owed| owed.due).min()
+        self.owed.iter().map(|owed| owed.phase.due()).min()
     }
 
     /// Take one restore that is due at `now`. It is no longer owed unless
     /// the caller hands it back through [`Self::retry`].
     pub(super) fn take_due(&mut self, now: Instant) -> Option<Owed<R>> {
-        let index = self.owed.iter().position(|owed| owed.due <= now)?;
+        let index = self.owed.iter().position(|owed| owed.phase.due() <= now)?;
         Some(self.owed.swap_remove(index))
     }
 
@@ -141,7 +188,10 @@ impl<R> RestoreLedger<R> {
         if self.owed.iter().any(|newer| newer.route == owed.route) {
             return;
         }
-        owed.due = now + RESTORE_RETRY;
+        owed.phase = Phase::Ended {
+            session: owed.phase.session(),
+            at: now + RESTORE_RETRY,
+        };
         self.owed.push(owed);
     }
 }
@@ -248,6 +298,38 @@ mod tests {
         );
         ledger.closed(1, used);
         assert_eq!(due(&mut ledger, used), vec![(mouse(), 7)]);
+    }
+
+    #[test]
+    fn a_session_used_after_its_close_is_handed_back_at_the_close() {
+        let start = Instant::now();
+        let mut ledger = RestoreLedger::default();
+        ledger.opened(1, mouse(), Some(7), start);
+        let closed = start + Duration::from_secs(2);
+        ledger.closed(1, closed);
+        ledger.used(1, closed + Duration::from_secs(1));
+        assert_eq!(ledger.next_due(), Some(closed), "the close stands");
+    }
+
+    #[test]
+    fn a_session_used_after_it_expired_is_handed_back_at_once() {
+        let start = Instant::now();
+        let mut ledger = RestoreLedger::default();
+        ledger.opened(1, mouse(), Some(7), start);
+        ledger.used(1, start + SESSION_LIFETIME);
+        assert_eq!(ledger.next_due(), Some(start + SESSION_LIFETIME));
+    }
+
+    #[test]
+    fn a_use_does_not_delay_a_restore_waiting_to_retry() {
+        let start = Instant::now();
+        let mut ledger = RestoreLedger::default();
+        ledger.opened(1, mouse(), Some(7), start);
+        ledger.closed(1, start);
+        let owed = ledger.take_due(start).expect("due at the close");
+        ledger.retry(owed, start);
+        ledger.used(1, start + Duration::from_secs(1));
+        assert_eq!(ledger.next_due(), Some(start + RESTORE_RETRY));
     }
 
     #[test]

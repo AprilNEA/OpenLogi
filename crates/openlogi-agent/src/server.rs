@@ -674,6 +674,23 @@ struct SessionNews {
     hand_back: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
+impl SessionNews {
+    /// Bring `ledger` up to date at `now`: the use first, then the close,
+    /// then the agent leaving. A use reported together with its session's
+    /// close therefore cannot keep the engine past that close.
+    fn record<R>(&self, ledger: &mut RestoreLedger<R>, now: Instant) {
+        if let Some(session) = self.used {
+            ledger.used(session, now);
+        }
+        if let Some(session) = self.closed {
+            ledger.closed(session, now);
+        }
+        if self.hand_back.is_some() {
+            ledger.leaving(now);
+        }
+    }
+}
+
 /// How long every attempt at one buzz may take together.
 ///
 /// The write path bounds a single call at its own 5 s, which is sized for a
@@ -988,7 +1005,7 @@ impl RingHapticPlayer {
                         due.map_or_else(tokio::time::Instant::now, tokio::time::Instant::from_std),
                     ), if due.is_some() => false,
                 };
-                let (news, paused) = {
+                let (mut news, paused) = {
                     let mut sessions = worker_sessions
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner);
@@ -999,7 +1016,7 @@ impl RingHapticPlayer {
                 // spawning it separately let the first hover race (and lose
                 // to) a disarmed haptic engine. A session that already closed
                 // is not armed at all, nor is one while the agent is leaving.
-                if let Some((session, route)) = news.opened
+                if let Some((session, route)) = news.opened.take()
                     && !paused
                     && news.closed.is_none_or(|closed| closed < session)
                 {
@@ -1029,15 +1046,7 @@ impl RingHapticPlayer {
                         }
                     }
                 }
-                if let Some(session) = news.used {
-                    ledger.used(session, Instant::now());
-                }
-                if let Some(session) = news.closed {
-                    ledger.closed(session, Instant::now());
-                }
-                if news.hand_back.is_some() {
-                    ledger.leaving(Instant::now());
-                }
+                news.record(&mut ledger, Instant::now());
                 while let Some(owed) = ledger.take_due(Instant::now()) {
                     if restore_firmware_haptics(&shared, &owed.route, owed.restore).await
                         == RestoreAttempt::Unreached
@@ -1335,6 +1344,38 @@ mod tests {
     #[test]
     fn an_owed_restore_leaves_the_worker_mostly_idle() {
         assert!(RESTORE_BUDGET * 5 <= haptic_restore::RESTORE_RETRY);
+    }
+
+    /// A use reported to the player keeps the engine its session armed for
+    /// another lifetime, and a close reported with it still ends it.
+    #[test]
+    fn a_use_reported_to_the_player_keeps_the_engine_owed() {
+        use openlogi_agent_core::action_ring::SESSION_LIFETIME;
+        let (tx, _) = tokio::sync::watch::channel(None);
+        let (closed, _) = tokio::sync::watch::channel(());
+        let player = super::RingHapticPlayer {
+            tx,
+            sessions: Arc::default(),
+            closed,
+        };
+        let route = DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xb042,
+        };
+        let start = Instant::now();
+        let mut ledger = haptic_restore::RestoreLedger::default();
+        ledger.opened(1, route, Some(7_u8), start);
+
+        player.use_session(1);
+        let used = start + Duration::from_secs(10);
+        std::mem::take(&mut player.sessions().news).record(&mut ledger, used);
+        assert_eq!(ledger.next_due(), Some(used + SESSION_LIFETIME));
+
+        player.use_session(1);
+        player.end_session(1);
+        let ended = used + Duration::from_secs(1);
+        std::mem::take(&mut player.sessions().news).record(&mut ledger, ended);
+        assert_eq!(ledger.next_due(), Some(ended), "the close stands");
     }
 
     /// A session that closed before the worker looked is never armed, so it

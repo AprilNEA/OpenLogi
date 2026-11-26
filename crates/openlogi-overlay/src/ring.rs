@@ -1239,6 +1239,54 @@ mod tests {
         }
     }
 
+    /// Moving onto or off a slot keeps the ring up for another lifetime.
+    /// Moving within the slot it is already on does not.
+    #[gpui::test]
+    fn moving_between_slots_keeps_the_ring_up(cx: &mut TestAppContext) {
+        let live = Arc::new(ClickAwaySession::new());
+        let (commands, _sent) = mpsc::unbounded_channel();
+        let pointer = cx.new(|_| RingPointer::default());
+        let shared = pointer.clone();
+        let opened = Instant::now();
+        let ring = cx.add_window(move |window, cx| {
+            RingView::new(
+                sized_invocation(ActionRingSize::Medium),
+                commands,
+                &live,
+                Placement::Window,
+                shared,
+                window,
+                cx,
+            )
+        });
+        let mut ring_cx = VisualTestContext::from_window(ring.into(), cx);
+        let centre = Geometry::of(ActionRingSize::Medium).window / 2.0;
+        let at = |x: f32, y: f32| point(px(centre + x), px(centre + y));
+        let closes = |cx: &mut VisualTestContext| {
+            pointer.read_with(cx, |pointer, _| pointer.closes_at(opened))
+        };
+        ring_cx.simulate_mouse_move(at(0.0, 0.0), None, Modifiers::default());
+        assert_eq!(closes(&mut ring_cx), opened + DISPLAY_LIFETIME);
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let moved = Instant::now();
+        ring_cx.simulate_mouse_move(at(0.0, -150.0), None, Modifiers::default());
+        let onto_slot = closes(&mut ring_cx);
+        assert!(onto_slot >= moved + DISPLAY_LIFETIME, "moving onto a slot");
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        ring_cx.simulate_mouse_move(at(20.0, -150.0), None, Modifiers::default());
+        assert_eq!(closes(&mut ring_cx), onto_slot, "the same slot");
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let left = Instant::now();
+        ring_cx.simulate_mouse_move(at(0.0, 0.0), None, Modifiers::default());
+        assert!(
+            closes(&mut ring_cx) >= left + DISPLAY_LIFETIME,
+            "moving off a slot"
+        );
+    }
+
     /// At every ring size, a hovered slot's label, at its longest and tallest,
     /// stays in the window and clear of every slot, including the hovered one
     /// at its grown size.
