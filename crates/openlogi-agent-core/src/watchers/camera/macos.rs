@@ -53,9 +53,28 @@ unsafe extern "C" {
     ) -> i32;
 }
 
+/// The macOS provider keeps no state between samples: every sample asks
+/// CoreMediaIO afresh.
+pub(super) struct Probe;
+
+impl Probe {
+    pub(super) const fn new() -> Self {
+        Self
+    }
+
+    /// Sample CoreMediaIO; see [`camera_in_use`].
+    #[expect(
+        clippy::unused_self,
+        reason = "every platform's probe shares the facade's stateful shape; this one needs no state"
+    )]
+    pub(super) fn sample(&mut self) -> Result<bool, i32> {
+        camera_in_use()
+    }
+}
+
 /// Report whether any camera device is running in any client. The error is the
 /// failing `OSStatus`.
-pub(super) fn camera_in_use() -> Result<bool, i32> {
+fn camera_in_use() -> Result<bool, i32> {
     let devices_address = PropertyAddress {
         selector: HARDWARE_DEVICES,
         scope: SCOPE_GLOBAL,

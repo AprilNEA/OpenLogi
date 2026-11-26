@@ -10,6 +10,7 @@
 
 use std::io;
 
+use super::status_of;
 use winreg::RegKey;
 use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ};
 
@@ -70,13 +71,32 @@ impl Scan {
     }
 }
 
+/// The Windows provider keeps no state between samples: every sample reads the
+/// consent store afresh.
+pub(super) struct Probe;
+
+impl Probe {
+    pub(super) const fn new() -> Self {
+        Self
+    }
+
+    /// Sample the consent store; see [`camera_in_use`].
+    #[expect(
+        clippy::unused_self,
+        reason = "every platform's probe shares the facade's stateful shape; this one needs no state"
+    )]
+    pub(super) fn sample(&mut self) -> Result<bool, i32> {
+        camera_in_use()
+    }
+}
+
 /// Report whether any client currently holds a camera.
 ///
 /// Every hive's scan reaches the answer through the same merge, so a hive that
 /// could not be read cannot be silently outvoted by one that could: `HKLM` is
 /// where services and other accounts are recorded, and answering from `HKCU`
 /// alone would switch a linked light off while one of them is on a call.
-pub(super) fn camera_in_use() -> Result<bool, i32> {
+fn camera_in_use() -> Result<bool, i32> {
     let mut scan = Scan::NoneHolding;
     for hive in [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE] {
         let hive_scan =
@@ -171,12 +191,6 @@ fn usage_stamp(client: &RegKey, name: &str) -> Result<u64, i32> {
 /// report every app that merely holds the permission as recording.
 const fn holds_camera(started: u64, stopped: u64) -> bool {
     started != 0 && stopped == 0
-}
-
-/// The Win32 status behind a registry error, in the `i32` shape the watcher
-/// logs for every platform.
-fn status_of(error: &io::Error) -> i32 {
-    error.raw_os_error().unwrap_or(-1)
 }
 
 #[cfg(test)]

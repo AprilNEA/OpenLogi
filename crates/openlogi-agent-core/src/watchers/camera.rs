@@ -4,36 +4,50 @@
 //! each platform provides that fact from whatever the OS already tracks for its
 //! own privacy indicator, rather than the watcher opening cameras or watching a
 //! list of meeting applications. macOS reads CoreMediaIO's device-running
-//! property; Windows reads the Capability Access Manager's consent store. A
-//! platform with no such provider gets an inert watcher and manual light power.
+//! property; Windows reads the Capability Access Manager's consent store; Linux,
+//! which keeps no such bookkeeping, reads which processes hold a V4L2 node open.
+//! A platform with no such provider gets an inert watcher and manual light power.
+//!
+//! Each platform module exports the same `Probe`: a provider that needs state
+//! between samples (Linux's inotify wake) keeps it there, and the stateless
+//! ones are unit structs.
 
 use std::time::Duration;
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 use std::thread;
 use tokio::sync::mpsc;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 use tracing::{debug, info, warn};
 
+#[cfg(target_os = "linux")]
+mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "windows")]
 mod windows;
 
+#[cfg(target_os = "linux")]
+use linux::Probe;
+#[cfg(target_os = "macos")]
+use macos::Probe;
+#[cfg(target_os = "windows")]
+use windows::Probe;
+
 /// A provider can briefly report no running stream while a camera client
 /// renegotiates or switches capture mode. Requiring two consecutive inactive
 /// samples prevents that gap from turning linked lights off and back on.
-#[cfg(any(target_os = "macos", target_os = "windows", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux", test))]
 const INACTIVE_CONFIRMATIONS: u8 = 2;
 
-#[cfg(any(target_os = "macos", target_os = "windows", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux", test))]
 #[derive(Default)]
 struct CameraDebouncer {
     emitted: Option<bool>,
     inactive_samples: u8,
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux", test))]
 impl CameraDebouncer {
     fn observe(&mut self, active: bool) -> Option<bool> {
         if active {
@@ -68,16 +82,17 @@ impl CameraDebouncer {
 /// Start the camera-use watcher. The first successful sample is emitted
 /// immediately; later samples are emitted only after a debounced state change.
 /// Dropping the receiver stops the worker on its next attempted send.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 #[must_use]
 pub fn spawn(period: Duration) -> mpsc::UnboundedReceiver<bool> {
     let (tx, rx) = mpsc::unbounded_channel();
     let spawn_result = thread::Builder::new()
         .name("openlogi-camera-watcher".into())
         .spawn(move || {
+            let mut probe = Probe::new();
             let mut debouncer = CameraDebouncer::default();
             loop {
-                match camera_in_use() {
+                match probe.sample() {
                     Ok(active) => {
                         if let Some(active) = debouncer.observe(active) {
                             info!(active, "camera usage state changed");
@@ -103,25 +118,19 @@ pub fn spawn(period: Duration) -> mpsc::UnboundedReceiver<bool> {
 
 /// Return an inert watcher on platforms that do not yet expose a supported
 /// aggregate camera-use provider. Camera-linked settings retain manual power.
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 #[must_use]
 pub fn spawn(_period: Duration) -> mpsc::UnboundedReceiver<bool> {
     let (_tx, rx) = mpsc::unbounded_channel();
     rx
 }
 
-/// Sample the host's aggregate camera-use provider. The error is that
-/// provider's own status code, logged rather than interpreted.
-#[cfg(target_os = "macos")]
-fn camera_in_use() -> Result<bool, i32> {
-    macos::camera_in_use()
-}
-
-/// Sample the host's aggregate camera-use provider. The error is that
-/// provider's own status code, logged rather than interpreted.
-#[cfg(target_os = "windows")]
-fn camera_in_use() -> Result<bool, i32> {
-    windows::camera_in_use()
+/// The OS error behind an I/O failure, in the `i32` shape the watcher logs for
+/// every platform — logged rather than interpreted. `-1` stands for a failure
+/// that carries no OS code.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn status_of(error: &std::io::Error) -> i32 {
+    error.raw_os_error().unwrap_or(-1)
 }
 
 #[cfg(test)]

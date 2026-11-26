@@ -738,11 +738,16 @@ pub struct Lighting {
 /// [`LightSettings::auto_camera`].
 ///
 /// macOS reads CoreMediaIO's device-running property; Windows reads the
-/// Capability Access Manager's webcam consent store. A platform without a
-/// provider still persists the setting — the config stays portable across the
-/// machines sharing it — but leaves the light on manual power, so the GUI hides
-/// the toggle rather than offering a switch that cannot do anything.
-pub const CAMERA_AUTOMATION_SUPPORTED: bool = cfg!(any(target_os = "macos", target_os = "windows"));
+/// Capability Access Manager's webcam consent store; Linux reads which
+/// processes hold a V4L2 node open. A platform without a provider still
+/// persists the setting — the config stays portable across the machines sharing
+/// it — but leaves the light on manual power, so the GUI hides the toggle rather
+/// than offering a switch that cannot do anything.
+pub const CAMERA_AUTOMATION_SUPPORTED: bool = cfg!(any(
+    target_os = "macos",
+    target_os = "windows",
+    target_os = "linux"
+));
 
 /// Persisted settings for a standalone light such as Logitech Litra.
 ///
