@@ -13,8 +13,8 @@
 //! [`AppState::commit_power_off_timeout`] and kept by the headset.
 
 use gpui::{
-    AnyElement, App, Context, IntoElement, ParentElement, Render, SharedString, Styled,
-    Subscription, Window, div, prelude::FluentBuilder as _, px,
+    AnyElement, App, Context, InteractiveElement as _, IntoElement, ParentElement, Render,
+    SharedString, Styled, Subscription, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_kit::component::{h_flex, slider::Slider, v_flex};
 use openlogi_core::hid::{PowerOffTimeout, SidetoneLevel};
@@ -47,6 +47,14 @@ impl AudioPanel {
             power_off: None,
             _state_obs: state_obs,
         }
+    }
+
+    /// The power-off slider, while the row shows one.
+    #[cfg(test)]
+    pub(crate) fn power_off_slider(
+        &self,
+    ) -> Option<&gpui::Entity<gpui_kit::component::slider::SliderState>> {
+        self.power_off.as_ref().map(|row| row.slider.slider())
     }
 }
 
@@ -187,6 +195,7 @@ fn sidetone_section(
         }
     };
     v_flex()
+        .debug_selector(|| "audio-sidetone-row".into())
         .gap_3()
         .w_full()
         .child(
@@ -346,6 +355,7 @@ fn power_off_section(
         }
     };
     v_flex()
+        .debug_selector(|| "audio-power-off-row".into())
         .gap_3()
         .w_full()
         .child(
