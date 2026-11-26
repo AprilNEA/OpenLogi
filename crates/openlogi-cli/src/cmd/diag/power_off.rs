@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use clap::Args;
 use openlogi_hid::PowerOffTimeout;
 
-use crate::cmd::diag::select_device;
+use crate::cmd::diag::{exclude_agent, select_device};
 
 #[derive(Debug, Args)]
 pub struct PowerOffArgs {
@@ -23,6 +23,9 @@ pub struct PowerOffArgs {
 }
 
 pub async fn run(args: PowerOffArgs) -> Result<()> {
+    // The agent writes the timeout too; held to the end, so none starts
+    // between this read and the write.
+    let _agent_lock = exclude_agent().await?;
     let (route, name) = select_device(args.device.as_deref(), &[0x1f20]).await?;
     println!("device: {name} ({route})");
 
@@ -85,6 +88,73 @@ mod tests {
         assert!(parse_minutes("91").is_err(), "91 is above the range");
         assert!(parse_minutes("256").is_err(), "256 does not fit a byte");
         assert!(parse_minutes("-1").is_err(), "minutes are not negative");
+    }
+
+    // Unix socket paths honor XDG_CONFIG_HOME; Windows uses a fixed pipe name
+    // and cannot isolate this endpoint test from a real agent that way.
+    #[cfg(unix)]
+    #[test]
+    fn a_running_agent_keeps_the_diagnostic_off_the_headset() {
+        use openlogi_core::single_instance::{self, InstanceError, Role};
+
+        use super::{PowerOffArgs, run};
+
+        const TEST: &str =
+            "cmd::diag::power_off::tests::a_running_agent_keeps_the_diagnostic_off_the_headset";
+        const MODE: &str = "OPENLOGI_DIAG_POWER_OFF_OWNERSHIP_TEST";
+        if std::env::var(MODE).as_deref() != Ok("exercise") {
+            // Run in a child with its own config home, so neither the lock
+            // nor the endpoint is a real agent's.
+            let home = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", TEST, "--nocapture"])
+                .env(MODE, "exercise")
+                .env("XDG_CONFIG_HOME", home.path())
+                .env_remove("XDG_RUNTIME_DIR")
+                .env(
+                    openlogi_core::env::PROFILE,
+                    openlogi_core::paths::Profile::Production.env_value(),
+                )
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        // Only reads: should the guard be missing, nothing is written.
+        let args = || PowerOffArgs {
+            minutes: None,
+            device: None,
+        };
+        openlogi_core::worker::runtime().unwrap().block_on(async {
+            // An agent starting up holds its lock before its socket binds.
+            {
+                let _agent = single_instance::acquire(Role::Agent).unwrap();
+                let error = run(args())
+                    .await
+                    .expect_err("an agent holding its lock must exclude the diagnostic");
+                assert!(
+                    matches!(
+                        error.downcast_ref::<InstanceError>(),
+                        Some(InstanceError::AlreadyRunning { .. })
+                    ),
+                    "refused for another reason: {error:#}"
+                );
+            }
+            // An endpoint that accepts connections is an agent, too.
+            let _listener = openlogi_ipc::transport::bind().unwrap();
+            let error = run(args())
+                .await
+                .expect_err("an answering endpoint must exclude the diagnostic");
+            assert!(
+                error.to_string().contains("agent is running"),
+                "refused for another reason: {error:#}"
+            );
+        });
     }
 
     #[test]
