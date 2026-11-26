@@ -326,3 +326,79 @@ fn a_sector_write_is_one_framed_transaction() {
         assert_eq!(written[17][3] >> 4, 8);
     });
 }
+
+/// Factory profile 1 (sector `0x0101`) of a G502 X LIGHTSPEED, read over its
+/// receiver: 1 ms, slots 800/1200/1600/2400/3200 with 1600 the default.
+/// Factory sectors carry no CRC.
+fn g502_x_lightspeed_factory_profile() -> Vec<u8> {
+    let mut bytes = vec![0xff; SECTOR_SIZE];
+    bytes[0x00..0x0d].copy_from_slice(&[
+        0x01, 0x02, 0x00, 0x20, 0x03, 0xb0, 0x04, 0x40, 0x06, 0x60, 0x09, 0x80, 0x0c,
+    ]);
+    bytes[0x11] = 0x00;
+    bytes[0x1c..0x4c].copy_from_slice(&[
+        0x3c, 0x00, 0x2c, 0x01, 0x80, 0x01, 0x00, 0x01, 0x80, 0x01, 0x00, 0x02, 0x80, 0x01, 0x00,
+        0x04, 0x80, 0x01, 0x00, 0x08, 0x90, 0x07, 0x00, 0x00, 0x80, 0x01, 0x00, 0x10, 0x90, 0x01,
+        0x00, 0x00, 0x90, 0x02, 0x00, 0x00, 0x90, 0x0a, 0x00, 0x00, 0x90, 0x03, 0x00, 0x00, 0x90,
+        0x04, 0x00, 0x00,
+    ]);
+    bytes[0xd0..0xff].copy_from_slice(&[
+        0x0f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x64, 0x00, 0x00, 0x0f, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x64, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x64, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x64, 0x00, 0x00, 0x00,
+        0x00, 0x00,
+    ]);
+    bytes
+}
+
+#[test]
+fn the_g502_x_lightspeed_declares_profile_format_ten() {
+    assert_eq!(
+        ProfileFormat::try_from(10),
+        Ok(ProfileFormat::G502XLightspeed)
+    );
+}
+
+#[test]
+fn a_g502_x_lightspeed_factory_profile_decodes() {
+    let profile = ProfileSector::decode_factory(
+        ProfileFormat::G502XLightspeed,
+        g502_x_lightspeed_factory_profile(),
+    )
+    .unwrap();
+    assert_eq!(profile.report_interval_ms(), 1);
+    assert_eq!(
+        profile.dpi_slots(),
+        [Some(800), Some(1200), Some(1600), Some(2400), Some(3200)]
+    );
+    assert_eq!(profile.default_dpi_slot(), 2);
+    assert_eq!(profile.shift_dpi_slot(), 0);
+    assert_eq!(profile.name(), None);
+    assert_eq!(profile.led_zones(), 2);
+    // Effects 0x0f and 0x10 are not ones this crate models.
+    assert_eq!(
+        profile.lighting(0),
+        Ok(ProfileLighting::Other { effect: 0x0f })
+    );
+}
+
+#[test]
+fn editing_a_g502_x_lightspeed_profile_keeps_the_fields_it_does_not_model() {
+    let original = g502_x_lightspeed_factory_profile();
+    let mut profile =
+        ProfileSector::decode_factory(ProfileFormat::G502XLightspeed, original.clone()).unwrap();
+    profile.set_dpi_slot(1, Some(1000)).unwrap();
+    profile.set_report_interval_ms(2).unwrap();
+    profile
+        .set_lighting(0, ProfileLighting::Other { effect: 0x0f })
+        .unwrap();
+    let encoded = profile.encode();
+
+    let mut expected = original;
+    expected[0x00] = 2;
+    expected[0x05..0x07].copy_from_slice(&1000u16.to_le_bytes());
+    let body = SECTOR_SIZE - 2;
+    assert_eq!(encoded[..body], expected[..body]);
+    let reread = ProfileSector::decode(ProfileFormat::G502XLightspeed, encoded).unwrap();
+    assert_eq!(reread.dpi_slots()[1], Some(1000));
+}

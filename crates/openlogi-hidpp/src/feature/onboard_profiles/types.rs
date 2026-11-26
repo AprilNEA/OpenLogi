@@ -48,6 +48,11 @@ pub enum ProfileFormat {
     G915 = 4,
     /// G502 X layout, which adds a custom-animation index after the LEDs.
     G502X = 5,
+    /// What a G502 X LIGHTSPEED (wpid `0x409f`) declares. Not from a spec:
+    /// its factory sectors were read and its writes checked on one mouse,
+    /// and they hold the fields above at the same offsets. They also fill
+    /// `0x1c..0x20`, which this crate leaves as it finds them.
+    G502XLightspeed = 10,
 }
 
 /// The macro encoding a device declares. Only one is known.
