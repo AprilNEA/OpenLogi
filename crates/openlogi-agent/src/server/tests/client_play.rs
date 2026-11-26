@@ -2,7 +2,9 @@
 //! burst arms a disarmed engine once, plays, and hands the engine back once
 //! the plays stop.
 
+use std::future::Future;
 use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Duration;
 
 use openlogi_core::device::{
     Capabilities, DeviceInventory, DeviceKind, PairedDevice, ReceiverInfo,
@@ -15,6 +17,24 @@ use super::{DeviceRoute, ObservableState, Orchestrator, WriteError};
 
 /// The device layer caches the haptic feature location process-wide.
 static CACHE_SLOT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// How long one scenario may take once it holds [`CACHE_SLOT`]: every wait
+/// in it is a few seconds of real time at most.
+const SCENARIO_DEADLINE: Duration = Duration::from_secs(30);
+
+/// How long a scenario may wait for the others to let go of [`CACHE_SLOT`].
+const SLOT_WAIT: Duration = Duration::from_secs(180);
+
+/// Run `scenario` alone against the feature cache, and fail it rather than
+/// hang the test job when a regression strands one of its waits.
+async fn bounded<T>(scenario: impl Future<Output = T>) -> T {
+    let _slot = tokio::time::timeout(SLOT_WAIT, CACHE_SLOT.lock())
+        .await
+        .expect("no other scenario holds the haptic feature cache this long");
+    tokio::time::timeout(SCENARIO_DEADLINE, scenario)
+        .await
+        .expect("the scenario finishes in time instead of stranding a wait")
+}
 
 const HAPTIC_INDEX: u8 = 0x0b;
 const SUBTLE_COLLISION: u32 = 1 << 4;
@@ -120,98 +140,104 @@ async fn player_for(
 /// so a paused tokio clock jumps past the worker's play and restore budgets
 /// while it waits for those answers, and the tests flake under load.
 async fn after_the_burst(config: &StdMutex<[u8; 3]>, expected: [u8; 3]) {
-    tokio::time::sleep(BURST_IDLE + std::time::Duration::from_millis(300)).await;
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    tokio::time::sleep(BURST_IDLE + Duration::from_millis(300)).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while *config.lock().expect("config") != expected && tokio::time::Instant::now() < deadline {
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
 
 #[tokio::test]
 async fn a_burst_on_a_disarmed_engine_arms_once_plays_and_hands_it_back() {
-    let _slot = CACHE_SLOT.lock().await;
-    let config = Arc::new(StdMutex::new(DISARMED));
-    let (player, handle) = player_for(Arc::clone(&config), BOTH_WAVEFORMS).await;
-    let mut sessions = 10..;
+    bounded(async {
+        let config = Arc::new(StdMutex::new(DISARMED));
+        let (player, handle) = player_for(Arc::clone(&config), BOTH_WAVEFORMS).await;
+        let mut sessions = 10..;
 
-    for waveform in [
-        HapticWaveform::SubtleCollision,
-        HapticWaveform::SubtleCollision,
-        HapticWaveform::DampStateChange,
-    ] {
+        for waveform in [
+            HapticWaveform::SubtleCollision,
+            HapticWaveform::SubtleCollision,
+            HapticWaveform::DampStateChange,
+        ] {
+            player
+                .play_external(mouse(), waveform, || sessions.next().expect("an ID"))
+                .await
+                .expect("the scripted mouse plays");
+        }
+        assert_eq!(plays(&handle), vec![4, 4, 1]);
+        assert_eq!(
+            config_writes(&handle),
+            vec![[0x83, 60]],
+            "the burst's first play turned the engine on, and only it"
+        );
+        assert_eq!(
+            reports(&handle, 0x01).len(),
+            1,
+            "one arming read for the whole burst; later plays take one round-trip"
+        );
+        assert_eq!(sessions.next(), Some(11), "the burst opened one session");
+
+        after_the_burst(&config, DISARMED).await;
+        assert_eq!(
+            config_writes(&handle),
+            vec![[0x83, 60], [0x82, 60]],
+            "the enable the burst made was handed back once it went idle"
+        );
+        assert_eq!(*config.lock().expect("config"), DISARMED);
+
+        // The next play is a new burst: it arms again rather than playing into
+        // the engine it just handed back.
         player
-            .play_external(mouse(), waveform, || sessions.next().expect("an ID"))
+            .play_external(mouse(), HapticWaveform::SubtleCollision, || 20)
             .await
             .expect("the scripted mouse plays");
-    }
-    assert_eq!(plays(&handle), vec![4, 4, 1]);
-    assert_eq!(
-        config_writes(&handle),
-        vec![[0x83, 60]],
-        "the burst's first play turned the engine on, and only it"
-    );
-    assert_eq!(
-        reports(&handle, 0x01).len(),
-        1,
-        "one arming read for the whole burst; later plays take one round-trip"
-    );
-    assert_eq!(sessions.next(), Some(11), "the burst opened one session");
-
-    after_the_burst(&config, DISARMED).await;
-    assert_eq!(
-        config_writes(&handle),
-        vec![[0x83, 60], [0x82, 60]],
-        "the enable the burst made was handed back once it went idle"
-    );
-    assert_eq!(*config.lock().expect("config"), DISARMED);
-
-    // The next play is a new burst: it arms again rather than playing into
-    // the engine it just handed back.
-    player
-        .play_external(mouse(), HapticWaveform::SubtleCollision, || 20)
-        .await
-        .expect("the scripted mouse plays");
-    assert_eq!(config_writes(&handle).len(), 3);
-    after_the_burst(&config, DISARMED).await;
-    assert_eq!(*config.lock().expect("config"), DISARMED);
+        assert_eq!(config_writes(&handle).len(), 3);
+        after_the_burst(&config, DISARMED).await;
+        assert_eq!(*config.lock().expect("config"), DISARMED);
+    })
+    .await;
 }
 
 #[tokio::test]
 async fn an_armed_engine_is_played_on_and_left_alone() {
-    let _slot = CACHE_SLOT.lock().await;
-    let armed = [0x83, 60, 0x34];
-    let config = Arc::new(StdMutex::new(armed));
-    let (player, handle) = player_for(Arc::clone(&config), BOTH_WAVEFORMS).await;
-    player
-        .play_external(mouse(), HapticWaveform::SubtleCollision, || 1)
-        .await
-        .expect("the scripted mouse plays");
-    after_the_burst(&config, armed).await;
-    assert_eq!(plays(&handle), vec![4]);
-    assert!(
-        config_writes(&handle).is_empty(),
-        "nothing to arm or hand back"
-    );
+    bounded(async {
+        let armed = [0x83, 60, 0x34];
+        let config = Arc::new(StdMutex::new(armed));
+        let (player, handle) = player_for(Arc::clone(&config), BOTH_WAVEFORMS).await;
+        player
+            .play_external(mouse(), HapticWaveform::SubtleCollision, || 1)
+            .await
+            .expect("the scripted mouse plays");
+        after_the_burst(&config, armed).await;
+        assert_eq!(plays(&handle), vec![4]);
+        assert!(
+            config_writes(&handle).is_empty(),
+            "nothing to arm or hand back"
+        );
+    })
+    .await;
 }
 
 #[tokio::test]
 async fn an_unadvertised_waveform_is_refused_and_leaves_no_engine_on() {
-    let _slot = CACHE_SLOT.lock().await;
-    let config = Arc::new(StdMutex::new(DISARMED));
-    let (player, handle) = player_for(Arc::clone(&config), SUBTLE_COLLISION).await;
-    assert!(matches!(
-        player
-            .play_external(mouse(), HapticWaveform::DampStateChange, || 1)
-            .await,
-        Err(WriteError::HapticWaveformUnsupported { waveform: 1 })
-    ));
-    assert!(plays(&handle).is_empty(), "the refusal sent no play");
-    after_the_burst(&config, DISARMED).await;
-    assert_eq!(
-        *config.lock().expect("config"),
-        DISARMED,
-        "the arming the refused play opened with was handed back too"
-    );
+    bounded(async {
+        let config = Arc::new(StdMutex::new(DISARMED));
+        let (player, handle) = player_for(Arc::clone(&config), SUBTLE_COLLISION).await;
+        assert!(matches!(
+            player
+                .play_external(mouse(), HapticWaveform::DampStateChange, || 1)
+                .await,
+            Err(WriteError::HapticWaveformUnsupported { waveform: 1 })
+        ));
+        assert!(plays(&handle).is_empty(), "the refusal sent no play");
+        after_the_burst(&config, DISARMED).await;
+        assert_eq!(
+            *config.lock().expect("config"),
+            DISARMED,
+            "the arming the refused play opened with was handed back too"
+        );
+    })
+    .await;
 }
 
 #[test]
