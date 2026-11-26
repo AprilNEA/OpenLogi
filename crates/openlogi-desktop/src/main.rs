@@ -31,6 +31,9 @@ mod app;
 mod app_assets;
 mod features;
 mod platform;
+#[cfg(feature = "native-ui-qa")]
+#[cfg(target_os = "macos")]
+mod qa;
 mod runtime;
 mod services;
 mod state;
@@ -61,6 +64,16 @@ fn main() -> Result<()> {
     #[cfg(target_os = "linux")]
     if openlogi_permissions::udev::is_install_request(std::env::args_os()) {
         return Ok(openlogi_permissions::udev::install_rules()?);
+    }
+
+    #[cfg(all(feature = "native-ui-qa", target_os = "macos"))]
+    if cfg!(feature = "native-ui-qa") {
+        return qa::run();
+    }
+
+    #[cfg(all(feature = "native-ui-qa", not(target_os = "macos")))]
+    if cfg!(feature = "native-ui-qa") {
+        anyhow::bail!("Native UI QA requires the macOS Metal renderer");
     }
 
     init_tracing();
