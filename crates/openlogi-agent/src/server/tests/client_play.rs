@@ -10,6 +10,7 @@ use openlogi_core::device::{
     Capabilities, DeviceInventory, DeviceKind, PairedDevice, ReceiverInfo,
 };
 use openlogi_device::test_support::{ScriptedRawHidHandle, publish_scripted_channel};
+use openlogi_fixture::RequestMatch;
 use openlogi_hid::HapticWaveform;
 
 use super::super::{BURST_IDLE, RingHapticPlayer, check_haptic_target};
@@ -49,6 +50,15 @@ fn mouse() -> DeviceRoute {
         product_id: 0xb042,
     }
 }
+
+fn other_mouse() -> DeviceRoute {
+    DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xb034,
+    }
+}
+
+const ARMED: [u8; 3] = [0x83, 60, 0x34];
 
 /// A `0x19b0` device advertising `waveforms`, keeping the configuration that
 /// `setConfiguration` writes, reporting a zero haptic status, and accepting
@@ -122,16 +132,39 @@ async fn player_for(
     config: Arc<StdMutex<[u8; 3]>>,
     waveforms: u32,
 ) -> (RingHapticPlayer, ScriptedRawHidHandle) {
+    let (player, mut handles) = player_over(vec![(mouse(), config, waveforms)]).await;
+    (player, handles.remove(0))
+}
+
+/// A scripted haptic mouse: its route, its engine configuration, and the
+/// waveforms it advertises.
+type ScriptedMouse = (DeviceRoute, Arc<StdMutex<[u8; 3]>>, u32);
+
+/// A worker over one scripted haptic mouse per entry, each answering on its
+/// route from its own configuration.
+async fn player_over(devices: Vec<ScriptedMouse>) -> (RingHapticPlayer, Vec<ScriptedRawHidHandle>) {
     let observable = Arc::new(ObservableState::new("test".to_owned()));
     let shared = Orchestrator::new(openlogi_core::config::Config::default(), observable).shared();
-    let (_, handle) = publish_scripted_channel(
-        &shared.channel_registry,
-        "mouse",
-        mouse(),
-        haptic_device(config, waveforms),
-    )
-    .await;
-    (RingHapticPlayer::spawn(shared), handle)
+    let mut handles = Vec::new();
+    for (index, (route, config, waveforms)) in devices.into_iter().enumerate() {
+        let (_, handle) = publish_scripted_channel(
+            &shared.channel_registry,
+            &format!("mouse-{index}"),
+            route,
+            haptic_device(config, waveforms),
+        )
+        .await;
+        handles.push(handle);
+    }
+    (RingHapticPlayer::spawn(shared), handles)
+}
+
+/// Wait until the engine reads `expected`, or a few seconds have passed.
+async fn until_engine_reads(config: &StdMutex<[u8; 3]>, expected: [u8; 3]) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while *config.lock().expect("config") != expected && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 /// Let the burst go idle, then wait until the engine reads `expected`.
@@ -141,10 +174,7 @@ async fn player_for(
 /// while it waits for those answers, and the tests flake under load.
 async fn after_the_burst(config: &StdMutex<[u8; 3]>, expected: [u8; 3]) {
     tokio::time::sleep(BURST_IDLE + Duration::from_millis(300)).await;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    while *config.lock().expect("config") != expected && tokio::time::Instant::now() < deadline {
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    until_engine_reads(config, expected).await;
 }
 
 #[tokio::test]
@@ -236,6 +266,181 @@ async fn an_unadvertised_waveform_is_refused_and_leaves_no_engine_on() {
             DISARMED,
             "the arming the refused play opened with was handed back too"
         );
+    })
+    .await;
+}
+
+/// A ring opened on the mouse a client burst plays on shares its engine: the
+/// burst going idle leaves the engine on for the ring, and the ring's close
+/// hands it back.
+#[tokio::test]
+async fn a_burst_going_idle_leaves_the_engine_on_for_an_open_ring() {
+    bounded(async {
+        let config = Arc::new(StdMutex::new(DISARMED));
+        let (player, handle) = player_for(Arc::clone(&config), BOTH_WAVEFORMS).await;
+        player.begin_session(5, Some(mouse()));
+        until_engine_reads(&config, ARMED).await;
+        player
+            .play_external(mouse(), HapticWaveform::SubtleCollision, || 6)
+            .await
+            .expect("the scripted mouse plays");
+
+        tokio::time::sleep(BURST_IDLE + Duration::from_millis(500)).await;
+        assert_eq!(
+            *config.lock().expect("config"),
+            ARMED,
+            "the burst is over, but the ring still plays on the engine"
+        );
+        player.end_session(5);
+        until_engine_reads(&config, DISARMED).await;
+        assert_eq!(
+            config_writes(&handle),
+            vec![[0x83, 60], [0x82, 60]],
+            "armed once, handed back once both sessions closed"
+        );
+    })
+    .await;
+}
+
+/// The other order: a ring that opens and closes inside a burst leaves the
+/// engine on for the burst, which hands it back once it goes idle.
+#[tokio::test]
+async fn a_ring_closing_inside_a_burst_leaves_the_engine_on_for_it() {
+    bounded(async {
+        let config = Arc::new(StdMutex::new(DISARMED));
+        let (player, handle) = player_for(Arc::clone(&config), BOTH_WAVEFORMS).await;
+        player
+            .play_external(mouse(), HapticWaveform::SubtleCollision, || 5)
+            .await
+            .expect("the scripted mouse plays");
+        player.begin_session(6, Some(mouse()));
+        player.end_session(6);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            *config.lock().expect("config"),
+            ARMED,
+            "the ring is over, but the burst still plays on the engine"
+        );
+        player
+            .play_external(mouse(), HapticWaveform::SubtleCollision, || 7)
+            .await
+            .expect("the scripted mouse plays");
+        assert_eq!(
+            config_writes(&handle),
+            vec![[0x83, 60]],
+            "the burst's later play found its engine still on"
+        );
+        after_the_burst(&config, DISARMED).await;
+        assert_eq!(config_writes(&handle), vec![[0x83, 60], [0x82, 60]]);
+    })
+    .await;
+}
+
+/// A play for a device whose session opened while the worker was arming
+/// another device's waits for its own arming, rather than playing into an
+/// engine that is still off.
+#[tokio::test]
+async fn a_play_queued_behind_another_devices_arming_is_armed_first() {
+    bounded(async {
+        let stalled = Arc::new(StdMutex::new(DISARMED));
+        let config = Arc::new(StdMutex::new(DISARMED));
+        let (player, handles) = player_over(vec![
+            (other_mouse(), Arc::clone(&stalled), BOTH_WAVEFORMS),
+            (mouse(), Arc::clone(&config), BOTH_WAVEFORMS),
+        ])
+        .await;
+        // The other mouse's ring arms first; its configuration read stalls.
+        let read = handles[0].hold_next_response(
+            RequestMatch::Hidpp20,
+            &[0x10, 0xff, HAPTIC_INDEX, 0x10, 0, 0, 0],
+        );
+        player.begin_session(1, Some(other_mouse()));
+        read.request_written().await;
+
+        let (published, opened) = tokio::sync::oneshot::channel();
+        let client = {
+            let player = player.clone();
+            tokio::spawn(async move {
+                player
+                    .play_external(mouse(), HapticWaveform::SubtleCollision, move || {
+                        let _ = published.send(());
+                        2
+                    })
+                    .await
+            })
+        };
+        opened.await.expect("the client play opened its session");
+        read.release();
+
+        client
+            .await
+            .expect("the client task")
+            .expect("the scripted mouse plays");
+        let written: Vec<u8> = handles[1]
+            .written_reports()
+            .into_iter()
+            .filter(|report| report[2] == HAPTIC_INDEX && matches!(report[3] >> 4, 0x02 | 0x04))
+            .map(|report| report[3] >> 4)
+            .collect();
+        assert_eq!(
+            written.first(),
+            Some(&0x02),
+            "the mouse's engine was turned on before its play: {written:?}"
+        );
+        player.end_session(1);
+        after_the_burst(&config, DISARMED).await;
+    })
+    .await;
+}
+
+/// A hand-back ends the burst with every other session, so the next play
+/// after the agent stays opens a new burst that arms again rather than
+/// playing into the engine just handed back.
+#[tokio::test]
+async fn a_play_after_a_hand_back_arms_the_engine_again() {
+    bounded(async {
+        let config = Arc::new(StdMutex::new(DISARMED));
+        let (player, handle) = player_for(Arc::clone(&config), BOTH_WAVEFORMS).await;
+        player
+            .play_external(mouse(), HapticWaveform::SubtleCollision, || 1)
+            .await
+            .expect("the scripted mouse plays");
+        player.finish().await;
+        assert_eq!(*config.lock().expect("config"), DISARMED, "handed back");
+
+        player.resume();
+        player
+            .play_external(mouse(), HapticWaveform::SubtleCollision, || 2)
+            .await
+            .expect("the scripted mouse plays");
+        assert_eq!(
+            config_writes(&handle),
+            vec![[0x83, 60], [0x82, 60], [0x83, 60]],
+            "the play after the agent stayed armed the engine again"
+        );
+        after_the_burst(&config, DISARMED).await;
+        assert_eq!(config_writes(&handle).len(), 4);
+    })
+    .await;
+}
+
+/// While the agent is leaving or handing over, nothing arms the engine, so
+/// a client play is refused instead of reporting a buzz that may not have
+/// been felt.
+#[tokio::test]
+async fn a_client_play_while_the_agent_is_leaving_is_refused() {
+    bounded(async {
+        let config = Arc::new(StdMutex::new(DISARMED));
+        let (player, handle) = player_for(Arc::clone(&config), BOTH_WAVEFORMS).await;
+        player.finish().await;
+        assert!(matches!(
+            player
+                .play_external(mouse(), HapticWaveform::SubtleCollision, || 1)
+                .await,
+            Err(WriteError::AgentUnavailable)
+        ));
+        assert!(plays(&handle).is_empty(), "the refused play sent nothing");
+        assert!(config_writes(&handle).is_empty(), "nor armed anything");
     })
     .await;
 }
