@@ -2,11 +2,15 @@ use std::collections::VecDeque;
 use std::future::pending;
 use std::sync::{Arc, Mutex};
 
-use openlogi_core::device::{DeviceInventory, DeviceKind, PairedDevice, ReceiverInfo};
-use openlogi_core::hid::WriteError;
+use openlogi_core::device::{
+    Capabilities, DeviceInventory, DeviceKind, PairedDevice, ReceiverInfo,
+};
+use openlogi_core::hid::{DeviceRoute, WriteError};
 use openlogi_ipc::client::ProtocolSkew;
 use openlogi_ipc::testing::{Answer, in_memory_agent};
-use openlogi_ipc::{AgentRequest, AgentResponse, AgentStatus, ForegroundApps};
+use openlogi_ipc::{
+    AgentRequest, AgentResponse, AgentSnapshot, AgentStatus, ForegroundApps, InventoryHealth,
+};
 
 use super::*;
 
