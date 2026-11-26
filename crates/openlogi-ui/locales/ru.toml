@@ -746,6 +746,7 @@ applying_light_setting = "Применение настройки освещен
 auto_on_with_camera = "Автовключение с камерой"
 camera_light_auto_description = "Включать свет при использовании любой камеры и выключать, когда камеры неактивны."
 keyboard_lighting_description = "Применяется OpenLogi, пока он запущен, и не сохраняется в клавиатуре."
+custom_color = "Свой цвет"
 
 [action_ring]
 actions_ring = "Кольцо действий"

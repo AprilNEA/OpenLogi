@@ -330,7 +330,7 @@ impl AppView {
         let dpi_panel = cx.new(DpiPanel::new);
         let smartshift_panel = cx.new(SmartShiftPanel::new);
         let momentum_panel = cx.new(|cx| MomentumPanel::new(MomentumScope::SelectedDevice, cx));
-        let lighting_panel = cx.new(LightingPanel::new);
+        let lighting_panel = cx.new(|cx| LightingPanel::new(window, cx));
         let camera_preview = cx.new(CameraPreview::new);
         let camera_controls = cx.new(CameraControlsPanel::new);
         let light_panel = cx.new(LightPanel::new);

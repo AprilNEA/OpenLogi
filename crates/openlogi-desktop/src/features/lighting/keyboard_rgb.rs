@@ -7,11 +7,15 @@
 
 use crate::ui::theme::FocusRingStyle as _;
 use gpui::{
-    Context, InteractiveElement, IntoElement, ParentElement, Render, Role,
-    StatefulInteractiveElement as _, Styled, Subscription, Toggled, Window, div, px, rgb,
+    App, AppContext as _, Context, Entity, Hsla, InteractiveElement, IntoElement, ParentElement,
+    Render, Rgba, Role, StatefulInteractiveElement as _, Styled, Subscription, Toggled, Window,
+    div, prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_kit::base::Button as BaseButton;
-use gpui_kit::component::{Selectable as _, h_flex, slider::Slider, v_flex};
+use gpui_kit::component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
+use gpui_kit::component::{
+    IconName, Selectable as _, Sizable as _, Size, h_flex, slider::Slider, v_flex,
+};
 use openlogi_core::color::Rgb;
 use openlogi_core::config::Lighting;
 
@@ -41,13 +45,57 @@ const PALETTE: &[Rgb] = &[
     Rgb::WHITE,
 ];
 
+/// The color the custom control stands for: the current color when the
+/// lighting is on and it is none of the presets.
+fn custom_color(current: &Lighting) -> Option<Rgb> {
+    (current.enabled && !PALETTE.contains(&current.color)).then_some(current.color)
+}
+
+/// A picker color as the 8-bit RGB the keyboard takes. The keys have no
+/// alpha, so a translucent pick lights them at full color.
+fn rgb_of(color: Hsla) -> Rgb {
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "clamped to 0.0..=255.0 before the cast"
+    )]
+    fn channel(value: f32) -> u8 {
+        (value.clamp(0., 1.) * 255.).round() as u8
+    }
+    let color = Rgba::from(color);
+    Rgb::new(channel(color.r), channel(color.g), channel(color.b))
+}
+
+/// Light the keys in `color`, unless they already are.
+fn commit_color(color: Rgb, cx: &mut App) {
+    let unchanged = AppState::try_read(cx).is_some_and(|state| {
+        let lighting = state.lighting();
+        lighting.enabled && lighting.color == color
+    });
+    if unchanged {
+        return;
+    }
+    AppState::apply(cx, |state| {
+        let mut next = state.lighting();
+        next.enabled = true;
+        next.color = color;
+        state.commit_lighting(next)
+    });
+}
+
 pub struct LightingPanel {
     brightness: CommitSlider<u8>,
+    /// The picker behind the custom-color control.
+    picker: Entity<ColorPickerState>,
+    /// The color a slider drag left in the open picker. It is written when
+    /// the picker closes, so a drag does not stream writes to the keyboard.
+    pending: Option<Rgb>,
     _state_obs: Subscription,
+    _picker_subscriptions: [Subscription; 2],
 }
 
 impl LightingPanel {
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let initial = AppState::try_read(cx).map_or(100, |s| s.lighting().brightness);
         // The slider drives the device only on release, to avoid streaming a
         // frame burst to the keyboard for every intermediate drag value.
@@ -66,10 +114,73 @@ impl LightingPanel {
         );
         let state_obs =
             AppState::repaint_on(cx, |event| matches!(event, StateEvent::LightingChanged(_)));
+        let picker = cx.new(|cx| ColorPickerState::new(window, cx));
+        // A palette pick or a hex commit closes the picker before it reports
+        // the color, so a closed picker's color is final; a slider drag reports
+        // every step while the picker stays open.
+        let change = cx.subscribe(&picker, |this, picker, event: &ColorPickerEvent, cx| {
+            let ColorPickerEvent::Change(Some(color)) = event else {
+                return;
+            };
+            let color = rgb_of(*color);
+            if picker.read(cx).is_open() {
+                this.pending = Some(color);
+            } else {
+                this.pending = None;
+                commit_color(color, cx);
+            }
+        });
+        let close = cx.observe(&picker, |this, picker, cx| {
+            if !picker.read(cx).is_open()
+                && let Some(color) = this.pending.take()
+            {
+                commit_color(color, cx);
+            }
+        });
         Self {
             brightness,
+            picker,
+            pending: None,
             _state_obs: state_obs,
+            _picker_subscriptions: [change, close],
         }
+    }
+
+    /// The custom-color control: the picker's trigger in a swatch-sized ring.
+    /// It shows the current color when that is none of the presets, and a
+    /// palette icon otherwise.
+    fn custom_control(&self, current: &Lighting, pal: Palette) -> impl IntoElement {
+        let custom = custom_color(current);
+        let label = match custom {
+            Some(color) => format!("{} #{:06X}", tr!("lighting.custom_color"), color.packed()),
+            None => tr!("lighting.custom_color").to_string(),
+        };
+        let outer = SWATCH_RING + SWATCH_RING_GAP;
+        div()
+            .flex()
+            .items_center()
+            .justify_center()
+            .size(px(SWATCH + 2. * outer))
+            .p(px(SWATCH_RING_GAP))
+            .rounded(pal.control_radius + px(outer))
+            .border(px(SWATCH_RING))
+            .border_color(if custom.is_some() {
+                theme::accent()
+            } else {
+                gpui::transparent_black()
+            })
+            .child(
+                ColorPicker::new(&self.picker)
+                    .with_size(Size::Size(px(SWATCH)))
+                    .featured_colors(
+                        PALETTE
+                            .iter()
+                            .map(|color| Hsla::from(rgb(color.packed())))
+                            .collect(),
+                    )
+                    .accessibility_label(label)
+                    .when(custom.is_none(), |picker| picker.icon(IconName::Palette)),
+            )
     }
 }
 
@@ -83,10 +194,20 @@ impl Render for LightingPanel {
         // disturbing an in-progress drag.
         self.brightness.sync(lighting.brightness, window, cx);
 
+        // Keep the closed picker on the device's color, so it opens there
+        // after a device switch or a preset pick.
+        let color = Hsla::from(rgb(lighting.color.packed()));
+        let picker = self.picker.read(cx);
+        if !picker.is_open() && picker.value() != Some(color) {
+            self.picker
+                .update(cx, |picker, cx| picker.set_value(color, window, cx));
+        }
+
         let swatches: Vec<_> = PALETTE
             .iter()
             .map(|&color| swatch(color, &lighting, pal))
             .collect();
+        let custom = self.custom_control(&lighting, pal);
 
         v_flex()
             .gap_3()
@@ -110,7 +231,13 @@ impl Render for LightingPanel {
             ))
             // The rings' clear gaps already space the faces; a full gap on top
             // would spread the row.
-            .child(h_flex().gap_1().flex_wrap().children(swatches))
+            .child(
+                h_flex()
+                    .gap_1()
+                    .flex_wrap()
+                    .children(swatches)
+                    .child(custom),
+            )
             .child(
                 SliderRow::new(
                     tr!("camera.brightness"),
@@ -184,3 +311,6 @@ fn swatch(color: Rgb, current: &Lighting, pal: Palette) -> impl IntoElement {
             });
         })
 }
+
+#[cfg(test)]
+mod tests;
