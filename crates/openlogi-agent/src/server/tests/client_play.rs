@@ -3,6 +3,7 @@
 //! the plays stop.
 
 use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
@@ -132,26 +133,41 @@ async fn player_for(
     config: Arc<StdMutex<[u8; 3]>>,
     waveforms: u32,
 ) -> (RingHapticPlayer, ScriptedRawHidHandle) {
-    let (player, mut handles) = player_over(vec![(mouse(), config, waveforms)]).await;
+    let (player, mut handles) =
+        player_over(vec![(mouse(), Box::new(haptic_device(config, waveforms)))]).await;
     (player, handles.remove(0))
 }
 
-/// A scripted haptic mouse: its route, its engine configuration, and the
-/// waveforms it advertises.
-type ScriptedMouse = (DeviceRoute, Arc<StdMutex<[u8; 3]>>, u32);
+/// How a scripted device answers a request.
+type Responder = Box<dyn Fn(&[u8]) -> Option<Vec<u8>> + Send + Sync>;
 
-/// A worker over one scripted haptic mouse per entry, each answering on its
-/// route from its own configuration.
-async fn player_over(devices: Vec<ScriptedMouse>) -> (RingHapticPlayer, Vec<ScriptedRawHidHandle>) {
+/// [`haptic_device`] holding `config` with both waveforms, which stops
+/// answering plays and configuration writes once `lossy` is set.
+fn lossy_haptic_device(config: Arc<StdMutex<[u8; 3]>>, lossy: Arc<AtomicBool>) -> Responder {
+    let device = haptic_device(config, BOTH_WAVEFORMS);
+    Box::new(move |request| {
+        let lost = lossy.load(Ordering::SeqCst)
+            && request.len() >= 4
+            && request[2] == HAPTIC_INDEX
+            && matches!(request[3] >> 4, 0x02 | 0x04);
+        if lost { None } else { device(request) }
+    })
+}
+
+/// A worker over one scripted device per entry, each answering on its
+/// route.
+async fn player_over(
+    devices: Vec<(DeviceRoute, Responder)>,
+) -> (RingHapticPlayer, Vec<ScriptedRawHidHandle>) {
     let observable = Arc::new(ObservableState::new("test".to_owned()));
     let shared = Orchestrator::new(openlogi_core::config::Config::default(), observable).shared();
     let mut handles = Vec::new();
-    for (index, (route, config, waveforms)) in devices.into_iter().enumerate() {
+    for (index, (route, responder)) in devices.into_iter().enumerate() {
         let (_, handle) = publish_scripted_channel(
             &shared.channel_registry,
             &format!("mouse-{index}"),
             route,
-            haptic_device(config, waveforms),
+            responder,
         )
         .await;
         handles.push(handle);
@@ -159,12 +175,28 @@ async fn player_over(devices: Vec<ScriptedMouse>) -> (RingHapticPlayer, Vec<Scri
     (RingHapticPlayer::spawn(shared), handles)
 }
 
-/// Wait until the engine reads `expected`, or a few seconds have passed.
-async fn until_engine_reads(config: &StdMutex<[u8; 3]>, expected: [u8; 3]) {
+/// Wait until `done`, or a few seconds have passed.
+async fn until(mut done: impl FnMut() -> bool) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    while *config.lock().expect("config") != expected && tokio::time::Instant::now() < deadline {
+    while !done() && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+}
+
+/// Wait until the engine reads `expected`, or a few seconds have passed.
+async fn until_engine_reads(config: &StdMutex<[u8; 3]>, expected: [u8; 3]) {
+    until(|| *config.lock().expect("config") == expected).await;
+}
+
+/// The `setConfiguration` (2) and `playWaveform` (4) functions written, in
+/// order.
+fn engine_writes(handle: &ScriptedRawHidHandle) -> Vec<u8> {
+    handle
+        .written_reports()
+        .into_iter()
+        .filter(|report| report[2] == HAPTIC_INDEX && matches!(report[3] >> 4, 0x02 | 0x04))
+        .map(|report| report[3] >> 4)
+        .collect()
 }
 
 /// Let the burst go idle, then wait until the engine reads `expected`.
@@ -302,8 +334,8 @@ async fn a_burst_going_idle_leaves_the_engine_on_for_an_open_ring() {
     .await;
 }
 
-/// The other order: a ring that opens and closes inside a burst leaves the
-/// engine on for the burst, which hands it back once it goes idle.
+/// The other order: a ring armed and closed inside a burst leaves the engine
+/// on for the burst, which hands it back once it goes idle.
 #[tokio::test]
 async fn a_ring_closing_inside_a_burst_leaves_the_engine_on_for_it() {
     bounded(async {
@@ -313,7 +345,12 @@ async fn a_ring_closing_inside_a_burst_leaves_the_engine_on_for_it() {
             .play_external(mouse(), HapticWaveform::SubtleCollision, || 5)
             .await
             .expect("the scripted mouse plays");
+        let reads = reports(&handle, 0x01).len();
         player.begin_session(6, Some(mouse()));
+        // The ring's arming reads the engine, finds it on, and owes nothing
+        // of its own; only then does the ring close.
+        until(|| reports(&handle, 0x01).len() > reads).await;
+        assert_eq!(reports(&handle, 0x01).len(), reads + 1, "the ring armed");
         player.end_session(6);
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(
@@ -345,8 +382,14 @@ async fn a_play_queued_behind_another_devices_arming_is_armed_first() {
         let stalled = Arc::new(StdMutex::new(DISARMED));
         let config = Arc::new(StdMutex::new(DISARMED));
         let (player, handles) = player_over(vec![
-            (other_mouse(), Arc::clone(&stalled), BOTH_WAVEFORMS),
-            (mouse(), Arc::clone(&config), BOTH_WAVEFORMS),
+            (
+                other_mouse(),
+                Box::new(haptic_device(Arc::clone(&stalled), BOTH_WAVEFORMS)),
+            ),
+            (
+                mouse(),
+                Box::new(haptic_device(Arc::clone(&config), BOTH_WAVEFORMS)),
+            ),
         ])
         .await;
         // The other mouse's ring arms first; its configuration read stalls.
@@ -376,18 +419,62 @@ async fn a_play_queued_behind_another_devices_arming_is_armed_first() {
             .await
             .expect("the client task")
             .expect("the scripted mouse plays");
-        let written: Vec<u8> = handles[1]
-            .written_reports()
-            .into_iter()
-            .filter(|report| report[2] == HAPTIC_INDEX && matches!(report[3] >> 4, 0x02 | 0x04))
-            .map(|report| report[3] >> 4)
-            .collect();
+        let written = engine_writes(&handles[1]);
         assert_eq!(
             written.first(),
             Some(&0x02),
             "the mouse's engine was turned on before its play: {written:?}"
         );
         player.end_session(1);
+        after_the_burst(&config, DISARMED).await;
+    })
+    .await;
+}
+
+/// A client play stuck behind a worker held up by a lost ring buzz and an
+/// unreachable restore keeps its burst open until it has played, so the
+/// burst cannot close before its arming and play into an engine still off.
+#[tokio::test]
+async fn a_burst_stays_open_while_its_play_waits_behind_a_stalled_worker() {
+    bounded(async {
+        let lossy = Arc::new(AtomicBool::new(false));
+        let stalled = Arc::new(StdMutex::new(DISARMED));
+        let config = Arc::new(StdMutex::new(DISARMED));
+        let (player, handles) = player_over(vec![
+            (
+                other_mouse(),
+                lossy_haptic_device(Arc::clone(&stalled), Arc::clone(&lossy)),
+            ),
+            (
+                mouse(),
+                Box::new(haptic_device(Arc::clone(&config), BOTH_WAVEFORMS)),
+            ),
+        ])
+        .await;
+        player.begin_session(1, Some(other_mouse()));
+        until_engine_reads(&stalled, ARMED).await;
+        // The ring's last buzz is lost, holding the worker for its whole
+        // play budget, and so is the restore its close owes after it.
+        lossy.store(true, Ordering::SeqCst);
+        player.play(
+            1,
+            Some(other_mouse()),
+            HapticWaveform::SubtleCollision,
+            "hover",
+        );
+        player.end_session(1);
+        until(|| !plays(&handles[0]).is_empty()).await;
+
+        player
+            .play_external(mouse(), HapticWaveform::SubtleCollision, || 2)
+            .await
+            .expect("the scripted mouse plays");
+        let written = engine_writes(&handles[1]);
+        assert_eq!(
+            written.first(),
+            Some(&0x02),
+            "the mouse's engine was turned on before its play: {written:?}"
+        );
         after_the_burst(&config, DISARMED).await;
     })
     .await;

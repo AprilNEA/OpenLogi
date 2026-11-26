@@ -1200,34 +1200,42 @@ impl RingHapticPlayer {
         waveform: HapticWaveform,
         new_session: impl FnOnce() -> u64,
     ) -> Result<(), WriteError> {
-        let id = self
-            .sessions()
-            .join_burst(&route, tokio::time::Instant::now(), new_session)
-            .map_err(|Paused| WriteError::AgentUnavailable)?;
-        let player = self.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(BURST_IDLE).await;
-            player.close_idle_burst(id);
-        });
         let (sender, answer) = tokio::sync::oneshot::channel();
-        let _ = self.tx.send(Some(Play {
-            session: Session {
-                lane: Lane::Client,
-                id,
-            },
-            route,
-            waveform,
-            interaction: "client",
-            reply: Some(Reply::new(sender)),
-        }));
-        answer.await.unwrap_or(Err(WriteError::WriteSuperseded {
+        let pending = {
+            let mut sessions = self.sessions();
+            let id = sessions
+                .join_burst(&route, tokio::time::Instant::now(), new_session)
+                .map_err(|Paused| WriteError::AgentUnavailable)?;
+            // Queued under the lock that ordered the join, so plays reach
+            // the worker in burst order: none carries a burst older than
+            // one the worker may already have armed past, which would play
+            // unarmed.
+            let _ = self.tx.send(Some(Play {
+                session: Session {
+                    lane: Lane::Client,
+                    id,
+                },
+                route,
+                waveform,
+                interaction: "client",
+                reply: Some(Reply::new(sender)),
+            }));
+            PendingPlay {
+                player: self.clone(),
+                session: id,
+            }
+        };
+        let answered = answer.await;
+        drop(pending);
+        answered.unwrap_or(Err(WriteError::WriteSuperseded {
             operation: HidppOperation::PlayHaptic,
         }))
     }
 
-    /// Close burst `session` if no play came for [`BURST_IDLE`]. A newer
-    /// play's own timer closes it otherwise, and a renewed burst's old session
-    /// is left to the ledger, which ends it as the new session opens.
+    /// Close burst `session` if no play is waiting on it and none was
+    /// answered for [`BURST_IDLE`]. A later play's own timer closes it
+    /// otherwise, and a renewed burst's old session is left to the ledger,
+    /// which ends it as the new session opens.
     fn close_idle_burst(&self, session: u64) {
         if self
             .sessions()
@@ -1316,6 +1324,31 @@ async fn play_newest(
     };
     if let Some(reply) = play.reply {
         reply.send(result);
+    }
+}
+
+/// A client play its burst still waits on. Dropping it, once the play is
+/// answered or its client gave up, starts the burst's idle clock: a burst
+/// never closes under a play the worker has not armed for yet.
+struct PendingPlay {
+    player: RingHapticPlayer,
+    session: u64,
+}
+
+impl Drop for PendingPlay {
+    fn drop(&mut self) {
+        self.player
+            .sessions()
+            .settle(self.session, tokio::time::Instant::now());
+        // Outside a runtime the agent is gone, and its ledger with it.
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let player = self.player.clone();
+            let session = self.session;
+            runtime.spawn(async move {
+                tokio::time::sleep(BURST_IDLE).await;
+                player.close_idle_burst(session);
+            });
+        }
     }
 }
 

@@ -47,6 +47,10 @@ struct Burst {
     session: u64,
     route: DeviceRoute,
     opened: Instant,
+    /// Plays joined but not yet answered. The burst stays open while any
+    /// waits, however long the worker takes to reach it.
+    pending: usize,
+    /// When the last play was answered.
     last: Instant,
 }
 
@@ -88,7 +92,8 @@ impl Sessions {
         self.ring_closed = self.ring_closed.max(Some(session));
     }
 
-    /// The burst session a client play on `route` at `now` belongs to.
+    /// The burst session a client play on `route` at `now` belongs to; the
+    /// burst stays open until the play [settles](Self::settle).
     ///
     /// It joins the open burst on `route` unless that burst is
     /// [`BURST_RENEW`] old; otherwise it opens a new one with an ID from
@@ -106,7 +111,7 @@ impl Sessions {
             .as_mut()
             .filter(|open| open.route == *route && now < open.opened + BURST_RENEW)
         {
-            open.last = now;
+            open.pending += 1;
             return Ok(open.session);
         }
         let session = new_session();
@@ -114,21 +119,33 @@ impl Sessions {
             session,
             route: route.clone(),
             opened: now,
+            pending: 1,
             last: now,
         });
         Ok(session)
     }
 
-    /// Close burst `session` if no play joined it for [`BURST_IDLE`] up to
-    /// `now`. Returns whether it closed, so the worker hands its engine back.
+    /// A play that joined burst `session` was answered, or its client gave
+    /// up, at `now`.
+    pub(super) fn settle(&mut self, session: u64, now: Instant) {
+        if let Phase::Running { burst: Some(open) } = &mut self.phase
+            && open.session == session
+        {
+            open.pending = open.pending.saturating_sub(1);
+            open.last = now;
+        }
+    }
+
+    /// Close burst `session` if no play waits on it and none was answered
+    /// for [`BURST_IDLE`] up to `now`. Returns whether it closed, so the
+    /// worker hands its engine back.
     pub(super) fn close_idle_burst(&mut self, session: u64, now: Instant) -> bool {
         let Phase::Running { burst } = &mut self.phase else {
             return false;
         };
-        if !burst
-            .as_ref()
-            .is_some_and(|open| open.session == session && now - open.last >= BURST_IDLE)
-        {
+        if !burst.as_ref().is_some_and(|open| {
+            open.session == session && open.pending == 0 && now - open.last >= BURST_IDLE
+        }) {
             return false;
         }
         *burst = None;
@@ -221,21 +238,26 @@ mod tests {
     }
 
     #[test]
-    fn a_burst_closes_only_once_idle_and_only_as_itself() {
+    fn a_burst_closes_only_once_every_play_settled_and_it_sat_idle() {
         let start = Instant::now();
         let mut sessions = Sessions::default();
         assert_eq!(sessions.join_burst(&mouse(), start, || 1), Ok(1));
-        let joined = start + Duration::from_secs(1);
-        assert_eq!(sessions.join_burst(&mouse(), joined, || 2), Ok(1));
+        assert_eq!(sessions.join_burst(&mouse(), start, || 2), Ok(1));
+        let late = start + BURST_IDLE * 3;
         assert!(
-            !sessions.close_idle_burst(1, start + BURST_IDLE),
-            "joined since"
+            !sessions.close_idle_burst(1, late),
+            "two plays still wait on it, however long the worker takes"
         );
+        let answered = start + Duration::from_secs(1);
+        sessions.settle(1, answered);
+        assert!(!sessions.close_idle_burst(1, late), "one play still waits");
+        sessions.settle(1, answered);
         assert!(
-            !sessions.close_idle_burst(9, joined + BURST_IDLE),
-            "not this burst"
+            !sessions.close_idle_burst(1, answered + BURST_IDLE / 2),
+            "answered too recently"
         );
-        assert!(sessions.close_idle_burst(1, joined + BURST_IDLE));
+        assert!(!sessions.close_idle_burst(9, late), "not this burst");
+        assert!(sessions.close_idle_burst(1, answered + BURST_IDLE));
         assert_eq!(
             sessions.take_news().burst_closed,
             Some(Session {
@@ -243,10 +265,7 @@ mod tests {
                 id: 1
             })
         );
-        assert!(
-            !sessions.close_idle_burst(1, joined + BURST_IDLE),
-            "closed once"
-        );
+        assert!(!sessions.close_idle_burst(1, late), "closed once");
     }
 
     #[test]
