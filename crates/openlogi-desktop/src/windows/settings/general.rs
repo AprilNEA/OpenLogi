@@ -58,6 +58,13 @@ pub(super) fn general_page(
     } else {
         group
     };
+    // Only the Windows agent finds UI elements under the pointer, so only
+    // Windows shows the switch; `cfg!` keeps it compiled everywhere.
+    let group = if cfg!(target_os = "windows") {
+        group.item(ui_hover_haptics_item())
+    } else {
+        group
+    };
     let group = group.item(launch_at_login_item());
 
     // Switched off under System Settings › Login Items: nothing can start
@@ -175,6 +182,20 @@ fn animate_desktop_switch_item() -> SettingItem {
         ),
     )
     .description(tr!("app.animate_desktop_switch_description"))
+}
+
+/// The switch for the haptic tick on hovering an interactive UI element.
+fn ui_hover_haptics_item() -> SettingItem {
+    SettingItem::new(
+        tr!("app.ui_hover_haptics"),
+        SettingField::switch(
+            |cx| AppState::try_read(cx).is_some_and(|s| s.app_settings().ui_hover_haptics),
+            |enabled, cx| {
+                AppState::apply(cx, |state| state.commit_ui_hover_haptics(enabled));
+            },
+        ),
+    )
+    .description(tr!("app.ui_hover_haptics_description"))
 }
 
 /// The switch for the overlay's low-battery notices.

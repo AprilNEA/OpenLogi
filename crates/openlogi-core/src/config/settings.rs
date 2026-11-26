@@ -316,6 +316,13 @@ pub struct AppSettings {
     /// Logi Options+; off switches instantly. Only macOS reads it.
     #[serde(default = "default_true")]
     pub animate_desktop_switch: bool,
+    /// Whether the active mouse plays a light haptic tick when the pointer
+    /// moves onto a new interactive UI element (button, link, menu item, tab,
+    /// list item), found through the platform accessibility API. **Off by
+    /// default**, and omitted from `config.toml` while off. Only Windows reads
+    /// it, and only devices with HID++ haptics (`0x19B0`) play it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ui_hover_haptics: bool,
 }
 
 const SENSITIVITY_MIN: u8 = 1;
@@ -523,6 +530,7 @@ impl Default for AppSettings {
             low_battery_notifications: true,
             lock_key_notifications: true,
             animate_desktop_switch: true,
+            ui_hover_haptics: false,
         }
     }
 }

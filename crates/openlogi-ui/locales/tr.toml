@@ -85,6 +85,8 @@ lock_key_notifications_description = "Bir klavye Caps Lock, Num Lock veya Scroll
 lock_key_notifications_description_macos = "Bir klavye Caps Lock'u açtığında ya da kapattığında ekranda kısa süre göster."
 animate_desktop_switch = "Masaüstü geçişini canlandır"
 animate_desktop_switch_description = "Önceki Masaüstü ve Sonraki Masaüstü, üç parmakla kaydırma gibi yandaki masaüstüne kayar. Anında geçmek için kapatın."
+ui_hover_haptics = "Haptic tick on hover"
+ui_hover_haptics_description = "The mouse taps lightly when the pointer moves onto a button, link, menu item, tab or list item. Needs a mouse with haptics."
 openlogi = "OpenLogi"
 
 [device]

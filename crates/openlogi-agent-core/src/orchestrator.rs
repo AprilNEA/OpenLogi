@@ -2200,6 +2200,26 @@ impl Orchestrator {
         })
     }
 
+    /// Route of the active device for UI hover haptics: `Some` only while the
+    /// app-wide preference is on and the device is online with HID++ haptics.
+    #[must_use]
+    pub fn ui_hover_haptic_route(&self) -> Option<DeviceRoute> {
+        if !self.config.app_settings.ui_hover_haptics {
+            return None;
+        }
+        let key = self.current_key()?;
+        let device = self
+            .devices
+            .iter()
+            .find(|device| device.config_key == key)?;
+        (device.online
+            && device
+                .capabilities
+                .is_some_and(|capabilities| capabilities.haptic_feedback))
+        .then(|| device.route.clone())
+        .flatten()
+    }
+
     /// Where enumeration stands, for the IPC `status` poll.
     #[must_use]
     pub fn inventory_health(&self) -> InventoryHealth {
