@@ -1277,11 +1277,15 @@ impl RingHapticPlayer {
 /// Play the newest queued waveform, arming its session first if the worker
 /// has not yet, and answer the client that queued it.
 ///
-/// A session can open while another device's arming runs; its play then
-/// waits for its own arming. A play superseded meanwhile is dropped for the
-/// newest, which may need an arming of its own. While `paused`, nothing
-/// arms, and a client play is refused: unarmed, its buzz may not be felt,
-/// and the client hears so rather than a false success.
+/// A session can open while another device's arming runs, so a play reads
+/// its own session to know whether it still needs arming. A pass arms at
+/// most one session and then plays the play it armed for, even if a newer
+/// one arrived meanwhile: that one stays queued for the next pass. Switching
+/// to it would arm again, and plays alternating between devices faster than
+/// arming completes would then keep the worker arming forever, playing no
+/// pulse and handing no engine back. While `paused`, nothing arms, and a
+/// client play is refused: unarmed, its buzz may not be felt, and the client
+/// hears so rather than a false success.
 async fn play_newest(
     shared: &SharedHandles,
     rx: &mut tokio::sync::watch::Receiver<Option<Play>>,
@@ -1289,20 +1293,12 @@ async fn play_newest(
     breaker: &mut HapticBreaker,
     paused: bool,
 ) {
-    let mut request = rx.borrow_and_update().clone();
-    while let Some(play) = request
-        .as_ref()
-        .filter(|play| !paused && ledger.is_new(play.session))
-    {
-        arm_session(shared, ledger, breaker, play.session, &play.route).await;
-        if !rx.has_changed().unwrap_or(false) {
-            break;
-        }
-        request.clone_from(&rx.borrow_and_update());
-    }
-    let Some(play) = request else {
+    let Some(play) = rx.borrow_and_update().clone() else {
         return;
     };
+    if !paused && ledger.is_new(play.session) {
+        arm_session(shared, ledger, breaker, play.session, &play.route).await;
+    }
     let result = if paused && play.session.lane == Lane::Client {
         Err(WriteError::AgentUnavailable)
     } else if breaker.allows(Instant::now()) {

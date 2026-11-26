@@ -3,7 +3,7 @@
 //! the plays stop.
 
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
@@ -14,7 +14,7 @@ use openlogi_device::test_support::{ScriptedRawHidHandle, publish_scripted_chann
 use openlogi_fixture::RequestMatch;
 use openlogi_hid::HapticWaveform;
 
-use super::super::{BURST_IDLE, RingHapticPlayer, check_haptic_target};
+use super::super::{ARM_BUDGET, BURST_IDLE, RingHapticPlayer, check_haptic_target};
 use super::{DeviceRoute, ObservableState, Orchestrator, WriteError};
 
 /// The device layer caches the haptic feature location process-wide.
@@ -56,6 +56,13 @@ fn other_mouse() -> DeviceRoute {
     DeviceRoute::Direct {
         vendor_id: 0x046d,
         product_id: 0xb034,
+    }
+}
+
+fn third_mouse() -> DeviceRoute {
+    DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xb035,
     }
 }
 
@@ -151,6 +158,17 @@ fn lossy_haptic_device(config: Arc<StdMutex<[u8; 3]>>, lossy: Arc<AtomicBool>) -
             && request[2] == HAPTIC_INDEX
             && matches!(request[3] >> 4, 0x02 | 0x04);
         if lost { None } else { device(request) }
+    })
+}
+
+/// [`haptic_device`] holding `config` with both waveforms, whose arming read
+/// is never answered: every arming on it takes its whole budget.
+fn slow_arming_haptic_device(config: Arc<StdMutex<[u8; 3]>>) -> Responder {
+    let device = haptic_device(config, BOTH_WAVEFORMS);
+    Box::new(move |request| {
+        let arming_read =
+            request.len() >= 4 && request[2] == HAPTIC_INDEX && request[3] >> 4 == 0x01;
+        if arming_read { None } else { device(request) }
     })
 }
 
@@ -476,6 +494,77 @@ async fn a_burst_stays_open_while_its_play_waits_behind_a_stalled_worker() {
             "the mouse's engine was turned on before its play: {written:?}"
         );
         after_the_burst(&config, DISARMED).await;
+    })
+    .await;
+}
+
+/// Two clients alternating between two mice faster than either can be
+/// armed open a new burst with every play. Each worker pass still plays a
+/// pulse and reaches the restores, rather than arming the newest burst over
+/// and over while nothing plays and nothing is handed back.
+#[tokio::test]
+async fn alternating_plays_during_slow_arming_still_play_and_restore() {
+    bounded(async {
+        let ringed = Arc::new(StdMutex::new(DISARMED));
+        let (player, handles) = player_over(vec![
+            (
+                third_mouse(),
+                Box::new(haptic_device(Arc::clone(&ringed), BOTH_WAVEFORMS)),
+            ),
+            (
+                mouse(),
+                slow_arming_haptic_device(Arc::new(StdMutex::new(DISARMED))),
+            ),
+            (
+                other_mouse(),
+                slow_arming_haptic_device(Arc::new(StdMutex::new(DISARMED))),
+            ),
+        ])
+        .await;
+        // A ring on a third mouse owes its engine back once it closes.
+        player.begin_session(1, Some(third_mouse()));
+        until_engine_reads(&ringed, ARMED).await;
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let clients = {
+            let player = player.clone();
+            let stop = Arc::clone(&stop);
+            tokio::spawn(async move {
+                let ids = Arc::new(AtomicU64::new(10));
+                for route in [mouse(), other_mouse()].into_iter().cycle() {
+                    if stop.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    let player = player.clone();
+                    let ids = Arc::clone(&ids);
+                    tokio::spawn(async move {
+                        let _ = player
+                            .play_external(route, HapticWaveform::SubtleCollision, || {
+                                ids.fetch_add(1, Ordering::SeqCst)
+                            })
+                            .await;
+                    });
+                    tokio::time::sleep(Duration::from_millis(150)).await;
+                }
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        player.end_session(1);
+        tokio::time::sleep(ARM_BUDGET * 4).await;
+
+        // Read while the plays still keep coming.
+        let pulses = plays(&handles[1]).len() + plays(&handles[2]).len();
+        let ring_engine = *ringed.lock().expect("config");
+        stop.store(true, Ordering::SeqCst);
+        clients.await.expect("the clients");
+        assert!(
+            pulses >= 2,
+            "pulses kept playing between armings, but {pulses} played"
+        );
+        assert_eq!(
+            ring_engine, DISARMED,
+            "the closed ring's engine was handed back meanwhile"
+        );
     })
     .await;
 }
