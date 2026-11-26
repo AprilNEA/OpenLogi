@@ -50,6 +50,7 @@ mod tests {
     use cmd::fixture::record_profile::RecordProfileArgs;
     use cmd::fixture::verify::VerifyArgs;
     use cmd::fixture::{FixtureCmd, FixtureRecordCmd};
+    use cmd::haptic::{HapticAction, Waveform};
 
     /// Clap's own structural validation (arg ID collisions, invalid
     /// `conflicts_with` targets, etc.) — cheap and catches a broken derive
@@ -158,6 +159,47 @@ mod tests {
             };
             assert_eq!(args.device.as_deref(), Some("Test keyboard"));
             assert_eq!(format!("{:?}", args.action.unwrap()), expected);
+        }
+    }
+
+    /// A script's bare `haptic play` is the light tick; the device filter may
+    /// come before or after the subcommand.
+    #[test]
+    fn haptic_play_defaults_to_a_tick_and_takes_a_waveform_and_device() {
+        for (argv, device, waveform) in [
+            (&["play"][..], None, Waveform::Tick),
+            (&["play", "confirm"], None, Waveform::Confirm),
+            (
+                &["--device", "MX", "play", "tick"],
+                Some("MX"),
+                Waveform::Tick,
+            ),
+            (
+                &["play", "confirm", "--device", "MX"],
+                Some("MX"),
+                Waveform::Confirm,
+            ),
+        ] {
+            let cli = Cli::try_parse_from(["openlogi", "haptic"].iter().chain(argv))
+                .unwrap_or_else(|error| panic!("{argv:?} parses: {error}"));
+            let Some(Command::Haptic(args)) = cli.cmd else {
+                panic!("expected haptic command for {argv:?}");
+            };
+            assert_eq!(args.device.as_deref(), device, "{argv:?}");
+            let HapticAction::Play { waveform: parsed } = args.action;
+            assert_eq!(parsed, waveform, "{argv:?}");
+        }
+    }
+
+    #[test]
+    fn haptic_rejects_an_unknown_waveform_and_a_missing_action() {
+        for argv in [&["haptic", "play", "buzz"][..], &["haptic"]] {
+            let error = Cli::try_parse_from(["openlogi"].iter().chain(argv)).expect_err("rejected");
+            assert_ne!(
+                error.kind(),
+                clap::error::ErrorKind::DisplayHelp,
+                "{argv:?}"
+            );
         }
     }
 

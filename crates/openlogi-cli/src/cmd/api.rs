@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 use tarpc::context;
 
 use crate::agent;
+use crate::cmd::haptic::Waveform;
 
 mod output;
 mod persistence;
@@ -90,6 +91,15 @@ pub enum ApiCommand {
         /// The computer's new name; the device limits its length in bytes.
         #[arg(long, requires = "channel")]
         name: Option<String>,
+    },
+    /// Play one haptic pulse now (HID++ 0x19b0). Nothing is saved.
+    Haptic {
+        /// Exact opaque ID returned by `api devices`.
+        #[arg(long)]
+        device: String,
+        /// A light `tick`, or a firmer `confirm` pulse.
+        #[arg(long, value_enum, default_value_t = Waveform::Tick)]
+        waveform: Waveform,
     },
 }
 
@@ -262,6 +272,11 @@ async fn execute(
                 channel.zip(name),
             )
             .await
+        }
+        ApiCommand::Haptic { device, waveform } => {
+            let route = select_device(&snapshot, &device)?;
+            agent::call(client.play_haptic(context::current(), route, waveform.pulse())).await??;
+            Ok(json!({ "device": device, "waveform": waveform.name() }))
         }
     }?;
     if let Some(save) = save {

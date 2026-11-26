@@ -9,6 +9,7 @@ pub mod backlight;
 pub mod camera;
 pub mod diag;
 pub mod fixture;
+pub mod haptic;
 #[cfg(target_os = "macos")]
 mod input_monitoring;
 pub mod light;
@@ -23,6 +24,8 @@ pub enum Command {
     List(list::ListArgs),
     /// Read or persistently set the keyboard backlight (HID++ 0x1982).
     Backlight(backlight::BacklightArgs),
+    /// Play haptic feedback on a mouse (HID++ 0x19b0), for scripts and apps.
+    Haptic(haptic::HapticArgs),
     /// Capture one frame from a Logitech webcam to a PNG.
     Snapshot(snapshot::SnapshotArgs),
     /// Read or write device-level UVC image controls on a webcam.
@@ -51,6 +54,7 @@ impl Command {
             Self::Api(command) => return api::run(command).await,
             Self::List(args) => return list::run(args).await,
             Self::Backlight(args) => backlight::run(args).await?,
+            Self::Haptic(args) => haptic::run(args).await?,
             // Camera capture is blocking AVFoundation — no need for the async runtime.
             Self::Snapshot(args) => snapshot::run(args)?,
             // UVC control transfers are blocking IOKit — no async runtime needed.
