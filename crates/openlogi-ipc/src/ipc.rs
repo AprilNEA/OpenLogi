@@ -20,9 +20,9 @@ use openlogi_core::device::{
 };
 use openlogi_core::hid::{
     BacklightChange, BacklightState, DeviceRoute, DisableKeysMask, DisableKeysState, Dpi, DpiInfo,
-    EasySwitchHosts, FnLockState, ForceSensingInfo, LightCommand, OnboardState, PairingError,
-    PasskeyMethod, PointerSpeed, ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode,
-    SidetoneLevel, SmartShiftStatus, WriteError,
+    EasySwitchHosts, FnLockState, ForceSensingInfo, HapticPulse, LightCommand, OnboardState,
+    PairingError, PasskeyMethod, PointerSpeed, ReceiverSelector, ReportRate, ReportRateInfo,
+    ScrollWheelMode, SidetoneLevel, SmartShiftStatus, WriteError,
 };
 use serde::{Deserialize, Serialize};
 pub use succession::Identity;
@@ -194,7 +194,10 @@ pub use succession::Identity;
 ///      and `ActionRingIcon::{Channel1, Channel2, Channel3}` appended after
 ///      them — a device's move to another Easy-Switch channel, bound to a
 ///      button or an Actions Ring slot.
-pub const PROTOCOL_VERSION: u32 = 46;
+/// v47: `Agent::play_haptic` and [`HapticPulse`] appended — any client asks
+///      the agent to play one `0x19b0` waveform on a device, and hears how it
+///      went.
+pub const PROTOCOL_VERSION: u32 = 47;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -1263,4 +1266,16 @@ pub trait Agent {
     /// held trigger cancels instead of choosing the slot last reported by
     /// [`Agent::action_ring_hover`].
     async fn action_ring_unhover(session_id: u64) -> Result<(), ActionRingCommandError>;
+    /// Play `pulse` on the device at `route` now, for a client outside the
+    /// Actions Ring (the CLI, a script), and answer once it played or failed.
+    ///
+    /// Plays share the Actions Ring's single-flight haptic worker: a play a
+    /// newer one replaced before it reached the device answers
+    /// [`WriteError::WriteSuperseded`]. A device the agent does not list
+    /// online answers [`WriteError::DeviceNotFound`] or
+    /// [`WriteError::DeviceUnreachable`], and one without measured `0x19b0`
+    /// [`WriteError::FeatureUnsupported`], before anything is sent. When the
+    /// firmware engine is off, the agent turns it on for a burst of plays and
+    /// back off once they stop, as it does for a ring session.
+    async fn play_haptic(route: DeviceRoute, pulse: HapticPulse) -> Result<(), WriteError>;
 }

@@ -22,6 +22,7 @@ use openlogi_agent_core::runtime::ActionDispatcher;
 use openlogi_core::binding::ActionRingSlot;
 use openlogi_core::config::{ConfigFile, ConfigRevision, Lighting};
 use openlogi_core::device::DeviceInventory;
+use openlogi_core::hid::HapticPulse;
 use openlogi_hid::{
     BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
     ForceSensingInfo, HapticRestore, HapticRestoreOutcome, HapticWaveform, HidppOperation,
@@ -599,6 +600,61 @@ impl Agent for AgentServer {
     ) -> Result<(), ActionRingCommandError> {
         self.action_ring.unhover(session_id)
     }
+
+    async fn play_haptic(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        pulse: HapticPulse,
+    ) -> Result<(), WriteError> {
+        self.observable
+            .read(|snapshot| check_haptic_target(&snapshot.inventory, &route))?;
+        let waveform = match pulse {
+            HapticPulse::SubtleCollision => HapticWaveform::SubtleCollision,
+            HapticPulse::DampStateChange => HapticWaveform::DampStateChange,
+        };
+        self.ring_haptics
+            .play_external(route, waveform, || self.action_ring.reserve_session_id())
+            .await
+    }
+}
+
+/// Refuse a client's play that the agent's inventory already rules out,
+/// before it reaches the haptic worker: a route no device answers on, a
+/// device that is offline, or one whose measured features lack `0x19b0`. The
+/// worker retries, and its breaker counts, lost replies; none of these is
+/// one, and retrying them would only cool the Actions Ring's haptics down.
+fn check_haptic_target(
+    inventory: &[DeviceInventory],
+    route: &DeviceRoute,
+) -> Result<(), WriteError> {
+    let device = inventory
+        .iter()
+        .flat_map(|inventory| {
+            inventory
+                .paired
+                .iter()
+                .map(move |device| (inventory, device))
+        })
+        .find(|(inventory, device)| {
+            DeviceRoute::for_slot(inventory, device.slot).as_ref() == Some(route)
+        })
+        .map(|(_, device)| device)
+        .ok_or(WriteError::DeviceNotFound)?;
+    if !device.online {
+        return Err(WriteError::DeviceUnreachable {
+            index: route.device_index(),
+        });
+    }
+    if !device
+        .capabilities
+        .is_some_and(|capabilities| capabilities.haptic_feedback)
+    {
+        return Err(WriteError::FeatureUnsupported {
+            feature_hex: 0x19b0,
+        });
+    }
+    Ok(())
 }
 
 /// Run the action a ring session closed on, whether a click on the overlay
@@ -633,14 +689,60 @@ pub(crate) fn run_ring_activation(
 /// The worker also owns the device-wide enable flag that arming may turn on
 /// for a session: [`haptic_restore::RestoreLedger`] records each enable
 /// arming made, and the worker hands it back once that session is over.
+///
+/// Clients other than the ring play through the same worker
+/// ([`Self::play_external`]), so their buzzes coalesce with the ring's and
+/// their enables are handed back the same way.
 #[derive(Clone)]
 pub struct RingHapticPlayer {
-    tx: tokio::sync::watch::Sender<Option<(DeviceRoute, HapticWaveform, &'static str)>>,
+    tx: tokio::sync::watch::Sender<Option<Play>>,
     sessions: Arc<std::sync::Mutex<Sessions>>,
     /// Wakes the worker for a closed session without touching the play slot:
     /// an activation buzz queued just before must still play first, and a
     /// buzz that already played must not play again.
     closed: tokio::sync::watch::Sender<()>,
+}
+
+/// A waveform queued for the worker; the newest replaces any not yet played.
+#[derive(Clone)]
+struct Play {
+    route: DeviceRoute,
+    waveform: HapticWaveform,
+    interaction: &'static str,
+    /// Where a client waits to hear how its play went, `None` for the ring.
+    reply: Option<Reply>,
+}
+
+/// A client's answer slot. Shared because the worker takes the play slot by
+/// clone; a play replaced before the worker took it drops the slot's last
+/// handle unanswered, which the client reads as superseded.
+#[derive(Clone)]
+struct Reply(Arc<std::sync::Mutex<Option<ReplySender>>>);
+
+/// Where the worker answers one client play.
+type ReplySender = tokio::sync::oneshot::Sender<Result<(), WriteError>>;
+
+impl Reply {
+    fn new(sender: ReplySender) -> Self {
+        Self(Arc::new(std::sync::Mutex::new(Some(sender))))
+    }
+
+    fn send(&self, result: Result<(), WriteError>) {
+        let sender = self.0.lock().unwrap_or_else(PoisonError::into_inner).take();
+        if let Some(sender) = sender {
+            // The client may have given up waiting; nothing is owed to it then.
+            let _ = sender.send(result);
+        }
+    }
+}
+
+/// The haptic session consecutive client plays on one device share.
+#[derive(Debug)]
+struct Burst {
+    session: u64,
+    route: DeviceRoute,
+    opened: tokio::time::Instant,
+    last: tokio::time::Instant,
 }
 
 /// What the worker shares with the trigger, the IPC handlers, and the
@@ -649,6 +751,8 @@ pub struct RingHapticPlayer {
 struct Sessions {
     /// What the worker has not looked at yet.
     news: SessionNews,
+    /// The open burst of client plays, see [`RingHapticPlayer::play_external`].
+    burst: Option<Burst>,
     /// While set, no session arms the engine: the agent is leaving, or
     /// handing over to a replacement, and an enable made now could not be
     /// handed back.
@@ -699,6 +803,22 @@ const RESTORE_BUDGET: Duration = Duration::from_secs(1);
 /// usual case — answers at once; a device that does not answer in time keeps
 /// the engine on, as it would if the agent crashed.
 const FINISH_BUDGET: Duration = PLAY_BUDGET.saturating_add(RESTORE_BUDGET);
+
+/// How long a burst of client plays keeps its session after the last play.
+///
+/// A radial menu ticks several times a second while the pointer moves, so
+/// plays this close together share one arming and play from the cached
+/// feature in one round-trip; the engine an arming turned on is handed back
+/// this long after they stop.
+const BURST_IDLE: Duration = Duration::from_secs(2);
+
+/// How long a burst keeps one session before its next play opens a new one.
+///
+/// The ledger hands an open session's enable back
+/// [`SESSION_LIFETIME`](openlogi_agent_core::action_ring::SESSION_LIFETIME) after
+/// it opened, so a burst that kept ticking past that would play into an
+/// engine handed back under it. Renewing re-arms and carries the restore over.
+const BURST_RENEW: Duration = Duration::from_secs(5);
 
 /// Re-assert the firmware haptic engine before the session's first buzz,
 /// within [`ARM_BUDGET`]. Returns the restore owed when this turned the
@@ -810,11 +930,14 @@ async fn restore_firmware_haptics(
 /// single-flight.
 async fn play_within_budget(
     shared: &SharedHandles,
-    rx: &tokio::sync::watch::Receiver<Option<(DeviceRoute, HapticWaveform, &'static str)>>,
+    rx: &tokio::sync::watch::Receiver<Option<Play>>,
     route: &DeviceRoute,
     waveform: HapticWaveform,
     interaction: &'static str,
-) -> PlayOutcome {
+) -> Result<(), WriteError> {
+    let out_of_time = || WriteError::RequestTimedOut {
+        operation: HidppOperation::PlayHaptic,
+    };
     let budget = Budget::starting_at(Instant::now(), PLAY_BUDGET);
     for attempt in 1..=3u8 {
         let Some(remaining) = budget.remaining(Instant::now()) else {
@@ -822,7 +945,7 @@ async fn play_within_budget(
                 interaction,
                 "ring haptic gave up — out of time to be feedback"
             );
-            return PlayOutcome::Failed;
+            return Err(out_of_time());
         };
         match tokio::time::timeout(
             remaining,
@@ -834,17 +957,17 @@ async fn play_within_budget(
         )
         .await
         {
-            Ok(Ok(())) => return PlayOutcome::Played,
+            Ok(Ok(())) => return Ok(()),
             Ok(Err(error)) if !is_worth_retrying(&error) => {
                 // Nothing was sent, and every hover asks again: no warning.
                 debug!(%error, interaction, "Actions Ring haptic skipped");
-                return PlayOutcome::Skipped;
+                return Err(error);
             }
             Ok(Err(error)) => {
                 let superseded = rx.has_changed().unwrap_or(true);
                 if attempt == 3 || superseded {
                     warn!(%error, interaction, attempt, superseded, "Actions Ring haptic failed");
-                    return PlayOutcome::Failed;
+                    return Err(error);
                 }
             }
             // Out of budget mid-attempt; the loop head reports it and stops,
@@ -852,7 +975,7 @@ async fn play_within_budget(
             Err(_elapsed) => {}
         }
     }
-    PlayOutcome::Failed
+    Err(out_of_time())
 }
 
 /// What one interaction's play came to.
@@ -864,6 +987,17 @@ enum PlayOutcome {
     Skipped,
     /// Lost, refused by the device, or out of budget.
     Failed,
+}
+
+impl PlayOutcome {
+    /// What a play's result says about the link.
+    fn of(result: &Result<(), WriteError>) -> Self {
+        match result {
+            Ok(()) => Self::Played,
+            Err(error) if !is_worth_retrying(error) => Self::Skipped,
+            Err(_) => Self::Failed,
+        }
+    }
 }
 
 /// The circuit breaker over lost plays. When replies keep getting lost,
@@ -957,9 +1091,7 @@ impl Budget {
 impl RingHapticPlayer {
     /// Spawn the single-flight worker. Must be called from a tokio runtime.
     pub fn spawn(shared: SharedHandles) -> Self {
-        let (tx, mut rx) = tokio::sync::watch::channel::<
-            Option<(DeviceRoute, HapticWaveform, &'static str)>,
-        >(None);
+        let (tx, mut rx) = tokio::sync::watch::channel::<Option<Play>>(None);
         let (closed, mut closed_rx) = tokio::sync::watch::channel(());
         let sessions = Arc::new(std::sync::Mutex::new(Sessions::default()));
         let worker_sessions = Arc::clone(&sessions);
@@ -1010,16 +1142,32 @@ impl RingHapticPlayer {
                 // its close, so it plays before the engine is handed back.
                 if woke_for_play || rx.has_changed().unwrap_or(false) {
                     let request = rx.borrow_and_update().clone();
-                    if let Some((route, waveform, interaction)) = request
-                        && breaker.allows(Instant::now())
-                    {
-                        let outcome =
-                            play_within_budget(&shared, &rx, &route, waveform, interaction).await;
-                        if breaker.record(outcome, Instant::now()) {
-                            info!(
-                                interaction,
-                                "ring haptics cooling down after repeated HID++ loss"
-                            );
+                    if let Some(play) = request {
+                        let result = if breaker.allows(Instant::now()) {
+                            let result = play_within_budget(
+                                &shared,
+                                &rx,
+                                &play.route,
+                                play.waveform,
+                                play.interaction,
+                            )
+                            .await;
+                            if breaker.record(PlayOutcome::of(&result), Instant::now()) {
+                                info!(
+                                    interaction = play.interaction,
+                                    "ring haptics cooling down after repeated HID++ loss"
+                                );
+                            }
+                            result
+                        } else {
+                            // Cooling down after lost replies: the play is
+                            // dropped as one more would be lost.
+                            Err(WriteError::RequestTimedOut {
+                                operation: HidppOperation::PlayHaptic,
+                            })
+                        };
+                        if let Some(reply) = play.reply {
+                            reply.send(result);
                         }
                     }
                 }
@@ -1099,6 +1247,81 @@ impl RingHapticPlayer {
         self.sessions().paused = false;
     }
 
+    /// Play `waveform` on `route` for a client other than the ring, and
+    /// answer with how it went.
+    ///
+    /// Consecutive plays on one device share a haptic session, a burst: its
+    /// first play opens the session with an ID from `new_session`, so the
+    /// worker arms the engine first, and later plays reuse the cached feature
+    /// in one round-trip. The session closes [`BURST_IDLE`] after the last
+    /// play, which hands back any enable its arming made, and renews after
+    /// [`BURST_RENEW`]. A play replaced before it reached the device answers
+    /// [`WriteError::WriteSuperseded`].
+    pub async fn play_external(
+        &self,
+        route: DeviceRoute,
+        waveform: HapticWaveform,
+        new_session: impl FnOnce() -> u64,
+    ) -> Result<(), WriteError> {
+        let now = tokio::time::Instant::now();
+        let session = {
+            let mut sessions = self.sessions();
+            let reused = sessions
+                .burst
+                .as_mut()
+                .filter(|burst| burst.route == route && now < burst.opened + BURST_RENEW)
+                .map(|burst| {
+                    burst.last = now;
+                    burst.session
+                });
+            reused.unwrap_or_else(|| {
+                let session = new_session();
+                sessions.news.opened = Some((session, route.clone()));
+                sessions.burst = Some(Burst {
+                    session,
+                    route: route.clone(),
+                    opened: now,
+                    last: now,
+                });
+                session
+            })
+        };
+        let player = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(BURST_IDLE).await;
+            player.close_idle_burst(session);
+        });
+        let (sender, answer) = tokio::sync::oneshot::channel();
+        let _ = self.tx.send(Some(Play {
+            route,
+            waveform,
+            interaction: "client",
+            reply: Some(Reply::new(sender)),
+        }));
+        answer.await.unwrap_or(Err(WriteError::WriteSuperseded {
+            operation: HidppOperation::PlayHaptic,
+        }))
+    }
+
+    /// Close burst `session` if no play came for [`BURST_IDLE`]. A newer
+    /// play's own timer closes it otherwise, and a renewed burst's old session
+    /// is left to the ledger, which the new session carries its restore over
+    /// to.
+    fn close_idle_burst(&self, session: u64) {
+        {
+            let mut sessions = self.sessions();
+            if !sessions
+                .burst
+                .as_ref()
+                .is_some_and(|burst| burst.session == session && burst.last.elapsed() >= BURST_IDLE)
+            {
+                return;
+            }
+            sessions.burst = None;
+        }
+        self.end_session(session);
+    }
+
     fn sessions(&self) -> std::sync::MutexGuard<'_, Sessions> {
         self.sessions.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -1113,7 +1336,12 @@ impl RingHapticPlayer {
         let Some(route) = route else {
             return;
         };
-        let _ = self.tx.send(Some((route, waveform, interaction)));
+        let _ = self.tx.send(Some(Play {
+            route,
+            waveform,
+            interaction,
+            reply: None,
+        }));
     }
 }
 
@@ -1174,6 +1402,19 @@ mod tests {
     use openlogi_ipc::{SavedConfig, SavedConfigVerdict};
     use std::sync::{Arc, PoisonError};
     use std::time::{Duration, Instant};
+
+    mod client_play;
+
+    /// A burst of client plays renews its session while the ledger still
+    /// holds its restore, so continuous ticking never plays into an engine
+    /// handed back under it, even behind an arming.
+    #[test]
+    fn a_burst_renews_before_its_session_expires() {
+        assert!(
+            super::BURST_RENEW + super::BURST_IDLE + ARM_BUDGET
+                < openlogi_agent_core::action_ring::SESSION_LIFETIME
+        );
+    }
 
     fn disable_keys_response(request: &[u8]) -> Option<Vec<u8>> {
         if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) {

@@ -63,7 +63,7 @@ use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind, LockKey,
     PairedDevice, StandaloneDevice, prettify_codename,
 };
-use openlogi_core::hid::{DisableKeysMask, DisableKeysState, HidppOperation};
+use openlogi_core::hid::{DisableKeysMask, DisableKeysState, HapticPulse, HidppOperation};
 use openlogi_core::single_instance::{self, InstanceError, Role};
 use openlogi_fixture::{DeviceProfile, FixtureError, ProfileDeviceSettings, ProfileSetting};
 use openlogi_hid::{
@@ -1602,6 +1602,17 @@ impl Agent for MockAgent {
         _session_id: u64,
     ) -> Result<(), ActionRingCommandError> {
         Err(ActionRingCommandError::SessionNotFound)
+    }
+
+    async fn play_haptic(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        pulse: HapticPulse,
+    ) -> Result<(), WriteError> {
+        self.state.lock().await.settings_for(&route)?;
+        info!(%route, ?pulse, "play_haptic (no-op in the mock)");
+        Ok(())
     }
 }
 

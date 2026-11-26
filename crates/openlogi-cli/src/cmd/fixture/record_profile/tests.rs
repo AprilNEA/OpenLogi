@@ -459,6 +459,15 @@ impl Agent for TestAgent {
         unreachable!("profile capture must not drive the Actions Ring")
     }
 
+    async fn play_haptic(
+        self,
+        _: TarpcContext,
+        _route: DeviceRoute,
+        _pulse: openlogi_core::hid::HapticPulse,
+    ) -> Result<(), WriteError> {
+        unreachable!("profile capture must never play haptics")
+    }
+
     async fn reload_saved_config(
         self,
         _: TarpcContext,
