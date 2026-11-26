@@ -686,3 +686,7 @@ Top = { action = { CustomShortcut = "Cmd+Shift+P" }, icon = "Keyboard", label = 
 ```
 
 `ShowActionsRing` is rejected inside a ring slot to prevent recursive rings.
+
+The ring chooses a slot by direction. A slot lights up as soon as the pointer
+leaves the centre circle. Inside the circle nothing is chosen: a click there,
+or a held trigger released there, closes the ring.
