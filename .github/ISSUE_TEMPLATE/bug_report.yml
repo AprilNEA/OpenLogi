@@ -156,5 +156,6 @@ body:
       label: macOS permissions (if applicable)
       description: System Settings → Privacy & Security
       options:
-        - label: OpenLogi has **Accessibility** permission (needed to remap buttons via the event tap).
-        - label: OpenLogi has **Input Monitoring** permission (needed for Bluetooth-direct devices and capture).
+        - label: "**OpenLogi Agent** has **Accessibility** permission (needed to remap buttons via the event tap)."
+        - label: "**OpenLogi Agent** has **Input Monitoring** permission (needed to read HID++ data from any device, including Bluetooth-direct ones)."
+        - label: "CLI only: the terminal app you run `openlogi` from has **Input Monitoring** permission (needed when a command opens devices itself, such as `openlogi diag` or `openlogi list` with no agent running)."
