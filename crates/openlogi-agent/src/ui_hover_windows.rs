@@ -1,6 +1,6 @@
 //! UI hover haptics (Windows): a light tick on the active mouse when the
 //! pointer moves onto a new interactive UI element — a button, link, menu
-//! item, tab or list item — found through UI Automation.
+//! item, tab, list item, check box and the like — found through UI Automation.
 //!
 //! A dedicated COM (MTA) thread samples the physical cursor position at a
 //! bounded rate and asks UI Automation only after the pointer moved, so a
@@ -20,7 +20,7 @@ use std::thread;
 use std::time::Duration;
 
 use openlogi_agent_core::orchestrator::{Orchestrator, SharedHandles};
-use openlogi_hid::{DeviceRoute, HapticWaveform, HidppOperation};
+use openlogi_hid::{DeviceRoute, HapticWaveform, HidppOperation, WriteError};
 use tracing::{debug, warn};
 use windows::Win32::Foundation::POINT;
 use windows::Win32::System::Com::{
@@ -68,7 +68,12 @@ const INTERACTIVE: [UIA_CONTROLTYPE_ID; 11] = [
     UIA_DataItemControlTypeId,
 ];
 
-/// The running watcher; dropping it stops the thread and the route refresh.
+/// How long a device that refused a play for its haptic status is left
+/// alone before the next hover re-reads that status.
+const STATUS_RETRY: Duration = Duration::from_secs(5);
+
+/// The running watcher; dropping it stops the thread, the route refresh and
+/// the player.
 pub(crate) struct UiHover {
     stop: Arc<AtomicBool>,
     refresh: tokio::task::JoinHandle<()>,
@@ -90,35 +95,31 @@ pub(crate) fn spawn(
 ) -> UiHover {
     let route = Arc::new(Mutex::new(None::<DeviceRoute>));
     let stop = Arc::new(AtomicBool::new(false));
-    let refresh = {
-        let route = Arc::clone(&route);
-        tokio::spawn(async move {
-            loop {
-                let next = orchestrator.lock().await.ui_hover_haptic_route();
-                *route.lock().unwrap_or_else(PoisonError::into_inner) = next;
-                tokio::time::sleep(ROUTE_REFRESH).await;
-            }
-        })
-    };
-    let (ticks, mut rx) = tokio::sync::watch::channel(None::<DeviceRoute>);
-    let player = tokio::spawn(async move {
-        while rx.changed().await.is_ok() {
-            let Some(route) = rx.borrow_and_update().clone() else {
-                continue;
-            };
+    let refresh = tokio::spawn(refresh_route(
+        move || {
+            let orchestrator = Arc::clone(&orchestrator);
+            async move { orchestrator.lock().await.ui_hover_haptic_route() }
+        },
+        Arc::clone(&route),
+        ROUTE_REFRESH,
+    ));
+    let (ticks, rx) = tokio::sync::watch::channel(None::<DeviceRoute>);
+    let player = tokio::spawn(play_ticks(rx, move |route, fresh_status| {
+        let shared = shared.clone();
+        async move {
             let play = shared
                 .device(&route)
-                .run(HidppOperation::PlayHaptic, |c| async move {
-                    openlogi_hid::play_haptic_without_reply_on(&c, HapticWaveform::SubtleCollision)
-                        .await
+                .run(HidppOperation::PlayHaptic, move |c| async move {
+                    openlogi_hid::play_haptic_without_reply_on(
+                        &c,
+                        HapticWaveform::SubtleCollision,
+                        fresh_status,
+                    )
+                    .await
                 });
-            match tokio::time::timeout(PLAY_BUDGET, play).await {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => debug!(%error, "UI hover haptic not sent"),
-                Err(_elapsed) => debug!("UI hover haptic ran out of time"),
-            }
+            tokio::time::timeout(PLAY_BUDGET, play).await.ok()
         }
-    });
+    }));
     let thread_stop = Arc::clone(&stop);
     let spawned = thread::Builder::new()
         .name("openlogi-ui-hover".into())
@@ -130,6 +131,99 @@ pub(crate) fn spawn(
         stop,
         refresh,
         player,
+    }
+}
+
+/// Publish the route `read` returns into `route` now, then once every
+/// `period`. The first periodic read is one period out.
+async fn refresh_route<F, Fut>(
+    mut read: F,
+    route: Arc<Mutex<Option<DeviceRoute>>>,
+    period: Duration,
+) where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Option<DeviceRoute>>,
+{
+    *lock(&route) = read().await;
+    let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        interval.tick().await;
+        *lock(&route) = read().await;
+    }
+}
+
+/// Play the newest tick, one at a time; ticks queued behind a play collapse
+/// into one. `play` sends one hover tick to a route, re-reading the haptic
+/// status first when asked, and is `None` when it ran out of time. After a
+/// status refusal the device is left alone for [`STATUS_RETRY`], then the next
+/// tick re-reads the status.
+async fn play_ticks<P, Fut>(mut rx: tokio::sync::watch::Receiver<Option<DeviceRoute>>, mut play: P)
+where
+    P: FnMut(DeviceRoute, bool) -> Fut,
+    Fut: Future<Output = Option<Result<(), WriteError>>>,
+{
+    let mut retry_at: Option<tokio::time::Instant> = None;
+    while rx.changed().await.is_ok() {
+        let Some(route) = rx.borrow_and_update().clone() else {
+            continue;
+        };
+        let fresh_status = match retry_at {
+            Some(at) if tokio::time::Instant::now() < at => continue,
+            Some(_) => true,
+            None => false,
+        };
+        match play(route, fresh_status).await {
+            Some(Ok(())) => retry_at = None,
+            Some(Err(WriteError::HapticsUnavailable { status })) => {
+                debug!(status, "UI hover haptics refused by the device's status");
+                retry_at = Some(tokio::time::Instant::now() + STATUS_RETRY);
+            }
+            Some(Err(error)) => debug!(%error, "UI hover haptic not sent"),
+            None => debug!("UI hover haptic ran out of time"),
+        }
+    }
+}
+
+fn lock(route: &Mutex<Option<DeviceRoute>>) -> std::sync::MutexGuard<'_, Option<DeviceRoute>> {
+    route.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// What the sampling loop remembers between samples.
+#[derive(Default)]
+struct Tracker {
+    last_point: Option<(i32, i32)>,
+    last_element: Option<Vec<i32>>,
+}
+
+impl Tracker {
+    /// Fold one pointer sample in. `lookup` finds the interactive element
+    /// under the pointer; it runs only when the pointer moved and a route is
+    /// set. Returns the route to tick when the pointer reached a new
+    /// interactive element. A lookup the route changed during (setting turned
+    /// off, another device selected) is discarded.
+    fn step(
+        &mut self,
+        route: &Mutex<Option<DeviceRoute>>,
+        point: (i32, i32),
+        lookup: impl FnOnce() -> Option<Vec<i32>>,
+    ) -> Option<DeviceRoute> {
+        let Some(current) = lock(route).clone() else {
+            *self = Self::default();
+            return None;
+        };
+        if self.last_point == Some(point) {
+            return None;
+        }
+        self.last_point = Some(point);
+        let element = lookup();
+        if lock(route).as_ref() != Some(&current) {
+            *self = Self::default();
+            return None;
+        }
+        let tick = element.is_some() && element != self.last_element;
+        self.last_element = element;
+        tick.then_some(current)
     }
 }
 
@@ -170,36 +264,26 @@ fn run(
         unsafe { cache.AddProperty(property) }?;
     }
 
-    let mut last_point: Option<(i32, i32)> = None;
-    let mut last_element: Option<Vec<i32>> = None;
+    let mut tracker = Tracker::default();
     while !stop.load(Ordering::Relaxed) {
         thread::sleep(PERIOD);
-        let current = route.lock().unwrap_or_else(PoisonError::into_inner).clone();
-        let Some(current) = current else {
-            last_point = None;
-            last_element = None;
-            continue;
-        };
         let mut point = POINT::default();
         // SAFETY: `point` is a valid out-pointer for the call's duration.
-        if unsafe { GetPhysicalCursorPos(&raw mut point) }.is_err()
-            || last_point == Some((point.x, point.y))
-        {
+        if unsafe { GetPhysicalCursorPos(&raw mut point) }.is_err() {
             continue;
         }
-        last_point = Some((point.x, point.y));
-        let element = match interactive_under(&automation, &walker, &cache, point) {
-            Ok(element) => element,
-            Err(error) => {
+        let tick = tracker.step(route, (point.x, point.y), || {
+            interactive_under(&automation, &walker, &cache, point).unwrap_or_else(|error| {
                 // Elements vanish, and elevated windows refuse queries.
                 debug!(%error, "UI Automation query failed");
                 None
-            }
-        };
-        if element.is_some() && element != last_element {
+            })
+        });
+        if let Some(current) = tick
+            && !stop.load(Ordering::Relaxed)
+        {
             let _ = ticks.send(Some(current));
         }
-        last_element = element;
     }
     Ok(())
 }
@@ -251,4 +335,144 @@ fn runtime_id(element: &IUIAutomationElement) -> windows::core::Result<Option<Ve
     // SAFETY: `value` came from UI Automation and is cleared exactly once.
     unsafe { VariantClear(&raw mut value) }?;
     Ok(ids)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::AtomicUsize;
+
+    use super::*;
+
+    fn mouse(product_id: u16) -> DeviceRoute {
+        DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id,
+        }
+    }
+
+    #[test]
+    fn ticks_once_per_new_interactive_element() {
+        let route = Mutex::new(Some(mouse(0xb042)));
+        let mut tracker = Tracker::default();
+        let button = || Some(vec![42, 1]);
+        assert_eq!(tracker.step(&route, (1, 1), button), Some(mouse(0xb042)));
+        assert_eq!(tracker.step(&route, (2, 1), button), None, "same element");
+        assert_eq!(
+            tracker.step(&route, (2, 1), || unreachable!()),
+            None,
+            "no move, no lookup"
+        );
+        assert_eq!(tracker.step(&route, (3, 1), || None), None, "plain text");
+        assert_eq!(
+            tracker.step(&route, (4, 1), button),
+            Some(mouse(0xb042)),
+            "back onto it"
+        );
+    }
+
+    #[test]
+    fn route_changes_during_hover_lookup() {
+        let route = Mutex::new(Some(mouse(0xb042)));
+        let mut tracker = Tracker::default();
+        let tick = tracker.step(&route, (1, 1), || {
+            // The setting is turned off while UI Automation answers.
+            *lock(&route) = None;
+            Some(vec![7])
+        });
+        assert_eq!(tick, None);
+
+        *lock(&route) = Some(mouse(0xb042));
+        let tick = tracker.step(&route, (1, 1), || {
+            // Another device is selected while UI Automation answers.
+            *lock(&route) = Some(mouse(0xb034));
+            Some(vec![7])
+        });
+        assert_eq!(tick, None, "an old lookup does not tick the old mouse");
+        assert_eq!(
+            tracker.step(&route, (1, 1), || Some(vec![7])),
+            Some(mouse(0xb034)),
+            "the next sample looks up again for the new route"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn hover_route_refresh_schedule() {
+        let reads = Arc::new(AtomicUsize::new(0));
+        let route = Arc::new(Mutex::new(None));
+        let counted = Arc::clone(&reads);
+        let task = tokio::spawn(refresh_route(
+            move || {
+                counted.fetch_add(1, Ordering::SeqCst);
+                async { Some(mouse(0xb042)) }
+            },
+            Arc::clone(&route),
+            ROUTE_REFRESH,
+        ));
+        tokio::task::yield_now().await;
+        assert_eq!(reads.load(Ordering::SeqCst), 1, "the initial snapshot");
+        assert_eq!(*lock(&route), Some(mouse(0xb042)));
+
+        tokio::time::advance(ROUTE_REFRESH.saturating_sub(Duration::from_millis(1))).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            1,
+            "the first periodic read is one period out"
+        );
+
+        tokio::time::advance(Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(reads.load(Ordering::SeqCst), 2);
+
+        tokio::time::advance(ROUTE_REFRESH).await;
+        tokio::task::yield_now().await;
+        assert_eq!(reads.load(Ordering::SeqCst), 3);
+        task.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_status_refusal_rereads_the_status_after_the_retry_delay() {
+        let (ticks, rx) = tokio::sync::watch::channel(None);
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&calls);
+        let player = tokio::spawn(play_ticks(rx, move |_, fresh_status| {
+            let mut seen = seen.lock().expect("calls");
+            seen.push(fresh_status);
+            let refused = seen.len() == 1;
+            async move {
+                Some(if refused {
+                    Err(WriteError::HapticsUnavailable { status: 2 })
+                } else {
+                    Ok(())
+                })
+            }
+        }));
+        let tick = || async {
+            ticks.send(Some(mouse(0xb042))).expect("player listens");
+            tokio::task::yield_now().await;
+        };
+
+        tick().await;
+        assert_eq!(*calls.lock().expect("calls"), vec![false]);
+        tick().await;
+        assert_eq!(
+            *calls.lock().expect("calls"),
+            vec![false],
+            "a refused device is left alone until the retry delay passes"
+        );
+        tokio::time::advance(STATUS_RETRY).await;
+        tick().await;
+        assert_eq!(
+            *calls.lock().expect("calls"),
+            vec![false, true],
+            "then the status is re-read"
+        );
+        tick().await;
+        assert_eq!(
+            *calls.lock().expect("calls"),
+            vec![false, true, false],
+            "and plays resume"
+        );
+        player.abort();
+    }
 }

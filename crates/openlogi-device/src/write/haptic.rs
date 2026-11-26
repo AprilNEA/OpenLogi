@@ -410,13 +410,24 @@ pub async fn play_haptic_on(
 /// high-rate feedback such as pointer hover. Only the first play on a channel
 /// waits, to locate the feature; a lost play is simply not felt, and the next
 /// hover tick tries again.
+///
+/// `fresh_status` re-reads the haptic status first (read-only: the engine is
+/// not armed). A caller that has no ring session to refresh the cached status
+/// passes it after a [`WriteError::HapticsUnavailable`] refusal, so feedback
+/// resumes once the device reports ready again.
 pub async fn play_haptic_without_reply_on(
     shared: &SharedChannel,
     waveform: HapticWaveform,
+    fresh_status: bool,
 ) -> Result<(), WriteError> {
     let channel = shared.channel();
     let index = shared.device_index();
-    let haptics = if let Some(haptics) = cached_feature(channel, index) {
+    let cached = if fresh_status {
+        None
+    } else {
+        cached_feature(channel, index)
+    };
+    let haptics = if let Some(haptics) = cached {
         haptics
     } else {
         let haptics = open_haptics(channel, index).await?;
@@ -500,6 +511,8 @@ mod tests {
         Error,
         /// Never answers.
         Silent,
+        /// Reports whatever status byte the cell holds at the time of the read.
+        Live(&'static std::sync::atomic::AtomicU8),
     }
 
     /// [`stateful_haptics`] whose `getHapticInfo` answers as `status` says.
@@ -563,6 +576,7 @@ mod tests {
                         return Some(vec![0x10, request[1], 0xff, request[2], request[3], 7, 0]);
                     }
                     StatusReply::Silent => return None,
+                    StatusReply::Live(cell) => cell.load(std::sync::atomic::Ordering::SeqCst),
                 };
                 let mut response = request[..4].to_vec();
                 response.extend_from_slice(&[raw, 0, 0]);
@@ -1035,6 +1049,47 @@ mod tests {
             Err(WriteError::HapticsUnavailable { status: 2 })
         );
         assert_eq!(handle.written_reports().len(), sent);
+        clear_cached_location();
+    }
+
+    #[tokio::test]
+    async fn hover_status_recovers_without_ring() {
+        static STATUS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(2);
+        let _slot = CACHE_SLOT.lock().await;
+        clear_cached_location();
+        STATUS.store(2, std::sync::atomic::Ordering::SeqCst);
+        let (raw, handle) = haptics_reporting(
+            [0x03, 40, 0x34],
+            |_| {},
+            RING_WAVEFORMS,
+            StatusReply::Live(&STATUS),
+        );
+        let shared = shared_channel(raw).await;
+        let hover = HapticWaveform::SubtleCollision;
+
+        assert_matches!(
+            play_haptic_without_reply_on(&shared, hover, false).await,
+            Err(WriteError::HapticsUnavailable { status: 2 })
+        );
+        STATUS.store(0, std::sync::atomic::Ordering::SeqCst);
+        // The cached refusal still holds without a fresh read.
+        assert_matches!(
+            play_haptic_without_reply_on(&shared, hover, false).await,
+            Err(WriteError::HapticsUnavailable { status: 2 })
+        );
+        assert_eq!(plays(&handle), Vec::<u8>::new());
+
+        // A fresh read sees the device ready again and plays, arming nothing.
+        play_haptic_without_reply_on(&shared, hover, true)
+            .await
+            .expect("a ready device plays");
+        assert_eq!(plays(&handle), vec![u8::from(hover)]);
+        assert_eq!(config_writes(&handle), Vec::<[u8; 3]>::new());
+        // Later ticks reuse the refreshed cache.
+        play_haptic_without_reply_on(&shared, hover, false)
+            .await
+            .expect("the refreshed status is cached");
+        assert_eq!(status_reads(&handle), 2);
         clear_cached_location();
     }
 

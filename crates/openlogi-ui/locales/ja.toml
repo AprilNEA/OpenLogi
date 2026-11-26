@@ -86,7 +86,7 @@ lock_key_notifications_description_macos = "キーボードで Caps Lock がオ�
 animate_desktop_switch = "デスクトップ切り替えのアニメーション"
 animate_desktop_switch_description = "「前のデスクトップ」と「次のデスクトップ」で、3本指スワイプのように隣のデスクトップへスライドします。オフにするとすぐに切り替わります。"
 ui_hover_haptics = "Haptic tick on hover"
-ui_hover_haptics_description = "The mouse taps lightly when the pointer moves onto a button, link, menu item, tab or list item. Needs a mouse with haptics."
+ui_hover_haptics_description = "The mouse taps lightly when the pointer moves onto a button, link, menu item, tab, list item, check box or other control. Needs a mouse with haptics."
 openlogi = "OpenLogi"
 
 [device]

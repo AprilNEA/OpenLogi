@@ -166,6 +166,7 @@ Feature coverage depends on what each device reports; the app shows only the con
 | Mouse profile follows the window under the pointer | ✓ | ✓ | X11 only |
 | Media keys | Native | Native | D-Bus MPRIS |
 | Window-manager actions (desktops, Mission Control, …) | Native | Native equivalents | GNOME, KDE (KWin), Hyprland; some macOS-only actions do nothing |
+| Haptic tick on hovering buttons, links and menu items | — | ✓ | — |
 | Menu-bar / tray icon | ✓ | ✓ | — |
 | Device controls in the menu-bar / tray menu | ✓ | — | — |
 | In-app updates | Sparkle | Built-in | Built-in |

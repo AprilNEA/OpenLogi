@@ -10,9 +10,11 @@ use crate::ui::slider_row::SliderRow;
 use crate::ui::theme::FocusRingStyle as _;
 use crate::ui::theme::PressableStyle as _;
 use crate::ui::theme::Typography as _;
+use gpui::div;
 use gpui_kit::base::Button as BaseButton;
 use gpui_kit::component::Sizable as _;
 use gpui_kit::component::radio::{Radio, RadioGroup};
+use gpui_kit::component::switch::Switch;
 use openlogi_core::config::MouseProfileTarget;
 
 use crate::features::pointer::momentum::MomentumPanel;
@@ -188,12 +190,18 @@ fn animate_desktop_switch_item() -> SettingItem {
 fn ui_hover_haptics_item() -> SettingItem {
     SettingItem::new(
         tr!("app.ui_hover_haptics"),
-        SettingField::switch(
-            |cx| AppState::try_read(cx).is_some_and(|s| s.app_settings().ui_hover_haptics),
-            |enabled, cx| {
-                AppState::apply(cx, |state| state.commit_ui_hover_haptics(enabled));
-            },
-        ),
+        SettingField::render(|_, _, cx| {
+            let enabled = AppState::try_read(cx).is_some_and(|s| s.app_settings().ui_hover_haptics);
+            div().debug_selector(|| "ui-hover-haptics".into()).child(
+                Switch::new("ui-hover-haptics")
+                    .checked(enabled)
+                    .accessibility_label(tr!("app.ui_hover_haptics"))
+                    .on_click(|enabled, _, cx| {
+                        let enabled = *enabled;
+                        AppState::apply(cx, |state| state.commit_ui_hover_haptics(enabled));
+                    }),
+            )
+        }),
     )
     .description(tr!("app.ui_hover_haptics_description"))
 }
@@ -385,5 +393,69 @@ mod tests {
             });
         }
         rust_i18n::set_locale("en");
+    }
+
+    /// The Windows-only hover switch is reachable at 125% and toggles the
+    /// setting, at the Settings window's opening size.
+    #[cfg(target_os = "windows")]
+    #[gpui::test]
+    fn ui_hover_haptics_switch_is_reachable_at_125_percent(cx: &mut TestAppContext) {
+        use gpui::{ScrollDelta, ScrollEvent};
+
+        let _locale = LOCALE_LOCK.lock().unwrap();
+        rust_i18n::set_locale("en");
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            theme::register_builtin_themes(cx);
+        });
+        let handle = cx.update(|cx| {
+            let mut config = Config::ephemeral();
+            config.app_settings.ui_scale = UiScale::Large;
+            let (commands, _) = tokio::sync::mpsc::unbounded_channel();
+            let resolver = AssetResolver::new();
+            let sources = Sources::in_memory(config, &resolver, commands);
+            AppState::set_global(cx.new(|_| AppState::new(sources)), cx);
+            settings::open(cx);
+            cx.global::<WindowRegistry>().settings.unwrap()
+        });
+        let mut visual = VisualTestContext::from_window(handle.into(), cx);
+        let window = size(px(920.), px(640.));
+        visual.simulate_resize(window);
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        let viewport = Bounds::new(point(px(0.), px(0.)), window);
+
+        let mut switch = visual
+            .debug_bounds("ui-hover-haptics")
+            .expect("the switch renders");
+        for _ in 0..20 {
+            if viewport.contains(&switch.origin) && viewport.contains(&switch.bottom_right()) {
+                break;
+            }
+            visual.simulate_event(ScrollEvent {
+                position: viewport.center(),
+                delta: ScrollDelta::Pixels(point(px(0.), px(-120.))),
+                ..Default::default()
+            });
+            visual.update(|window, cx| window.draw(cx).clear(cx));
+            switch = visual
+                .debug_bounds("ui-hover-haptics")
+                .expect("the switch renders");
+        }
+        assert!(
+            viewport.contains(&switch.origin) && viewport.contains(&switch.bottom_right()),
+            "the switch at {switch:?} must scroll into {viewport:?}"
+        );
+
+        visual.simulate_click(switch.center(), Modifiers::default());
+        visual.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            assert!(
+                AppState::try_read(cx)
+                    .unwrap()
+                    .app_settings()
+                    .ui_hover_haptics
+            );
+            window.remove_window();
+        });
     }
 }

@@ -142,6 +142,23 @@ optional physical device key.
   action returns when the last frame is posted, about 315 ms later. With the
   setting off, the agent posts two frames and the Dock changes Space at once.
   A change applies from the next switch. Windows and Linux ignore the setting.
+- `ui_hover_haptics` (default `false`, Windows only): the selected mouse plays
+  a light tick (`SubtleCollision`) when the pointer moves onto a new
+  interactive element: a button, split button, link, menu item, tab, list item,
+  check box, radio button, combo box, tree item or data grid row. The agent
+  samples the pointer every 33 ms and asks UI Automation for the element only
+  after the pointer moved, searching up to three parent levels (the text inside
+  a button). Moving within one element does not tick again. Only a managed,
+  online device with HID++ haptics (`0x19B0`, e.g. MX Master 4) plays it, over
+  the link it is selected on; the engine is not armed for it, so a device
+  whose haptics are turned off stays silent. Each tick is sent without waiting
+  for the device's reply, so a busy Bluetooth link loses single ticks rather
+  than stalling later ones. When the device refuses a tick for its haptic
+  status, hover ticks pause for 5 seconds and the next one re-reads the status.
+  Known limits: controls an application draws itself and reports to UI
+  Automation only as a group, text or pane do not tick, and windows running
+  elevated refuse the query from a non-elevated agent. A change applies within
+  a second. macOS and Linux ignore the setting.
 
 `[devices."<physical-key>"]` contains per-device state. Receiver keys look like
 `receiver:<receiver-id>:slot:<number>`; direct, raw-HID, and camera devices use
