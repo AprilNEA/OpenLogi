@@ -7,9 +7,9 @@
 
 use crate::ui::theme::FocusRingStyle as _;
 use gpui::{
-    App, AppContext as _, Context, Entity, Hsla, InteractiveElement, IntoElement, ParentElement,
-    Render, Rgba, Role, StatefulInteractiveElement as _, Styled, Subscription, Toggled, Window,
-    div, prelude::FluentBuilder as _, px, rgb,
+    App, AppContext as _, Context, Entity, Focusable as _, Hsla, InteractiveElement, IntoElement,
+    ParentElement, Render, Rgba, Role, StatefulInteractiveElement as _, Styled, Subscription,
+    Toggled, Window, div, prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_kit::base::Button as BaseButton;
 use gpui_kit::component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
@@ -66,6 +66,38 @@ fn rgb_of(color: Hsla) -> Rgb {
     Rgb::new(channel(color.r), channel(color.g), channel(color.b))
 }
 
+/// Where an edit in the custom-color picker stands.
+///
+/// A palette pick or a hex commit closes the picker before it reports the
+/// color, so a color a closed picker reports is final. A slider drag reports
+/// every step while the picker stays open; only its last color is written,
+/// once, when the picker closes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PickerEdit {
+    /// The picker is closed and holds nothing to write.
+    Closed,
+    /// The picker is open and nothing was dragged yet.
+    Open,
+    /// The picker is open after a drag that ended on this color.
+    Dragged(Rgb),
+}
+
+impl PickerEdit {
+    /// The edit after the picker reports `open` and, on a change, `color`,
+    /// and the color to write now, if any.
+    fn next(self, open: bool, color: Option<Rgb>) -> (Self, Option<Rgb>) {
+        match (open, color, self) {
+            (false, Some(color), _) | (false, None, Self::Dragged(color)) => {
+                (Self::Closed, Some(color))
+            }
+            (true, Some(color), _) => (Self::Dragged(color), None),
+            (false, None, _) => (Self::Closed, None),
+            (true, None, Self::Closed) => (Self::Open, None),
+            (true, None, edit) => (edit, None),
+        }
+    }
+}
+
 /// Light the keys in `color`, unless they already are.
 fn commit_color(color: Rgb, cx: &mut App) {
     let unchanged = AppState::try_read(cx).is_some_and(|state| {
@@ -87,9 +119,8 @@ pub struct LightingPanel {
     brightness: CommitSlider<u8>,
     /// The picker behind the custom-color control.
     picker: Entity<ColorPickerState>,
-    /// The color a slider drag left in the open picker. It is written when
-    /// the picker closes, so a drag does not stream writes to the keyboard.
-    pending: Option<Rgb>,
+    /// The edit in that picker. Only [`Self::picker_changed`] moves it.
+    edit: PickerEdit,
     _state_obs: Subscription,
     _picker_subscriptions: [Subscription; 2],
 }
@@ -115,48 +146,55 @@ impl LightingPanel {
         let state_obs =
             AppState::repaint_on(cx, |event| matches!(event, StateEvent::LightingChanged(_)));
         let picker = cx.new(|cx| ColorPickerState::new(window, cx));
-        // A palette pick or a hex commit closes the picker before it reports
-        // the color, so a closed picker's color is final; a slider drag reports
-        // every step while the picker stays open.
-        let change = cx.subscribe(&picker, |this, picker, event: &ColorPickerEvent, cx| {
-            let ColorPickerEvent::Change(Some(color)) = event else {
-                return;
-            };
-            let color = rgb_of(*color);
-            if picker.read(cx).is_open() {
-                this.pending = Some(color);
-            } else {
-                this.pending = None;
-                commit_color(color, cx);
+        let change = cx.subscribe(&picker, |this, _, event: &ColorPickerEvent, cx| {
+            if let ColorPickerEvent::Change(Some(color)) = event {
+                this.picker_changed(Some(rgb_of(*color)), cx);
             }
         });
-        let close = cx.observe(&picker, |this, picker, cx| {
-            if !picker.read(cx).is_open()
-                && let Some(color) = this.pending.take()
-            {
-                commit_color(color, cx);
-            }
-        });
+        // Opening and closing only notify.
+        let open = cx.observe(&picker, |this, _, cx| this.picker_changed(None, cx));
         Self {
             brightness,
             picker,
-            pending: None,
+            edit: PickerEdit::Closed,
             _state_obs: state_obs,
-            _picker_subscriptions: [change, close],
+            _picker_subscriptions: [change, open],
+        }
+    }
+
+    /// Move the picker edit on a picker report, and write what it settles.
+    fn picker_changed(&mut self, color: Option<Rgb>, cx: &mut Context<Self>) {
+        let open = self.picker.read(cx).is_open();
+        let (edit, write) = self.edit.next(open, color);
+        self.edit = edit;
+        if let Some(color) = write {
+            commit_color(color, cx);
         }
     }
 
     /// The custom-color control: the picker's trigger in a swatch-sized ring.
     /// It shows the current color when that is none of the presets, and a
     /// palette icon otherwise.
-    fn custom_control(&self, current: &Lighting, pal: Palette) -> impl IntoElement {
+    fn custom_control(
+        &self,
+        current: &Lighting,
+        pal: Palette,
+        window: &Window,
+        cx: &App,
+    ) -> impl IntoElement {
         let custom = custom_color(current);
+        // The trigger is the picker's own focus target, so the ring it shares
+        // with the swatches goes on this frame, under the same keyboard-only
+        // rule as `focus_visible`.
+        let focus_visible = self.picker.read(cx).focus_handle(cx).is_focused(window)
+            && window.last_input_was_keyboard();
         let label = match custom {
             Some(color) => format!("{} #{:06X}", tr!("lighting.custom_color"), color.packed()),
             None => tr!("lighting.custom_color").to_string(),
         };
         let outer = SWATCH_RING + SWATCH_RING_GAP;
         div()
+            .debug_selector(|| "lighting-custom-color".into())
             .flex()
             .items_center()
             .justify_center()
@@ -169,6 +207,7 @@ impl LightingPanel {
             } else {
                 gpui::transparent_black()
             })
+            .when(focus_visible, |frame| frame.focus_ring(pal))
             .child(
                 ColorPicker::new(&self.picker)
                     .with_size(Size::Size(px(SWATCH)))
@@ -207,7 +246,7 @@ impl Render for LightingPanel {
             .iter()
             .map(|&color| swatch(color, &lighting, pal))
             .collect();
-        let custom = self.custom_control(&lighting, pal);
+        let custom = self.custom_control(&lighting, pal, window, cx);
 
         v_flex()
             .gap_3()

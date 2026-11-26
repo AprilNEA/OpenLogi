@@ -2,7 +2,7 @@ use gpui::{Hsla, rgb};
 use openlogi_core::color::Rgb;
 use openlogi_core::config::Lighting;
 
-use super::{PALETTE, custom_color, rgb_of};
+use super::{PALETTE, PickerEdit, custom_color, rgb_of};
 
 fn lighting(enabled: bool, color: Rgb) -> Lighting {
     Lighting {
@@ -44,13 +44,64 @@ fn picker_colors_convert_without_alpha() {
     }
 }
 
+const DRAGGED: Rgb = Rgb::new(0x11, 0x22, 0x33);
+
+#[test]
+fn a_color_reported_by_a_closed_picker_is_written_at_once() {
+    // A palette pick or a hex commit closes the picker, then reports.
+    for from in [
+        PickerEdit::Closed,
+        PickerEdit::Open,
+        PickerEdit::Dragged(DRAGGED),
+    ] {
+        assert_eq!(
+            from.next(false, Some(Rgb::WHITE)),
+            (PickerEdit::Closed, Some(Rgb::WHITE)),
+            "{from:?}"
+        );
+    }
+}
+
+#[test]
+fn a_drag_is_held_until_the_picker_closes() {
+    let (edit, write) = PickerEdit::Closed.next(true, None);
+    assert_eq!((edit, write), (PickerEdit::Open, None));
+    let (edit, write) = edit.next(true, Some(Rgb::WHITE));
+    assert_eq!((edit, write), (PickerEdit::Dragged(Rgb::WHITE), None));
+    let (edit, write) = edit.next(true, Some(DRAGGED));
+    assert_eq!((edit, write), (PickerEdit::Dragged(DRAGGED), None));
+    assert_eq!(edit.next(false, None), (PickerEdit::Closed, Some(DRAGGED)));
+}
+
+#[test]
+fn closing_without_a_drag_writes_nothing() {
+    assert_eq!(
+        PickerEdit::Open.next(false, None),
+        (PickerEdit::Closed, None)
+    );
+    assert_eq!(
+        PickerEdit::Closed.next(false, None),
+        (PickerEdit::Closed, None)
+    );
+}
+
+#[test]
+fn a_finished_drag_is_not_written_twice() {
+    let (edit, write) = PickerEdit::Dragged(DRAGGED).next(false, None);
+    assert_eq!(write, Some(DRAGGED));
+    assert_eq!(edit.next(false, None), (PickerEdit::Closed, None));
+}
+
 mod picker {
     use std::sync::Arc;
 
-    use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext, rgb};
+    use gpui::{
+        AppContext as _, Entity, Focusable as _, Modifiers, TestAppContext, VisualTestContext,
+        point, px, rgb, size,
+    };
     use gpui_kit::component::color_picker::ColorPickerState;
     use openlogi_core::color::Rgb;
-    use openlogi_core::config::Config;
+    use openlogi_core::config::{Config, UiScale};
     use openlogi_core::device::{Capabilities, DeviceKind};
     use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -58,6 +109,7 @@ mod picker {
     use crate::services::assets::AssetResolver;
     use crate::services::ipc::Command;
     use crate::state::{AppState, ConfigPersistence, Sources};
+    use crate::ui::theme;
 
     const CUSTOM: Rgb = Rgb::new(0x00, 0xff, 0xaa);
 
@@ -97,6 +149,7 @@ mod picker {
             receiver
         });
         let (panel, cx) = cx.add_window_view(LightingPanel::new);
+        cx.simulate_resize(size(px(800.), px(600.)));
         cx.run_until_parked();
         (panel, receiver, cx)
     }
@@ -121,40 +174,137 @@ mod picker {
             .count()
     }
 
+    /// Click the custom-color control where a user would.
+    fn click_custom_control(cx: &mut VisualTestContext) {
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let control = cx
+            .debug_bounds("lighting-custom-color")
+            .expect("the custom-color control renders");
+        cx.simulate_click(control.center(), Modifiers::none());
+        cx.run_until_parked();
+    }
+
+    fn is_open(picker: &Entity<ColorPickerState>, cx: &mut VisualTestContext) -> bool {
+        cx.read(|cx| picker.read(cx).is_open())
+    }
+
     #[gpui::test]
-    fn a_closed_picker_commits_its_color_at_once(cx: &mut TestAppContext) {
+    fn clicking_the_custom_control_opens_the_picker_without_a_write(cx: &mut TestAppContext) {
         let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
         let (panel, mut receiver, cx) = panel(cx);
         lighting_writes(&mut receiver);
         let picker = picker_of(&panel, cx);
-        cx.update(|window, cx| {
-            picker.update(cx, |picker, cx| {
-                picker.select_color(rgb(CUSTOM.packed()).into(), window, cx);
-            });
-        });
+        click_custom_control(cx);
+        assert!(is_open(&picker, cx));
+        assert_eq!(lighting_writes(&mut receiver), 0);
+    }
+
+    #[gpui::test]
+    fn a_typed_hex_color_is_written_once_and_closes_the_picker(cx: &mut TestAppContext) {
+        let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+        let (panel, mut receiver, cx) = panel(cx);
+        lighting_writes(&mut receiver);
+        let picker = picker_of(&panel, cx);
+        click_custom_control(cx);
+        let hex = cx.read(|cx| picker.read(cx).hex_input().clone());
+        cx.update(|window, cx| hex.update(cx, |input, cx| input.focus(window, cx)));
+        // The field holds the current color as `#RRGGBB`; keep the `#`.
+        cx.simulate_keystrokes("end backspace backspace backspace backspace backspace backspace");
+        cx.simulate_input("00ffaa");
+        cx.simulate_keystrokes("enter");
         cx.run_until_parked();
+        assert!(!is_open(&picker, cx));
         assert_eq!(current(cx), (true, CUSTOM));
         assert_eq!(lighting_writes(&mut receiver), 1);
     }
 
     #[gpui::test]
-    fn an_open_picker_commits_only_when_it_closes(cx: &mut TestAppContext) {
+    fn a_click_outside_closes_the_picker_without_a_write(cx: &mut TestAppContext) {
         let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
         let (panel, mut receiver, cx) = panel(cx);
         lighting_writes(&mut receiver);
         let before = current(cx);
         let picker = picker_of(&panel, cx);
+        click_custom_control(cx);
+        assert!(is_open(&picker, cx));
+        cx.simulate_click(point(px(790.), px(590.)), Modifiers::none());
+        cx.run_until_parked();
+        assert!(!is_open(&picker, cx));
+        assert_eq!(current(cx), before);
+        assert_eq!(lighting_writes(&mut receiver), 0);
+    }
+
+    #[gpui::test]
+    fn the_keyboard_reaches_opens_and_closes_the_picker(cx: &mut TestAppContext) {
+        let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+        let (panel, mut receiver, cx) = panel(cx);
+        lighting_writes(&mut receiver);
+        let picker = picker_of(&panel, cx);
+        let focused = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| picker.read(cx).focus_handle(cx).is_focused(window))
+        };
+        // Move focus the way Tab does (the test window has no gpui-kit Root
+        // to bind the key), past the toggle and the nine swatches.
+        for _ in 0..16 {
+            if focused(cx) {
+                break;
+            }
+            cx.update(gpui::Window::focus_next);
+        }
+        assert!(focused(cx), "Tab order reaches the custom-color control");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(is_open(&picker, cx));
+        assert!(
+            cx.update(|window, _| window.last_input_was_keyboard()),
+            "a keyboard-focused control draws the shared focus ring"
+        );
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(!is_open(&picker, cx));
+        assert_eq!(lighting_writes(&mut receiver), 0);
+    }
+
+    #[gpui::test]
+    fn the_custom_control_stays_in_a_narrow_card_at_125_percent(cx: &mut TestAppContext) {
+        let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+        let (_panel, _receiver, cx) = panel(cx);
+        // A column narrower than the Lighting card at the main window's
+        // minimum width, at the largest interface scale.
+        let width = px(360.);
+        cx.update(|window, _| theme::apply_scale(window, UiScale::ExtraLarge));
+        cx.simulate_resize(size(width, px(600.)));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let control = cx
+            .debug_bounds("lighting-custom-color")
+            .expect("the custom-color control renders");
+        assert!(
+            control.right() <= width,
+            "{control:?} must wrap inside the {width:?} column"
+        );
+    }
+
+    /// The popover's sliders carry no debug selector in gpui-kit, so a test
+    /// cannot drag them; this drives the slider's reports through the picker
+    /// state the sliders update, then closes the picker by clicking outside.
+    #[gpui::test]
+    fn a_slider_drag_is_written_once_when_the_picker_closes(cx: &mut TestAppContext) {
+        let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+        let (panel, mut receiver, cx) = panel(cx);
+        lighting_writes(&mut receiver);
+        let before = current(cx);
+        let picker = picker_of(&panel, cx);
+        click_custom_control(cx);
         cx.update(|window, cx| {
             picker.update(cx, |picker, cx| {
-                picker.set_open(true, cx);
-                picker.update_color(rgb(0x11_2233).into(), window, cx);
+                picker.update_color(rgb(0x0011_2233).into(), window, cx);
                 picker.update_color(rgb(CUSTOM.packed()).into(), window, cx);
             });
         });
         cx.run_until_parked();
         assert_eq!(current(cx), before, "a drag writes nothing");
         assert_eq!(lighting_writes(&mut receiver), 0);
-        cx.update(|_, cx| picker.update(cx, |picker, cx| picker.set_open(false, cx)));
+        cx.simulate_click(point(px(790.), px(590.)), Modifiers::none());
         cx.run_until_parked();
         assert_eq!(current(cx), (true, CUSTOM));
         assert_eq!(
@@ -162,23 +312,5 @@ mod picker {
             1,
             "closing writes the last color once"
         );
-    }
-
-    #[gpui::test]
-    fn closing_an_unchanged_picker_writes_nothing(cx: &mut TestAppContext) {
-        let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
-        let (panel, mut receiver, cx) = panel(cx);
-        lighting_writes(&mut receiver);
-        let before = current(cx);
-        let picker = picker_of(&panel, cx);
-        cx.update(|_, cx| {
-            picker.update(cx, |picker, cx| {
-                picker.set_open(true, cx);
-                picker.set_open(false, cx);
-            });
-        });
-        cx.run_until_parked();
-        assert_eq!(current(cx), before);
-        assert_eq!(lighting_writes(&mut receiver), 0);
     }
 }
