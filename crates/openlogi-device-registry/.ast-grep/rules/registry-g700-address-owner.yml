@@ -17,6 +17,10 @@ ignores:
   - "**/tests.rs"
   - "**/tests/**"
   - "**/*_tests.rs"
+  # The test-only G700 simulator and the mock agent's scripted G700 play
+  # the hardware, so they pin its ids as fixtures.
+  - crates/openlogi-device/src/write/g700/sim.rs
+  - crates/openlogi-agent/src/bin/mock_agent/**
 rule:
   all:
     - any:
