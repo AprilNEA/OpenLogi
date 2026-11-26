@@ -14,7 +14,7 @@ use hidpp::{
     protocol::v20::{ErrorType, Hidpp20Error},
 };
 use openlogi_core::hid::PowerOffTimeout;
-use tracing::debug;
+use tracing::info;
 
 use super::{HidppOperation, WriteError, classify_hidpp_error, open_feature, with_route};
 use crate::SharedChannel;
@@ -100,7 +100,8 @@ async fn write(
         .await
         .map_err(|error| classify(error, HidppOperation::WritePowerOffTimeout))?;
     let applied = parse(raw, HidppOperation::WritePowerOffTimeout)?;
-    debug!(index, %timeout, %applied, "power-off timeout written");
+    // The headset now powers off on another timeout: a change, not a refresh.
+    info!(index, %timeout, %applied, "power-off timeout written");
     Ok(applied)
 }
 

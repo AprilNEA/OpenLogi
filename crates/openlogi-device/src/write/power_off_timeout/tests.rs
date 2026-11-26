@@ -211,3 +211,53 @@ async fn a_timeout_above_the_range_is_an_unsupported_response() {
         })
     );
 }
+
+thread_local! {
+    /// What the test subscriber logged on this thread.
+    static LOGGED: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Writes a log line into [`LOGGED`] of the thread that emitted it.
+struct ThreadLog;
+
+impl std::io::Write for ThreadLog {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        LOGGED.with_borrow_mut(|logged| logged.extend_from_slice(bytes));
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A confirmed write changes when the headset switches itself off, so it is
+/// logged at `info`, the level a user's log keeps; a refresh stays below it.
+#[tokio::test]
+async fn a_confirmed_write_is_logged_at_info() {
+    // Global, not `set_default`: with a single dispatcher `tracing` caches a
+    // callsite's interest from whichever thread reaches it first, so a
+    // parallel test writing the timeout would switch this line off here.
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+    INSTALL.call_once(|| {
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(|| ThreadLog)
+            .finish();
+        tracing::subscriber::set_global_default(subscriber)
+            .expect("no other test in this binary installs a global subscriber");
+    });
+    LOGGED.with_borrow_mut(Vec::clear);
+    let headset = Arc::new(Mutex::new(Headset::g933(15)));
+    let shared = headset_channel(&headset).await;
+
+    set_power_off_timeout_on(&shared, minutes(30))
+        .await
+        .unwrap();
+
+    let logged = String::from_utf8(LOGGED.take()).unwrap();
+    assert!(
+        logged.contains("INFO") && logged.contains("power-off timeout written"),
+        "expected the confirmed write at info, got: {logged:?}"
+    );
+}
