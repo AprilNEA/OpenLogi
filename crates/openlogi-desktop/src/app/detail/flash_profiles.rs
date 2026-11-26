@@ -326,13 +326,10 @@ fn unlisted_row(
     can_enable: bool,
     pal: Palette,
 ) -> impl IntoElement {
-    let shown = match name.map(display_name) {
-        Some(DisplayName {
-            text,
-            damaged: false,
-        }) if !text.is_empty() => text,
-        _ => tr!("pointer.flash_profile_unnamed"),
-    };
+    let shown = readable_name(name).map_or_else(
+        || tr!("pointer.flash_profile_unnamed"),
+        |name| name.to_owned().into(),
+    );
     v_flex()
         .id(("flash-unlisted", row))
         .debug_selector(move || format!("flash-unlisted-{row}"))
@@ -413,28 +410,27 @@ struct DisplayName {
     damaged: bool,
 }
 
-/// `name` with control characters shown as U+FFFD, trimmed.
-fn display_name(name: &str) -> DisplayName {
-    let damaged = name.chars().any(char::is_control);
-    let text: String = name
-        .chars()
-        .map(|c| if c.is_control() { '\u{FFFD}' } else { c })
-        .collect();
-    DisplayName {
-        text: text.trim().to_owned().into(),
-        damaged,
-    }
+/// Whether a stored name lost its UTF-16 high bytes (see
+/// [`DisplayName::damaged`]).
+fn is_damaged(name: &str) -> bool {
+    name.chars().any(char::is_control)
 }
 
-/// A listed profile's name: the stored one, or "Profile N" for none or a
-/// blank one.
+/// The stored name as it reads, trimmed: `None` for none, a blank one, or a
+/// damaged one, whose surviving characters spell nothing.
+fn readable_name(name: Option<&str>) -> Option<&str> {
+    name.map(str::trim)
+        .filter(|name| !name.is_empty() && !is_damaged(name))
+}
+
+/// A listed profile's name: the readable stored one, or "Profile N".
 fn profile_name(index: ProfileIndex, name: Option<&str>) -> DisplayName {
-    match name.map(display_name) {
-        Some(shown) if !shown.text.is_empty() => shown,
-        _ => DisplayName {
-            text: tr!("pointer.onboard_profile_number", number => index.to_string()),
-            damaged: false,
-        },
+    DisplayName {
+        text: readable_name(name).map_or_else(
+            || tr!("pointer.onboard_profile_number", number => index.to_string()),
+            |name| name.to_owned().into(),
+        ),
+        damaged: name.is_some_and(is_damaged),
     }
 }
 

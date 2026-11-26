@@ -10,8 +10,7 @@ use openlogi_core::hid::{
 };
 
 use super::{
-    FlashProfilesFacts, NAME_UNITS, NameCheck, display_name, flash_profiles_card, name_check,
-    profile_name,
+    FlashProfilesFacts, NAME_UNITS, NameCheck, flash_profiles_card, name_check, profile_name,
 };
 use crate::services::i18n::LOCALE_LOCK;
 use crate::state::{DeviceKey, Load};
@@ -157,12 +156,16 @@ fn editing_waits_for_a_running_write_and_a_reachable_mouse() {
 }
 
 #[test]
-fn a_name_with_lost_high_bytes_shows_as_damaged() {
-    let shown = display_name("\u{1f}@>D8;L 1");
+fn a_name_with_lost_high_bytes_is_numbered_and_damaged() {
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    // "Профиль 3" with each UTF-16 unit cut to its low byte, as a real G700
+    // stored it.
+    let shown = profile_name(index(3), Some("\u{1f}@>D8;L 3"));
     assert!(shown.damaged);
-    assert_eq!(shown.text.as_ref(), "\u{FFFD}@>D8;L 1");
+    assert_eq!(shown.text.as_ref(), "Profile 3");
 
-    let shown = display_name("Профиль 2");
+    let shown = profile_name(index(2), Some(" Профиль 2 "));
     assert!(!shown.damaged);
     assert_eq!(shown.text.as_ref(), "Профиль 2");
 }
