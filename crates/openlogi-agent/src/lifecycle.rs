@@ -331,7 +331,7 @@ impl Armed {
         #[cfg(target_os = "windows")]
         let _ui_hover = crate::ui_hover_windows::spawn(
             Arc::clone(&running.orchestrator),
-            running.ring_haptics.clone(),
+            running.shared.clone(),
         );
 
         info!("openlogi-agent started");

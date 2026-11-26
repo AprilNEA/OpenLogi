@@ -4,9 +4,10 @@
 //!
 //! A dedicated COM (MTA) thread samples the physical cursor position at a
 //! bounded rate and asks UI Automation only after the pointer moved, so a
-//! resting pointer costs one `GetPhysicalCursorPos` per period. The tick goes
-//! through the Actions Ring's latest-wins [`RingHapticPlayer`], so a fast
-//! pointer never queues HID++ plays faster than the device drains them.
+//! resting pointer costs one `GetPhysicalCursorPos` per period. Ticks go to a
+//! latest-wins player that sends each play without waiting for the device's
+//! acknowledgement: over a busy Bluetooth link replies get dropped while the
+//! pointer moves, and waiting on them stalled every later tick for seconds.
 
 #![expect(
     unsafe_code,
@@ -18,8 +19,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::Duration;
 
-use openlogi_agent_core::orchestrator::Orchestrator;
-use openlogi_hid::{DeviceRoute, HapticWaveform};
+use openlogi_agent_core::orchestrator::{Orchestrator, SharedHandles};
+use openlogi_hid::{DeviceRoute, HapticWaveform, HidppOperation};
 use tracing::{debug, warn};
 use windows::Win32::Foundation::POINT;
 use windows::Win32::System::Com::{
@@ -29,13 +30,12 @@ use windows::Win32::System::Variant::{VARENUM, VT_ARRAY, VT_I4, VariantClear};
 use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomationCacheRequest, IUIAutomationElement,
     IUIAutomationTreeWalker, UIA_ButtonControlTypeId, UIA_CONTROLTYPE_ID,
-    UIA_ControlTypePropertyId, UIA_HyperlinkControlTypeId, UIA_ListItemControlTypeId,
-    UIA_MenuItemControlTypeId, UIA_RuntimeIdPropertyId, UIA_SplitButtonControlTypeId,
-    UIA_TabItemControlTypeId,
+    UIA_CheckBoxControlTypeId, UIA_ComboBoxControlTypeId, UIA_ControlTypePropertyId,
+    UIA_DataItemControlTypeId, UIA_HyperlinkControlTypeId, UIA_ListItemControlTypeId,
+    UIA_MenuItemControlTypeId, UIA_RadioButtonControlTypeId, UIA_RuntimeIdPropertyId,
+    UIA_SplitButtonControlTypeId, UIA_TabItemControlTypeId, UIA_TreeItemControlTypeId,
 };
 use windows::Win32::UI::WindowsAndMessaging::GetPhysicalCursorPos;
-
-use crate::server::RingHapticPlayer;
 
 /// How often the pointer position is sampled: at most ~30 UI Automation
 /// queries a second while the pointer moves.
@@ -45,37 +45,48 @@ const PERIOD: Duration = Duration::from_millis(33);
 /// orchestrator. A setting or device change takes effect within this.
 const ROUTE_REFRESH: Duration = Duration::from_secs(1);
 
+/// How long one play may take. Only the first play on a channel waits on the
+/// device (to locate the haptic feature); later ones just write a report.
+const PLAY_BUDGET: Duration = Duration::from_millis(500);
+
 /// How many ancestors to search for the interactive element: the element
 /// under the pointer is often the text or image inside a button.
 const PARENT_DEPTH: usize = 3;
 
 /// The control types that tick.
-const INTERACTIVE: [UIA_CONTROLTYPE_ID; 6] = [
+const INTERACTIVE: [UIA_CONTROLTYPE_ID; 11] = [
     UIA_ButtonControlTypeId,
     UIA_SplitButtonControlTypeId,
     UIA_HyperlinkControlTypeId,
     UIA_MenuItemControlTypeId,
     UIA_TabItemControlTypeId,
     UIA_ListItemControlTypeId,
+    UIA_CheckBoxControlTypeId,
+    UIA_RadioButtonControlTypeId,
+    UIA_ComboBoxControlTypeId,
+    UIA_TreeItemControlTypeId,
+    UIA_DataItemControlTypeId,
 ];
 
 /// The running watcher; dropping it stops the thread and the route refresh.
 pub(crate) struct UiHover {
     stop: Arc<AtomicBool>,
     refresh: tokio::task::JoinHandle<()>,
+    player: tokio::task::JoinHandle<()>,
 }
 
 impl Drop for UiHover {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         self.refresh.abort();
+        self.player.abort();
     }
 }
 
 /// Start the watcher. Must be called from a tokio runtime.
 pub(crate) fn spawn(
     orchestrator: Arc<tokio::sync::Mutex<Orchestrator>>,
-    haptics: RingHapticPlayer,
+    shared: SharedHandles,
 ) -> UiHover {
     let route = Arc::new(Mutex::new(None::<DeviceRoute>));
     let stop = Arc::new(AtomicBool::new(false));
@@ -89,24 +100,51 @@ pub(crate) fn spawn(
             }
         })
     };
+    let (ticks, mut rx) = tokio::sync::watch::channel(None::<DeviceRoute>);
+    let player = tokio::spawn(async move {
+        while rx.changed().await.is_ok() {
+            let Some(route) = rx.borrow_and_update().clone() else {
+                continue;
+            };
+            let play = shared
+                .device(&route)
+                .run(HidppOperation::PlayHaptic, |c| async move {
+                    openlogi_hid::play_haptic_without_reply_on(&c, HapticWaveform::SubtleCollision)
+                        .await
+                });
+            match tokio::time::timeout(PLAY_BUDGET, play).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => debug!(%error, "UI hover haptic not sent"),
+                Err(_elapsed) => debug!("UI hover haptic ran out of time"),
+            }
+        }
+    });
     let thread_stop = Arc::clone(&stop);
     let spawned = thread::Builder::new()
         .name("openlogi-ui-hover".into())
-        .spawn(move || watch(&route, &haptics, &thread_stop));
+        .spawn(move || watch(&route, &ticks, &thread_stop));
     if let Err(error) = spawned {
         warn!(%error, "could not start the UI hover watcher — no UI hover haptics");
     }
-    UiHover { stop, refresh }
+    UiHover {
+        stop,
+        refresh,
+        player,
+    }
 }
 
-fn watch(route: &Mutex<Option<DeviceRoute>>, haptics: &RingHapticPlayer, stop: &AtomicBool) {
+fn watch(
+    route: &Mutex<Option<DeviceRoute>>,
+    ticks: &tokio::sync::watch::Sender<Option<DeviceRoute>>,
+    stop: &AtomicBool,
+) {
     // SAFETY: called once on this thread before any COM use, balanced by
     // `CoUninitialize` below when it succeeded.
     if let Err(error) = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.ok() {
         warn!(%error, "COM initialization failed — no UI hover haptics");
         return;
     }
-    if let Err(error) = run(route, haptics, stop) {
+    if let Err(error) = run(route, ticks, stop) {
         warn!(%error, "UI Automation unavailable — no UI hover haptics");
     }
     // SAFETY: balances the successful `CoInitializeEx` above; every COM
@@ -116,7 +154,7 @@ fn watch(route: &Mutex<Option<DeviceRoute>>, haptics: &RingHapticPlayer, stop: &
 
 fn run(
     route: &Mutex<Option<DeviceRoute>>,
-    haptics: &RingHapticPlayer,
+    ticks: &tokio::sync::watch::Sender<Option<DeviceRoute>>,
     stop: &AtomicBool,
 ) -> windows::core::Result<()> {
     // SAFETY: COM is initialized on this thread; the class and interface are
@@ -159,7 +197,7 @@ fn run(
             }
         };
         if element.is_some() && element != last_element {
-            haptics.play(Some(current), HapticWaveform::SubtleCollision, "ui hover");
+            let _ = ticks.send(Some(current));
         }
         last_element = element;
     }

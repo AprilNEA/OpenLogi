@@ -406,6 +406,34 @@ pub async fn play_haptic_on(
     })
 }
 
+/// [`play_haptic_on`] without waiting for the device's acknowledgement, for
+/// high-rate feedback such as pointer hover. Only the first play on a channel
+/// waits, to locate the feature; a lost play is simply not felt, and the next
+/// hover tick tries again.
+pub async fn play_haptic_without_reply_on(
+    shared: &SharedChannel,
+    waveform: HapticWaveform,
+) -> Result<(), WriteError> {
+    let channel = shared.channel();
+    let index = shared.device_index();
+    let haptics = if let Some(haptics) = cached_feature(channel, index) {
+        haptics
+    } else {
+        let haptics = open_haptics(channel, index).await?;
+        store_cached_location(channel, index, &haptics);
+        haptics
+    };
+    haptics.check(waveform)?;
+    haptics
+        .feature
+        .play_without_reply(waveform)
+        .await
+        .map_err(|error| {
+            clear_cached_location();
+            classify_hidpp_error(error, HidppOperation::PlayHaptic, HapticFeedbackFeature::ID)
+        })
+}
+
 /// Play a waveform immediately by route. A waveform the device does not
 /// advertise fails with [`WriteError::HapticWaveformUnsupported`], and a play
 /// while the device reports a non-zero haptic status with

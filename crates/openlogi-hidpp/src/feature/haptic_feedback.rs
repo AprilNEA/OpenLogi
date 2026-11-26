@@ -226,6 +226,13 @@ impl HapticFeedbackFeature {
         self.endpoint.call(4, [waveform.into(), 0, 0]).await?;
         Ok(())
     }
+
+    /// Play one typed haptic waveform without waiting for the device's
+    /// acknowledgement. For high-rate feedback (pointer hover), where waiting
+    /// on a reply a busy link may drop would stall every later tick.
+    pub async fn play_without_reply(&self, waveform: HapticWaveform) -> Result<(), Hidpp20Error> {
+        self.endpoint.notify(4, [waveform.into(), 0, 0]).await
+    }
 }
 
 #[cfg(test)]

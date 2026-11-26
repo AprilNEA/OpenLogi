@@ -1104,7 +1104,7 @@ impl RingHapticPlayer {
     }
 
     /// Queue `waveform`, replacing any not-yet-played request.
-    pub(crate) fn play(
+    fn play(
         &self,
         route: Option<DeviceRoute>,
         waveform: HapticWaveform,
