@@ -23,6 +23,8 @@ fn main() {
     // unrelated change happens to recompile this crate.
     println!("cargo:rerun-if-changed=../openlogi-ui/locales");
 
+    reserve_debug_main_stack("openlogi-overlay");
+
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
@@ -81,4 +83,31 @@ END
     embed_resource::compile(&rc_path, embed_resource::NONE)
         .manifest_optional()
         .expect("compile Windows resources");
+}
+
+/// Give a debug build's main thread a 2 MiB stack on Windows, where the OS
+/// reserves 1 MiB and Rust gives every other thread 2 MiB.
+///
+/// `rust_i18n::i18n!` expands all of `../openlogi-ui/locales` into the
+/// initializer of `_RUST_I18N_BACKEND`, one `HashMap` literal per catalog.
+/// Unoptimized, that closure keeps every entry on the stack until the map
+/// takes it: its prologue asks `__chkstk` for 0x1352C0 bytes (1.21 MiB) and
+/// the first `t!` on the main thread dies with `STATUS_STACK_OVERFLOW`
+/// before the ring opens. Release inlines the closure and keeps nothing on
+/// the stack, so it is left alone. Only the named binary gets the flag; test
+/// harnesses translate on their own 2 MiB threads and need none.
+///
+/// Kept in sync with the twin in `crates/openlogi-desktop/build.rs`.
+fn reserve_debug_main_stack(binary: &str) {
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows")
+        || env::var("PROFILE").as_deref() != Ok("debug")
+    {
+        return;
+    }
+    let arg = if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        "/STACK:2097152"
+    } else {
+        "-Wl,--stack,2097152"
+    };
+    println!("cargo:rustc-link-arg-bin={binary}={arg}");
 }
