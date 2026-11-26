@@ -151,3 +151,37 @@ fn equal_runtime_projection_does_not_wake_managers() {
             .expect("publication remains open")
     );
 }
+
+#[test]
+fn pointer_demand_follows_the_mouse_profile_policy_across_reloads() {
+    use crate::watchers::pointer::PointerDemand;
+    use openlogi_core::config::MouseProfileTarget;
+
+    let defaults = orchestrator(Config::default());
+    assert_eq!(
+        *defaults.shared.pointer_demand.borrow(),
+        PointerDemand::Wanted,
+        "profiles follow the pointer by default"
+    );
+
+    let mut config = Config::default();
+    config.app_settings.mouse_profile_target = MouseProfileTarget::Focused;
+    let mut orch = orchestrator(config.clone());
+    let mut demand = orch.shared.pointer_demand.clone();
+    assert_eq!(*demand.borrow_and_update(), PointerDemand::Idle);
+
+    // Another setting changing must not wake the watcher.
+    config.app_settings.smooth_scroll = !config.app_settings.smooth_scroll;
+    orch.reload_config(config.clone());
+    assert!(!demand.has_changed().expect("publication remains open"));
+
+    config.app_settings.mouse_profile_target = MouseProfileTarget::Pointer;
+    orch.reload_config(config.clone());
+    assert!(demand.has_changed().expect("publication remains open"));
+    assert_eq!(*demand.borrow_and_update(), PointerDemand::Wanted);
+
+    config.app_settings.mouse_profile_target = MouseProfileTarget::Focused;
+    orch.reload_config(config);
+    assert!(demand.has_changed().expect("publication remains open"));
+    assert_eq!(*demand.borrow_and_update(), PointerDemand::Idle);
+}
