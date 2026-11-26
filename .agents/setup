@@ -129,6 +129,39 @@ rustup toolchain install stable \
 echo "    completed in $((SECONDS - step_started))s"
 
 step_started=$SECONDS
+echo "==> Installing mbx"
+# mbx shares compiled crates across every checkout and worktree and prunes its
+# own storage, so parallel agent worktrees neither rebuild from scratch nor
+# fill the disk.
+mbx_version=1.29.1
+mbx_sha256=ca95f28c77711845c0455839792ca3f3070bdf007979ab75bf7e10c03b07fe3f
+mbx="$HOME/.local/bin/mbx"
+if [[ "$("$mbx" --version 2>/dev/null)" != "mbx $mbx_version" ]]; then
+  mbx_download="$(mktemp -d)"
+  curl --proto '=https' --tlsv1.2 -fsSL -o "$mbx_download/mbx.tar.gz" \
+    "https://github.com/jdx/mr-boxington/releases/download/v$mbx_version/mbx-x86_64-unknown-linux-gnu.tar.gz"
+  echo "$mbx_sha256  $mbx_download/mbx.tar.gz" | sha256sum --check --quiet
+  tar -xzf "$mbx_download/mbx.tar.gz" -C "$mbx_download" mbx
+  install -D -m 755 "$mbx_download/mbx" "$mbx"
+  rm -rf "$mbx_download"
+fi
+"$mbx" setup
+
+# Appended after the Rust toolchain block so the shim precedes ~/.cargo/bin.
+mbx_profile_marker="# OpenLogi orb mbx Cargo shim"
+if ! grep -Fqx "$mbx_profile_marker" "$HOME/.bash_profile" 2>/dev/null; then
+  cat >>"$HOME/.bash_profile" <<'EOF'
+
+# OpenLogi orb mbx Cargo shim
+case ":$PATH:" in
+  *":$HOME/.local/share/mbx/bin:"*) ;;
+  *) PATH="$HOME/.local/share/mbx/bin:$PATH" ;;
+esac
+EOF
+fi
+echo "    completed in $((SECONDS - step_started))s"
+
+step_started=$SECONDS
 echo "==> Fetching locked Cargo dependencies for this host"
 host_target="$(rustc -vV | sed -n 's/^host: //p')"
 cargo fetch --locked --target "$host_target"
