@@ -312,9 +312,8 @@ impl AppState {
     /// The configuration key of the flash mouse `key`, when settings may be
     /// stored for it.
     fn flash_config_key(&self, key: &DeviceKey) -> Option<String> {
-        self.devices()
-            .iter()
-            .find(|record| record.device_key() == *key)
+        self.devices
+            .record(key)
             .and_then(DeviceRecord::persistent_config_key)
             .map(str::to_owned)
     }
