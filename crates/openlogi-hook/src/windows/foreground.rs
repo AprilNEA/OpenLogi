@@ -19,6 +19,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use super::hook::{Backend, MessageLoopExit, message_loop};
+use super::pointer::note_activity;
 use super::worker::{ForegroundChanges, NotificationLatch, WorkerEvent, WorkerPhase, WorkerStatus};
 use crate::{ForegroundApp, HookBackend};
 
@@ -390,6 +391,8 @@ fn clear_callback_target(target: &Arc<CallbackTarget>) {
 
 /// Win32 callback: coalesce and enqueue only. Process lookup, deduplication,
 /// and user delivery stay outside this native boundary on the owning pump.
+/// A new foreground window can also surface under a resting pointer, so this
+/// wakes the pointer-context watcher too.
 unsafe extern "system" fn foreground_event_proc(
     _hook: HWINEVENTHOOK,
     _event: u32,
@@ -410,5 +413,6 @@ unsafe extern "system" fn foreground_event_proc(
         if let Some(target) = target {
             target.queue_snapshot();
         }
+        note_activity();
     }));
 }
