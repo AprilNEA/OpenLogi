@@ -155,6 +155,7 @@ fn settle_probe<Node: Eq + Hash + Clone>(
     match verdict {
         ProbeVerdict::Deferred => ledger.defer(node),
         ProbeVerdict::AliveButIncomplete => ledger.settle_arrival_replay_failure(node),
+        ProbeVerdict::Partial => ledger.settle_incomplete(node, inventory),
         verdict => ledger.settle(node, verdict.is_healthy(), inventory),
     }
 }
@@ -167,7 +168,7 @@ fn settle_unhealthy_node<Node: Eq + Hash + Clone>(
 ) -> Option<DeviceInventory> {
     *all_complete = false;
     *all_healthy = false;
-    ledger.settle(node, false, None).inventory
+    ledger.settle_without_channel(node).inventory
 }
 
 /// Enumerate all Logitech HID++ receivers visible to the current process and

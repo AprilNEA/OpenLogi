@@ -12,7 +12,9 @@
 //! The ledger fixes both: while a node's probe fails it replays the node's
 //! last completed inventory for a bounded grace, and after a couple of
 //! consecutive failures it asks the enumerator to drop the node's cached
-//! channel so the next tick reopens it fresh.
+//! channel so the next tick reopens it fresh. Replacements that stay just as
+//! unanswered need progressively more failures before they are retired in
+//! turn, until the node answers again.
 //!
 //! Generic over the node key ([`crate::backend::NodeId`] in production) purely
 //! so the decision table can be exercised with a trivial key, keeping the
@@ -33,11 +35,26 @@ use tracing::{debug, warn};
 const NODE_MISS_GRACE: u8 = 3;
 
 /// Consecutive failed probes after which the node's cached channel should be
-/// dropped and reopened. A channel whose read loop parked on a `Disconnected`
+/// dropped and reopened — the base threshold, before any
+/// [`EVICT_BACKOFF_MAX_DOUBLINGS`] backoff. A channel whose read loop parked on a `Disconnected`
 /// handle never recovers on its own — the transport contract (see
 /// `AsyncHidChannel::read_report`) expects the inventory watcher to evict it,
 /// and node-vanish eviction never fires for a node the OS keeps listing.
 const CHANNEL_EVICT_AFTER: u8 = 2;
+
+/// Cap on how often [`CHANNEL_EVICT_AFTER`] doubles for replacement channels
+/// that stay unanswered. A Bluetooth-direct device asleep on a live link keeps
+/// its node listed and answers no channel, so reopening at the base threshold
+/// retires a channel every ~35 s for as long as it sleeps, and every
+/// retire/reopen cycle has measured at ~0.5 MB of agent memory never returned
+/// (#735). At the cap a sick node still gets a fresh channel every 32 failed
+/// probes instead of every 2.
+const EVICT_BACKOFF_MAX_DOUBLINGS: u8 = 4;
+
+const _: () = assert!(
+    (CHANNEL_EVICT_AFTER as u16) << EVICT_BACKOFF_MAX_DOUBLINGS <= u8::MAX as u16,
+    "the backed-off eviction threshold must fit the u8 failure count"
+);
 
 /// Consecutive arrival-replay failures tolerated after the receiver answered
 /// its pairing-count register. This path gets a longer channel grace because
@@ -52,7 +69,8 @@ pub(crate) struct SettledNode {
     pub inventory: Option<DeviceInventory>,
     /// Whether the node's cached channel should be dropped so the next tick
     /// reopens it. `true` once the current failure kind reaches its threshold,
-    /// so a persistently sick node keeps getting a fresh channel.
+    /// so a persistently sick node keeps getting a fresh channel — at a
+    /// backed-off cadence while each replacement stays unanswered.
     pub evict_channel: bool,
 }
 
@@ -65,41 +83,165 @@ pub(crate) struct NodeLedger<K> {
 
 #[derive(Default)]
 struct FailureCounts {
-    /// Consecutive probes that produced no liveness evidence.
-    probe: u8,
+    /// Where the node's current channel stands in its probe lifecycle.
+    channel: ChannelHealth,
     /// Failed arrival replays on the current channel generation.
     arrival_replay: u8,
     /// Non-authoritative ticks since the last complete inventory.
     publication_misses: u8,
 }
 
-#[derive(Clone, Copy)]
-enum FailureKind {
-    Probe,
-    ArrivalReplay,
+/// The probe lifecycle of a node's current channel since the node last showed
+/// liveness. [`Self::transition`] is the only place it changes; a healthy
+/// [`NodeLedger::settle`] drops it with the rest of the node's failure state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChannelHealth {
+    /// The current channel is in service. `failures` counts its consecutive
+    /// failed probes; `doublings` counts the channels before it that were
+    /// retired unanswered, each doubling the threshold that retires this one.
+    Probing { failures: u8, doublings: u8 },
+    /// The current channel reached its threshold and awaits replacement.
+    Retired {
+        failures: u8,
+        doublings: u8,
+        reason: RetireReason,
+    },
 }
 
-impl FailureKind {
-    fn record(self, counts: &mut FailureCounts) -> u8 {
+/// Why a channel was retired, which decides whether its replacement backs off.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RetireReason {
+    /// Nothing answered the channel: the replacement backs off.
+    Unanswered,
+    /// The node answered but its walk stayed incomplete: no backoff.
+    Incomplete,
+}
+
+/// What one tick or open told the ledger about the node's current channel.
+#[derive(Clone, Copy)]
+enum ChannelEvent {
+    /// A probe got no answer.
+    Unanswered,
+    /// The node answered its liveness register, but the walk stayed
+    /// incomplete. Still a failed probe, at the base threshold: the streak
+    /// keeps the channel's earlier unanswered failures, so a channel that was
+    /// silent and now answers only partially is retired promptly.
+    AnsweredIncomplete,
+    /// A receiver answered its liveness register on the arrival-replay path;
+    /// not a failed probe.
+    Alive,
+    /// A replacement channel opened.
+    Reopened,
+}
+
+impl Default for ChannelHealth {
+    fn default() -> Self {
+        Self::Probing {
+            failures: 0,
+            doublings: 0,
+        }
+    }
+}
+
+impl ChannelHealth {
+    fn transition(self, event: ChannelEvent) -> Self {
+        let (failures, doublings) = self.counts();
+        match event {
+            ChannelEvent::Alive => Self::default(),
+            ChannelEvent::Reopened => Self::Probing {
+                failures: 0,
+                doublings: match self {
+                    Self::Retired {
+                        reason: RetireReason::Unanswered,
+                        ..
+                    } => doublings.saturating_add(1).min(EVICT_BACKOFF_MAX_DOUBLINGS),
+                    Self::Retired { .. } | Self::Probing { .. } => doublings,
+                },
+            },
+            ChannelEvent::Unanswered => Self::failed(failures, doublings, RetireReason::Unanswered),
+            ChannelEvent::AnsweredIncomplete => Self::failed(failures, 0, RetireReason::Incomplete),
+        }
+    }
+
+    /// One more failed probe, retiring the channel once it reaches the
+    /// threshold for `doublings`.
+    fn failed(failures: u8, doublings: u8, reason: RetireReason) -> Self {
+        let failures = failures.saturating_add(1);
+        if failures >= CHANNEL_EVICT_AFTER << doublings.min(EVICT_BACKOFF_MAX_DOUBLINGS) {
+            Self::Retired {
+                failures,
+                doublings,
+                reason,
+            }
+        } else {
+            Self::Probing {
+                failures,
+                doublings,
+            }
+        }
+    }
+
+    const fn counts(self) -> (u8, u8) {
         match self {
-            Self::Probe => {
-                counts.probe = counts.probe.saturating_add(1);
-                counts.probe
+            Self::Probing {
+                failures,
+                doublings,
+            }
+            | Self::Retired {
+                failures,
+                doublings,
+                ..
+            } => (failures, doublings),
+        }
+    }
+
+    const fn is_retired(self) -> bool {
+        matches!(self, Self::Retired { .. })
+    }
+}
+
+/// One non-authoritative tick, by what it says about the node's channel.
+#[derive(Clone, Copy)]
+enum Tick {
+    /// The current channel was probed.
+    Probe(ChannelEvent),
+    /// A receiver answered but could not replay its arrival notifications.
+    ArrivalReplay,
+    /// No channel served the node: it would not open, or its previous one is
+    /// still draining. Nothing was probed, so no channel failed.
+    NoChannel,
+}
+
+impl Tick {
+    /// Fold the tick into the channel state; returns the streak it extended
+    /// and whether the channel must be retired.
+    fn record(self, counts: &mut FailureCounts) -> (u8, bool) {
+        match self {
+            Self::Probe(event) => {
+                counts.channel = counts.channel.transition(event);
+                (counts.channel.counts().0, counts.channel.is_retired())
             }
             Self::ArrivalReplay => {
                 // The pairing-count response proves transport liveness, so a
-                // later ordinary failure must start its own streak again.
-                counts.probe = 0;
+                // later ordinary failure must start its own streak again, at
+                // the base threshold.
+                counts.channel = counts.channel.transition(ChannelEvent::Alive);
                 counts.arrival_replay = counts.arrival_replay.saturating_add(1);
-                counts.arrival_replay
+                (
+                    counts.arrival_replay,
+                    counts.arrival_replay >= ARRIVAL_REPLAY_EVICT_AFTER,
+                )
             }
+            Self::NoChannel => (counts.channel.counts().0, false),
         }
     }
 
     const fn label(self) -> &'static str {
         match self {
-            Self::Probe => "probe",
+            Self::Probe(ChannelEvent::AnsweredIncomplete) => "incomplete walk",
+            Self::Probe(_) => "probe",
             Self::ArrivalReplay => "arrival replay",
+            Self::NoChannel => "no channel",
         }
     }
 }
@@ -117,10 +259,12 @@ impl<K> Default for NodeLedger<K> {
 
 impl<K: Eq + Hash + Clone> NodeLedger<K> {
     /// Start channel-eviction accounting again after the enumerator opens a
-    /// replacement channel, without re-arming expired inventory replay.
+    /// replacement channel, without re-arming expired inventory replay. A
+    /// replacement for a channel retired unanswered backs off the next probe
+    /// eviction until the node shows liveness again.
     pub fn reset_channel_failures_after_open(&mut self, node: &K) {
         if let Some(counts) = self.failures.get_mut(node) {
-            counts.probe = 0;
+            counts.channel = counts.channel.transition(ChannelEvent::Reopened);
             counts.arrival_replay = 0;
         }
     }
@@ -132,12 +276,22 @@ impl<K: Eq + Hash + Clone> NodeLedger<K> {
     /// arrival-trigger write may fail transiently while ordinary receiver
     /// registers and an already-armed capture session remain functional.
     pub fn settle_arrival_replay_failure(&mut self, node: &K) -> SettledNode {
-        self.settle_failure(
-            node,
-            None,
-            ARRIVAL_REPLAY_EVICT_AFTER,
-            FailureKind::ArrivalReplay,
-        )
+        self.settle_failure(node, None, Tick::ArrivalReplay)
+    }
+
+    /// Fold in a probe whose node answered its liveness register but left the
+    /// walk incomplete (a Bolt slot that would not read). It counts toward
+    /// retiring the channel like any failed probe, but at the base threshold:
+    /// an answering node is not the unanswered case the backoff is for.
+    pub fn settle_incomplete(&mut self, node: &K, live: Option<DeviceInventory>) -> SettledNode {
+        self.settle_failure(node, live, Tick::Probe(ChannelEvent::AnsweredIncomplete))
+    }
+
+    /// Fold in a tick on which no channel served the node — it would not open,
+    /// or its previous channel is still draining. The replay grace advances,
+    /// but no channel failed, so no eviction or backoff is recorded.
+    pub fn settle_without_channel(&mut self, node: &K) -> SettledNode {
+        self.settle_failure(node, None, Tick::NoChannel)
     }
 
     /// Fold one node's probe result into the ledger and decide what to report.
@@ -169,21 +323,20 @@ impl<K: Eq + Hash + Clone> NodeLedger<K> {
             };
         }
 
-        self.settle_failure(node, live, CHANNEL_EVICT_AFTER, FailureKind::Probe)
+        self.settle_failure(node, live, Tick::Probe(ChannelEvent::Unanswered))
     }
 
     fn settle_failure(
         &mut self,
         node: &K,
         live: Option<DeviceInventory>,
-        evict_after: u8,
-        failure_kind: FailureKind,
+        tick: Tick,
     ) -> SettledNode {
         let counts = self.failures.entry(node.clone()).or_default();
-        let channel_failures = failure_kind.record(counts);
+        let (channel_failures, evict_channel) = tick.record(counts);
         counts.publication_misses = counts.publication_misses.saturating_add(1);
         let publication_misses = counts.publication_misses;
-        let failure_kind = failure_kind.label();
+        let failure_kind = tick.label();
         let inventory = if publication_misses <= NODE_MISS_GRACE {
             if let Some(previous) = self.last_good.get(node) {
                 debug!(
@@ -209,7 +362,7 @@ impl<K: Eq + Hash + Clone> NodeLedger<K> {
         };
         SettledNode {
             inventory,
-            evict_channel: channel_failures >= evict_after,
+            evict_channel,
         }
     }
 
@@ -428,16 +581,21 @@ mod tests {
 
         for _ in 0..3 {
             ledger.reset_channel_failures_after_open(&1);
-            let first = ledger.settle(&1, false, None);
-            published.push(first.inventory.is_some());
-            assert!(!first.evict_channel);
-
-            let second = ledger.settle(&1, false, None);
-            published.push(second.inventory.is_some());
-            assert!(second.evict_channel);
+            loop {
+                let settled = ledger.settle(&1, false, None);
+                published.push(settled.inventory.is_some());
+                if settled.evict_channel {
+                    break;
+                }
+            }
         }
 
-        assert_eq!(published, vec![true, true, true, false, false, false]);
+        let grace = usize::from(NODE_MISS_GRACE);
+        assert!(published[..grace].iter().all(|&replayed| replayed));
+        assert!(
+            published[grace..].iter().all(|&replayed| !replayed),
+            "replacement channels must not re-arm the expired replay: {published:?}"
+        );
     }
 
     #[test]
@@ -508,6 +666,76 @@ mod tests {
         ledger.settle(&1, true, None);
         let settled = ledger.settle(&1, false, None);
         assert!(settled.inventory.is_none());
+    }
+
+    /// Failed probes on the current channel until the ledger asks to retire it.
+    fn failures_until_eviction(ledger: &mut NodeLedger<i32>) -> u32 {
+        (1..=u32::from(u8::MAX))
+            .find(|_| ledger.settle(&1, false, None).evict_channel)
+            .expect("a node that never answers is eventually retired")
+    }
+
+    /// A Bluetooth-direct device asleep on a live link: the OS keeps the node
+    /// listed and every replacement channel stays as unanswered as the last.
+    /// Each unanswered replacement doubles the failures needed before the
+    /// next retirement, so the reopen cadence decays from ~35 s toward
+    /// minutes instead of churning OS handles all night (#735).
+    #[test]
+    fn unanswered_replacements_back_off_channel_eviction() {
+        let mut ledger = NodeLedger::default();
+        ledger.settle(&1, true, Some(inventory("keyboard")));
+
+        let mut thresholds = Vec::new();
+        for _ in 0..7 {
+            thresholds.push(failures_until_eviction(&mut ledger));
+            ledger.reset_channel_failures_after_open(&1);
+        }
+        assert_eq!(thresholds, vec![2, 4, 8, 16, 32, 32, 32]);
+
+        ledger.settle(&1, true, Some(inventory("keyboard")));
+        assert_eq!(
+            failures_until_eviction(&mut ledger),
+            u32::from(CHANNEL_EVICT_AFTER),
+            "an answered probe restores the prompt first retirement"
+        );
+    }
+
+    /// A channel replaced before its probe threshold (a capture-reported dead
+    /// channel) was not retired unanswered, and a tick with no channel at all
+    /// failed nothing: neither backs off the next retirement.
+    #[test]
+    fn a_replacement_before_the_threshold_does_not_back_off() {
+        let mut ledger = NodeLedger::default();
+        ledger.settle(&1, true, Some(inventory("keyboard")));
+        assert!(!ledger.settle(&1, false, None).evict_channel);
+        ledger.reset_channel_failures_after_open(&1);
+        for _ in 0..3 {
+            assert!(!ledger.settle_without_channel(&1).evict_channel);
+        }
+
+        ledger.reset_channel_failures_after_open(&1);
+        assert_eq!(
+            failures_until_eviction(&mut ledger),
+            u32::from(CHANNEL_EVICT_AFTER)
+        );
+    }
+
+    /// The receiver answering its pairing-count register proves the link is
+    /// alive, so it clears the backoff as an answered probe would.
+    #[test]
+    fn arrival_replay_liveness_clears_the_eviction_backoff() {
+        let mut ledger = NodeLedger::default();
+        ledger.settle(&1, true, Some(inventory("bolt")));
+        failures_until_eviction(&mut ledger);
+        ledger.reset_channel_failures_after_open(&1);
+        failures_until_eviction(&mut ledger);
+        ledger.reset_channel_failures_after_open(&1);
+
+        ledger.settle_arrival_replay_failure(&1);
+        assert_eq!(
+            failures_until_eviction(&mut ledger),
+            u32::from(CHANNEL_EVICT_AFTER)
+        );
     }
 
     #[test]

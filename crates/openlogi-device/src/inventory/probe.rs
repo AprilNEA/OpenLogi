@@ -263,14 +263,20 @@ impl PassContext<'_> {
 /// the invariant lived in a comment at every construction site.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ProbeVerdict {
-    /// The node could not be checked (budget timeout, unanswered registers, a
-    /// feature walk that never finished): the ledger replays the last-good
-    /// snapshot instead of presenting the failure as truth.
+    /// The node could not be checked (budget timeout, an unanswered liveness
+    /// register, a feature walk that never finished): the ledger replays the
+    /// last-good snapshot instead of presenting the failure as truth. A
+    /// receiver that answered its pairing count is [`Self::Partial`] instead.
     Failed,
     /// The receiver answered a liveness register, but the only operation that
     /// can produce an authoritative device list failed. The ledger may replay
     /// its last-good snapshot briefly, but must eventually reopen the channel.
     AliveButIncomplete,
+    /// The receiver answered its pairing-count register, but not every
+    /// counted slot was readable. The walk is not authoritative — the ledger
+    /// replays the last-good snapshot as for [`Self::Failed`] — but the link
+    /// is alive, which the ledger's channel-eviction backoff must see.
+    Partial,
     /// The node was not checked at all: another OpenLogi process held its
     /// receiver register phase, so this probe skipped the node's I/O and has
     /// no evidence either way. The ledger replays the last-good snapshot
@@ -289,16 +295,6 @@ pub(super) enum ProbeVerdict {
 }
 
 impl ProbeVerdict {
-    /// `Healthy` with `complete` decided by the walk, `Failed` otherwise —
-    /// for paths where one flag carries both facts.
-    pub(super) fn healthy_when(answered_in_full: bool) -> Self {
-        if answered_in_full {
-            Self::Healthy { complete: true }
-        } else {
-            Self::Failed
-        }
-    }
-
     /// The node produced an authoritative inventory this tick.
     pub(super) fn is_healthy(self) -> bool {
         matches!(self, Self::Healthy { .. })

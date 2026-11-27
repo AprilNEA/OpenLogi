@@ -263,7 +263,7 @@ fn partial_first_probe_does_not_abandon_unread_slots_during_deferral() {
     // The receiver reports two paired slots but only one identity is readable.
     // Its identifying outcome is not a complete cache-ownership inventory.
     let partial = assemble_bolt_probe(bolt_receiver_info(), Some(2), vec![bolt_slot(1)]);
-    assert_eq!(partial.verdict, ProbeVerdict::Failed);
+    assert_eq!(partial.verdict, ProbeVerdict::Partial);
     pass(&mut e, partial);
     assert_eq!(e.misses.get(&unread), Some(&1));
     for _ in 0..CACHE_MISS_GRACE {
