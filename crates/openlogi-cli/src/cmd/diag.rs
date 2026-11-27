@@ -8,10 +8,12 @@
 //! the agent owns the device's HID channel and the device leaves this
 //! computer's radio link after the write.
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::Subcommand;
 use openlogi_core::device::DeviceInventory;
+use openlogi_core::single_instance::{self, InstanceGuard, Role};
 use openlogi_hid::{DeviceRoute, dump_features};
+use openlogi_ipc::client::ConnectError;
 
 pub mod battery;
 pub mod controls;
@@ -94,12 +96,37 @@ impl DiagCmd {
     }
 }
 
+/// Keep the agent off the devices for as long as the returned guard lives,
+/// for a diagnostic that writes to a device directly.
+///
+/// The agent holds each device's channel and may write to it at any time. It
+/// takes this lock before any HID I/O, so holding it keeps one from starting
+/// mid-command; the endpoint check refuses an agent that is already up.
+pub(crate) async fn exclude_agent() -> Result<InstanceGuard> {
+    let guard = single_instance::acquire(Role::Agent).context(
+        "could not take the agent's instance lock; quit the OpenLogi agent, then run this again",
+    )?;
+    if !matches!(
+        crate::agent::connect().await,
+        Err(ConnectError::Endpoint(_))
+    ) {
+        bail!("the OpenLogi agent is running; quit it, then run this again");
+    }
+    Ok(guard)
+}
+
 /// One online, paired device discovered during enumeration, already resolved to
 /// the [`DeviceRoute`] needed to talk to it. Builds a Bolt route when the device
 /// is behind a receiver, a direct route otherwise (USB cable / Bluetooth).
-struct Candidate {
-    route: DeviceRoute,
-    name: String,
+#[derive(Debug, Clone)]
+pub(crate) struct Candidate {
+    /// How to reach the device.
+    pub(crate) route: DeviceRoute,
+    /// Its name, as `--device` matches it.
+    pub(crate) name: String,
+    /// The `0x0003` unit ID enumeration read, if it read one. A write bound to
+    /// this physical device checks it again before writing.
+    pub(crate) unit: Option<[u8; 4]>,
 }
 
 /// Enumerate inventories and resolve every *online* paired device to a route.
@@ -120,7 +147,12 @@ fn online_candidates(inventory: &DeviceInventory) -> Vec<Candidate> {
                 .codename
                 .clone()
                 .unwrap_or_else(|| format!("Slot {}", paired.slot));
-            candidates.push(Candidate { route, name });
+            let unit = paired
+                .model_info
+                .as_ref()
+                .map(|info| info.unit_id)
+                .filter(|unit| *unit != [0; 4]);
+            candidates.push(Candidate { route, name, unit });
         } else {
             tracing::warn!(
                 receiver = %inventory.receiver.name,
@@ -142,6 +174,11 @@ fn online_candidates(inventory: &DeviceInventory) -> Vec<Candidate> {
 /// chosen route that another online device shares: two Bluetooth-direct
 /// devices with one vendor/product id have one route, whatever their names.
 fn select_named_device(devices: &[Candidate], query: &str) -> Result<(DeviceRoute, String)> {
+    select_named_candidate(devices, query).map(|chosen| (chosen.route.clone(), chosen.name.clone()))
+}
+
+/// [`select_named_device`], keeping the whole candidate.
+fn select_named_candidate<'a>(devices: &'a [Candidate], query: &str) -> Result<&'a Candidate> {
     let needle = query.to_lowercase();
     let matches: Vec<&Candidate> = devices
         .iter()
@@ -168,7 +205,7 @@ fn select_named_device(devices: &[Candidate], query: &str) -> Result<(DeviceRout
             chosen.name
         ));
     }
-    Ok((chosen.route.clone(), chosen.name.clone()))
+    Ok(chosen)
 }
 
 fn candidate_list(candidates: &[&Candidate]) -> String {
@@ -232,10 +269,21 @@ pub(crate) async fn select_device(
     query: Option<&str>,
     required_features: &[u16],
 ) -> Result<(DeviceRoute, String)> {
+    select_candidate(query, required_features)
+        .await
+        .map(|chosen| (chosen.route, chosen.name))
+}
+
+/// [`select_device`], keeping the unit ID enumeration read, for a write that
+/// must stay bound to the device the user chose.
+pub(crate) async fn select_candidate(
+    query: Option<&str>,
+    required_features: &[u16],
+) -> Result<Candidate> {
     let devices = online_devices().await?;
 
     if let Some(q) = query {
-        return select_named_device(&devices, q);
+        return select_named_candidate(&devices, q).cloned();
     }
 
     if !required_features.is_empty() {
@@ -243,7 +291,7 @@ pub(crate) async fn select_device(
             match dump_features(&c.route).await {
                 Ok(entries) => {
                     if entries.iter().any(|e| required_features.contains(&e.id)) {
-                        return Ok((c.route.clone(), c.name.clone()));
+                        return Ok(c.clone());
                     }
                 }
                 Err(e) => {
@@ -265,14 +313,14 @@ pub(crate) async fn select_device(
     devices
         .into_iter()
         .next()
-        .map(|c| (c.route, c.name))
         .ok_or_else(|| no_match_err(&[], None))
 }
 
 #[cfg(test)]
 mod tests {
     use openlogi_core::device::{
-        Capabilities, DeviceInventory, DeviceKind, PairedDevice, ReceiverInfo,
+        Capabilities, DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports, PairedDevice,
+        ReceiverInfo,
     };
     use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute};
 
@@ -287,6 +335,7 @@ mod tests {
                 product_id,
             },
             name: name.to_string(),
+            unit: None,
         }
     }
 
@@ -418,6 +467,32 @@ mod tests {
                 slot: 4,
             }
         );
+    }
+
+    #[test]
+    fn a_candidate_keeps_the_unit_id_enumeration_read() {
+        let model = |unit_id| DeviceModelInfo {
+            entity_count: 1,
+            serial_number: None,
+            unit_id,
+            transports: DeviceTransports::default(),
+            model_ids: [0x4093, 0, 0],
+            extended_model_id: 2,
+        };
+        let mut known = paired(1, "PRO X Wireless", true);
+        known.model_info = Some(model([1, 2, 3, 4]));
+        let mut zeroed = paired(2, "G502 X Plus", true);
+        zeroed.model_info = Some(model([0; 4]));
+        let unread = paired(3, "G Pro", true);
+        let inventory = inventory(0xc547, Some("receiver-uid"), vec![known, zeroed, unread]);
+
+        let units: Vec<_> = online_candidates(&inventory)
+            .iter()
+            .map(|candidate| candidate.unit)
+            .collect();
+
+        // A zero unit ID names no unit, so a bound write must refuse it.
+        assert_eq!(units, [Some([1, 2, 3, 4]), None, None]);
     }
 
     #[test]

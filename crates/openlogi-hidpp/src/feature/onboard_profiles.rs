@@ -1,8 +1,12 @@
 //! Implements the `OnboardProfiles` feature (ID `0x8100`).
 //!
-//! Reverse-engineered (libratbag), checked on a G502 LIGHTSPEED. Never writes flash.
+//! Reverse-engineered (libratbag), checked on a G502 LIGHTSPEED and a PRO X
+//! SUPERLIGHT. Flash is written only through [`OnboardProfilesFeature::write_profile`],
+//! one whole CRC-sealed profile sector at a time.
 
-use std::num::NonZeroU8;
+use std::num::{NonZeroU8, NonZeroU16};
+
+use crc::{CRC_16_IBM_3740, Crc};
 
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use openlogi_hidpp_derive::Feature;
@@ -15,6 +19,9 @@ const FN_GET_MODE: u8 = 2;
 const FN_SET_CURRENT_PROFILE: u8 = 3;
 const FN_GET_CURRENT_PROFILE: u8 = 4;
 const FN_MEMORY_READ: u8 = 5;
+const FN_MEMORY_ADDR_WRITE: u8 = 6;
+const FN_MEMORY_WRITE: u8 = 7;
+const FN_MEMORY_WRITE_END: u8 = 8;
 
 const USER_DIRECTORY_SECTOR: u16 = 0x0000;
 const ROM_DIRECTORY_SECTOR: u16 = 0x0100;
@@ -24,6 +31,15 @@ const NAME_OFFSET: u16 = 0xa0;
 const NAME_LEN: usize = 48;
 // What G HUB writes into an unnamed profile.
 const UNNAMED_PLACEHOLDER: &str = "PROFILE_NAME_DEFAULT";
+// The head profile formats 1–5 share (libratbag): report rate, the default
+// and shift DPI slot indices, then five little-endian DPI slots.
+const DEFAULT_DPI_SLOT_OFFSET: usize = 1;
+const DPI_TABLE_OFFSET: usize = 3;
+/// DPI slots a stored profile holds.
+pub const DPI_SLOTS: usize = 5;
+// A sector ends in a big-endian CRC-16/CCITT-FALSE over the bytes before it.
+const SECTOR_CRC: Crc<u16> = Crc::<u16>::new(&CRC_16_IBM_3740);
+const CRC_LEN: usize = 2;
 
 /// Implements the `OnboardProfiles` / `0x8100` feature.
 #[derive(Clone, Feature)]
@@ -184,6 +200,135 @@ impl OnboardProfilesFeature {
         }
         Ok(name_from_bytes(&bytes[..NAME_LEN]))
     }
+
+    /// Reads the whole profile stored in `sector` and checks its CRC.
+    ///
+    /// Fails with [`Hidpp20Error::UnsupportedResponse`] for a profile format
+    /// whose layout is unknown, or a sector whose CRC does not match.
+    pub async fn read_profile(
+        &self,
+        info: &OnboardProfilesInfo,
+        sector: u16,
+    ) -> Result<ProfileSector, Hidpp20Error> {
+        if !(1..=5).contains(&info.profile_format) {
+            return Err(Hidpp20Error::UnsupportedResponse);
+        }
+        let size = usize::from(info.sector_size);
+        let mut bytes = vec![0; size];
+        for start in (0..size).step_by(usize::from(READ_CHUNK)) {
+            // A sector size that is no multiple of 16 ends with a read that
+            // overlaps the previous one, so no read runs past the sector.
+            let start = start.min(size.saturating_sub(usize::from(READ_CHUNK)));
+            let offset = u16::try_from(start).map_err(|_| Hidpp20Error::UnsupportedResponse)?;
+            let chunk = self.read_memory(sector, offset).await?;
+            let end = (start + chunk.len()).min(size);
+            bytes[start..end].copy_from_slice(&chunk[..end - start]);
+        }
+        ProfileSector::from_bytes(sector, bytes).ok_or(Hidpp20Error::UnsupportedResponse)
+    }
+
+    /// Writes `profile` back to its sector, sealed with a fresh CRC.
+    ///
+    /// The sector is written whole: start, every 16-byte chunk, end. The owner
+    /// must drive this future to completion, since an abandoned write leaves
+    /// a sector the firmware rejects until it is written again.
+    pub async fn write_profile(&self, profile: &ProfileSector) -> Result<(), Hidpp20Error> {
+        let bytes = &profile.bytes;
+        let size = u16::try_from(bytes.len()).map_err(|_| Hidpp20Error::UnsupportedResponse)?;
+        let [sector_hi, sector_lo] = profile.sector.to_be_bytes();
+        let [size_hi, size_lo] = size.to_be_bytes();
+        let mut args = [0; 16];
+        args[..6].copy_from_slice(&[sector_hi, sector_lo, 0, 0, size_hi, size_lo]);
+        self.endpoint
+            .call_long_write_through(FN_MEMORY_ADDR_WRITE, args)
+            .await?;
+        for chunk in bytes.chunks(usize::from(READ_CHUNK)) {
+            let mut args = [0xff; 16];
+            args[..chunk.len()].copy_from_slice(chunk);
+            self.endpoint
+                .call_long_write_through(FN_MEMORY_WRITE, args)
+                .await?;
+        }
+        self.endpoint
+            .call_write_through(FN_MEMORY_WRITE_END, [0; 3])
+            .await?;
+        Ok(())
+    }
+}
+
+/// One stored profile sector. Its CRC checked out when it was read, and every
+/// edit reseals it, so the bytes held are always the bytes flash should hold.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProfileSector {
+    sector: u16,
+    bytes: Vec<u8>,
+}
+
+impl ProfileSector {
+    fn from_bytes(sector: u16, bytes: Vec<u8>) -> Option<Self> {
+        let body_len = bytes.len().checked_sub(CRC_LEN)?;
+        if body_len < DPI_TABLE_OFFSET + DPI_SLOTS * 2 {
+            return None;
+        }
+        let stored = u16::from_be_bytes([bytes[body_len], bytes[body_len + 1]]);
+        if SECTOR_CRC.checksum(&bytes[..body_len]) != stored {
+            return None;
+        }
+        if usize::from(bytes[DEFAULT_DPI_SLOT_OFFSET]) >= DPI_SLOTS {
+            return None;
+        }
+        Some(Self { sector, bytes })
+    }
+
+    /// The flash sector the profile lives in.
+    #[must_use]
+    pub fn sector(&self) -> u16 {
+        self.sector
+    }
+
+    /// The five DPI slots; `None` for an unused one.
+    #[must_use]
+    pub fn dpi_slots(&self) -> [Option<NonZeroU16>; DPI_SLOTS] {
+        std::array::from_fn(|slot| {
+            let at = DPI_TABLE_OFFSET + slot * 2;
+            let dpi = u16::from_le_bytes([self.bytes[at], self.bytes[at + 1]]);
+            NonZeroU16::new(dpi).filter(|dpi| dpi.get() != 0xffff)
+        })
+    }
+
+    /// The slot the profile starts in.
+    #[must_use]
+    pub fn default_dpi_slot(&self) -> usize {
+        usize::from(self.bytes[DEFAULT_DPI_SLOT_OFFSET])
+    }
+
+    /// The DPI the profile starts at, or `None` if its default slot is unused.
+    #[must_use]
+    pub fn default_dpi(&self) -> Option<NonZeroU16> {
+        self.dpi_slots()[self.default_dpi_slot()]
+    }
+
+    /// Makes `dpi` the profile's startup DPI. A slot that already holds it
+    /// becomes the default; otherwise `dpi` replaces the value in the default
+    /// slot, so the rest of the table is untouched either way.
+    pub fn set_default_dpi(&mut self, dpi: NonZeroU16) {
+        let holding = (0u8..)
+            .zip(self.dpi_slots())
+            .find_map(|(slot, held)| (held == Some(dpi)).then_some(slot));
+        if let Some(slot) = holding {
+            self.bytes[DEFAULT_DPI_SLOT_OFFSET] = slot;
+        } else {
+            let at = DPI_TABLE_OFFSET + self.default_dpi_slot() * 2;
+            self.bytes[at..at + 2].copy_from_slice(&dpi.get().to_le_bytes());
+        }
+        self.seal();
+    }
+
+    fn seal(&mut self) {
+        let body_len = self.bytes.len() - CRC_LEN;
+        let crc = SECTOR_CRC.checksum(&self.bytes[..body_len]);
+        self.bytes[body_len..].copy_from_slice(&crc.to_be_bytes());
+    }
 }
 
 fn info_from_payload(payload: &[u8; 16]) -> OnboardProfilesInfo {
@@ -276,6 +421,124 @@ mod tests {
                 },
             ]
         );
+    }
+
+    /// A 255-byte sector (the G502 LIGHTSPEED size) holding `slots` and
+    /// starting in `default`, sealed with a valid CRC.
+    fn sector_with(slots: [u16; DPI_SLOTS], default: u8) -> ProfileSector {
+        let mut bytes = vec![0xff; 255];
+        bytes[0] = 4;
+        bytes[DEFAULT_DPI_SLOT_OFFSET] = default;
+        bytes[2] = 0;
+        for (slot, dpi) in slots.iter().enumerate() {
+            let at = DPI_TABLE_OFFSET + slot * 2;
+            bytes[at..at + 2].copy_from_slice(&dpi.to_le_bytes());
+        }
+        let mut sector = ProfileSector { sector: 1, bytes };
+        sector.seal();
+        ProfileSector::from_bytes(1, sector.bytes).unwrap()
+    }
+
+    fn dpi(value: u16) -> NonZeroU16 {
+        NonZeroU16::new(value).unwrap()
+    }
+
+    #[test]
+    fn sector_crc_is_ccitt_false() {
+        assert_eq!(SECTOR_CRC.checksum(b"123456789"), 0x29b1);
+    }
+
+    #[test]
+    fn reads_the_dpi_table_and_its_default() {
+        let sector = sector_with([400, 1200, 1950, 3250, 0xffff], 3);
+        assert_eq!(
+            sector.dpi_slots(),
+            [
+                Some(dpi(400)),
+                Some(dpi(1200)),
+                Some(dpi(1950)),
+                Some(dpi(3250)),
+                None
+            ]
+        );
+        assert_eq!(sector.default_dpi(), Some(dpi(3250)));
+    }
+
+    #[test]
+    fn rejects_a_sector_whose_crc_does_not_match() {
+        let mut bytes = sector_with([400, 800, 1600, 3200, 6400], 2).bytes;
+        bytes[DPI_TABLE_OFFSET] ^= 1;
+        assert_eq!(ProfileSector::from_bytes(1, bytes), None);
+    }
+
+    #[test]
+    fn rejects_a_default_slot_outside_the_table() {
+        let mut sector = sector_with([400, 800, 1600, 3200, 6400], 0);
+        sector.bytes[DEFAULT_DPI_SLOT_OFFSET] = 5;
+        sector.seal();
+        assert_eq!(ProfileSector::from_bytes(1, sector.bytes), None);
+    }
+
+    #[test]
+    fn a_held_dpi_becomes_the_default_without_touching_the_table() {
+        let mut sector = sector_with([400, 1200, 1950, 3250, 4000], 3);
+        let table = sector.dpi_slots();
+        sector.set_default_dpi(dpi(1200));
+        assert_eq!(sector.default_dpi_slot(), 1);
+        assert_eq!(sector.dpi_slots(), table);
+    }
+
+    #[test]
+    fn a_new_dpi_replaces_only_the_default_slot() {
+        let mut sector = sector_with([400, 800, 1600, 3200, 6400], 2);
+        sector.set_default_dpi(dpi(1200));
+        assert_eq!(sector.default_dpi_slot(), 2);
+        assert_eq!(
+            sector.dpi_slots(),
+            [
+                Some(dpi(400)),
+                Some(dpi(800)),
+                Some(dpi(1200)),
+                Some(dpi(3200)),
+                Some(dpi(6400))
+            ]
+        );
+    }
+
+    #[test]
+    fn an_edited_sector_reseals_and_keeps_every_other_byte() {
+        let original = sector_with([400, 1200, 1950, 3250, 4000], 3);
+        let mut edited = original.clone();
+        edited.set_default_dpi(dpi(1200));
+        // What flash holds after a write must read back equal to the edit.
+        let reread = ProfileSector::from_bytes(1, edited.bytes.clone()).unwrap();
+        assert_eq!(reread, edited);
+        let sealed = edited.bytes;
+        let before = original.bytes;
+        let changed: Vec<usize> = (0..before.len())
+            .filter(|&i| before[i] != sealed[i])
+            .collect();
+        assert_eq!(changed[0], DEFAULT_DPI_SLOT_OFFSET);
+        assert!(changed[1..].iter().all(|&i| i >= before.len() - CRC_LEN));
+    }
+
+    /// Profile 1 as read from a PRO X SUPERLIGHT (format 4, 255-byte sectors):
+    /// slots 400/800/1600/3200/4950, starting in slot 4. The device layer's
+    /// scripted mouse serves the same file.
+    const SUPERLIGHT_PROFILE: &[u8] = include_bytes!("onboard_profiles/superlight_profile_1.bin");
+    #[test]
+    fn rewrites_a_superlight_profile_the_way_its_flash_stored_it() {
+        let bytes = SUPERLIGHT_PROFILE.to_vec();
+        let mut sector = ProfileSector::from_bytes(1, bytes.clone()).unwrap();
+        assert_eq!(sector.default_dpi(), Some(dpi(4950)));
+        sector.set_default_dpi(dpi(1200));
+        let changed: Vec<usize> = (0..bytes.len())
+            .filter(|&i| bytes[i] != sector.bytes[i])
+            .collect();
+        // Measured: the device then held slot 4 = 1200 and CRC 0x4682.
+        assert_eq!(changed, [11, 12, 253, 254]);
+        assert_eq!(sector.bytes[253..], [0x46, 0x82]);
+        assert_eq!(sector.default_dpi(), Some(dpi(1200)));
     }
 
     fn nz(index: u8) -> NonZeroU8 {

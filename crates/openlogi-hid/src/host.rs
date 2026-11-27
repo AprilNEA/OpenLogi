@@ -27,8 +27,8 @@ use openlogi_device::inventory::{Enumerator, InventoryError};
 use openlogi_device::pairing::PairingReceiver;
 use openlogi_device::write::{
     self as device, Dpi, DpiInfo, FeatureEntry, FirmwareEntity, HapticWaveform, LightingMethod,
-    LitraModel, PointerScaling, ReprogControlEntry, ScrollResolution, ScrollWheelMode,
-    SidetoneLevel,
+    LitraModel, OnboardDefaultDpi, OnboardDefaultDpiChange, PointerScaling, ReprogControlEntry,
+    ScrollResolution, ScrollWheelMode, SidetoneLevel,
 };
 use openlogi_device::{ButtonSpyError, ButtonSpyWatch, LightWatch};
 use openlogi_device::{DeviceIoGate, DeviceIoSignal, DeviceRoute};
@@ -163,6 +163,16 @@ pub async fn set_scroll_wheel_mode(
 /// Read the onboard memory of the device on `route`.
 pub async fn get_onboard(route: &DeviceRoute) -> Result<OnboardState, WriteError> {
     device::get_onboard(&*native_backend(), route).await
+}
+
+/// Make `write.dpi` the startup DPI of onboard `write.profile` on the mouse
+/// `route` reaches, if it is still the unit `write.unit` names, and read it
+/// back.
+pub async fn set_onboard_default_dpi(
+    route: &DeviceRoute,
+    write: OnboardDefaultDpi,
+) -> Result<OnboardDefaultDpiChange, WriteError> {
+    device::set_onboard_default_dpi(&*native_backend(), route, write).await
 }
 
 /// Read the HID++ `0x8110` slot mapping of the mouse `route` reaches and

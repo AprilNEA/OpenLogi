@@ -362,9 +362,12 @@ pub enum HidppOperation {
     /// Read the `0x8300` sidetone level. Appended after `ChangeHost` —
     /// variant order is wire format.
     ReadSidetone,
-    /// Write the `0x8300` sidetone level. Appended last — variant order is
-    /// wire format.
+    /// Write the `0x8300` sidetone level. Appended after `ReadSidetone` —
+    /// variant order is wire format.
     WriteSidetone,
+    /// Write a profile sector of `0x8100` onboard memory. Appended last —
+    /// variant order is wire format.
+    WriteOnboard,
 }
 
 /// HID++ feature error kind in a serializable wire-safe form.

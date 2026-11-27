@@ -193,7 +193,8 @@ pub use succession::Identity;
 ///      `Action::{EasySwitchChannel1, EasySwitchChannel2, EasySwitchChannel3}`
 ///      and `ActionRingIcon::{Channel1, Channel2, Channel3}` appended after
 ///      them — a device's move to another Easy-Switch channel, bound to a
-///      button or an Actions Ring slot.
+///      button or an Actions Ring slot. `HidppOperation::WriteOnboard`
+///      appended — a write to a G-series mouse's `0x8100` onboard profile.
 pub const PROTOCOL_VERSION: u32 = 46;
 
 /// Environment variable through which the agent hands a supervised helper the
