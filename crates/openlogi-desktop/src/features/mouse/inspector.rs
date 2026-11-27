@@ -10,11 +10,11 @@ use gpui::{
 };
 use gpui_kit::base::Button as BaseButton;
 use gpui_kit::component::{
-    Disableable as _, Icon, IconName, Selectable as _, Sizable as _, button::Button, h_flex,
-    input::InputState, scroll::ScrollableElement as _, v_flex,
+    Icon, IconName, Selectable as _, Sizable as _, button::Button, h_flex, input::InputState,
+    scroll::ScrollableElement as _, v_flex,
 };
 use openlogi_core::binding::{
-    Action, ButtonId, GamingLayout, GestureDirection, default_binding, default_binding_on,
+    Action, ButtonId, GamingLayout, GestureDirection, HeldDrag, default_binding, default_binding_on,
 };
 
 use super::editor_mode::Selection;
@@ -27,10 +27,12 @@ use crate::features::binding_editor::{
 };
 use crate::state::AppState;
 use crate::ui::action::localized_action_label;
-use crate::ui::components::{MenuRow, Toggle, control_button, control_input, toggle_row};
+use crate::ui::components::{MenuRow, control_button, control_input};
 use crate::ui::theme::{
     self, ACCENT_BLUE, Palette, PressableStyle as _, SelectableStyle as _, Typography as _,
 };
+
+mod modes;
 
 pub(super) const INSPECTOR_W: f32 = 328.;
 
@@ -46,8 +48,14 @@ pub(super) struct BindingInspectorData<'a> {
     /// The device reports raw wheel on Back/Forward, so holding one can
     /// scroll sideways (`Capabilities::virtual_thumbwheel`).
     pub virtual_thumbwheel: bool,
+    /// The device reports raw XY on Back/Forward, so holding one can play a
+    /// trackpad swipe (`Capabilities::drag_hold`).
+    pub drag_hold_capable: bool,
     /// Buttons that hold the wheel to scroll sideways, from the global profile.
     pub wheel_hold: &'a BTreeSet<ButtonId>,
+    /// Buttons whose hold and drag plays a trackpad swipe, and which one,
+    /// from the global profile.
+    pub drag_hold: &'a BTreeMap<ButtonId, HeldDrag>,
     pub editing_app: Option<&'a str>,
     pub overridden: Option<&'a BTreeMap<ButtonId, Action>>,
     /// The haptic panel's press-force row, present only while
@@ -187,10 +195,6 @@ fn empty_inspector(app: Option<&str>, override_count: usize, pal: Palette) -> gp
         .child(div().text_body().text_color(pal.text_muted).child(summary))
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "the button inspector lays out its rows inline"
-)]
 fn button_inspector(
     button: ButtonId,
     direction: GestureDirection,
@@ -220,6 +224,13 @@ fn button_inspector(
         .get(&button)
         .cloned()
         .unwrap_or_else(|| default_binding_on(data.layout, button));
+    // Drag-hold mode, like gesture mode, lives in the global profile only.
+    let drag = data
+        .editing_app
+        .is_none()
+        .then(|| data.drag_hold.get(&button).copied())
+        .flatten();
+    let sideways = data.editing_app.is_none() && data.wheel_hold.contains(&button);
     let observer = picker.view.clone();
     let on_pick: PickFn = Rc::new(move |action, _window, cx| {
         AppState::apply(cx, |state| state.commit_binding(button, action));
@@ -236,14 +247,18 @@ fn button_inspector(
             Some(button_status(button, &action, data, overridden)),
             pal,
         ))
+        .children(modes::mode_list(button, data, picker.view, pal))
+        .when_some(drag, |panel, drag| {
+            panel
+                .child(modes::drag_swipe_choice(button, drag, pal))
+                .child(click_caption(tr!("actions.drag_hold_click"), pal))
+        })
+        .when(sideways, |panel| {
+            panel.child(click_caption(tr!("actions.wheel_hold_click"), pal))
+        })
         .child(current_action_card(&action, picker, pal))
-        .children(wheel_hold_section(
-            button,
-            data,
-            overridden,
-            picker.view,
-            pal,
-        ))
+        .children(wheel_hold_app_note(button, data, overridden, pal))
+        .children(drag_hold_app_note(button, data, overridden, pal))
         .when(overridden, |panel| {
             let observer = picker.view.clone();
             panel.child(
@@ -260,33 +275,17 @@ fn button_inspector(
                     }),
             )
         })
-        .when(can_enable_gestures(button, data.editing_app), |panel| {
-            let observer = picker.view.clone();
-            let unavailable = button == ButtonId::DpiToggle && !data.dpi_gestures;
-            panel
-                .child(
-                    control_button("inspector-use-gestures")
-                        .w_full()
-                        .icon(Icon::empty().path(GESTURE_BUTTON_ICON))
-                        .label(tr!("actions.use_gestures"))
-                        .disabled(unavailable)
-                        .on_click(move |_, _, cx| {
-                            AppState::apply(cx, |state| state.commit_gesture_mode(button, true));
-                            observer.update(cx, |view, cx| {
-                                view.select_gesture_direction(GestureDirection::Click);
-                                cx.notify();
-                            });
-                        }),
+        .when(
+            data.editing_app.is_none() && button == ButtonId::DpiToggle && !data.dpi_gestures,
+            |panel| {
+                panel.child(
+                    div()
+                        .text_body()
+                        .text_color(pal.text_muted)
+                        .child(tr!("actions.dpi_gestures_unavailable")),
                 )
-                .when(unavailable, |panel| {
-                    panel.child(
-                        div()
-                            .text_body()
-                            .text_color(pal.text_muted)
-                            .child(tr!("actions.dpi_gestures_unavailable")),
-                    )
-                })
-        })
+            },
+        )
         .children(
             data.press_force
                 .map(|press_force| force_sensing_row(press_force, pal)),
@@ -315,8 +314,9 @@ fn button_status(
     data: &BindingInspectorData<'_>,
     overridden: bool,
 ) -> gpui::SharedString {
-    let default =
-        *action == default_binding_on(data.layout, button) && !data.wheel_hold.contains(&button);
+    let default = *action == default_binding_on(data.layout, button)
+        && !data.wheel_hold.contains(&button)
+        && !data.drag_hold.contains_key(&button);
     match (data.editing_app, overridden, default) {
         (Some(app), true, _) => tr!("actions.overridden_in_app", app => app.to_string()),
         (Some(_), false, _) => tr!("profiles.inherited_from_default"),
@@ -325,68 +325,60 @@ fn button_status(
     }
 }
 
-/// Back/Forward's wheel-hold control: the switch in the global profile, or,
-/// in an app profile that has not overridden the button, a note that an
-/// action picked there replaces it.
-fn wheel_hold_section(
+/// In an app profile that has not overridden a wheel-hold button, a note
+/// that an action picked there replaces holding to scroll sideways.
+fn wheel_hold_app_note(
     button: ButtonId,
     data: &BindingInspectorData<'_>,
     overridden: bool,
-    view: &Entity<MouseModelView>,
     pal: Palette,
 ) -> Option<gpui::AnyElement> {
-    let enabled = data.wheel_hold.contains(&button);
-    match data.editing_app {
-        None if button.supports_wheel_hold() && (data.virtual_thumbwheel || enabled) => {
-            Some(wheel_hold_row(button, enabled, view, pal).into_any_element())
-        }
-        Some(app) if enabled && !overridden => Some(
-            div()
-                .debug_selector(|| "inspector-wheel-hold-app-note".into())
-                .text_caption()
-                .text_color(pal.text_muted)
-                .child(tr!(
-                    "actions.app_profile_action_replaces_wheel_hold",
-                    app => app.to_string()
-                ))
-                .into_any_element(),
-        ),
-        _ => None,
-    }
+    let app = data.editing_app?;
+    (data.wheel_hold.contains(&button) && !overridden).then(|| {
+        div()
+            .debug_selector(|| "inspector-wheel-hold-app-note".into())
+            .text_caption()
+            .text_color(pal.text_muted)
+            .child(tr!(
+                "actions.app_profile_action_replaces_wheel_hold",
+                app => app.to_string()
+            ))
+            .into_any_element()
+    })
 }
 
-/// Back/Forward's wheel-hold switch. Shown only in the global profile: a
-/// per-app entry holds one action, so the mode is device-wide. Turning it
-/// off stays possible on a device that does not report raw wheel, so a
-/// binding carried over from another mouse can be removed.
-///
-/// The gesture inspector offers it too. Turning it on there leaves gesture
-/// mode, stashing the direction map, so the selected direction goes back
-/// to Click as "Use a single action" does.
-fn wheel_hold_row(
+/// The muted line above a held mode's action card, saying when it runs.
+fn click_caption(text: gpui::SharedString, pal: Palette) -> impl IntoElement {
+    div().text_caption().text_color(pal.text_muted).child(text)
+}
+
+/// Whether a held button's drag can play a trackpad swipe here: Back/Forward
+/// on a device that measured raw-XY support for them, on macOS, where the
+/// agent synthesises trackpad gestures.
+fn offers_drag_hold(button: ButtonId, data: &BindingInspectorData<'_>) -> bool {
+    cfg!(target_os = "macos") && button.supports_drag_hold() && data.drag_hold_capable
+}
+
+/// In an app profile that has not overridden a drag-hold button, a note that
+/// an action picked there replaces the drag.
+fn drag_hold_app_note(
     button: ButtonId,
-    enabled: bool,
-    view: &Entity<MouseModelView>,
+    data: &BindingInspectorData<'_>,
+    overridden: bool,
     pal: Palette,
-) -> impl IntoElement {
-    let observer = view.clone();
-    toggle_row(
-        "inspector-wheel-hold-row",
-        pal,
-        tr!("actions.hold_to_scroll_sideways"),
-        tr!("actions.hold_to_scroll_sideways_description"),
-        Toggle::new("inspector-wheel-hold-toggle")
-            .selected(enabled)
-            .on_change(move |enabled, _window, cx| {
-                AppState::apply(cx, |state| state.commit_wheel_hold(button, *enabled));
-                if *enabled {
-                    observer.update(cx, |view, cx| {
-                        view.select_gesture_direction(GestureDirection::Click);
-                        cx.notify();
-                    });
-                }
-            }),
-    )
+) -> Option<gpui::AnyElement> {
+    let app = data.editing_app?;
+    (data.drag_hold.contains_key(&button) && !overridden).then(|| {
+        div()
+            .debug_selector(|| "inspector-drag-hold-app-note".into())
+            .text_caption()
+            .text_color(pal.text_muted)
+            .child(tr!(
+                "actions.app_profile_action_replaces_drag_hold",
+                app => app.to_string()
+            ))
+            .into_any_element()
+    })
 }
 
 fn inherited_gesture_inspector(
@@ -458,9 +450,6 @@ fn gesture_inspector(
     pal: Palette,
     cx: &Context<MouseModelView>,
 ) -> gpui::Div {
-    // Gesture mode never holds the wheel, so the switch here is off and only
-    // turning it on is useful, which needs measured raw wheel.
-    let offer_wheel_hold = button.supports_wheel_hold() && data.virtual_thumbwheel;
     let current = gesture_action(gesture_map, button, direction);
     let observer = picker.view.clone();
     let on_pick: PickFn = Rc::new(move |action, _window, cx| {
@@ -472,7 +461,6 @@ fn gesture_inspector(
             cx.notify();
         });
     });
-    let turn_off = picker.view.clone();
 
     v_flex()
         .gap_3()
@@ -481,6 +469,7 @@ fn gesture_inspector(
             Some(tr!("actions.five_directions")),
             pal,
         ))
+        .children(modes::mode_list(button, data, picker.view, pal))
         .child(gesture_directions(
             direction,
             gesture_map,
@@ -489,21 +478,6 @@ fn gesture_inspector(
             pal,
         ))
         .child(current_action_card(&current, picker, pal))
-        .when(offer_wheel_hold, |panel| {
-            panel.child(wheel_hold_row(button, false, picker.view, pal))
-        })
-        .child(
-            control_button("inspector-single-action")
-                .w_full()
-                .label(tr!("actions.use_a_single_action"))
-                .on_click(move |_, _, cx| {
-                    AppState::apply(cx, |state| state.commit_gesture_mode(button, false));
-                    turn_off.update(cx, |view, cx| {
-                        view.select_gesture_direction(GestureDirection::Click);
-                        cx.notify();
-                    });
-                }),
-        )
         .children(
             data.press_force
                 .map(|press_force| force_sensing_row(press_force, pal)),
@@ -1076,10 +1050,13 @@ mod tests {
         ));
     }
 
+    static NO_DRAG_HOLD: BTreeMap<ButtonId, HeldDrag> = BTreeMap::new();
+
     fn global_profile<'a>(
         bindings: &'a BTreeMap<ButtonId, Action>,
         gesture_maps: &'a BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
         wheel_hold: &'a BTreeSet<ButtonId>,
+        drag_hold: &'a BTreeMap<ButtonId, HeldDrag>,
     ) -> BindingInspectorData<'a> {
         BindingInspectorData {
             selected: None,
@@ -1090,7 +1067,9 @@ mod tests {
             extra_actions: &[],
             hidden_actions: &[],
             virtual_thumbwheel: true,
+            drag_hold_capable: true,
             wheel_hold,
+            drag_hold,
             editing_app: None,
             overridden: None,
             press_force: None,
@@ -1101,7 +1080,7 @@ mod tests {
     fn a_g_button_on_its_stock_function_reads_as_the_device_default() {
         let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
         let (bindings, gesture_maps, held) = (BTreeMap::new(), BTreeMap::new(), BTreeSet::new());
-        let mut data = global_profile(&bindings, &gesture_maps, &held);
+        let mut data = global_profile(&bindings, &gesture_maps, &held, &NO_DRAG_HOLD);
         data.layout = Some(&openlogi_core::binding::G502_LIGHTSPEED);
         assert_eq!(
             button_status(ButtonId::G6, &Action::DpiShift, &data, false),
@@ -1120,16 +1099,78 @@ mod tests {
         let (bindings, gesture_maps) = (BTreeMap::new(), BTreeMap::new());
         let action = default_binding(ButtonId::Back);
         let plain = BTreeSet::new();
-        let data = global_profile(&bindings, &gesture_maps, &plain);
+        let data = global_profile(&bindings, &gesture_maps, &plain, &NO_DRAG_HOLD);
         assert_eq!(
             button_status(ButtonId::Back, &action, &data, false),
             tr!("pointer.device_default")
         );
         let held = BTreeSet::from([ButtonId::Back]);
-        let data = global_profile(&bindings, &gesture_maps, &held);
+        let data = global_profile(&bindings, &gesture_maps, &held, &NO_DRAG_HOLD);
         assert_eq!(
             button_status(ButtonId::Back, &action, &data, false),
             tr!("profiles.customized")
         );
+    }
+
+    #[test]
+    fn back_lists_every_mode_its_mouse_can_run() {
+        use super::modes::{ButtonMode, offered_modes};
+
+        let (bindings, gesture_maps, plain) = (BTreeMap::new(), BTreeMap::new(), BTreeSet::new());
+        let mut data = global_profile(&bindings, &gesture_maps, &plain, &NO_DRAG_HOLD);
+        let all = if cfg!(target_os = "macos") {
+            vec![
+                ButtonMode::Single,
+                ButtonMode::Gestures,
+                ButtonMode::ScrollSideways,
+                ButtonMode::HoldAndDrag,
+            ]
+        } else {
+            vec![
+                ButtonMode::Single,
+                ButtonMode::Gestures,
+                ButtonMode::ScrollSideways,
+            ]
+        };
+        assert_eq!(offered_modes(ButtonId::Back, &data), all);
+
+        data.virtual_thumbwheel = false;
+        data.drag_hold_capable = false;
+        assert_eq!(
+            offered_modes(ButtonId::Back, &data),
+            vec![ButtonMode::Single, ButtonMode::Gestures]
+        );
+        assert_eq!(
+            offered_modes(ButtonId::MiddleClick, &data),
+            vec![ButtonMode::Single, ButtonMode::Gestures]
+        );
+        assert_eq!(
+            offered_modes(ButtonId::DpiToggle, &data),
+            vec![ButtonMode::Single],
+            "DPI gestures need the device to report them"
+        );
+    }
+
+    #[test]
+    fn a_mode_the_mouse_cannot_run_stays_listed_while_the_button_is_in_it() {
+        use super::modes::{ButtonMode, offered_modes};
+
+        let (bindings, gesture_maps) = (BTreeMap::new(), BTreeMap::new());
+        let held = BTreeSet::from([ButtonId::Forward]);
+        let drags = BTreeMap::from([(ButtonId::Back, HeldDrag::TwoFingerSwipe)]);
+        let mut data = global_profile(&bindings, &gesture_maps, &held, &drags);
+        data.virtual_thumbwheel = false;
+        data.drag_hold_capable = false;
+
+        assert_eq!(
+            ButtonMode::of(ButtonId::Forward, &data),
+            ButtonMode::ScrollSideways
+        );
+        assert!(offered_modes(ButtonId::Forward, &data).contains(&ButtonMode::ScrollSideways));
+        assert_eq!(
+            ButtonMode::of(ButtonId::Back, &data),
+            ButtonMode::HoldAndDrag
+        );
+        assert!(offered_modes(ButtonId::Back, &data).contains(&ButtonMode::HoldAndDrag));
     }
 }

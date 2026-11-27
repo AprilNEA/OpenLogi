@@ -15,7 +15,7 @@ use gpui_kit::component::{
     input::{InputEvent, InputState},
     v_flex,
 };
-use openlogi_core::binding::{Action, ButtonId, GamingLayout, GestureDirection};
+use openlogi_core::binding::{Action, ButtonId, GamingLayout, GestureDirection, HeldDrag};
 
 use super::editor_mode::{EditorMode, PickerDrafts};
 use super::force_sensing::{ForceSensingFacts, ForceSensingSlider, PressForce};
@@ -75,7 +75,11 @@ fn held_actions(offer_gshift: bool) -> &'static [Action] {
 const MODEL_VERTICAL_RESERVE: f32 = 154.;
 
 mod labels;
-use labels::{CardSize, MAX_VALUE_LINES, ValueMetrics, binding_label_for_control, label_control};
+use labels::{
+    CardSize, MAX_VALUE_LINES, ValueMetrics, binding_label_for_control, callout_held_modes,
+    label_control,
+};
+pub(super) use labels::{drag_hold_fingers, drag_hold_icon, drag_hold_text};
 /// Floor for the scaled model height. Below this the evenly-slotted side labels
 /// (≈[`LABEL_H`](super::geometry::LABEL_H) each) start to overlap; the window's minimum height is sized to
 /// keep the viewport above [`MODEL_VERTICAL_RESERVE`] + this.
@@ -91,6 +95,10 @@ const MODEL_HORIZONTAL_RESERVE: f32 =
 /// Floor for the model's available width on a narrow window.
 const MODEL_MIN_CONTENT_W: f32 = 200.;
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent device capability flags, each read straight into the inspector"
+)]
 struct MouseWorkspaceData<'a> {
     asset: Option<&'a ResolvedAsset>,
     layout: Option<&'static GamingLayout>,
@@ -101,7 +109,9 @@ struct MouseWorkspaceData<'a> {
     thumbwheel: bool,
     dpi_gestures: bool,
     virtual_thumbwheel: bool,
+    drag_hold_capable: bool,
     wheel_hold: &'a BTreeSet<ButtonId>,
+    drag_hold: &'a BTreeMap<ButtonId, HeldDrag>,
     editing_app: Option<String>,
     overridden: Option<&'a BTreeMap<ButtonId, Action>>,
     /// Actions the picker offers beyond the catalog.
@@ -137,7 +147,12 @@ impl<'a> MouseWorkspaceData<'a> {
                 .current_record()
                 .and_then(|record| record.capabilities)
                 .is_some_and(|capabilities| capabilities.virtual_thumbwheel),
+            drag_hold_capable: state
+                .current_record()
+                .and_then(|record| record.capabilities)
+                .is_some_and(|capabilities| capabilities.drag_hold),
             wheel_hold: state.wheel_hold_buttons(),
+            drag_hold: state.drag_hold_buttons(),
             editing_app: if state.binding_layer() == BindingLayer::GShift {
                 Some(tr!("actions.g_shift").to_string())
             } else {
@@ -164,6 +179,7 @@ impl<'a> MouseWorkspaceData<'a> {
         static NO_GESTURE_MAPS: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>> =
             BTreeMap::new();
         static NO_WHEEL_HOLD: BTreeSet<ButtonId> = BTreeSet::new();
+        static NO_DRAG_HOLD: BTreeMap<ButtonId, HeldDrag> = BTreeMap::new();
         Self {
             asset: None,
             layout: None,
@@ -174,7 +190,9 @@ impl<'a> MouseWorkspaceData<'a> {
             thumbwheel: false,
             dpi_gestures: false,
             virtual_thumbwheel: false,
+            drag_hold_capable: false,
             wheel_hold: &NO_WHEEL_HOLD,
+            drag_hold: &NO_DRAG_HOLD,
             editing_app: None,
             overridden: None,
             extra_actions: &[],
@@ -518,23 +536,21 @@ impl Render for MouseModelView {
             thumbwheel,
             dpi_gestures,
             virtual_thumbwheel,
+            drag_hold_capable,
             wheel_hold,
+            drag_hold,
             editing_app,
             overridden,
             extra_actions,
             hidden_actions,
         } = MouseWorkspaceData::read(cx).unwrap_or_else(MouseWorkspaceData::empty);
 
-        let gesture_buttons: Vec<ButtonId> = gesture_maps
-            .keys()
-            .copied()
-            .filter(|button| {
-                editing_app.is_none()
-                    || !overridden.is_some_and(|overrides| overrides.contains_key(button))
-            })
-            .collect();
+        let (gesture_buttons, shown_drags) =
+            callout_held_modes(gesture_maps, drag_hold, editing_app.is_some(), overridden);
 
-        let value = |control| binding_label_for_control(control, bindings, &gesture_buttons).text;
+        let value = |control| {
+            binding_label_for_control(control, bindings, &gesture_buttons, &shown_drags).text
+        };
         let ModelLayout {
             canvas_w,
             canvas_h,
@@ -569,7 +585,8 @@ impl Render for MouseModelView {
             .child(breathing_art)
             .child(leader_canvas)
             .children(labels_outer.iter().enumerate().map(|(idx, label)| {
-                let binding = binding_label_for_control(label.id, bindings, &gesture_buttons);
+                let binding =
+                    binding_label_for_control(label.id, bindings, &gesture_buttons, &shown_drags);
                 label_control(
                     idx,
                     *label,
@@ -591,7 +608,9 @@ impl Render for MouseModelView {
                 gesture_maps,
                 dpi_gestures,
                 virtual_thumbwheel,
+                drag_hold_capable,
                 wheel_hold,
+                drag_hold,
                 editing_app: editing_app.as_deref(),
                 overridden,
                 press_force: PressForce::of(force_sensing.as_ref(), self.press_force()),

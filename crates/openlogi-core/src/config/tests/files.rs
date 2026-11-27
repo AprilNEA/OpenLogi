@@ -581,3 +581,15 @@ fn a_saved_file_reads_back_at_the_revision_of_its_save() {
     let (_, reader) = ConfigFile::load_from_path(&path).expect("load the edit");
     assert_ne!(reader.revision(), writer.revision());
 }
+
+#[test]
+fn documented_config_schema() {
+    // The configuration guide states the schema version the build writes,
+    // so a bump that forgets the guide fails here.
+    let guide = include_str!("../../../../../docs/CONFIGURATION.md");
+    let stated = format!("`schema_version` is required and currently `{SCHEMA_VERSION}`");
+    assert!(
+        guide.contains(&stated),
+        "docs/CONFIGURATION.md must say: {stated}"
+    );
+}

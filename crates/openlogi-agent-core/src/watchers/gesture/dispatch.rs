@@ -1,5 +1,6 @@
 //! Resolve captured HID++ inputs against the active per-device plan.
 
+mod held;
 mod wheel;
 
 use std::collections::{HashMap, HashSet};
@@ -13,11 +14,13 @@ use openlogi_hid::CapturedInput;
 use openlogi_hid::thumbwheel::WheelResolution;
 use tracing::debug;
 
+use self::held::{HeldInteractions, Motion};
+pub(crate) use self::held::{LiveDrags, SharedDragOutput};
 use self::wheel::{ScrollScale, WheelAccumulators, WheelOutput, WheelRotation};
 use super::GestureOutputs;
 use crate::capture_plan::DispatchPlan;
 use crate::runtime::hook::SharedHookMaps;
-use crate::runtime::{HidppSessionId, PointerPress, PressToken};
+use crate::runtime::{HidppSessionId, PointerPress};
 
 /// Effective thumb-wheel configuration whose continuity is tied to one
 /// dispatch plan. A binding or sensitivity update clears accumulated state
@@ -53,33 +56,6 @@ impl WheelConfiguration {
     }
 }
 
-/// Correlates what happens during a held press — a completed HID++ gesture,
-/// or wheel movement under a wheel-hold button — with the exact physical
-/// press token admitted by the shared button runtime. The runtime remains the
-/// sole authority on whether the token is still active.
-#[derive(Default)]
-struct HeldPresses {
-    tokens: HashMap<(HidppSessionId, ButtonId), PressToken>,
-}
-
-impl HeldPresses {
-    fn start(&mut self, session: &HidppSessionId, button: ButtonId, press: PressToken) {
-        self.tokens.insert((session.clone(), button), press);
-    }
-
-    fn get(&self, session: &HidppSessionId, button: ButtonId) -> Option<&PressToken> {
-        self.tokens.get(&(session.clone(), button))
-    }
-
-    fn end(&mut self, session: &HidppSessionId, button: ButtonId) {
-        self.tokens.remove(&(session.clone(), button));
-    }
-
-    fn cancel_session(&mut self, session: &HidppSessionId) {
-        self.tokens.retain(|(candidate, _), _| candidate != session);
-    }
-}
-
 /// Wheel state scoped to exact capture-session incarnations. Keying by session
 /// rather than device prevents a replacement epoch from inheriting progress or
 /// having its state removed by a stale completion from the previous epoch.
@@ -102,7 +78,10 @@ pub(super) struct InputDispatcher {
     hook_maps: SharedHookMaps,
     outputs: GestureOutputs,
     wheels: SessionWheels,
-    held_presses: HeldPresses,
+    /// Presses whose hold matters — gesture sources, wheel holds, drag
+    /// holds — correlated with the exact press token the shared button
+    /// runtime admitted, which stays the authority on whether it is active.
+    held: HeldInteractions,
     shift_held: HeldShift,
 }
 
@@ -113,7 +92,7 @@ impl InputDispatcher {
             hook_maps: outputs.hook_maps.clone(),
             outputs,
             wheels: SessionWheels::default(),
-            held_presses: HeldPresses::default(),
+            held: HeldInteractions::default(),
             shift_held: HeldShift::default(),
         }
     }
@@ -121,14 +100,14 @@ impl InputDispatcher {
     /// Whether `session` still holds an admitted gesture press for `button`.
     #[cfg(test)]
     pub(super) fn holds_gesture_press(&self, session: &HidppSessionId, button: ButtonId) -> bool {
-        self.held_presses.get(session, button).is_some()
+        self.held.token(session, button).is_some()
     }
 
     /// Cancel every input lifecycle retained for one capture session.
     pub(super) fn cancel_session(&mut self, session: &HidppSessionId) {
         self.outputs.cancel_session(session);
         self.wheels.cancel_session(session);
-        self.held_presses.cancel_session(session);
+        self.held.cancel_session(session);
         self.shift_held.0.remove(session);
         self.publish_shift(session);
     }
@@ -206,7 +185,7 @@ impl InputDispatcher {
         let key = session.device_key();
         match input {
             CapturedInput::Gesture(button, direction) => {
-                let Some(press) = self.held_presses.get(session, button) else {
+                let Some(press) = self.held.token(session, button) else {
                     debug!(key, %button, ?direction, "gesture from a canceled button lifecycle — ignored");
                     return;
                 };
@@ -238,7 +217,9 @@ impl InputDispatcher {
                 let is_gesture = plan.gesture_bindings.contains_key(&button)
                     || plan.side_gesture_bindings.contains_key(&button);
                 let (binding, pointer) = self.binding_for(session, plan, button, is_gesture);
-                let tracks_hold = is_gesture || binding.is_some_and(Binding::is_wheel_hold);
+                let tracks_hold = is_gesture
+                    || binding
+                        .is_some_and(|binding| binding.is_wheel_hold() || binding.is_drag_hold());
                 if let Some(binding) = binding {
                     debug!(key, ?button, action = %binding.click_action().label(), "HID++ button → binding");
                 } else {
@@ -249,10 +230,14 @@ impl InputDispatcher {
                     .actions
                     .try_hidpp_button_down(session, button, binding, pointer);
                 if tracks_hold {
+                    let drag = match binding {
+                        Some(Binding::DragHold(binding)) => Some(binding.drag()),
+                        _ => None,
+                    };
                     if let Some(press) = press {
-                        self.held_presses.start(session, button, press);
+                        self.held.start(session, button, press, drag);
                     } else {
-                        self.held_presses.end(session, button);
+                        self.held.forget(session, button);
                     }
                 }
             }
@@ -260,10 +245,21 @@ impl InputDispatcher {
                 if self.end_gshift(session, button) {
                     return;
                 }
+                // The up edge carries no report time; it is handled in arrival
+                // order, after every motion before it.
+                self.held.release(session, button, Instant::now());
                 self.outputs.actions.try_hidpp_button_up(session, button);
-                self.held_presses.end(session, button);
             }
-            CapturedInput::ButtonPulse(button) => self.dispatch_button_pulse(session, plan, button),
+            CapturedInput::ButtonPulse(button) => {
+                if button == ButtonId::Thumbwheel && self.held.drag_held(session) {
+                    debug!(key, "thumb-wheel tap during a drag hold — ignored");
+                    return;
+                }
+                self.dispatch_button_pulse(session, plan, button);
+            }
+            CapturedInput::Motion { button, dx, dy, at } => {
+                self.dispatch_motion(session, button, dx, dy, at);
+            }
             CapturedInput::Scroll {
                 increments,
                 resolution,
@@ -326,11 +322,11 @@ impl InputDispatcher {
         per_notch: NonZeroU8,
     ) {
         let key = session.device_key();
-        let Some(press) = self.held_presses.get(session, button) else {
+        let Some(press) = self.held.token(session, button) else {
             debug!(key, %button, delta, "held wheel from a canceled button lifecycle — ignored");
             return;
         };
-        if !self.outputs.actions.try_wheel_while_pressed(press) {
+        if !self.outputs.actions.try_hold_used_while_pressed(press) {
             debug!(key, %button, delta, "held wheel after the press ended — ignored");
             return;
         }
@@ -346,6 +342,35 @@ impl InputDispatcher {
         }
     }
 
+    /// Raw-XY motion under a held source, whose report arrived `at`. A
+    /// drag-hold press gathers travel until it is a drag, then gives up its
+    /// click and plays its trackpad gesture, following every further report
+    /// while the runtime still holds the press. Motion under any other press
+    /// belongs to swipe recognition and is ignored here.
+    fn dispatch_motion(
+        &mut self,
+        session: &HidppSessionId,
+        button: ButtonId,
+        dx: i16,
+        dy: i16,
+        at: Instant,
+    ) {
+        let key = session.device_key();
+        let actions = &self.outputs.actions;
+        let outcome = self.held.motion(
+            (session, button),
+            (f64::from(dx), f64::from(dy), at),
+            self.outputs.drags.as_ref(),
+            |press| actions.press_is_current(press),
+            |press| actions.try_hold_used_while_pressed(press),
+        );
+        match outcome {
+            Motion::Started(kind) => debug!(key, %button, ?kind, "drag hold → trackpad gesture"),
+            Motion::Stale => debug!(key, %button, "drag from an ended press — canceled"),
+            Motion::Ignored | Motion::Gathering | Motion::Moved => {}
+        }
+    }
+
     fn dispatch_wheel(
         &mut self,
         session: &HidppSessionId,
@@ -356,6 +381,16 @@ impl InputDispatcher {
         let Some(rotation) = WheelRotation::from_increments(increments) else {
             return;
         };
+        // The thumb wheel sits beside Back/Forward, and the thumb holding one
+        // brushes it: during a drag hold its rotation would scroll sideways in
+        // the middle of the swipe.
+        if self.held.drag_held(session) {
+            debug!(
+                key = session.device_key(),
+                "thumb wheel during a drag hold — ignored"
+            );
+            return;
+        }
         let key = session.device_key();
         let button = rotation.button();
         let configuration = WheelConfiguration::for_plan(plan);

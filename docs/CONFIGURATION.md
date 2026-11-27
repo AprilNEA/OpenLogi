@@ -57,7 +57,7 @@ parsing its fields. A v10 file without the section loads with Flow disabled.
 
 ## Shape
 
-`schema_version` is required and currently `11`. `selected_device` is an
+`schema_version` is required and currently `12`. `selected_device` is an
 optional physical device key.
 
 `[app_settings]` contains application-wide preferences:
@@ -142,6 +142,7 @@ optional physical device key.
   action returns when the last frame is posted, about 315 ms later. With the
   setting off, the agent posts two frames and the Dock changes Space at once.
   A change applies from the next switch. Windows and Linux ignore the setting.
+
 
 `[devices."<physical-key>"]` contains per-device state. Receiver keys look like
 `receiver:<receiver-id>:slot:<number>`; direct, raw-HID, and camera devices use
@@ -669,15 +670,52 @@ OpenLogi, so OpenLogi hands both back to the firmware when the binding changes,
 the device disconnects, or the agent exits. It never sets the firmware's
 persistent flag, so the diversion does not outlive a device power cycle.
 
-In the desktop app, select `Back` or `Forward` in the default profile and turn
-on **Hold to scroll sideways**. The switch appears only on mice that report raw
-wheel on that button; a binding carried over to another mouse still shows it,
-so it can be turned off. Picking a different action for the button keeps the
-wheel hold and changes `click`. A button in gesture mode offers the switch too:
-turning it on leaves gesture mode with the gesture map's `Click` as the press,
-and turning gestures back on restores the saved directions. The setting is per
-device, not per application: an app profile that gives the button its own
-action replaces the wheel hold in that application.
+In the desktop app, select `Back` or `Forward` in the default profile and pick
+**Hold to scroll sideways** in the **Mode** list. The list shows one row per
+way the button can behave: **Single action**, **Gestures**, **Hold to scroll
+sideways** and **Hold and drag**, each only on mice that can run it. A mode
+carried over to another mouse stays listed while the button is in it, so it can
+be left. Picking a mode keeps the button's click action: leaving gesture mode
+keeps the gesture map's `Click` as the press, and picking **Gestures** again
+restores the saved directions. Picking a different action for the button keeps
+the wheel hold and changes `click`. The setting is per device, not per
+application, so the list shows only in the default profile: an app profile that
+gives the button its own action replaces the wheel hold in that application.
+
+A drag-hold binding on `Back` or `Forward` plays a trackpad swipe while the
+button is held and the mouse moves, as Mac Mouse Fix's click and drag does:
+
+```toml
+Back = { click = "Paste", drag = "ThreeFingerSwipe" }
+Forward = { click = "Copy", drag = "TwoFingerSwipe" }
+```
+
+`TwoFingerSwipe` scrolls the view under the pointer with the hand, glides
+on after a flick, and swipes between pages where the app supports it.
+`ThreeFingerSwipe` switches Spaces sideways, opens Mission Control upward and
+App Exposé downward, following the hand; on release the Dock finishes or
+springs back as it does on a trackpad. Releasing the button before the mouse
+has moved about a millimetre fires `click`; a press that dragged fires nothing
+else. While a drag-hold button is held, the thumb wheel beside it is ignored,
+so a thumb brushing it does not scroll sideways mid-swipe.
+
+The swipe needs macOS, raw-XY reporting on that button (the device reports
+it as the `drag_hold` capability), and the mouse hook, so OpenLogi can post
+events (the Accessibility permission). Without them OpenLogi captures the
+button for `click` alone. The pointer stays still while you drag, as on a
+trackpad: OpenLogi cannot tell when a page stops scrolling, so a pointer
+following the hand would run off the page at its end. Canceling the press, by a capture change or
+a binding reload, ends the swipe without a glide, and a session that ends
+stops a glide still running.
+
+In the desktop app, select `Back` or `Forward` in the default profile, pick
+**Hold and drag** in the **Mode** list, and choose what the drag plays:
+**Scroll and swipe pages** (`TwoFingerSwipe`) or **Spaces and Mission Control**
+(`ThreeFingerSwipe`). The mode appears only on macOS, on mice that report raw
+XY on that button; a binding carried over still shows it, so it can be left.
+Picking a different action keeps the drag and changes `click`. Like wheel hold
+it is per device: an app profile that gives the button its own action replaces
+it there.
 
 An Actions Ring entry wraps the action and may add an icon or literal label:
 

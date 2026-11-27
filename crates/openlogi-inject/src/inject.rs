@@ -24,6 +24,8 @@ mod macos;
 pub use macos::{VirtualKeyboard, is_virtual_keyboard_product};
 
 #[cfg(any(target_os = "macos", test))]
+mod flick;
+#[cfg(any(target_os = "macos", test))]
 mod space_switch;
 
 #[cfg(target_os = "linux")]
@@ -778,6 +780,111 @@ pub fn post_scroll(delta: ScrollDelta) {
         }
         _ => {
             let _ = delta;
+        }
+    }
+}
+
+/// A trackpad gesture played by a held button's drag (a
+/// [`HeldDrag`](openlogi_core::binding::HeldDrag)): content or the Dock
+/// follows the hand from [`begin`](Self::begin) until it is released or
+/// canceled. Every sample carries the instant its report arrived.
+///
+/// macOS only. Elsewhere [`begin`](Self::begin) returns `None`, and the
+/// button keeps its click.
+pub struct TrackpadDrag {
+    #[cfg(target_os = "macos")]
+    inner: macos::Drag,
+}
+
+impl TrackpadDrag {
+    /// Begin `kind` with its first motion, in raw sensor counts (positive
+    /// right and down), whose report arrived `at`. `None` where the platform
+    /// cannot play it.
+    #[must_use]
+    pub fn begin(
+        kind: openlogi_core::binding::HeldDrag,
+        dx: f64,
+        dy: f64,
+        at: std::time::Instant,
+    ) -> Option<Self> {
+        cfg_select! {
+            target_os = "macos" => {
+                Some(Self { inner: macos::Drag::begin(kind, dx, dy, at) })
+            }
+            _ => {
+                let _ = (kind, dx, dy, at);
+                None
+            }
+        }
+    }
+
+    /// Follow further motion, in raw sensor counts, whose report arrived `at`.
+    pub fn moved(&mut self, dx: f64, dy: f64, at: std::time::Instant) {
+        cfg_select! {
+            target_os = "macos" => {
+                self.inner.moved(dx, dy, at);
+            }
+            _ => {
+                let _ = (dx, dy, at);
+            }
+        }
+    }
+
+    /// The button was released `at`: finish the gesture as a trackpad lift
+    /// does. A two-finger flick hands back the momentum glide it launched,
+    /// which the caller keeps so it can stop it.
+    #[must_use]
+    pub fn release(self, at: std::time::Instant) -> Option<TrackpadGlide> {
+        cfg_select! {
+            target_os = "macos" => {
+                self.inner.release(at).map(|inner| TrackpadGlide { inner })
+            }
+            _ => {
+                let _ = at;
+                None
+            }
+        }
+    }
+
+    /// The press ended without a release: end the gesture with no glide.
+    pub fn cancel(self) {
+        cfg_select! {
+            target_os = "macos" => {
+                self.inner.cancel();
+            }
+            _ => {}
+        }
+    }
+}
+
+/// A two-finger drag's momentum glide, running on its own. Dropping it leaves
+/// it running to its natural stop.
+pub struct TrackpadGlide {
+    #[cfg(target_os = "macos")]
+    inner: macos::Glide,
+}
+
+impl TrackpadGlide {
+    /// End the glide at its next frame.
+    pub fn stop(&self) {
+        cfg_select! {
+            target_os = "macos" => {
+                self.inner.stop();
+            }
+            _ => {}
+        }
+    }
+
+    /// Whether the glide is still posting frames.
+    #[must_use]
+    pub fn is_running(&self) -> bool {
+        cfg_select! {
+            target_os = "macos" => {
+                self.inner.is_running()
+            }
+            _ => {
+                false
+            }
         }
     }
 }

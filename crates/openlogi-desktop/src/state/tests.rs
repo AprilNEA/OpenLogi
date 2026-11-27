@@ -53,6 +53,7 @@ mod camera;
 pub(crate) mod device_list;
 mod device_names;
 mod dpi;
+mod drag_hold;
 mod easy_switch;
 mod flow;
 mod fn_lock;

@@ -252,6 +252,12 @@ impl CaptureAccum {
         if *overlap {
             return;
         }
+        let _ = sink.send(CapturedInput::Motion {
+            button: *button,
+            dx,
+            dy,
+            at: std::time::Instant::now(),
+        });
         // Commit the instant a clean direction emerges (mid-swipe, repeatable per hold);
         // the accumulator gates on hold duration internally and drops travel that
         // arrives outside a hold.

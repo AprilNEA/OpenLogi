@@ -3,8 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use openlogi_core::binding::{
-    Action, Binding, ButtonId, GamingLayout, GestureDirection, KeypadPage, LongPressBinding,
-    WheelHoldBinding,
+    Action, Binding, ButtonId, DragHoldBinding, GamingLayout, GestureDirection, HeldDrag,
+    KeypadPage, LongPressBinding, WheelHoldBinding,
 };
 use openlogi_core::bindings::{
     bindings_for, button_bindings_for, hidpp_gesture_maps_for, oshook_gestures_for,
@@ -44,6 +44,9 @@ pub(super) struct BindingState {
     /// Device-global like the gesture maps: a per-app entry holds one
     /// `Action`, so wheel-hold lives only in the global profile.
     wheel_hold_buttons: BTreeSet<ButtonId>,
+    /// Buttons whose hold and drag plays a trackpad swipe, and which one.
+    /// Device-global for the same reason as `wheel_hold_buttons`.
+    drag_hold_buttons: BTreeMap<ButtonId, HeldDrag>,
     /// Global keyboard F-key bindings (Esc + F1-F19).
     keyboard_bindings: BTreeMap<KeyTrigger, Action>,
 }
@@ -60,6 +63,7 @@ impl BindingState {
             button_bindings: BTreeMap::new(),
             gesture_bindings: BTreeMap::new(),
             wheel_hold_buttons: BTreeSet::new(),
+            drag_hold_buttons: BTreeMap::new(),
             keyboard_bindings: config.keyboard.bindings.clone(),
         };
         state.refresh_device(config, persistent_key, layout);
@@ -128,6 +132,12 @@ impl BindingState {
             ButtonId::ALL
                 .into_iter()
                 .filter(|button| config.is_wheel_hold(key, *button))
+                .collect()
+        });
+        self.drag_hold_buttons = persistent_key.map_or_else(BTreeMap::new, |key| {
+            ButtonId::ALL
+                .into_iter()
+                .filter_map(|button| Some((button, config.drag_hold(key, button)?)))
                 .collect()
         });
     }
@@ -289,6 +299,13 @@ impl AppState {
         &self.bindings.wheel_hold_buttons
     }
 
+    /// The selected device's buttons whose hold and drag plays a trackpad
+    /// swipe, and which swipe. Device-level like [`Self::wheel_hold_buttons`].
+    #[must_use]
+    pub fn drag_hold_buttons(&self) -> &BTreeMap<ButtonId, HeldDrag> {
+        &self.bindings.drag_hold_buttons
+    }
+
     /// Global keyboard F-key bindings.
     #[must_use]
     pub fn keyboard_bindings(&self) -> &BTreeMap<KeyTrigger, Action> {
@@ -413,6 +430,9 @@ impl AppState {
                     }
                     Some(Binding::WheelHold(_)) => {
                         Binding::WheelHold(WheelHoldBinding::horizontal_scroll(action))
+                    }
+                    Some(Binding::DragHold(binding)) => {
+                        Binding::DragHold(DragHoldBinding::new(action, binding.drag()))
                     }
                     _ => Binding::Single(action),
                 };
@@ -749,6 +769,52 @@ impl AppState {
         // Leaving gesture mode moves the button between the projected maps.
         self.refresh_binding_projections();
         self.persist_and_reload("wheel-hold change");
+        events
+    }
+
+    /// Set the trackpad swipe one button of the current device plays when held
+    /// and dragged, or turn it off with `None`. A press without dragging still
+    /// runs its action. Persists, tells the agent to rebuild, and refreshes
+    /// the projections the UI reads.
+    pub fn commit_drag_hold(&mut self, button: ButtonId, drag: Option<HeldDrag>) -> StateEvents {
+        let events = self.for_current_device(StateEvent::BindingsChanged);
+        if !button.supports_drag_hold() {
+            debug!(?button, "drag-hold is not supported for this control");
+            return events;
+        }
+        // Turning it off stays possible without the capability, so a binding
+        // carried over from another device can always be removed. Unknown
+        // capabilities count as unsupported.
+        if drag.is_some()
+            && !self
+                .current_record()
+                .and_then(|record| record.capabilities)
+                .is_some_and(|caps| caps.drag_hold)
+        {
+            debug!("drag-hold requires measured raw-XY support");
+            return events;
+        }
+        let Some(key) = self
+            .current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .map(str::to_string)
+        else {
+            return events;
+        };
+        // Same backstop as `commit_wheel_hold`: a per-app entry holds one
+        // `Action`, so writing here would change every app.
+        if self.editing_app().is_some() {
+            debug!(?button, "drag-hold is not editable in a per-app profile");
+            return events;
+        }
+        if self.config.drag_hold(&key, button) == drag {
+            return events;
+        }
+        self.config
+            .edit(|config| config.set_drag_hold(&key, button, drag));
+        // Leaving gesture mode moves the button between the projected maps.
+        self.refresh_binding_projections();
+        self.persist_and_reload("drag-hold change");
         events
     }
 

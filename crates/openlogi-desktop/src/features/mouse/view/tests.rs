@@ -565,7 +565,9 @@ fn a_selected_gesture_can_render_in_the_binding_inspector(cx: &mut TestAppContex
                 gesture_maps: &gesture_maps,
                 dpi_gestures: false,
                 virtual_thumbwheel: false,
+                drag_hold_capable: false,
                 wheel_hold: &BTreeSet::new(),
+                drag_hold: &BTreeMap::new(),
                 editing_app: None,
                 overridden: None,
                 press_force: None,
@@ -698,10 +700,22 @@ fn fallback_model_only_adds_thumbwheel_when_capability_is_measured() {
 /// opens the mouse view on it with `button` selected. Callers hold
 /// `LOCALE_LOCK` in English: a locale change from another test between a
 /// click's mouse-down redraw and its mouse-up reflows the inspector, and the
-/// release then misses the switch.
+/// release then misses the row.
 fn wheel_hold_view(
     cx: &mut TestAppContext,
     raw_wheel: bool,
+    config: Config,
+    button: ButtonId,
+) -> (Entity<MouseModelView>, &mut VisualTestContext) {
+    held_mode_view(cx, raw_wheel, false, config, button)
+}
+
+/// [`wheel_hold_view`], also choosing whether the mouse reports raw XY on
+/// Back/Forward, which hold and drag needs.
+fn held_mode_view(
+    cx: &mut TestAppContext,
+    raw_wheel: bool,
+    raw_xy: bool,
     config: Config,
     button: ButtonId,
 ) -> (Entity<MouseModelView>, &mut VisualTestContext) {
@@ -710,11 +724,12 @@ fn wheel_hold_view(
         let resolver = AssetResolver::new();
         let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
         let mut inventory = crate::state::tests::direct_inventory([0xa3, 0x93, 0xca, 0xe0]);
-        inventory.paired[0]
+        let capabilities = inventory.paired[0]
             .capabilities
             .as_mut()
-            .expect("the fixture mouse has capabilities")
-            .virtual_thumbwheel = raw_wheel;
+            .expect("the fixture mouse has capabilities");
+        capabilities.virtual_thumbwheel = raw_wheel;
+        capabilities.drag_hold = raw_xy;
         let state = cx.new(|_| {
             AppState::new(Sources {
                 inventories: &[inventory],
@@ -739,21 +754,35 @@ fn holds_the_wheel(cx: &mut VisualTestContext, button: ButtonId) -> bool {
     })
 }
 
+#[cfg(target_os = "macos")]
+fn drag_hold_of(
+    cx: &mut VisualTestContext,
+    button: ButtonId,
+) -> Option<openlogi_core::binding::HeldDrag> {
+    cx.update(|_, cx| {
+        AppState::try_read(cx)
+            .expect("state is installed")
+            .drag_hold_buttons()
+            .get(&button)
+            .copied()
+    })
+}
+
 #[gpui::test]
-fn the_wheel_hold_switch_turns_holding_back_into_sideways_scrolling(cx: &mut TestAppContext) {
+fn the_mode_list_turns_holding_back_into_sideways_scrolling(cx: &mut TestAppContext) {
     let _locale = LOCALE_LOCK.lock().unwrap();
     rust_i18n::set_locale("en");
     let (view, cx) = wheel_hold_view(cx, true, Config::ephemeral(), ButtonId::Back);
     assert!(
-        cx.debug_bounds("inspector-wheel-hold-row").is_some(),
-        "Back offers the switch on a mouse that reports raw wheel"
+        cx.debug_bounds("inspector-mode-scroll-sideways").is_some(),
+        "Back offers sideways scrolling on a mouse that reports raw wheel"
     );
     assert!(!holds_the_wheel(cx, ButtonId::Back));
 
-    click_picker_control(cx, "inspector-wheel-hold-row-control");
+    click_picker_control(cx, "inspector-mode-scroll-sideways");
     assert!(holds_the_wheel(cx, ButtonId::Back));
 
-    click_picker_control(cx, "inspector-wheel-hold-row-control");
+    click_picker_control(cx, "inspector-mode-single");
     assert!(!holds_the_wheel(cx, ButtonId::Back));
 
     view.update(cx, |view, _| {
@@ -761,7 +790,11 @@ fn the_wheel_hold_switch_turns_holding_back_into_sideways_scrolling(cx: &mut Tes
     });
     cx.update(|window, cx| window.draw(cx).clear(cx));
     assert!(
-        cx.debug_bounds("inspector-wheel-hold-row").is_none(),
+        cx.debug_bounds("inspector-mode-list").is_some(),
+        "Middle click still has a single action and gestures to choose from"
+    );
+    assert!(
+        cx.debug_bounds("inspector-mode-scroll-sideways").is_none(),
         "only Back and Forward can hold the wheel"
     );
     drop(view);
@@ -775,8 +808,8 @@ fn a_mouse_without_raw_wheel_offers_no_wheel_hold(cx: &mut TestAppContext) {
     rust_i18n::set_locale("en");
     let (view, cx) = wheel_hold_view(cx, false, Config::ephemeral(), ButtonId::Forward);
     assert!(
-        cx.debug_bounds("inspector-wheel-hold-row").is_none(),
-        "no switch where holding cannot scroll"
+        cx.debug_bounds("inspector-mode-scroll-sideways").is_none(),
+        "no sideways mode where holding cannot scroll"
     );
     drop(view);
     cx.update(|window, _| window.remove_window());
@@ -795,16 +828,16 @@ fn a_carried_over_wheel_hold_can_still_be_turned_off(cx: &mut TestAppContext) {
     );
     let (view, cx) = wheel_hold_view(cx, false, config, ButtonId::Forward);
     assert!(
-        cx.debug_bounds("inspector-wheel-hold-row").is_some(),
-        "a setting from another mouse stays visible so it can be turned off"
+        cx.debug_bounds("inspector-mode-scroll-sideways").is_some(),
+        "a setting from another mouse stays listed so it can be left"
     );
 
-    click_picker_control(cx, "inspector-wheel-hold-row-control");
+    click_picker_control(cx, "inspector-mode-single");
 
     assert!(!holds_the_wheel(cx, ButtonId::Forward));
     assert!(
-        cx.debug_bounds("inspector-wheel-hold-row").is_none(),
-        "once off, it cannot be turned back on here"
+        cx.debug_bounds("inspector-mode-scroll-sideways").is_none(),
+        "once left, it cannot be picked again here"
     );
     drop(view);
     cx.update(|window, _| window.remove_window());
@@ -828,8 +861,8 @@ fn an_app_profile_explains_that_an_action_replaces_wheel_hold(cx: &mut TestAppCo
     cx.update(|window, cx| window.draw(cx).clear(cx));
 
     assert!(
-        cx.debug_bounds("inspector-wheel-hold-row").is_none(),
-        "the switch is device-wide, so an app profile does not show it"
+        cx.debug_bounds("inspector-mode-list").is_none(),
+        "modes are device-wide, so an app profile does not list them"
     );
     assert!(
         cx.debug_bounds("inspector-wheel-hold-app-note").is_some(),
@@ -883,11 +916,11 @@ fn a_gesture_button_offers_wheel_hold_and_leaves_gestures_for_it(cx: &mut TestAp
     cx.update(|window, cx| window.draw(cx).clear(cx));
     assert!(in_gesture_mode(cx, ButtonId::Back));
     assert!(
-        cx.debug_bounds("inspector-wheel-hold-row").is_some(),
-        "the gesture inspector offers the switch too"
+        cx.debug_bounds("inspector-mode-scroll-sideways").is_some(),
+        "the gesture inspector lists the modes too"
     );
 
-    click_picker_control(cx, "inspector-wheel-hold-row-control");
+    click_picker_control(cx, "inspector-mode-scroll-sideways");
 
     assert!(holds_the_wheel(cx, ButtonId::Back));
     assert!(
@@ -901,8 +934,8 @@ fn a_gesture_button_offers_wheel_hold_and_leaves_gestures_for_it(cx: &mut TestAp
         );
     });
     assert!(
-        cx.debug_bounds("inspector-wheel-hold-row").is_some(),
-        "the single-action inspector shows the switch, now on"
+        cx.debug_bounds("inspector-mode-gestures").is_some(),
+        "the list stays, so gestures can be picked again"
     );
     drop(view);
     cx.update(|window, _| window.remove_window());
@@ -922,9 +955,68 @@ fn a_gesture_button_without_raw_wheel_offers_no_wheel_hold(cx: &mut TestAppConte
     let (view, cx) = wheel_hold_view(cx, false, config, ButtonId::Forward);
     assert!(in_gesture_mode(cx, ButtonId::Forward));
     assert!(
-        cx.debug_bounds("inspector-wheel-hold-row").is_none(),
-        "no switch where holding cannot scroll"
+        cx.debug_bounds("inspector-mode-scroll-sideways").is_none(),
+        "no sideways mode where holding cannot scroll"
     );
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}
+
+/// Hold and drag and sideways scrolling are two shapes of one binding. The
+/// list moves between them in one pick and keeps the click action, where
+/// the old sideways switch quietly ended hold and drag.
+#[cfg(target_os = "macos")]
+#[gpui::test]
+fn the_mode_list_moves_between_hold_and_drag_and_sideways_scrolling(cx: &mut TestAppContext) {
+    use openlogi_core::binding::HeldDrag;
+
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    let (view, cx) = held_mode_view(cx, true, true, Config::ephemeral(), ButtonId::Back);
+    cx.update(|_, cx| {
+        AppState::apply(cx, |state| {
+            state.commit_binding(ButtonId::Back, Action::Copy)
+        });
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    click_picker_control(cx, "inspector-mode-hold-and-drag");
+    assert_eq!(
+        drag_hold_of(cx, ButtonId::Back),
+        Some(HeldDrag::ThreeFingerSwipe),
+        "Back starts on Spaces, as Mac Mouse Fix sets it up"
+    );
+    click_picker_control(cx, "inspector-drag-hold-two");
+    assert_eq!(
+        drag_hold_of(cx, ButtonId::Back),
+        Some(HeldDrag::TwoFingerSwipe)
+    );
+    click_picker_control(cx, "inspector-mode-hold-and-drag");
+    assert_eq!(
+        drag_hold_of(cx, ButtonId::Back),
+        Some(HeldDrag::TwoFingerSwipe),
+        "picking the current mode keeps the chosen swipe"
+    );
+
+    click_picker_control(cx, "inspector-mode-scroll-sideways");
+    assert!(holds_the_wheel(cx, ButtonId::Back));
+    assert_eq!(drag_hold_of(cx, ButtonId::Back), None);
+    assert!(
+        cx.debug_bounds("inspector-drag-hold-two").is_none(),
+        "the swipe choice belongs to hold and drag only"
+    );
+
+    click_picker_control(cx, "inspector-mode-single");
+    assert!(!holds_the_wheel(cx, ButtonId::Back));
+    cx.update(|_, cx| {
+        let state = AppState::try_read(cx).expect("state is installed");
+        assert_eq!(
+            state.button_bindings().get(&ButtonId::Back),
+            Some(&Action::Copy),
+            "every move keeps the click action"
+        );
+    });
     drop(view);
     cx.update(|window, _| window.remove_window());
     cx.run_until_parked();
@@ -1219,4 +1311,65 @@ fn the_model_and_full_values_fit_the_canvas_area_below_the_chrome(cx: &mut TestA
     drop(view);
     cx.update(|window, _| window.remove_window());
     cx.run_until_parked();
+}
+
+#[test]
+fn a_drag_hold_callout_names_its_swipe_like_a_gesture_callout() {
+    use openlogi_core::binding::HeldDrag;
+
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    let bindings = BTreeMap::from([(ButtonId::Back, Action::Paste)]);
+    let drags = BTreeMap::from([(ButtonId::Back, HeldDrag::ThreeFingerSwipe)]);
+    let back = MouseControlId::Button(ButtonId::Back);
+
+    let label = super::labels::binding_label_for_control(back, &bindings, &[], &drags);
+    assert_eq!(label.text, tr!("actions.drag_swipe_spaces"));
+
+    // Without a drag hold the callout shows the click action.
+    let plain = super::labels::binding_label_for_control(back, &bindings, &[], &BTreeMap::new());
+    assert_eq!(
+        plain.text,
+        crate::ui::action::localized_action_label(&Action::Paste)
+    );
+}
+
+#[test]
+fn drag_hold_callout_app_override() {
+    use openlogi_core::binding::{GestureDirection, HeldDrag};
+
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    let no_gestures: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>> = BTreeMap::new();
+    let drags = BTreeMap::from([
+        (ButtonId::Back, HeldDrag::ThreeFingerSwipe),
+        (ButtonId::Forward, HeldDrag::TwoFingerSwipe),
+    ]);
+    // The app maps Back to Copy and leaves Forward to the global profile.
+    let overrides = BTreeMap::from([(ButtonId::Back, Action::Copy)]);
+    let label = |button, editing_app| {
+        let (gestures, shown) =
+            super::labels::callout_held_modes(&no_gestures, &drags, editing_app, Some(&overrides));
+        super::labels::binding_label_for_control(
+            MouseControlId::Button(button),
+            &overrides,
+            &gestures,
+            &shown,
+        )
+        .text
+    };
+
+    assert_eq!(
+        label(ButtonId::Back, true),
+        crate::ui::action::localized_action_label(&Action::Copy),
+        "an overridden button shows the app's action"
+    );
+    assert_eq!(
+        label(ButtonId::Forward, true),
+        tr!("actions.drag_swipe_pages"),
+        "an inherited button still shows its swipe"
+    );
+    assert_eq!(
+        label(ButtonId::Back, false),
+        tr!("actions.drag_swipe_spaces"),
+        "the global profile shows the swipe"
+    );
 }

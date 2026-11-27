@@ -487,6 +487,7 @@ const HID_FIELD_FLAVOR: u32 = HID_TYPE_DOCK_SWIPE << 16 | 5;
 const HID_FIELD_VELOCITY_X: u32 = HID_TYPE_VELOCITY << 16;
 const HID_FIELD_VELOCITY_Y: u32 = HID_TYPE_VELOCITY << 16 | 1;
 const HID_MOTION_HORIZONTAL: isize = 1;
+const HID_MOTION_VERTICAL: isize = 2;
 const HID_FLAVOR_DOCK_PRIMARY: isize = 3;
 const HID_OPTION_PHASE_SHIFT: u32 = 24;
 
@@ -541,7 +542,24 @@ impl HidSwipe {
 
     /// A swipe event at `progress`, signed the way the private fields sign it.
     fn event(&self, phase: u32, progress: f64) -> Option<CFRetained<CGEvent>> {
-        let hid = dock_swipe_hid_event(self.class, phase, self.flip * progress)?;
+        self.axis_event(DockAxis::Horizontal, phase, progress, None)
+    }
+
+    /// A swipe event on `axis` at `progress`, with an optional exit velocity.
+    fn axis_event(
+        &self,
+        axis: DockAxis,
+        phase: u32,
+        progress: f64,
+        exit: Option<f64>,
+    ) -> Option<CFRetained<CGEvent>> {
+        let hid = dock_hid_event(
+            self.class,
+            axis,
+            phase,
+            self.flip * progress,
+            exit.map(|speed| self.flip * speed),
+        )?;
         let event = CGEvent::new(None)?;
         CGEvent::set_type(Some(&event), CGEventType(30));
         // SAFETY: both objects are live; SkyLight retains the HID event.
@@ -582,27 +600,34 @@ fn hid_slide_events(
         .collect()
 }
 
-/// macOS 27 requires a velocity child on the end phase of a DockSwipe; it
-/// points the way `progress` does. Private fields follow Mac Mouse Fix's event
-/// investigation: <https://github.com/noah-nuebling/mac-mouse-fix/commit/f92d2d53a>.
-fn dock_swipe_hid_event(
+/// A Dock swipe `IOHIDEvent` on `axis`. macOS 27 requires a velocity child
+/// on the end phase: `exit` when given, else an emphatic one toward
+/// `progress` that finishes the switch. Private fields follow Mac Mouse Fix's
+/// event investigation:
+/// <https://github.com/noah-nuebling/mac-mouse-fix/commit/f92d2d53a>.
+fn dock_hid_event(
     class: &AnyClass,
+    axis: DockAxis,
     phase: u32,
     progress: f64,
+    exit: Option<f64>,
 ) -> Option<Retained<AnyObject>> {
     let hid = hid_event(class, HID_TYPE_DOCK_SWIPE)?;
+    let motion: isize = match axis {
+        DockAxis::Horizontal => HID_MOTION_HORIZONTAL,
+        DockAxis::Vertical => HID_MOTION_VERTICAL,
+    };
     // SAFETY: private `HIDEvent` setters taking (u32), (NSInteger, u32),
     // (double, u32) and (HIDEvent) respectively.
     unsafe {
         let _: () = msg_send![&*hid, setOptions: phase << HID_OPTION_PHASE_SHIFT];
-        let _: () =
-            msg_send![&*hid, setIntegerValue: HID_MOTION_HORIZONTAL, forField: HID_FIELD_MOTION];
+        let _: () = msg_send![&*hid, setIntegerValue: motion, forField: HID_FIELD_MOTION];
         let _: () =
             msg_send![&*hid, setIntegerValue: HID_FLAVOR_DOCK_PRIMARY, forField: HID_FIELD_FLAVOR];
         let _: () = msg_send![&*hid, setDoubleValue: progress, forField: HID_FIELD_PROGRESS];
-        if phase == 4 {
+        if phase == 4 || phase == 8 {
             let velocity = hid_event(class, HID_TYPE_VELOCITY)?;
-            let speed = progress.signum() * 9999.0;
+            let speed = exit.unwrap_or_else(|| progress.signum() * 9999.0);
             let _: () =
                 msg_send![&*velocity, setDoubleValue: speed, forField: HID_FIELD_VELOCITY_X];
             let _: () =
@@ -611,6 +636,107 @@ fn dock_swipe_hid_event(
         }
     }
     Some(hid)
+}
+
+/// The axis a held-button three-finger drag swipes on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum DockAxis {
+    /// Switch Spaces.
+    Horizontal,
+    /// Mission Control (up) or App Exposé (down).
+    Vertical,
+}
+
+impl DockAxis {
+    /// The axis code the private fields carry.
+    const fn code(self) -> u32 {
+        match self {
+            Self::Horizontal => 1,
+            Self::Vertical => 2,
+        }
+    }
+}
+
+/// Post one frame of a held-button three-finger drag: a Dock swipe on `axis`
+/// at cumulative `progress`, in the layout this macOS reads. `exit` is the
+/// exit velocity of an end or cancel frame. Events follow Mac Mouse Fix's
+/// `TouchSimulator`, which also posts a companion gesture event.
+pub(super) fn post_dock_drag(
+    axis: DockAxis,
+    phase: u32,
+    progress: f64,
+    exit: Option<f64>,
+    natural: bool,
+) {
+    let event = match *DOCK_SWIPE_LAYOUT {
+        DockSwipeLayout::HidEvent => {
+            HidSwipe::new(natural).and_then(|swipe| swipe.axis_event(axis, phase, progress, exit))
+        }
+        DockSwipeLayout::Fields => drag_field_event(axis, phase, progress, exit, natural),
+    };
+    let Some(event) = event else {
+        tracing::debug!(
+            ?axis,
+            phase,
+            "three-finger drag: Dock swipe event unavailable"
+        );
+        return;
+    };
+    super::drag::post(&event);
+    if let Some(gesture) = CGEvent::new(None) {
+        CGEvent::set_type(Some(&gesture), CGEventType(29));
+        CGEvent::set_double_value_field(Some(&gesture), CGEventField(41), 33_231.0);
+        CGEvent::set_integer_value_field(
+            Some(&gesture),
+            CGEventField::EventSourceUserData,
+            super::super::SYNTHETIC_EVENT_USER_DATA,
+        );
+        super::drag::post(&gesture);
+    }
+}
+
+/// One drag frame in the private type-30 fields, through macOS 26.
+fn drag_field_event(
+    axis: DockAxis,
+    phase: u32,
+    progress: f64,
+    exit: Option<f64>,
+    natural: bool,
+) -> Option<CFRetained<CGEvent>> {
+    let event = CGEvent::new(None)?;
+    CGEvent::set_type(Some(&event), CGEventType(30));
+    let code = i64::from(axis.code());
+    let phase = i64::from(phase);
+    for (field, value) in [
+        (110, 23),
+        (123, code),
+        (165, code),
+        (132, phase),
+        (134, phase),
+        (136, i64::from(natural)),
+    ] {
+        CGEvent::set_integer_value_field(Some(&event), CGEventField(field), value);
+    }
+    CGEvent::set_double_value_field(Some(&event), CGEventField(41), 33_231.0);
+    CGEvent::set_double_value_field(Some(&event), CGEventField(124), progress);
+    CGEvent::set_integer_value_field(
+        Some(&event),
+        CGEventField(135),
+        i64::from(slide_progress_bits(progress)),
+    );
+    let axis_bits = f64::from(f32::from_bits(axis.code()));
+    CGEvent::set_double_value_field(Some(&event), CGEventField(119), axis_bits);
+    CGEvent::set_double_value_field(Some(&event), CGEventField(139), axis_bits);
+    if let Some(exit) = exit {
+        CGEvent::set_double_value_field(Some(&event), CGEventField(129), exit);
+        CGEvent::set_double_value_field(Some(&event), CGEventField(130), exit);
+    }
+    CGEvent::set_integer_value_field(
+        Some(&event),
+        CGEventField::EventSourceUserData,
+        super::super::SYNTHETIC_EVENT_USER_DATA,
+    );
+    Some(event)
 }
 
 type Dictionary = CFDictionary<CFString, CFType>;

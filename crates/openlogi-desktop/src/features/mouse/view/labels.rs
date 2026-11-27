@@ -15,7 +15,7 @@ use gpui::{
 };
 use gpui_kit::base::Button as BaseButton;
 use gpui_kit::component::{Icon, IconName, h_flex};
-use openlogi_core::binding::{Action, ButtonId, default_binding};
+use openlogi_core::binding::{Action, ButtonId, HeldDrag, default_binding};
 
 use super::{ModelRect, MouseModelView, SIDE_GAP, set_control_hovered};
 
@@ -317,11 +317,70 @@ impl RenderOnce for LabelTrigger {
     }
 }
 
+/// The callout label of a drag-hold button: its swipe.
+fn drag_hold_label(drag: HeldDrag) -> BindingLabel {
+    BindingLabel {
+        text: drag_hold_text(drag),
+        icon: Some(drag_hold_icon(drag)),
+    }
+}
+
+/// A drag-hold swipe's name, on its callout and its inspector choice: what
+/// the drag does.
+pub(in crate::features::mouse) fn drag_hold_text(drag: HeldDrag) -> SharedString {
+    match drag {
+        HeldDrag::TwoFingerSwipe => tr!("actions.drag_swipe_pages"),
+        HeldDrag::ThreeFingerSwipe => tr!("actions.drag_swipe_spaces"),
+    }
+}
+
+/// The trackpad fingers a drag-hold swipe stands for, its choice's hint.
+pub(in crate::features::mouse) fn drag_hold_fingers(drag: HeldDrag) -> SharedString {
+    match drag {
+        HeldDrag::TwoFingerSwipe => tr!("actions.two_finger_swipe"),
+        HeldDrag::ThreeFingerSwipe => tr!("actions.three_finger_swipe"),
+    }
+}
+
+/// A drag-hold swipe's icon: scrolling for two fingers, the Spaces grid for
+/// three.
+pub(in crate::features::mouse) const fn drag_hold_icon(drag: HeldDrag) -> &'static str {
+    match drag {
+        HeldDrag::TwoFingerSwipe => "action-icons/scroll-text.svg",
+        HeldDrag::ThreeFingerSwipe => "action-icons/layout-grid.svg",
+    }
+}
+
+/// The held modes the callouts show: the gesture buttons and the drag-hold
+/// swipes. In an app profile a button the app overrides runs the app's
+/// action instead, so its global held mode is left out.
+pub(super) fn callout_held_modes<G>(
+    gesture_maps: &std::collections::BTreeMap<ButtonId, G>,
+    drag_holds: &std::collections::BTreeMap<ButtonId, HeldDrag>,
+    editing_app: bool,
+    overridden: Option<&std::collections::BTreeMap<ButtonId, Action>>,
+) -> (
+    Vec<ButtonId>,
+    std::collections::BTreeMap<ButtonId, HeldDrag>,
+) {
+    let shown = |button: &ButtonId| {
+        !editing_app || !overridden.is_some_and(|overrides| overrides.contains_key(button))
+    };
+    let gesture_buttons = gesture_maps.keys().copied().filter(shown).collect();
+    let drags = drag_holds
+        .iter()
+        .filter(|(button, _)| shown(button))
+        .map(|(button, drag)| (*button, *drag))
+        .collect();
+    (gesture_buttons, drags)
+}
+
 /// The label card's text and icon for one control.
 pub(super) fn binding_label_for_control(
     control: MouseControlId,
     bindings: &std::collections::BTreeMap<ButtonId, Action>,
     gesture_buttons: &[ButtonId],
+    drag_holds: &std::collections::BTreeMap<ButtonId, HeldDrag>,
 ) -> BindingLabel {
     if control
         .button()
@@ -331,6 +390,11 @@ pub(super) fn binding_label_for_control(
             text: tr!("actions.five_directions"),
             icon: Some(GESTURE_BUTTON_ICON),
         };
+    }
+    // A drag-hold button reads as its swipe, as a gesture button reads as
+    // its directions: the swipe is what holding it does.
+    if let Some(drag) = control.button().and_then(|button| drag_holds.get(&button)) {
+        return drag_hold_label(*drag);
     }
 
     match control {

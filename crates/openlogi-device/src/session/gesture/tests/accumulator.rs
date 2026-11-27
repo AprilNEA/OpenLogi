@@ -632,6 +632,16 @@ fn a_side_gesture_button_uses_its_hidpp_raw_xy() {
         rx.try_recv(),
         Ok(CapturedInput::ButtonDown(ButtonId::Forward))
     );
+    // Every travel report also streams as motion, for a drag hold.
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(CapturedInput::Motion {
+            button: ButtonId::Forward,
+            dx: -120,
+            dy: 5,
+            ..
+        })
+    ));
     assert_eq!(
         rx.try_recv(),
         Ok(CapturedInput::Gesture(
@@ -703,6 +713,16 @@ fn a_dpi_gesture_button_uses_the_shared_raw_xy_path() {
         rx.try_recv(),
         Ok(CapturedInput::ButtonDown(ButtonId::DpiToggle))
     );
+    // Every travel report also streams as motion, for a drag hold.
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(CapturedInput::Motion {
+            button: ButtonId::DpiToggle,
+            dx: 5,
+            dy: -120,
+            ..
+        })
+    ));
     assert_eq!(
         rx.try_recv(),
         Ok(CapturedInput::Gesture(

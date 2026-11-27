@@ -307,6 +307,29 @@ pub struct PlanDevice<'a> {
     pub layout: Option<&'a GamingLayout>,
 }
 
+/// The Back/Forward controls bound to a drag hold, to divert with raw XY. A
+/// drag hold streams its motion as a trackpad gesture, which only macOS
+/// plays, and only while the agent can post events. Elsewhere the binding is
+/// click-only: the control is plain-diverted, so its click still runs on
+/// release and no drag can swallow it.
+fn drag_hold_buttons(
+    config: &Config,
+    bindings: &BTreeMap<ButtonId, Binding>,
+    os_mouse_hook_available: bool,
+) -> Vec<(u16, ButtonId)> {
+    if !cfg!(target_os = "macos")
+        || !os_mouse_hook_available
+        || !config.app_settings.capture_mouse_events
+    {
+        return Vec::new();
+    }
+    DIVERTABLE_STANDARD_BUTTONS
+        .into_iter()
+        .filter(|(_, button)| button.supports_drag_hold())
+        .filter(|(_, button)| bindings.get(button).is_some_and(Binding::is_drag_hold))
+        .collect()
+}
+
 /// Build one device's plan from the config (per-app effective for `app`).
 #[must_use]
 pub fn plan_for_device(
@@ -331,7 +354,8 @@ pub fn plan_for_device(
     // gesture at once, each armed with its own raw-XY divert (the capture
     // target below derives the CIDs to divert from this map's keys).
     let gesture_bindings = hidpp_gesture_maps_for(config, Some(config_key), app);
-    let mut divert_gesture_buttons = Vec::new();
+    let drag_hold_buttons = drag_hold_buttons(config, &bindings, os_mouse_hook_available);
+    let mut divert_gesture_buttons = drag_hold_buttons.clone();
     if os_mouse_hook_available {
         divert_gesture_buttons.extend(
             DIVERTABLE_STANDARD_BUTTONS
@@ -379,11 +403,12 @@ pub fn plan_for_device(
         })
         .filter(|(_, button)| !oshook.contains_key(button))
         .filter(|entry| !divert_wheel_buttons.contains(entry))
+        .filter(|entry| !drag_hold_buttons.contains(entry))
         .filter(|(_, button)| {
             bindings.get(button).is_some_and(|binding| {
-                // Both decide on release whether the click runs, which only
+                // These decide on release whether the click runs, which only
                 // the shared button runtime can do.
-                if matches!(binding, Binding::LongPress(_) | Binding::WheelHold(_)) {
+                if binding.decides_on_release() {
                     return true;
                 }
                 let action = binding.click_action();
@@ -447,7 +472,9 @@ pub fn plan_for_device(
 
 #[cfg(test)]
 mod tests {
-    use openlogi_core::binding::{Binding, LongPressBinding, WheelHoldBinding};
+    use openlogi_core::binding::{
+        Binding, DragHoldBinding, HeldDrag, LongPressBinding, WheelHoldBinding,
+    };
     use openlogi_core::hid::ProfileIndex;
     use openlogi_hid::reprog_controls::{
         GESTURE_BUTTON_CID, HAPTIC_PANEL_CID, MULTIPLATFORM_GESTURE_BUTTON_CID,
@@ -834,6 +861,76 @@ mod tests {
         let plan = plan_for_device(&cfg, "2b01a", route(), None, 0, true);
         assert!(plan.target.spec.divert_wheel_buttons.is_empty());
         assert!(diverts(&plan, ButtonId::MiddleClick));
+    }
+
+    fn drag_hold_config(capture_mouse_events: bool) -> Config {
+        let mut cfg = Config::default();
+        cfg.app_settings.capture_mouse_events = capture_mouse_events;
+        cfg.set_binding(
+            "2b01a",
+            ButtonId::Back,
+            Binding::DragHold(DragHoldBinding::new(
+                Action::Paste,
+                HeldDrag::ThreeFingerSwipe,
+            )),
+        );
+        cfg.set_binding(
+            "2b01a",
+            ButtonId::Forward,
+            Binding::DragHold(DragHoldBinding::new(Action::Copy, HeldDrag::TwoFingerSwipe)),
+        );
+        cfg
+    }
+
+    fn raw_xy_diverts(plan: &DeviceCapturePlan, button: ButtonId) -> bool {
+        plan.target
+            .spec
+            .divert_gesture_buttons
+            .iter()
+            .any(|&(_, diverted)| diverted == button)
+    }
+
+    #[test]
+    fn drag_hold_platform_fallback() {
+        // macOS plays the swipe from raw XY; every other platform keeps the
+        // binding click-only through a plain divert, hook or not.
+        let plan = plan_for_device(&drag_hold_config(true), "2b01a", route(), None, 0, true);
+        let plays_swipes = cfg!(target_os = "macos");
+        for button in [ButtonId::Back, ButtonId::Forward] {
+            assert_eq!(raw_xy_diverts(&plan, button), plays_swipes, "{button}");
+            assert_eq!(diverts(&plan, button), !plays_swipes, "{button}");
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn drag_hold_thumb_buttons_divert_raw_xy_while_gestures_can_be_posted() {
+        let plan = plan_for_device(&drag_hold_config(true), "2b01a", route(), None, 0, true);
+        for button in [ButtonId::Back, ButtonId::Forward] {
+            assert!(raw_xy_diverts(&plan, button), "{button}");
+            assert!(!diverts(&plan, button), "{button} has one owner");
+            assert!(!wheel_diverts(&plan, button), "{button}");
+        }
+    }
+
+    #[test]
+    fn drag_hold_without_the_mouse_hook_is_plain_diverted_for_its_click() {
+        let plan = plan_for_device(&drag_hold_config(true), "2b01a", route(), None, 0, false);
+        for button in [ButtonId::Back, ButtonId::Forward] {
+            assert!(!raw_xy_diverts(&plan, button), "{button}");
+            assert!(diverts(&plan, button), "{button} still clicks on release");
+        }
+    }
+
+    #[test]
+    fn mouse_capture_opt_out_keeps_drag_hold_thumb_buttons_native() {
+        let plan = plan_for_device(&drag_hold_config(false), "2b01a", route(), None, 0, true);
+        for button in [ButtonId::Back, ButtonId::Forward] {
+            assert!(
+                !raw_xy_diverts(&plan, button) && !diverts(&plan, button),
+                "{button}"
+            );
+        }
     }
 
     #[test]
