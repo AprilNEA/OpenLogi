@@ -40,9 +40,9 @@ pub(super) fn section_indices(sliders: &[ControlSlider], lens: bool) -> Vec<usiz
 pub(super) fn profiles_row(key: &str, cx: &mut Context<CameraControlsPanel>) -> gpui::Div {
     let state = AppState::try_read(cx);
     let active = state.and_then(|s| s.camera_active_profile(key));
-    let customs: Vec<String> = state
-        .map(|s| s.camera_profiles(key).keys().cloned().collect())
-        .unwrap_or_default();
+    let customs: Vec<String> = state.map_or_else(Default::default, |s| {
+        s.camera_profiles(key).keys().cloned().collect()
+    });
 
     let mut row = h_flex().flex_wrap().gap_1p5().items_center();
     for (ix, builtin) in BUILTIN_PROFILES.iter().enumerate() {
