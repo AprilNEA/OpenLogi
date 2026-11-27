@@ -1840,8 +1840,8 @@ fn slow_strokes_after_a_spent_glide_and_a_catch_still_scroll() {
     );
     assert!(
         matches!(
-            engine.wheels.get(&source).map(|s| &s.glide),
-            Some(GlideState::Spent { .. })
+            engine.wheels.get(&source).map(|s| &s.mode),
+            Some(WheelMode::Modeled(GlideState::Spent { .. }))
         ),
         "the glide did not run out under the spinning wheel"
     );
@@ -1891,4 +1891,392 @@ fn each_wheel_follows_its_own_devices_momentum_settings() {
     assert!(!engine.wheels.contains_key(&plain));
     assert!(engine.pixels_for(&gliding).is_some());
     assert_eq!(engine.pixels_for(&plain), None);
+}
+
+#[test]
+fn a_notch_glide_eases_out_over_its_length() {
+    let glide = Easing::Glide(Duration::from_millis(300));
+    assert_eq!(glide.duration(), Duration::from_millis(300));
+    assert!(glide.ease(0.0).abs() < 1e-12);
+    assert!((glide.ease(1.0) - 1.0).abs() < 1e-12);
+    // Fastest as the notch lands, then coasting: past halfway by a quarter.
+    assert!(glide.ease(0.25) > 0.5, "{}", glide.ease(0.25));
+    assert!(glide.ease(2.0) <= 1.0, "clamped");
+}
+
+/// The ticks `engine`'s main wheel has emitted for notches at `notch_times`
+/// (ms after `start`), evaluated at `until` ms.
+fn ratchet_distance(
+    engine: &mut MomentumEngine,
+    start: Instant,
+    notch_times: &[u64],
+    until: u64,
+) -> f64 {
+    let source = hidpp_source("mouse", 1);
+    let mut frames = Vec::new();
+    let mut ms = 0;
+    for &at in notch_times {
+        while ms < at {
+            ms += 1;
+            engine.advance_due(start + Duration::from_millis(ms), &mut |frame| {
+                frames.push(frame);
+            });
+        }
+        engine.wheel_impulse(
+            source.clone(),
+            wheel(0.0, 1.0),
+            1.0,
+            start + Duration::from_millis(at),
+            &mut |frame| frames.push(frame),
+        );
+    }
+    while ms < until {
+        ms += 1;
+        engine.advance_due(start + Duration::from_millis(ms), &mut |frame| {
+            frames.push(frame);
+        });
+    }
+    frames.iter().map(in_ticks).sum()
+}
+
+fn momentum(change: impl FnOnce(&mut MomentumScrolling)) -> MomentumEngine {
+    let mut settings = MomentumScrolling {
+        enabled: true,
+        ..MomentumScrolling::default()
+    };
+    change(&mut settings);
+    MomentumEngine::new(settings)
+}
+
+#[test]
+fn ratchet_notches_use_configured_glide() {
+    let start = Instant::now();
+    // The crisp default finishes a notch in 40 ms.
+    let crisp = ratchet_distance(&mut momentum(|_| {}), start, &[0], 40);
+    assert!((crisp - 1.0).abs() < 1e-6, "{crisp}");
+    // A 300 ms glide is about a third of the way there at 40 ms...
+    let glide = |m: &mut MomentumScrolling| m.notch_glide_ms = 300;
+    let early = ratchet_distance(&mut momentum(glide), start, &[0], 40);
+    assert!(early > 0.2 && early < 0.5, "{early}");
+    // ...and done at 300 ms.
+    let done = ratchet_distance(&mut momentum(glide), start, &[0], 300);
+    assert!((done - 1.0).abs() < 1e-6, "{done}");
+    // A notch landing mid-glide adds to the distance left: both arrive.
+    let two = ratchet_distance(&mut momentum(glide), start, &[0, 100], 400);
+    assert!((two - 2.0).abs() < 1e-6, "{two}");
+    let mid = ratchet_distance(&mut momentum(glide), start, &[0, 100], 150);
+    assert!(mid > 1.0 && mid < 2.0, "still gliding: {mid}");
+}
+
+#[test]
+fn isolated_ratchet_notches_keep_plain_distance() {
+    let start = Instant::now();
+    let accelerated = |m: &mut MomentumScrolling| m.acceleration = 300;
+    // A second apart: every notch scrolls its plain distance.
+    let slow = ratchet_distance(&mut momentum(accelerated), start, &[0, 1000, 2000], 2100);
+    assert!((slow - 3.0).abs() < 1e-6, "{slow}");
+    // 10 ms apart, a quick turn: the notches after the first go three
+    // times as far.
+    let quick = ratchet_distance(&mut momentum(accelerated), start, &[0, 10, 20], 200);
+    assert!((quick - 7.0).abs() < 1e-6, "{quick}");
+    // Off by default.
+    let plain = ratchet_distance(&mut momentum(|_| {}), start, &[0, 10, 20], 200);
+    assert!((plain - 3.0).abs() < 1e-6, "{plain}");
+}
+
+#[test]
+fn released_reversal_keeps_original_acceleration_rate() {
+    // Two notches held back as a possible spring-back, 60 ms apart, both
+    // replayed at one later instant: the second is measured at 1/0.06 s,
+    // not as instantaneous.
+    let mut engine = momentum(|m| m.acceleration = 300);
+    let source = hidpp_source("mouse", 1);
+    let start = Instant::now();
+    let replay = start + Duration::from_millis(100);
+    let momentum = engine.momentum.expect("enabled");
+    let mut frames = Vec::new();
+    for reported in [0, 60] {
+        engine.engine.wheel_tick(
+            &source,
+            WheelTick {
+                impulse: wheel(0.0, -1.0),
+                notches: -1.0,
+                at: start + Duration::from_millis(reported),
+            },
+            replay,
+            momentum,
+            &mut |frame| frames.push(frame),
+        );
+    }
+    engine.advance_due(replay + Duration::from_millis(100), &mut |frame| {
+        frames.push(frame);
+    });
+    let distance: f64 = frames.iter().map(in_ticks).sum();
+    // 1 + the ramp at 16.7 notches/s: 1 + 2 × (16.7 - 5) / 25 ≈ 1.93.
+    let expected = -(1.0 + 1.0 + 2.0 * ((1.0 / 0.06) - 5.0) / 25.0);
+    assert!(
+        (distance - expected).abs() < 1e-6,
+        "{distance} vs {expected}"
+    );
+}
+
+/// Following the wheel, a free spin never glides: the page moves exactly as
+/// far as the wheel turns, every report as it lands, and stops the moment the
+/// reports stop.
+#[test]
+fn following_the_wheel_moves_the_page_as_far_as_it_spins() {
+    let mut engine = momentum_engine_with(|m| m.follow_wheel = true);
+    let source = hidpp_source("mouse", 1);
+    let mut frames = Vec::new();
+    // A hard spin that slows as a free-spinning wheel does.
+    let stopped = drive_wheel(
+        &mut engine,
+        &source,
+        Instant::now(),
+        |t| (250.0 - 300.0 * t).max(20.0),
+        Duration::from_millis(700),
+        &mut frames,
+    );
+    assert!(
+        frames.iter().all(|f| f.kind != FrameKind::Glide),
+        "following the wheel glided"
+    );
+    let turned: f64 = frames.iter().map(in_ticks).sum();
+
+    let mut after = Vec::new();
+    run_on(&mut engine, stopped, Duration::from_millis(500), &mut after);
+    let tail: f64 = after.iter().map(in_ticks).sum();
+    // At most the eased step of one last ratchet notch, if the slowing
+    // wheel read as ratchet at the very end.
+    assert!(
+        tail.abs() <= 2.0 + 1e-9,
+        "the page moved {tail} ticks after the wheel stopped"
+    );
+
+    // Same spin with the glide: the page runs on far past the wheel.
+    let mut glide = momentum_engine();
+    let mut glided = Vec::new();
+    let end = drive_wheel(
+        &mut glide,
+        &source,
+        Instant::now(),
+        |t| (250.0 - 300.0 * t).max(20.0),
+        Duration::from_millis(700),
+        &mut glided,
+    );
+    run_on(&mut glide, end, Duration::from_millis(1500), &mut glided);
+    let glided: f64 = glided.iter().map(in_ticks).sum();
+    let followed = turned + tail;
+    assert!(followed > 0.0);
+    assert!(
+        (glided - followed).abs() > 0.1 * followed,
+        "follow {followed} and glide {glided} should differ"
+    );
+}
+
+/// Following the wheel, the page moves by each report the instant it lands,
+/// in step with the wheel rather than eased behind it.
+#[test]
+fn following_the_wheel_posts_each_free_spin_report_at_once() {
+    let mut engine = momentum_engine_with(|m| m.follow_wheel = true);
+    let source = hidpp_source("mouse", 1);
+    let mut frames = Vec::new();
+    let at = drive_wheel(
+        &mut engine,
+        &source,
+        Instant::now(),
+        |_| 200.0,
+        Duration::from_millis(400),
+        &mut frames,
+    );
+    // The wheel is spinning freely now: one more report.
+    let mut now = Vec::new();
+    engine.wheel_impulse(source, wheel(0.0, 2.0 * 3.0), 3.0, at, &mut |f| {
+        now.push(f);
+    });
+    let moved: f64 = now.iter().map(in_ticks).sum();
+    assert_delta(wheel(0.0, moved), wheel(0.0, 6.0));
+}
+
+/// Following the wheel, ratchet scrolling moves in whole notches: a finger
+/// rocking the wheel within a detent moves nothing, and a full notch made of
+/// high-resolution fractions eases in as one step of exactly its distance,
+/// never accelerated however quickly the notches come.
+#[test]
+fn following_the_wheel_ratchets_in_whole_eased_notches() {
+    let mut engine = momentum_engine_with(|m| {
+        m.follow_wheel = true;
+        m.notch_glide_ms = 300;
+        m.acceleration = 200;
+    });
+    let source = hidpp_source("mouse", 1);
+    let start = Instant::now();
+    let mut frames = Vec::new();
+    // Rocking within a detent, at 2x sensitivity.
+    for (i, notches) in [0.3, -0.2, 0.2, -0.3].into_iter().enumerate() {
+        let at = start + Duration::from_millis(30 * i as u64);
+        engine.wheel_impulse(
+            source.clone(),
+            wheel(0.0, 2.0 * notches),
+            notches,
+            at,
+            &mut |f| {
+                frames.push(f);
+            },
+        );
+    }
+    let at = run_on(&mut engine, start, Duration::from_millis(200), &mut frames);
+    assert!(
+        frames.is_empty(),
+        "rocking in a detent scrolled: {frames:?}"
+    );
+
+    // Three quick notches, each in fifteen 1/15 reports.
+    let mut at = at;
+    for _ in 0..3 {
+        for _ in 0..15 {
+            let notches = 1.0 / 15.0;
+            engine.wheel_impulse(
+                source.clone(),
+                wheel(0.0, 2.0 * notches),
+                notches,
+                at,
+                &mut |f| {
+                    frames.push(f);
+                },
+            );
+            at += Duration::from_millis(2);
+        }
+        at += Duration::from_millis(10);
+    }
+    run_on(&mut engine, at, Duration::from_millis(600), &mut frames);
+    assert!(frames.iter().all(|f| f.kind != FrameKind::Glide));
+    assert!(
+        frames.len() > 3,
+        "each notch should ease over several frames"
+    );
+    let moved: f64 = frames.iter().map(in_ticks).sum();
+    assert_delta(wheel(0.0, moved), wheel(0.0, 6.0));
+}
+
+/// A followed free spin that a finger stops is seen stopped between
+/// reports: a fraction turned a moment later is ratchet again, carried until
+/// it makes a whole notch instead of moving the page at once.
+#[test]
+fn followed_spin_silence_restores_whole_notches() {
+    let mut engine = momentum_engine_with(|m| m.follow_wheel = true);
+    let source = hidpp_source("mouse", 1);
+    let mut frames = Vec::new();
+    let stopped = drive_wheel(
+        &mut engine,
+        &source,
+        Instant::now(),
+        |_| 200.0,
+        Duration::from_millis(400),
+        &mut frames,
+    );
+    assert!(matches!(
+        engine.wheels.get(&source).map(|s| &s.mode),
+        Some(WheelMode::FollowFreeSpin { .. })
+    ));
+    // The finger holds the wheel: the frame checks see the silence.
+    let at = run_on(
+        &mut engine,
+        stopped,
+        Duration::from_millis(200),
+        &mut frames,
+    );
+    assert!(
+        matches!(
+            engine.wheels.get(&source).map(|s| &s.mode),
+            Some(WheelMode::FollowRatchet { .. })
+        ),
+        "the stop was not seen between reports"
+    );
+    let mut after = Vec::new();
+    engine.wheel_impulse(source.clone(), wheel(0.0, 2.0 * 0.4), 0.4, at, &mut |f| {
+        after.push(f);
+    });
+    assert!(
+        after.is_empty(),
+        "a fraction after the stop scrolled: {after:?}"
+    );
+    engine.wheel_impulse(
+        source.clone(),
+        wheel(0.0, 2.0 * 0.6),
+        0.6,
+        at + Duration::from_millis(20),
+        &mut |f| after.push(f),
+    );
+    run_on(
+        &mut engine,
+        at + Duration::from_millis(20),
+        Duration::from_millis(300),
+        &mut after,
+    );
+    let moved: f64 = after.iter().map(in_ticks).sum();
+    assert_delta(wheel(0.0, moved), wheel(0.0, 2.0));
+}
+
+/// Turning Follow the wheel on or off between reports leaves nothing of the
+/// other mode behind: a running glide stops at the switch and a carried
+/// fraction is dropped, so the wheel is only ever in one mode.
+#[test]
+fn switching_follow_leaves_no_state_of_the_other_mode() {
+    let mut engine = momentum_engine();
+    let source = hidpp_source("mouse", 1);
+    let mut frames = Vec::new();
+    let at = drive_wheel(
+        &mut engine,
+        &source,
+        Instant::now(),
+        |_| 200.0,
+        Duration::from_millis(300),
+        &mut frames,
+    );
+    assert!(
+        engine
+            .wheels
+            .get(&source)
+            .and_then(WheelState::gliding)
+            .is_some()
+    );
+
+    // On mid-glide: the next report follows the wheel, and the glide is gone.
+    engine.momentum = MomentumScrolling {
+        enabled: true,
+        follow_wheel: true,
+        ..MomentumScrolling::default()
+    }
+    .resolve();
+    let mut after = Vec::new();
+    engine.wheel_impulse(source.clone(), wheel(0.0, 2.0 * 0.4), 0.4, at, &mut |f| {
+        after.push(f);
+    });
+    let state = engine.wheels.get(&source).expect("wheel state");
+    assert!(state.mode.follows(), "still modeled after switching on");
+    assert!(state.gliding().is_none());
+    run_on(&mut engine, at, Duration::from_millis(800), &mut after);
+    assert!(
+        after.iter().all(|f| f.kind != FrameKind::Glide),
+        "the glide ran on after following was switched on"
+    );
+
+    // Off with a fraction carried: the glide model starts clean.
+    let at = at + Duration::from_millis(800);
+    engine.wheel_impulse(source.clone(), wheel(0.0, 2.0 * 0.3), 0.3, at, &mut |_| {});
+    engine.momentum = momentum_engine().momentum;
+    engine.wheel_impulse(
+        source.clone(),
+        wheel(0.0, 2.0),
+        1.0,
+        at + Duration::from_millis(500),
+        &mut |_| {},
+    );
+    let state = engine.wheels.get(&source).expect("wheel state");
+    assert!(
+        matches!(state.mode, WheelMode::Modeled(GlideState::Idle { .. })),
+        "following state survived switching off"
+    );
+    assert_eq!(state.next_tick(), None);
 }

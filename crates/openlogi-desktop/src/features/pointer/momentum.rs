@@ -1,10 +1,12 @@
 //! Momentum scrolling, for Settings → General and the Pointer tab.
 //!
 //! One switch turns it on; only then do its settings show: the distance a
-//! wheel notch scrolls, then the glide — its shape, picked from curve tiles
+//! wheel notch scrolls, how long it glides out and how much a quick turn
+//! speeds it up, then the glide — its shape, picked from curve tiles
 //! ([`glide_shape`](super::glide_shape)), and its max speed, length and
 //! repeat speed-up. Each slider has seven distinct stops — the default in the
-//! middle — its value, and a one-line explanation; a button puts them all
+//! middle, or first for a setting that is off by default — its value, and a
+//! one-line explanation; a button puts them all
 //! back to their defaults. The settings ([`MomentumScrolling`]) take effect on
 //! a mouse whose Smooth wheel is on. Settings → General edits the app-wide
 //! default and counts the mice with their own; the Pointer tab edits the
@@ -42,6 +44,9 @@ const PIXELS_PER_NOTCH: [u16; STOPS] = [16, 20, 24, 28, 34, 42, 52];
 const MAX_GLIDE_SPEEDS: [u16; STOPS] = [2500, 4000, 6000, 8000, 10000, 12500, 15000];
 const GLIDE_LENGTHS: [u16; STOPS] = [150, 200, 300, 400, 550, 800, 1200];
 const REPEAT_BOOSTS: [u16; STOPS] = [100, 115, 125, 135, 150, 175, 200];
+/// Off by default: the first stop is off.
+const NOTCH_GLIDES: [u16; STOPS] = [0, 100, 150, 200, 300, 400, 600];
+const ACCELERATIONS: [u16; STOPS] = [100, 125, 150, 175, 200, 250, 300];
 
 /// The stop nearest `value`.
 fn nearest_stop(stops: &[u16; STOPS], value: u16) -> u8 {
@@ -65,16 +70,26 @@ enum MomentumSetting {
     MaxGlideSpeed,
     GlideLength,
     RepeatBoost,
+    NotchGlide,
+    Acceleration,
 }
 
 impl MomentumSetting {
     #[cfg(test)]
-    const ALL: [Self; 4] = [
+    const ALL: [Self; 6] = [
         Self::PixelsPerNotch,
         Self::MaxGlideSpeed,
         Self::GlideLength,
         Self::RepeatBoost,
+        Self::NotchGlide,
+        Self::Acceleration,
     ];
+
+    /// Whether the setting is off by default, its first stop being off.
+    #[cfg(test)]
+    const fn off_by_default(self) -> bool {
+        matches!(self, Self::NotchGlide | Self::Acceleration)
+    }
 
     /// The setting's seven values, low to high.
     const fn stops(self) -> &'static [u16; STOPS] {
@@ -83,6 +98,8 @@ impl MomentumSetting {
             Self::MaxGlideSpeed => &MAX_GLIDE_SPEEDS,
             Self::GlideLength => &GLIDE_LENGTHS,
             Self::RepeatBoost => &REPEAT_BOOSTS,
+            Self::NotchGlide => &NOTCH_GLIDES,
+            Self::Acceleration => &ACCELERATIONS,
         }
     }
 
@@ -93,6 +110,8 @@ impl MomentumSetting {
             Self::MaxGlideSpeed => momentum.max_glide_speed,
             Self::GlideLength => momentum.glide_ms,
             Self::RepeatBoost => momentum.repeat_boost,
+            Self::NotchGlide => momentum.notch_glide_ms,
+            Self::Acceleration => momentum.acceleration,
         }
     }
 
@@ -103,17 +122,26 @@ impl MomentumSetting {
             Self::MaxGlideSpeed => momentum.max_glide_speed = value,
             Self::GlideLength => momentum.glide_ms = value,
             Self::RepeatBoost => momentum.repeat_boost = value,
+            Self::NotchGlide => momentum.notch_glide_ms = value,
+            Self::Acceleration => momentum.acceleration = value,
         }
     }
 
     /// `value` as the setting's row shows it.
     fn format(self, value: u16) -> String {
+        let off = match self {
+            Self::RepeatBoost | Self::Acceleration => value <= 100,
+            Self::NotchGlide => value == 0,
+            Self::PixelsPerNotch | Self::MaxGlideSpeed | Self::GlideLength => false,
+        };
+        if off {
+            return tr!("common.off").to_string();
+        }
         match self {
             Self::PixelsPerNotch => format!("{value} px"),
             Self::MaxGlideSpeed => format!("{value} px/s"),
-            Self::GlideLength => format!("{value} ms"),
-            Self::RepeatBoost if value <= 100 => tr!("common.off").to_string(),
-            Self::RepeatBoost => format!("×{}", f64::from(value) / 100.0),
+            Self::GlideLength | Self::NotchGlide => format!("{value} ms"),
+            Self::RepeatBoost | Self::Acceleration => format!("×{}", f64::from(value) / 100.0),
         }
     }
 }
@@ -187,6 +215,8 @@ pub struct MomentumPanel {
     max_glide_speed: Setting,
     glide_length: Setting,
     repeat_boost: Setting,
+    notch_glide: Setting,
+    acceleration: Setting,
     _state_obs: Subscription,
 }
 
@@ -258,12 +288,15 @@ impl MomentumPanel {
             max_glide_speed: Setting::new(MomentumSetting::MaxGlideSpeed, scope, cx),
             glide_length: Setting::new(MomentumSetting::GlideLength, scope, cx),
             repeat_boost: Setting::new(MomentumSetting::RepeatBoost, scope, cx),
+            notch_glide: Setting::new(MomentumSetting::NotchGlide, scope, cx),
+            acceleration: Setting::new(MomentumSetting::Acceleration, scope, cx),
             _state_obs: state_obs,
         }
     }
 
     /// The settings shown while momentum scrolling is on: the wheel's notch
-    /// distance, then the glide's.
+    /// distance, glide, acceleration and whether a free spin follows the
+    /// wheel, then the glide's unless it does.
     fn settings(
         &mut self,
         pal: Palette,
@@ -277,11 +310,59 @@ impl MomentumPanel {
             max_glide_speed: self.max_glide_speed.shown(&momentum, window, cx),
             glide_ms: self.glide_length.shown(&momentum, window, cx),
             repeat_boost: self.repeat_boost.shown(&momentum, window, cx),
+            notch_glide_ms: self.notch_glide.shown(&momentum, window, cx),
+            acceleration: self.acceleration.shown(&momentum, window, cx),
             ..momentum
         };
+        let scope = self.scope;
+        // Following the wheel, nothing glides or speeds up, so those
+        // settings would do nothing.
+        let glide = (!momentum.follow_wheel).then(|| {
+            v_flex()
+                .gap_4()
+                .child(group_heading(tr!("pointer.momentum_section_glide"), pal))
+                .child(glide_shape_picker(
+                    scope,
+                    momentum.glide_shape,
+                    &shown.params(),
+                    pal,
+                ))
+                .child(slider_row(
+                    pal,
+                    tr!("pointer.momentum_max_glide_speed"),
+                    tr!("pointer.momentum_max_glide_speed_description"),
+                    &self.max_glide_speed,
+                    shown.max_glide_speed,
+                ))
+                .child(slider_row(
+                    pal,
+                    tr!("pointer.momentum_glide_length"),
+                    tr!("pointer.momentum_glide_length_description"),
+                    &self.glide_length,
+                    shown.glide_ms,
+                ))
+                .child(slider_row(
+                    pal,
+                    tr!("pointer.momentum_repeat_boost"),
+                    tr!("pointer.momentum_repeat_boost_description"),
+                    &self.repeat_boost,
+                    shown.repeat_boost,
+                ))
+        });
         v_flex()
             .gap_4()
             .child(group_heading(tr!("pointer.momentum_section_wheel"), pal))
+            .child(toggle_row(
+                "momentum-follow-wheel-row",
+                pal,
+                tr!("pointer.momentum_follow_wheel"),
+                tr!("pointer.momentum_follow_wheel_description"),
+                Toggle::new("momentum-follow-wheel-toggle")
+                    .selected(momentum.follow_wheel)
+                    .on_change(move |on, _window, cx| {
+                        commit(cx, scope, |m| m.follow_wheel = *on);
+                    }),
+            ))
             .child(slider_row(
                 pal,
                 tr!("pointer.momentum_pixels_per_notch"),
@@ -289,34 +370,23 @@ impl MomentumPanel {
                 &self.pixels_per_notch,
                 shown.pixels_per_notch,
             ))
-            .child(group_heading(tr!("pointer.momentum_section_glide"), pal))
-            .child(glide_shape_picker(
-                self.scope,
-                momentum.glide_shape,
-                &shown.params(),
-                pal,
-            ))
             .child(slider_row(
                 pal,
-                tr!("pointer.momentum_max_glide_speed"),
-                tr!("pointer.momentum_max_glide_speed_description"),
-                &self.max_glide_speed,
-                shown.max_glide_speed,
+                tr!("pointer.momentum_notch_glide"),
+                tr!("pointer.momentum_notch_glide_description"),
+                &self.notch_glide,
+                shown.notch_glide_ms,
             ))
-            .child(slider_row(
-                pal,
-                tr!("pointer.momentum_glide_length"),
-                tr!("pointer.momentum_glide_length_description"),
-                &self.glide_length,
-                shown.glide_ms,
-            ))
-            .child(slider_row(
-                pal,
-                tr!("pointer.momentum_repeat_boost"),
-                tr!("pointer.momentum_repeat_boost_description"),
-                &self.repeat_boost,
-                shown.repeat_boost,
-            ))
+            .when(!momentum.follow_wheel, |this| {
+                this.child(slider_row(
+                    pal,
+                    tr!("pointer.momentum_acceleration"),
+                    tr!("pointer.momentum_acceleration_description"),
+                    &self.acceleration,
+                    shown.acceleration,
+                ))
+            })
+            .children(glide)
             .child(
                 h_flex()
                     .justify_end()
@@ -530,16 +600,21 @@ mod tests {
     use crate::services::assets::AssetResolver;
     use crate::state::{Sources, tests::direct_inventory};
 
-    /// The middle stop, where every default sits.
+    /// The middle stop, where every default sits but an off one.
     const MIDDLE_STOP: u8 = LAST_STOP / 2;
 
     #[test]
-    fn every_default_is_the_middle_stop() {
+    fn every_default_is_the_middle_stop_or_off() {
         let defaults = MomentumScrolling::default();
         for setting in MomentumSetting::ALL {
             let (stops, value) = (setting.stops(), setting.get(&defaults));
-            assert_eq!(nearest_stop(stops, value), MIDDLE_STOP, "{setting:?}");
-            assert_eq!(stop_value(stops, MIDDLE_STOP), value);
+            let stop = if setting.off_by_default() {
+                0
+            } else {
+                MIDDLE_STOP
+            };
+            assert_eq!(nearest_stop(stops, value), stop, "{setting:?}");
+            assert_eq!(stop_value(stops, stop), value);
         }
     }
 
@@ -566,6 +641,11 @@ mod tests {
         assert!(GLIDE_LENGTHS[0] >= MomentumScrolling::GLIDE_MS_MIN);
         assert!(GLIDE_LENGTHS[STOPS - 1] <= MomentumScrolling::GLIDE_MS_MAX);
         assert!(REPEAT_BOOSTS[STOPS - 1] <= MomentumScrolling::REPEAT_BOOST_MAX);
+        assert_eq!(NOTCH_GLIDES[0], 0, "the first stop is off");
+        assert!(NOTCH_GLIDES[1] >= MomentumScrolling::NOTCH_GLIDE_MS_MIN);
+        assert!(NOTCH_GLIDES[STOPS - 1] <= MomentumScrolling::NOTCH_GLIDE_MS_MAX);
+        assert_eq!(ACCELERATIONS[0], 100, "the first stop is off");
+        assert!(ACCELERATIONS[STOPS - 1] <= MomentumScrolling::ACCELERATION_MAX);
     }
 
     #[test]

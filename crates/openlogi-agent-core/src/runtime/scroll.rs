@@ -13,7 +13,11 @@
 //! scrolling from a SmartShift free spin, the page glides off at the speed
 //! the wheel was spun (the `glide` model) and slows along one
 //! [`GlideCurve`], and a finger stopping the wheel ends the glide at once.
-//! Off, the wheel eases exactly as any other wheel does.
+//! With `follow_wheel` set, a free spin launches no glide: each report moves
+//! the page as far as the wheel turned, at once, so the wheel's own spin is
+//! the momentum. Ratchet scrolling then moves in whole notches, each eased
+//! as one step and never accelerated, so a finger resting in a detent does
+//! not jiggle the page. Off, the wheel eases exactly as any other wheel does.
 
 mod free_spin;
 mod glide;
@@ -62,6 +66,11 @@ const REPEAT_WINDOW: Duration = Duration::from_millis(600);
 /// How long after a free-spinning wheel's last tick a single step the other
 /// way is held back as the wheel springing back from a finger stopping it.
 const SPRING_BACK: Duration = Duration::from_millis(100);
+/// Following the wheel, a ratchet carry this long untouched is the wheel
+/// resting in a detent: what is left of it is rounding, not motion.
+const CARRY_IDLE: Duration = Duration::from_millis(400);
+/// Slack on a whole notch, for reports that are fractions of one.
+const CARRY_SLACK: f64 = 1e-6;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct WheelDelta {
@@ -272,6 +281,11 @@ enum Easing {
     /// steps, kept short and direct so ratchet scrolling stays precise beside
     /// the glide.
     Crisp,
+    /// Cubic ease-out over the given length: momentum scrolling's notch
+    /// steps with a notch glide set. The page moves fastest as the notch
+    /// lands and coasts to a stop; a notch landing mid-glide restarts it from
+    /// there toward the summed target, so a steady turn reads as one motion.
+    Glide(Duration),
 }
 
 impl Easing {
@@ -279,6 +293,7 @@ impl Easing {
         match self {
             Self::Smooth => ANIMATION_DURATION,
             Self::Crisp => CRISP_STEP_DURATION,
+            Self::Glide(length) => length,
         }
     }
 
@@ -288,6 +303,7 @@ impl Easing {
         match self {
             Self::Smooth => p * p * (3.0 - 2.0 * p),
             Self::Crisp => p,
+            Self::Glide(_) => 1.0 - (1.0 - p).powi(3),
         }
     }
 }
@@ -481,10 +497,63 @@ struct WheelState {
     momentum: MomentumParams,
     spring_back: ReverseLock<WheelTick>,
     detector: FreeSpinDetector,
-    glide: GlideState,
+    /// How the wheel's motion reaches the page; only
+    /// [`Self::sync_mode`] and [`Self::follow`] move it between its
+    /// follow-the-wheel and modeled families.
+    mode: WheelMode,
     /// Spins chained onto the glide, like repeated trackpad flicks: each
     /// one speeds it up ([`glide::chain_boost`]).
     chain: u32,
+    /// When the last ratchet notch arrived, for acceleration's notch rate.
+    last_ratchet: Option<Instant>,
+}
+
+/// How a smoothed main wheel's motion reaches the page.
+enum WheelMode {
+    /// The glide model: a free spin launches a glide.
+    Modeled(GlideState),
+    /// Following the wheel while it ratchets: report fractions wait in
+    /// `carry`, raw signed notches last changed at `carry_at`, until they
+    /// make a whole notch.
+    FollowRatchet {
+        carry: f64,
+        carry_at: Option<Instant>,
+    },
+    /// Following a free spin: each report moves the page at once, and the
+    /// detector is checked every frame from `next_check`, so a finger
+    /// stopping the wheel is seen between reports.
+    FollowFreeSpin { next_check: Instant },
+}
+
+impl WheelMode {
+    /// The mode a wheel starts in, or switches to, under `follow`.
+    fn initial(follow: bool) -> Self {
+        if follow {
+            Self::FollowRatchet {
+                carry: 0.0,
+                carry_at: None,
+            }
+        } else {
+            Self::Modeled(GlideState::default())
+        }
+    }
+
+    const fn follows(&self) -> bool {
+        !matches!(self, Self::Modeled(_))
+    }
+}
+
+/// What following the wheel does with one report.
+#[derive(Debug, PartialEq)]
+enum FollowStep {
+    /// Nothing yet: a fraction of a notch is carried.
+    Carry,
+    /// Ease in this many whole notches as one step.
+    Notch(WheelDelta),
+    /// Move the page by this report's own distance, now.
+    Report(WheelDelta),
+    /// A finger stopped the wheel: drop what is still moving.
+    Stop,
 }
 
 impl WheelState {
@@ -493,22 +562,120 @@ impl WheelState {
             momentum,
             spring_back: ReverseLock::default(),
             detector: FreeSpinDetector::default(),
-            glide: GlideState::default(),
+            mode: WheelMode::initial(momentum.follow_wheel()),
             chain: 0,
+            last_ratchet: None,
+        }
+    }
+
+    /// Switch the wheel between following and the glide model when its
+    /// device's setting changed. Nothing of the other family survives: a
+    /// running glide or a carried fraction is dropped, so no combination of
+    /// the two can arise.
+    fn sync_mode(&mut self, follow: bool) {
+        if self.mode.follows() != follow {
+            self.mode = WheelMode::initial(follow);
+        }
+    }
+
+    /// When the detector is next due a tick between reports, if ever.
+    fn next_tick(&self) -> Option<Instant> {
+        match &self.mode {
+            WheelMode::Modeled(glide) => glide.next_tick(),
+            WheelMode::FollowFreeSpin { next_check } => Some(*next_check),
+            WheelMode::FollowRatchet { .. } => None,
+        }
+    }
+
+    /// Follow one report of `notches` raw notches, scaled to `impulse`, in
+    /// detector `phase`: the one transition function of the follow modes.
+    fn follow(
+        &mut self,
+        phase: WheelPhase,
+        impulse: WheelDelta,
+        notches: f64,
+        at: Instant,
+    ) -> FollowStep {
+        let (carry, carry_at) = match self.mode {
+            WheelMode::FollowRatchet { carry, carry_at } => (carry, carry_at),
+            WheelMode::FollowFreeSpin { .. } => (0.0, None),
+            WheelMode::Modeled(_) => unreachable!("follow() runs only in a follow mode"),
+        };
+        match phase {
+            WheelPhase::Ratchet => {
+                // A carry left untouched since the wheel last settled in a
+                // detent is rounding, not motion: start again from zero.
+                let carry = if carry_at
+                    .is_some_and(|last| at.saturating_duration_since(last) >= CARRY_IDLE)
+                {
+                    notches
+                } else {
+                    carry + notches
+                };
+                // A hair of slack, so fifteen 1/15 reports make one notch.
+                let whole = (carry + carry.signum() * CARRY_SLACK).trunc();
+                self.mode = WheelMode::FollowRatchet {
+                    carry: carry - whole,
+                    carry_at: Some(at),
+                };
+                if whole == 0.0 {
+                    FollowStep::Carry
+                } else {
+                    FollowStep::Notch(impulse.scale(whole / notches))
+                }
+            }
+            WheelPhase::FreeSpin => {
+                self.mode = WheelMode::FollowFreeSpin {
+                    next_check: at + FRAME_PERIOD,
+                };
+                // The fraction still carried from the ratchet rides along.
+                FollowStep::Report(impulse.scale((notches + carry) / notches))
+            }
+            WheelPhase::Stopped(_) => {
+                self.mode = WheelMode::initial(true);
+                FollowStep::Stop
+            }
+        }
+    }
+
+    /// Re-check a followed free spin's detector between reports at `at`,
+    /// once due: answers whether a finger has just stopped the wheel.
+    fn check_followed_spin(&mut self, at: Instant) -> bool {
+        let WheelMode::FollowFreeSpin { next_check } = self.mode else {
+            return false;
+        };
+        if at < next_check {
+            return false;
+        }
+        match self.detector.tick(at) {
+            WheelPhase::FreeSpin => {
+                self.mode = WheelMode::FollowFreeSpin {
+                    next_check: at + FRAME_PERIOD,
+                };
+                false
+            }
+            WheelPhase::Ratchet => {
+                self.mode = WheelMode::initial(true);
+                false
+            }
+            WheelPhase::Stopped(_) => {
+                self.mode = WheelMode::initial(true);
+                true
+            }
         }
     }
 
     /// The running glide, if any.
     fn gliding(&self) -> Option<&Glide> {
-        match &self.glide {
-            GlideState::Gliding(glide) => Some(glide),
-            GlideState::Idle { .. } | GlideState::Spent { .. } => None,
+        match &self.mode {
+            WheelMode::Modeled(GlideState::Gliding(glide)) => Some(glide),
+            _ => None,
         }
     }
 
     /// End a running glide at `at`, the way `stop` says.
     fn end_glide(&mut self, at: Instant, stop: GlideStop) {
-        let GlideState::Gliding(glide) = &self.glide else {
+        let WheelMode::Modeled(GlideState::Gliding(glide)) = &self.mode else {
             return;
         };
         let last = GlideEnd {
@@ -516,13 +683,13 @@ impl WheelState {
             direction: glide.direction,
             speed: glide.speed(at),
         };
-        self.glide = match stop {
+        self.mode = WheelMode::Modeled(match stop {
             GlideStop::RanOutSpinning => GlideState::Spent {
                 last,
                 next_check: at + FRAME_PERIOD,
             },
             GlideStop::Touched | GlideStop::RanOut => GlideState::Idle { last: Some(last) },
-        };
+        });
     }
 }
 
@@ -614,6 +781,9 @@ impl Direction {
 struct WheelTick {
     impulse: WheelDelta,
     notches: f64,
+    /// When the report arrived. A tick held back as a possible spring-back
+    /// is replayed later, but its notch rate is measured from this.
+    at: Instant,
 }
 
 /// A free-spinning wheel's glide: one [`GlideCurve`], relaunched from where
@@ -757,6 +927,19 @@ impl ScrollEngine {
             .map(|state| state.momentum.pixels_per_notch())
     }
 
+    /// How `source`'s notch steps move: a smoothed wheel under momentum
+    /// scrolling steps crisply or glides per its notch glide; every other
+    /// wheel eases.
+    fn step_easing(&self, source: &ScrollSource) -> Easing {
+        match self.wheels.get(source) {
+            Some(state) => state
+                .momentum
+                .notch_glide()
+                .map_or(Easing::Crisp, Easing::Glide),
+            None => Easing::Smooth,
+        }
+    }
+
     /// One smoothed main-wheel impulse of `notches` raw wheel notches.
     ///
     /// `momentum` is the settings of the wheel's device, `None` while momentum
@@ -798,10 +981,16 @@ impl ScrollEngine {
         } else {
             SPRING_BACK
         };
-        match state
-            .spring_back
-            .admit(notches, at, lock, WheelTick { impulse, notches })
-        {
+        match state.spring_back.admit(
+            notches,
+            at,
+            lock,
+            WheelTick {
+                impulse,
+                notches,
+                at,
+            },
+        ) {
             Admit::Pass(tick) => self.wheel_tick(&source, tick, at, momentum, emit),
             Admit::Hold => {}
             // Released now: replayed at their own, older instants the held
@@ -820,7 +1009,11 @@ impl ScrollEngine {
     fn wheel_tick(
         &mut self,
         source: &ScrollSource,
-        WheelTick { impulse, notches }: WheelTick,
+        WheelTick {
+            impulse,
+            notches,
+            at: reported_at,
+        }: WheelTick,
         at: Instant,
         momentum: MomentumParams,
         emit: &mut impl FnMut(ScrollFrame),
@@ -830,6 +1023,23 @@ impl ScrollEngine {
             .entry(source.clone())
             .or_insert_with(|| WheelState::new(momentum));
         let phase = state.detector.report(at, notches);
+        state.sync_mode(momentum.follow_wheel());
+        if state.mode.follows() {
+            match state.follow(phase, impulse, notches, reported_at) {
+                FollowStep::Carry => {}
+                // Whole notches only, each one step of its own distance:
+                // the fractions a finger turns within a detent, and back,
+                // cancel in the carry instead of jiggling the page.
+                FollowStep::Notch(whole) => self.impulse(source.clone(), whole, at, emit),
+                // The wheel's own spin is the momentum: each report moves
+                // the page as far as it turned, at once.
+                FollowStep::Report(moved) => {
+                    emit(ScrollFrame::step(moved, momentum.pixels_per_notch()));
+                }
+                FollowStep::Stop => self.stop_wheel(source, at, emit),
+            }
+            return;
+        }
         // A push the detector reads as a finger driving the wheel, landing on
         // a glide still going strong the same way, is a repeated spin: keep
         // gliding, faster once the spin before it has peaked.
@@ -841,7 +1051,7 @@ impl ScrollEngine {
         if pushed_while_gliding {
             state.detector.resume_free_spin(at);
             let wheel_speed = state.detector.speed(at);
-            if let GlideState::Gliding(glide) = &mut state.glide
+            if let WheelMode::Modeled(GlideState::Gliding(glide)) = &mut state.mode
                 && let Flick::Peaked = glide.flick
             {
                 if let Some(frame) = glide.advance(at, momentum.pixels_per_notch()) {
@@ -855,13 +1065,23 @@ impl ScrollEngine {
             }
             return;
         }
-        match (phase, &state.glide, direction) {
+        let WheelMode::Modeled(glide) = &state.mode else {
+            unreachable!("the follow modes returned above");
+        };
+        match (phase, glide, direction) {
             (WheelPhase::Ratchet, ..) => {
                 state.end_glide(at, GlideStop::Touched);
-                if let GlideState::Spent { last, .. } = state.glide {
-                    state.glide = GlideState::Idle { last: Some(last) };
+                if let WheelMode::Modeled(GlideState::Spent { last, .. }) = state.mode {
+                    state.mode = WheelMode::Modeled(GlideState::Idle { last: Some(last) });
                 }
-                self.impulse(source.clone(), impulse, at, emit);
+                // A quick turn scrolls each notch farther. The rate comes from
+                // the gap since the previous notch: the detector's windowed
+                // speed reads one isolated notch as a turn of several
+                // notches per second.
+                let rate = glide::notch_rate(state.last_ratchet, notches, reported_at);
+                state.last_ratchet = Some(reported_at);
+                let boost = glide::acceleration(rate, &momentum);
+                self.impulse(source.clone(), impulse.scale(boost), at, emit);
             }
             (WheelPhase::FreeSpin, &GlideState::Idle { last }, Some(direction)) => {
                 // `notches` is the raw count in the same direction as
@@ -884,14 +1104,14 @@ impl ScrollEngine {
                 let boost = glide::chain_boost(&momentum, state.chain);
                 let caught = repeat.map_or(0.0, |last| last.speed);
                 let speed = (launch * boost).max(caught);
-                state.glide = GlideState::Gliding(Glide::new(
+                state.mode = WheelMode::Modeled(GlideState::Gliding(Glide::new(
                     direction,
                     sensitivity,
                     boost,
                     (pace, speed),
                     &momentum,
                     at,
-                ));
+                )));
                 // The glide takes over from here: the eased tail still in
                 // flight would double up with its first frames.
                 self.drop_motion(source, emit);
@@ -941,7 +1161,7 @@ impl ScrollEngine {
         let ticking: Vec<ScrollSource> = self
             .wheels
             .iter()
-            .filter(|(_, state)| state.glide.next_tick().is_some())
+            .filter(|(_, state)| state.next_tick().is_some())
             .map(|(source, _)| source.clone())
             .collect();
         for source in ticking {
@@ -950,9 +1170,15 @@ impl ScrollEngine {
             };
             let momentum = state.momentum;
             let per_tick = momentum.pixels_per_notch();
-            if let GlideState::Spent { last, next_check } = state.glide {
+            if state.mode.follows() {
+                if state.check_followed_spin(at) {
+                    self.stop_wheel(&source, at, emit);
+                }
+                continue;
+            }
+            if let WheelMode::Modeled(GlideState::Spent { last, next_check }) = state.mode {
                 if at >= next_check {
-                    state.glide = match state.detector.tick(at) {
+                    state.mode = WheelMode::Modeled(match state.detector.tick(at) {
                         WheelPhase::FreeSpin => GlideState::Spent {
                             last,
                             next_check: at + FRAME_PERIOD,
@@ -962,7 +1188,7 @@ impl ScrollEngine {
                         WheelPhase::Stopped(_) | WheelPhase::Ratchet => {
                             GlideState::Idle { last: Some(last) }
                         }
-                    };
+                    });
                 }
                 continue;
             }
@@ -975,7 +1201,7 @@ impl ScrollEngine {
                 WheelPhase::Ratchet => 0.0,
                 WheelPhase::FreeSpin => state.detector.speed(at),
             };
-            let GlideState::Gliding(glide) = &mut state.glide else {
+            let WheelMode::Modeled(GlideState::Gliding(glide)) = &mut state.mode else {
                 continue;
             };
             if at < glide.next_frame {
@@ -1015,12 +1241,7 @@ impl ScrollEngine {
         emit: &mut impl FnMut(ScrollFrame),
     ) {
         let pixels = self.pixels_for(&source);
-        // Momentum scrolling's wheel steps crisply; every other wheel eases.
-        let easing = if pixels.is_some() {
-            Easing::Crisp
-        } else {
-            Easing::Smooth
-        };
+        let easing = self.step_easing(&source);
         if self
             .active
             .get(&source)
@@ -1108,11 +1329,7 @@ impl ScrollEngine {
             .active
             .values()
             .map(|motion| motion.next_frame)
-            .chain(
-                self.wheels
-                    .values()
-                    .filter_map(|state| state.glide.next_tick()),
-            )
+            .chain(self.wheels.values().filter_map(WheelState::next_tick))
             .min();
         frame.into_iter().chain(self.phased.values().copied()).min()
     }

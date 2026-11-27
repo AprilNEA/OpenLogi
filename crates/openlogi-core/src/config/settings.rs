@@ -557,6 +557,21 @@ pub struct MomentumScrolling {
     /// Speed-up per repeated spin onto a still-running glide, in percent
     /// (135 = ×1.35 per spin); 100 turns it off.
     pub repeat_boost: u16,
+    /// How long each ratchet notch glides out, in milliseconds: the page
+    /// moves fastest at the notch and eases to a stop, and a notch landing
+    /// mid-glide adds to the distance left. 0 keeps the crisp step.
+    pub notch_glide_ms: u16,
+    /// How much farther a notch scrolls while the wheel turns fast, in
+    /// percent (200 = twice as far at full speed); 100 turns it off. Slow
+    /// notches always scroll `pixels_per_notch`.
+    pub acceleration: u16,
+    /// Whether a free-spinning wheel moves the page exactly as far as it
+    /// turns, report by report, instead of gliding. The wheel's own spin is
+    /// then the momentum, and the page stops when it stops. Ratchet
+    /// scrolling moves in whole notches, eased by `notch_glide_ms` and never
+    /// accelerated; `acceleration` and the glide settings do nothing while
+    /// this is on. **Off by default.**
+    pub follow_wheel: bool,
 }
 
 /// How a glide slows toward its stop: its speed falls as `(1 − t/T)^p`.
@@ -603,6 +618,9 @@ pub struct MomentumParams {
     max_glide_speed: f64,
     glide_length: Duration,
     repeat_boost: f64,
+    notch_glide: Option<Duration>,
+    acceleration: f64,
+    follow_wheel: bool,
 }
 
 impl MomentumParams {
@@ -635,6 +653,26 @@ impl MomentumParams {
     pub const fn repeat_boost(&self) -> f64 {
         self.repeat_boost
     }
+
+    /// How long each ratchet notch glides out, or `None` for the crisp step.
+    #[must_use]
+    pub const fn notch_glide(&self) -> Option<Duration> {
+        self.notch_glide
+    }
+
+    /// The notch distance multiplier at full ratchet speed, `>= 1.0` (1 is
+    /// off).
+    #[must_use]
+    pub const fn acceleration(&self) -> f64 {
+        self.acceleration
+    }
+
+    /// Whether a free spin moves the page as far as the wheel turns, with no
+    /// glide, and ratchet notches are never accelerated.
+    #[must_use]
+    pub const fn follow_wheel(&self) -> bool {
+        self.follow_wheel
+    }
 }
 
 impl MomentumScrolling {
@@ -652,6 +690,12 @@ impl MomentumScrolling {
     pub const GLIDE_MS_MAX: u16 = 1200;
     /// Largest selectable repeat speed-up, percent.
     pub const REPEAT_BOOST_MAX: u16 = 200;
+    /// Selectable notch glide lengths, ms; 0, below the range, is off.
+    pub const NOTCH_GLIDE_MS_MIN: u16 = 60;
+    /// See [`Self::NOTCH_GLIDE_MS_MIN`].
+    pub const NOTCH_GLIDE_MS_MAX: u16 = 600;
+    /// Largest selectable acceleration, percent.
+    pub const ACCELERATION_MAX: u16 = 300;
 
     /// The settings the agent runs with, each clamped into its range — or
     /// `None` while momentum scrolling is off.
@@ -678,6 +722,14 @@ impl MomentumScrolling {
                 self.glide_ms.clamp(Self::GLIDE_MS_MIN, Self::GLIDE_MS_MAX),
             )),
             repeat_boost: f64::from(self.repeat_boost.clamp(100, Self::REPEAT_BOOST_MAX)) / 100.0,
+            notch_glide: (self.notch_glide_ms > 0).then(|| {
+                Duration::from_millis(u64::from(
+                    self.notch_glide_ms
+                        .clamp(Self::NOTCH_GLIDE_MS_MIN, Self::NOTCH_GLIDE_MS_MAX),
+                ))
+            }),
+            acceleration: f64::from(self.acceleration.clamp(100, Self::ACCELERATION_MAX)) / 100.0,
+            follow_wheel: self.follow_wheel,
         }
     }
 }
@@ -692,6 +744,9 @@ impl Default for MomentumScrolling {
             max_glide_speed: 8000,
             glide_ms: 400,
             repeat_boost: 135,
+            notch_glide_ms: 0,
+            acceleration: 100,
+            follow_wheel: false,
         }
     }
 }
@@ -1152,6 +1207,9 @@ mod tests {
         assert!((defaults.max_glide_speed() - 8000.0).abs() < f64::EPSILON);
         assert_eq!(defaults.glide_length(), Duration::from_millis(400));
         assert!((defaults.repeat_boost() - 1.35).abs() < f64::EPSILON);
+        assert_eq!(defaults.notch_glide(), None, "off by default");
+        assert!((defaults.acceleration() - 1.0).abs() < f64::EPSILON);
+        assert!(!defaults.follow_wheel(), "off by default");
 
         let low = MomentumScrolling {
             enabled: true,
@@ -1159,6 +1217,8 @@ mod tests {
             max_glide_speed: 0,
             glide_ms: 0,
             repeat_boost: 0,
+            notch_glide_ms: 1,
+            acceleration: 0,
             ..MomentumScrolling::default()
         }
         .resolve()
@@ -1167,6 +1227,8 @@ mod tests {
         assert!((low.max_glide_speed() - 2000.0).abs() < 1e-9);
         assert_eq!(low.glide_length(), Duration::from_millis(150));
         assert!((low.repeat_boost() - 1.0).abs() < 1e-9);
+        assert_eq!(low.notch_glide(), Some(Duration::from_millis(60)));
+        assert!((low.acceleration() - 1.0).abs() < 1e-9);
 
         let high = MomentumScrolling {
             enabled: true,
@@ -1175,6 +1237,9 @@ mod tests {
             max_glide_speed: u16::MAX,
             glide_ms: u16::MAX,
             repeat_boost: u16::MAX,
+            notch_glide_ms: u16::MAX,
+            acceleration: u16::MAX,
+            follow_wheel: true,
         }
         .resolve()
         .expect("on");
@@ -1183,6 +1248,9 @@ mod tests {
         assert!((high.max_glide_speed() - 15000.0).abs() < 1e-9);
         assert_eq!(high.glide_length(), Duration::from_millis(1200));
         assert!((high.repeat_boost() - 2.0).abs() < 1e-9);
+        assert_eq!(high.notch_glide(), Some(Duration::from_millis(600)));
+        assert!((high.acceleration() - 3.0).abs() < 1e-9);
+        assert!(high.follow_wheel());
     }
 
     #[test]

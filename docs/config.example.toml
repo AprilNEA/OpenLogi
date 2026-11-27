@@ -30,6 +30,10 @@ animate_desktop_switch = true
 [app_settings.momentum_scrolling]
 enabled = true
 glide_shape = "smooth"
+# Let each ratchet notch glide out over 300 ms, and scroll up to twice as far
+# per notch while the wheel turns fast. Both are off (0 and 100) by default.
+notch_glide_ms = 300
+acceleration = 200
 
 # Cross-machine device handoff. Pairing writes the peer's pinned public key;
 # manual addresses keep Flow usable across VPNs, VLANs, and overlay networks.
