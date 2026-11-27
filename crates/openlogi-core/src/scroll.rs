@@ -74,6 +74,16 @@ impl ScrollDelta {
             Self::WheelTicks { x, y } => Self::WheelTicks { x, y: -y },
         }
     }
+
+    /// Flip the sign of the horizontal component, preserving the unit and the
+    /// vertical component.
+    #[must_use]
+    pub const fn negate_x(self) -> Self {
+        match self {
+            Self::Pixels { x, y } => Self::Pixels { x: -x, y },
+            Self::WheelTicks { x, y } => Self::WheelTicks { x: -x, y },
+        }
+    }
 }
 
 /// One momentum glide: its speed falls from `start_speed` to zero as
