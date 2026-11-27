@@ -9,6 +9,7 @@ fn collect_assets_requires_minisign_signature_for_each_dmg() {
         dist.path(),
         "https://updates.example/releases/v1.2.3",
         false,
+        false,
     )
     .unwrap_err();
 }
@@ -26,6 +27,7 @@ fn collect_assets_publishes_signature_url() {
     let assets = collect_assets(
         dist.path(),
         "https://updates.example/releases/v1.2.3",
+        false,
         false,
     )
     .unwrap();
@@ -53,6 +55,7 @@ fn collect_assets_skips_windows_artifacts_unless_opted_in() {
         dist.path(),
         "https://updates.example/releases/v1.2.3",
         false,
+        false,
     )
     .unwrap();
 
@@ -71,8 +74,13 @@ fn collect_assets_includes_windows_msi_and_zip_per_arch() {
         fs_err::write(dist.path().join(format!("{name}.minisig")), b"signature").unwrap();
     }
 
-    let assets =
-        collect_assets(dist.path(), "https://updates.example/releases/v1.2.3", true).unwrap();
+    let assets = collect_assets(
+        dist.path(),
+        "https://updates.example/releases/v1.2.3",
+        true,
+        false,
+    )
+    .unwrap();
 
     assert_eq!(assets.len(), 3);
     assert!(assets.iter().all(|a| a.os == "windows"));
@@ -90,7 +98,7 @@ fn collect_assets_includes_windows_msi_and_zip_per_arch() {
 }
 
 #[test]
-fn collect_assets_skips_linux_packages_and_foreign_archives() {
+fn collect_assets_classifies_linux_packages_and_skips_foreign_archives() {
     let dist = tempfile::tempdir().unwrap();
     for name in [
         "openlogi-v1.2.3-linux-amd64.deb",
@@ -102,8 +110,43 @@ fn collect_assets_skips_linux_packages_and_foreign_archives() {
         fs_err::write(dist.path().join(format!("{name}.minisig")), b"signature").unwrap();
     }
 
-    let assets =
-        collect_assets(dist.path(), "https://updates.example/releases/v1.2.3", true).unwrap();
+    let assets = collect_assets(
+        dist.path(),
+        "https://updates.example/releases/v1.2.3",
+        true,
+        true,
+    )
+    .unwrap();
 
-    assert!(assets.is_empty());
+    assert_eq!(assets.len(), 2);
+    assert!(assets.iter().all(|asset| asset.os == "linux"));
+    assert!(assets.iter().all(|asset| asset.arch == "x86_64"));
+    assert!(assets.iter().any(|asset| asset.format == "deb"));
+    assert!(assets.iter().any(|asset| asset.format == "rpm"));
+}
+
+#[test]
+fn collect_assets_skips_unsigned_linux_without_blocking_macos() {
+    let dist = tempfile::tempdir().unwrap();
+
+    let dmg = "OpenLogi-v1.2.3-macos-arm64.dmg";
+    fs_err::write(dist.path().join(dmg), b"dmg").unwrap();
+    fs_err::write(dist.path().join(format!("{dmg}.minisig")), b"signature").unwrap();
+
+    fs_err::write(
+        dist.path().join("openlogi-v1.2.3-linux-amd64.pkg.tar.zst"),
+        b"unsigned package",
+    )
+    .unwrap();
+
+    let assets = collect_assets(
+        dist.path(),
+        "https://updates.example/releases/v1.2.3",
+        false,
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(assets.len(), 1);
+    assert_eq!(assets[0].os, "macos");
 }

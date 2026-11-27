@@ -38,10 +38,13 @@
 //! checkbox for the same preference, so a change made there is adopted back
 //! into the config instead of being overwritten at the next launch.
 
+#[cfg(target_os = "linux")]
+mod linux;
+
 use gpui::{App, AppContext as _, Context, Entity, Global, Subscription};
-use gpui_updater::{
-    EngineConfig, StaticManifestSource, UpdateStatus, Updater, Verification, Version,
-};
+#[cfg(not(target_os = "linux"))]
+use gpui_updater::{EngineConfig, StaticManifestSource, Verification};
+use gpui_updater::{UpdateStatus, Updater, Version};
 use gpui_updater_sparkle::{SparkleDriver, SparkleOptions, StagedUpdatePolicy};
 use openlogi_core::config::AppSettings;
 use openlogi_core::update_feed::UpdateChannel;
@@ -128,9 +131,36 @@ impl Global for UpdaterObserver {}
 /// artifact.
 pub fn new_entity(cx: &mut App) -> Entity<Updater> {
     let channel = channel_in_use(cx);
-    cx.new(|cx| engine_updater(channel, cx))
+    cx.new(|cx| {
+        #[cfg(target_os = "linux")]
+        {
+            linux_updater(channel, cx)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            engine_updater(channel, cx)
+        }
+    })
 }
 
+#[cfg(target_os = "linux")]
+fn linux_updater(channel: UpdateChannel, cx: &mut Context<Updater>) -> Updater {
+    #[expect(
+        clippy::expect_used,
+        reason = "CARGO_PKG_VERSION is cargo-provided and always valid semver"
+    )]
+    let version = Version::parse(env!("CARGO_PKG_VERSION")).expect("valid embedded version");
+    Updater::with_driver(
+        linux::LinuxPackageDriver::new(
+            channel.manifest_url(UPDATE_BASE_URL),
+            minisign_public_key().map(str::to_owned),
+            version,
+        ),
+        cx,
+    )
+}
+
+#[cfg(not(target_os = "linux"))]
 fn engine_updater(channel: UpdateChannel, cx: &mut Context<Updater>) -> Updater {
     let source = StaticManifestSource::new(channel.manifest_url(UPDATE_BASE_URL))
         .os(std::env::consts::OS)
@@ -156,6 +186,7 @@ fn minisign_public_key() -> Option<&'static str> {
         .filter(|key| !key.is_empty())
 }
 
+#[cfg(not(target_os = "linux"))]
 fn release_arch() -> &'static str {
     match std::env::consts::ARCH {
         "aarch64" => "arm64",
@@ -163,6 +194,7 @@ fn release_arch() -> &'static str {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 fn release_format() -> &'static str {
     match std::env::consts::OS {
         "macos" => "dmg",
@@ -200,7 +232,16 @@ pub fn install(cx: &mut App, settings: &AppSettings) {
     cx.set_global(ChannelInUse(channel));
     let updater = cx.new(|cx| match load_sparkle(channel) {
         Some(sparkle) => Updater::with_driver(sparkle, cx),
-        None => engine_updater(channel, cx),
+        None => {
+            #[cfg(target_os = "linux")]
+            {
+                linux_updater(channel, cx)
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                engine_updater(channel, cx)
+            }
+        }
     });
     with_sparkle(&updater, cx, |sparkle| {
         // OpenLogi never polls — see the module docs.
@@ -218,12 +259,13 @@ pub fn install(cx: &mut App, settings: &AppSettings) {
         else {
             return;
         };
-        if updater.read(cx).is_driver_backed() {
+        if with_sparkle(&updater, cx, |_| ()).is_some() {
             adopt_sparkle_auto_install(&updater, auto_install, cx);
         } else if auto_install && matches!(updater.read(cx).status(), UpdateStatus::Available(_)) {
-            // The engine found a newer version and the user opted into
-            // automatic install: download and stage it (applied on the next
-            // restart, never mid-session). Sparkle does this on its own.
+            // The engine or Linux package driver found a newer version and the
+            // user opted into automatic install: download and stage/install it
+            // (applied on the next restart for the engine; Linux packages ask
+            // for elevation then relaunch). Sparkle does this on its own.
             updater.update(cx, Updater::download_and_install);
         }
     });
@@ -414,7 +456,11 @@ mod tests {
             install(cx, &settings);
 
             let updater = shared(cx).unwrap();
-            assert!(!updater.read(cx).is_driver_backed());
+            assert_eq!(
+                updater.read(cx).is_driver_backed(),
+                cfg!(target_os = "linux"),
+                "Linux uses its package driver; other platforms use the engine without Sparkle",
+            );
             assert!(with_sparkle(&updater, cx, |_| ()).is_none());
 
             for enabled in [true, false] {
