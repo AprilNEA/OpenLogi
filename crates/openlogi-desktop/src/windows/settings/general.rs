@@ -50,7 +50,8 @@ pub(super) fn general_page(
             thumbwheel,
             ThumbwheelSensitivity::MAX,
             ThumbwheelSensitivity::DEFAULT,
-        ));
+        ))
+        .item(one_gesture_per_press_item());
     // Only macOS animates a desktop switch, so only macOS shows the switch.
     // `cfg!` keeps the item and its setter compiled, and used, everywhere.
     let group = if cfg!(target_os = "macos") {
@@ -175,6 +176,20 @@ fn animate_desktop_switch_item() -> SettingItem {
         ),
     )
     .description(tr!("app.animate_desktop_switch_description"))
+}
+
+/// The switch that makes each gesture-button press exactly one swipe.
+fn one_gesture_per_press_item() -> SettingItem {
+    SettingItem::new(
+        tr!("pointer.one_gesture_per_press"),
+        SettingField::switch(
+            |cx| AppState::try_read(cx).is_some_and(|s| s.app_settings().one_gesture_per_press),
+            |enabled, cx| {
+                AppState::apply(cx, |state| state.commit_one_gesture_per_press(enabled));
+            },
+        ),
+    )
+    .description(tr!("pointer.one_gesture_per_press_description"))
 }
 
 /// The switch for the overlay's low-battery notices.

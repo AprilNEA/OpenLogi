@@ -316,6 +316,15 @@ pub struct AppSettings {
     /// Logi Options+; off switches instantly. Only macOS reads it.
     #[serde(default = "default_true")]
     pub animate_desktop_switch: bool,
+    /// Whether each press of a gesture button is exactly one swipe, and a
+    /// desktop switch made while the previous one still slides starts at
+    /// once, so pressing twice during one movement moves two desktops.
+    /// **On by default**, as in Logi Options+. Off, one long hold may repeat
+    /// its swipe as the hand keeps moving (#1652), and a desktop switch made
+    /// during a slide is dropped. The swipe rule applies on every platform;
+    /// only macOS slides desktops.
+    #[serde(default = "default_true")]
+    pub one_gesture_per_press: bool,
 }
 
 const SENSITIVITY_MIN: u8 = 1;
@@ -523,6 +532,7 @@ impl Default for AppSettings {
             low_battery_notifications: true,
             lock_key_notifications: true,
             animate_desktop_switch: true,
+            one_gesture_per_press: true,
         }
     }
 }

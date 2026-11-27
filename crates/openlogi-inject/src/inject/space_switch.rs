@@ -1,7 +1,8 @@
 //! Space-switch transaction policy, independent of macOS FFI for regression tests.
 
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::{Arc, mpsc};
+use std::num::NonZeroU32;
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, mpsc};
 use std::time::{Duration, Instant};
 
 const PREPARATION_TIMEOUT: Duration = Duration::from_secs(2);
@@ -290,11 +291,15 @@ impl PostWait {
     }
 }
 
-/// Bound preparation, not native event posting. Return after irrevocable
-/// cancellation, posting acknowledgement, or worker exit. Confirmation stays
-/// detached; a canceled but stuck worker retains its single-flight lease.
-pub(super) fn spawn_ordered(work: impl FnOnce(PostGate) + Send + 'static) -> Result<(), Failure> {
-    let (gate, wait) = PostGate::new(Instant::now() + PREPARATION_TIMEOUT);
+/// Bound preparation by `deadline`, not native event posting. Return after
+/// irrevocable cancellation, posting acknowledgement, or worker exit.
+/// Confirmation stays detached; a canceled but stuck worker keeps its
+/// [`Ticket`].
+pub(super) fn spawn_ordered(
+    deadline: Instant,
+    work: impl FnOnce(PostGate) + Send + 'static,
+) -> Result<(), Failure> {
+    let (gate, wait) = PostGate::new(deadline);
     std::thread::Builder::new()
         .name("openlogi-spaces".into())
         .spawn(move || work(gate))
@@ -342,22 +347,416 @@ pub(super) fn run(
     }
 }
 
-/// Single in-flight transaction; no queue of relative actions that can run
-/// later on a different display. The owned lease also releases on spawn failure.
-pub(super) struct Lease<'a>(&'a AtomicBool);
+/// Where the one switch in flight stands. There is never more than one: no
+/// queue of relative switches that could land later on another display.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Phase {
+    /// No switch in flight.
+    Idle,
+    /// Switch `flight` on `display` reads its Spaces and builds its events.
+    /// Nothing may follow it yet. Its preparation ends at `deadline`, which
+    /// its post gate enforces.
+    Preparing {
+        flight: u64,
+        display: u32,
+        deadline: Instant,
+    },
+    /// Switch `flight` on `display` claimed its post before its deadline and
+    /// is posting. Nothing may follow it until it has posted, however long
+    /// that takes: native posting can't be canceled, so its caller waits for
+    /// it too.
+    Posting { flight: u64, display: u32 },
+    /// Switch `flight` on `display` has posted and waits for its Space.
+    /// `followed` once a follow-up was posted after it. `followers` counts
+    /// the follow-ups admitted after it that have not finished.
+    Confirming {
+        flight: u64,
+        display: u32,
+        followed: bool,
+        followers: u32,
+    },
+    /// Switch `flight` on `display` has ended, but `followers` follow-ups
+    /// admitted after it still prepare or post. No switch may start until
+    /// they finish: it would read Spaces they are about to change.
+    Draining {
+        flight: u64,
+        display: u32,
+        followers: NonZeroU32,
+    },
+}
 
-impl<'a> Lease<'a> {
-    pub(super) fn acquire(busy: &'a AtomicBool) -> Option<Self> {
-        busy.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .ok()
-            .map(|_| Self(busy))
+/// What a request may do, decided from the phase alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Step {
+    /// Start a switch.
+    Lead,
+    /// Post at once after switch `flight`, which has posted.
+    Follow(u64),
+    /// Wait for the switch in flight to claim its post, until `deadline`.
+    WaitUntil(Instant),
+    /// Wait for the switch in flight to finish posting.
+    WaitForPost,
+    /// Drop the request.
+    Refuse,
+}
+
+impl Phase {
+    /// The step for a request on `display`. `chain` is the host's choice to
+    /// post a request that finds a switch in flight on its display.
+    fn step(self, display: u32, chain: bool) -> Step {
+        match self {
+            Self::Idle => Step::Lead,
+            Self::Preparing {
+                display: busy,
+                deadline,
+                ..
+            } if chain && busy == display => Step::WaitUntil(deadline),
+            Self::Posting { display: busy, .. } if chain && busy == display => Step::WaitForPost,
+            Self::Confirming {
+                flight,
+                display: busy,
+                ..
+            }
+            | Self::Draining {
+                flight,
+                display: busy,
+                ..
+            } if chain && busy == display => Step::Follow(flight),
+            Self::Preparing { .. }
+            | Self::Posting { .. }
+            | Self::Confirming { .. }
+            | Self::Draining { .. } => Step::Refuse,
+        }
+    }
+
+    fn flight(self) -> Option<u64> {
+        match self {
+            Self::Idle => None,
+            Self::Preparing { flight, .. }
+            | Self::Posting { flight, .. }
+            | Self::Confirming { flight, .. }
+            | Self::Draining { flight, .. } => Some(flight),
+        }
+    }
+
+    /// This phase with one more follow-up admitted after its switch. Only a
+    /// phase [`Self::step`] lets a request follow has followers.
+    fn joined(self) -> Self {
+        match self {
+            Self::Confirming {
+                flight,
+                display,
+                followed,
+                followers,
+            } => Self::Confirming {
+                flight,
+                display,
+                followed,
+                followers: followers.saturating_add(1),
+            },
+            Self::Draining {
+                flight,
+                display,
+                followers,
+            } => Self::Draining {
+                flight,
+                display,
+                followers: followers.saturating_add(1),
+            },
+            phase => phase,
+        }
+    }
+
+    /// This phase once a follow-up admitted after switch `of` finished.
+    /// The last one to finish after its switch ended frees the flight.
+    fn left(self, of: u64) -> Self {
+        match self {
+            Self::Confirming {
+                flight,
+                display,
+                followed,
+                followers,
+            } if flight == of => Self::Confirming {
+                flight,
+                display,
+                followed,
+                followers: followers.saturating_sub(1),
+            },
+            Self::Draining {
+                flight,
+                display,
+                followers,
+            } if flight == of => {
+                NonZeroU32::new(followers.get() - 1).map_or(Self::Idle, |followers| {
+                    Self::Draining {
+                        flight,
+                        display,
+                        followers,
+                    }
+                })
+            }
+            phase => phase,
+        }
+    }
+
+    /// This phase once switch `of` ended. Follow-ups admitted after it that
+    /// have not finished keep the flight.
+    fn ended(self, of: u64) -> Self {
+        match self {
+            Self::Confirming {
+                flight,
+                display,
+                followers,
+                ..
+            } if flight == of => {
+                NonZeroU32::new(followers).map_or(Self::Idle, |followers| Self::Draining {
+                    flight,
+                    display,
+                    followers,
+                })
+            }
+            phase if phase.flight() == Some(of) => Self::Idle,
+            phase => phase,
+        }
     }
 }
 
-impl Drop for Lease<'_> {
-    fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
+struct FlightState {
+    phase: Phase,
+    /// The identity the next switch takes, so a late call about an earlier
+    /// switch never changes its successor.
+    next: u64,
+}
+
+/// The single-flight rule for desktop switches and the one owner of its
+/// transitions. A request leads a switch only when none is in flight. With
+/// chaining on, a request on the same display follows the switch in flight,
+/// but only once that switch has posted: posted earlier, it would move the
+/// Space under the first switch's preparation, which then gives up, and two
+/// requests would make one switch. A follow-up holds the flight until it has
+/// posted, for the same reason: a switch that ends first must not let the
+/// next one read Spaces the follow-up is about to change.
+pub(super) struct Flight {
+    state: Mutex<FlightState>,
+    changed: Condvar,
+}
+
+/// What [`Flight::admit`] grants a request.
+pub(super) enum Admission<'a> {
+    /// Start a switch. The ticket holds the flight until it drops.
+    Lead(Ticket<'a>),
+    /// Post at once after the switch in flight, which has posted. The
+    /// follower holds the flight until it drops.
+    Follow(Follower<'a>),
+    /// Drop the request: a switch it may not follow is in flight, or the one
+    /// it waited for did not post before its preparation ended.
+    Refused,
+}
+
+/// A follow-up's hold on the switch it follows. Dropping it ends the
+/// follow-up, posted or not.
+pub(super) struct Follower<'a> {
+    owner: &'a Flight,
+    flight: u64,
+}
+
+impl Flight {
+    pub(super) const fn new() -> Self {
+        Self {
+            state: Mutex::new(FlightState {
+                phase: Phase::Idle,
+                next: 0,
+            }),
+            changed: Condvar::new(),
+        }
     }
+
+    fn lock(&self) -> MutexGuard<'_, FlightState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Admit a request on `display` arriving at `now`. One that may follow a
+    /// switch still preparing waits for it to claim its post, but never past
+    /// that switch's preparation deadline, so a stuck switch holds no caller
+    /// longer than it holds its own. Once the post is claimed, it waits for
+    /// the post to finish.
+    pub(super) fn admit(&self, display: u32, chain: bool, mut now: Instant) -> Admission<'_> {
+        let mut state = self.lock();
+        loop {
+            match state.phase.step(display, chain) {
+                Step::Lead => {
+                    let flight = state.next;
+                    state.next = flight.wrapping_add(1);
+                    let deadline = now + PREPARATION_TIMEOUT;
+                    state.phase = Phase::Preparing {
+                        flight,
+                        display,
+                        deadline,
+                    };
+                    return Admission::Lead(Ticket {
+                        owner: self,
+                        flight,
+                        deadline,
+                    });
+                }
+                Step::Follow(flight) => {
+                    state.phase = state.phase.joined();
+                    return Admission::Follow(Follower {
+                        owner: self,
+                        flight,
+                    });
+                }
+                Step::Refuse => return Admission::Refused,
+                Step::WaitForPost => {
+                    state = self
+                        .changed
+                        .wait(state)
+                        .unwrap_or_else(PoisonError::into_inner);
+                    now = Instant::now();
+                }
+                Step::WaitUntil(deadline) => {
+                    let remaining = deadline.saturating_duration_since(now);
+                    if remaining.is_zero() {
+                        return Admission::Refused;
+                    }
+                    state = self
+                        .changed
+                        .wait_timeout(state, remaining)
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .0;
+                    now = Instant::now();
+                }
+            }
+        }
+    }
+}
+
+impl Follower<'_> {
+    /// Record that this follow-up posted. Only a switch it follows that
+    /// still waits for its Space counts it.
+    pub(super) fn posted(&self) {
+        let mut state = self.owner.lock();
+        if let Phase::Confirming {
+            flight, followed, ..
+        } = &mut state.phase
+            && *flight == self.flight
+        {
+            *followed = true;
+        }
+    }
+}
+
+impl Drop for Follower<'_> {
+    fn drop(&mut self) {
+        let mut state = self.owner.lock();
+        let left = state.phase.left(self.flight);
+        if left != state.phase {
+            state.phase = left;
+            self.owner.changed.notify_all();
+        }
+    }
+}
+
+/// A leading switch's hold on the flight. Dropping it ends the switch,
+/// however it ended, so a stuck worker keeps the flight until it exits.
+/// Follow-ups admitted after it that have not finished keep it longer.
+pub(super) struct Ticket<'a> {
+    owner: &'a Flight,
+    flight: u64,
+    deadline: Instant,
+}
+
+impl Ticket<'_> {
+    /// When this switch's preparation ends; its post gate enforces it.
+    pub(super) fn deadline(&self) -> Instant {
+        self.deadline
+    }
+
+    /// Claim this switch's post, if its preparation has not ended by `now`.
+    /// Decided under the flight's lock against the same deadline a waiting
+    /// follow-up checks, so a follow-up is refused exactly when no post was
+    /// claimed in time. Once claimed, follow-ups wait for the post itself.
+    pub(super) fn begin_posting(&self, now: Instant) -> bool {
+        let mut state = self.owner.lock();
+        match state.phase {
+            Phase::Preparing {
+                flight,
+                display,
+                deadline,
+            } if flight == self.flight && now < deadline => {
+                state.phase = Phase::Posting { flight, display };
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Give up a claimed post its gate refused, so waiting follow-ups see
+    /// the preparation deadline again.
+    pub(super) fn abandon_post(&self) {
+        let mut state = self.owner.lock();
+        if let Phase::Posting { flight, display } = state.phase
+            && flight == self.flight
+        {
+            state.phase = Phase::Preparing {
+                flight,
+                display,
+                deadline: self.deadline,
+            };
+            self.owner.changed.notify_all();
+        }
+    }
+
+    /// Record that this switch has posted, letting follow-ups on its display
+    /// post. Call it after the posting lock is released: a follow-up takes
+    /// that lock next.
+    pub(super) fn posted(&self) {
+        let mut state = self.owner.lock();
+        if let Phase::Posting { flight, display } = state.phase
+            && flight == self.flight
+        {
+            state.phase = Phase::Confirming {
+                flight,
+                display,
+                followed: false,
+                followers: 0,
+            };
+            self.owner.changed.notify_all();
+        }
+    }
+
+    /// Whether a follow-up was posted after this switch.
+    pub(super) fn followed(&self) -> bool {
+        matches!(
+            self.owner.lock().phase,
+            Phase::Confirming { flight, followed: true, .. } if flight == self.flight
+        )
+    }
+}
+
+impl Drop for Ticket<'_> {
+    fn drop(&mut self) {
+        let mut state = self.owner.lock();
+        let ended = state.phase.ended(self.flight);
+        if ended != state.phase {
+            state.phase = ended;
+            self.owner.changed.notify_all();
+        }
+    }
+}
+
+/// Run `emit` holding `turn`, if `cursor` still reports `display` once
+/// `turn` is held. A request can wait for its turn behind another switch's
+/// slide, and the pointer can leave the display meanwhile, so only a check
+/// made after that wait counts. `None` when the pointer left.
+pub(super) fn post_on_display<T>(
+    turn: &Mutex<()>,
+    display: u32,
+    cursor: impl FnOnce() -> Option<u32>,
+    emit: impl FnOnce() -> T,
+) -> Option<T> {
+    let _turn = turn.lock().unwrap_or_else(PoisonError::into_inner);
+    (cursor() == Some(display)).then(emit)
 }
 
 #[cfg(test)]

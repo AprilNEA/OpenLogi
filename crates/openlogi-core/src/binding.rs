@@ -50,6 +50,6 @@ pub use key_combo::{KeyCombo, KeyComboParseError, KeyboardUsage, KeyboardUsageEr
 pub use modifiers::{BareModifiers, BareModifiersParseError, Modifiers};
 pub use swipe::{
     GESTURE_HOLD_FOR_SWIPE, GESTURE_REARM_PAUSE, GESTURE_REPEAT_DISTANCE, GESTURE_SWIPE_DEADZONE,
-    GESTURE_SWIPE_THRESHOLD, SwipeAccumulator, detect_swipe,
+    GESTURE_SWIPE_THRESHOLD, SwipeAccumulator, detect_swipe, set_one_swipe_per_press,
 };
 pub use value::{Binding, HeldWheel, LONG_PRESS_THRESHOLD, LongPressBinding, WheelHoldBinding};
