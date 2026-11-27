@@ -69,10 +69,10 @@ use crate::binding::{Binding, ButtonId, GestureDirection};
 /// persisted shape or enum vocabulary changes; readers inspect this value
 /// before consuming the rest of the file.
 ///
-/// v12 adds `notch_glide_ms` and `acceleration` to `momentum_scrolling`.
-/// Nothing older needs migrating; the bump makes a v11 build refuse a file
-/// that may hold either at the version check, instead of failing on the
-/// unknown field.
+/// v12 adds `notch_glide_ms`, `acceleration` and `follow_wheel` to
+/// `momentum_scrolling`. Nothing older needs migrating; the bump makes a v11
+/// build refuse a file that may hold any of them at the version check,
+/// instead of failing on the unknown field.
 ///
 /// v11 adds the `[flow]` section for cross-machine device handoff. Nothing
 /// older needs migrating, and a file without it loads as disabled Flow. The

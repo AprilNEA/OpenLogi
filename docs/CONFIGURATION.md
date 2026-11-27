@@ -105,6 +105,13 @@ optional physical device key.
     farther a notch scrolls while the wheel turns quickly. Notches at 5 per
     second or slower scroll `pixels_per_notch`; the multiplier rises linearly
     to this value at 30 per second. `100` turns it off
+  - `follow_wheel`, `true` or `false` (default `false`): a free-spinning
+    wheel moves the page exactly as far as it turns, report by report, with
+    no glide. The wheel's own spin is the momentum, so the page slows as the
+    wheel slows and stops when it stops. Ratchet scrolling moves in whole
+    notches, each eased by `notch_glide_ms`, so rocking the wheel within a
+    detent moves nothing. `acceleration` and the glide settings above do
+    nothing while it is on
 - `mouse_profile_target`: `pointer` (default, including existing configs that
   omit this preference) or `focused`. Mouse button profiles follow the window
   under the pointer; the desktop uses the global bindings. Keyboard profiles

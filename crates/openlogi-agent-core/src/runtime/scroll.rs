@@ -13,7 +13,11 @@
 //! scrolling from a SmartShift free spin, the page glides off at the speed
 //! the wheel was spun (the `glide` model) and slows along one
 //! [`GlideCurve`], and a finger stopping the wheel ends the glide at once.
-//! Off, the wheel eases exactly as any other wheel does.
+//! With `follow_wheel` set, a free spin launches no glide: each report moves
+//! the page as far as the wheel turned, at once, so the wheel's own spin is
+//! the momentum. Ratchet scrolling then moves in whole notches, each eased
+//! as one step and never accelerated, so a finger resting in a detent does
+//! not jiggle the page. Off, the wheel eases exactly as any other wheel does.
 
 mod free_spin;
 mod glide;
@@ -62,6 +66,11 @@ const REPEAT_WINDOW: Duration = Duration::from_millis(600);
 /// How long after a free-spinning wheel's last tick a single step the other
 /// way is held back as the wheel springing back from a finger stopping it.
 const SPRING_BACK: Duration = Duration::from_millis(100);
+/// Following the wheel, a ratchet carry this long untouched is the wheel
+/// resting in a detent: what is left of it is rounding, not motion.
+const CARRY_IDLE: Duration = Duration::from_millis(400);
+/// Slack on a whole notch, for reports that are fractions of one.
+const CARRY_SLACK: f64 = 1e-6;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct WheelDelta {
@@ -494,6 +503,10 @@ struct WheelState {
     chain: u32,
     /// When the last ratchet notch arrived, for acceleration's notch rate.
     last_ratchet: Option<Instant>,
+    /// Following the wheel: ratchet motion not yet a whole notch, in raw
+    /// signed notches, and when it last changed.
+    carry: f64,
+    carry_at: Option<Instant>,
 }
 
 impl WheelState {
@@ -505,7 +518,44 @@ impl WheelState {
             glide: GlideState::default(),
             chain: 0,
             last_ratchet: None,
+            carry: 0.0,
+            carry_at: None,
         }
+    }
+
+    /// Add a ratchet report of `notches` raw notches, scaled to `impulse`,
+    /// to the carry, and answer the whole notches it now holds as an impulse
+    /// at this report's sensitivity. A carry left untouched since the wheel
+    /// last settled in a detent starts again from zero.
+    fn carry_whole_notches(
+        &mut self,
+        impulse: WheelDelta,
+        notches: f64,
+        at: Instant,
+    ) -> Option<WheelDelta> {
+        if self
+            .carry_at
+            .is_some_and(|last| at.saturating_duration_since(last) >= CARRY_IDLE)
+        {
+            self.carry = 0.0;
+        }
+        self.carry_at = Some(at);
+        self.carry += notches;
+        // A hair of slack, so fifteen 1/15 reports make one notch.
+        let whole = (self.carry + self.carry.signum() * CARRY_SLACK).trunc();
+        if whole == 0.0 {
+            return None;
+        }
+        self.carry -= whole;
+        Some(impulse.scale(whole / notches))
+    }
+
+    /// This report's `impulse` with the carry added to it, emptying the
+    /// carry.
+    fn take_carry(&mut self, impulse: WheelDelta, notches: f64) -> WheelDelta {
+        let carried = impulse.scale((notches + self.carry) / notches);
+        self.carry = 0.0;
+        carried
     }
 
     /// The running glide, if any.
@@ -892,6 +942,21 @@ impl ScrollEngine {
             return;
         }
         match (phase, &state.glide, direction) {
+            (WheelPhase::Ratchet, ..) if momentum.follow_wheel() => {
+                // Whole notches only, each one step of its own distance: the
+                // fractions a finger turns within a detent, and back, cancel
+                // in the carry instead of jiggling the page.
+                if let Some(whole) = state.carry_whole_notches(impulse, notches, reported_at) {
+                    self.impulse(source.clone(), whole, at, emit);
+                }
+            }
+            // Following the wheel: the wheel's own spin is the momentum, so
+            // each report moves the page as far as it turned, at once, with
+            // whatever ratchet motion was still short of a notch.
+            (WheelPhase::FreeSpin, ..) if momentum.follow_wheel() => {
+                let carried = state.take_carry(impulse, notches);
+                emit(ScrollFrame::step(carried, momentum.pixels_per_notch()));
+            }
             (WheelPhase::Ratchet, ..) => {
                 state.end_glide(at, GlideStop::Touched);
                 if let GlideState::Spent { last, .. } = state.glide {
@@ -940,7 +1005,10 @@ impl ScrollEngine {
                 self.drop_motion(source, emit);
             }
             (WheelPhase::FreeSpin, ..) => {}
-            (WheelPhase::Stopped(_), ..) => self.stop_wheel(source, at, emit),
+            (WheelPhase::Stopped(_), ..) => {
+                state.carry = 0.0;
+                self.stop_wheel(source, at, emit);
+            }
         }
     }
 

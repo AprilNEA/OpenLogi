@@ -295,7 +295,8 @@ impl MomentumPanel {
     }
 
     /// The settings shown while momentum scrolling is on: the wheel's notch
-    /// distance, glide and acceleration, then the glide's.
+    /// distance, glide, acceleration and whether a free spin follows the
+    /// wheel, then the glide's unless it does.
     fn settings(
         &mut self,
         pal: Palette,
@@ -313,9 +314,55 @@ impl MomentumPanel {
             acceleration: self.acceleration.shown(&momentum, window, cx),
             ..momentum
         };
+        let scope = self.scope;
+        // Following the wheel, nothing glides or speeds up, so those
+        // settings would do nothing.
+        let glide = (!momentum.follow_wheel).then(|| {
+            v_flex()
+                .gap_4()
+                .child(group_heading(tr!("pointer.momentum_section_glide"), pal))
+                .child(glide_shape_picker(
+                    scope,
+                    momentum.glide_shape,
+                    &shown.params(),
+                    pal,
+                ))
+                .child(slider_row(
+                    pal,
+                    tr!("pointer.momentum_max_glide_speed"),
+                    tr!("pointer.momentum_max_glide_speed_description"),
+                    &self.max_glide_speed,
+                    shown.max_glide_speed,
+                ))
+                .child(slider_row(
+                    pal,
+                    tr!("pointer.momentum_glide_length"),
+                    tr!("pointer.momentum_glide_length_description"),
+                    &self.glide_length,
+                    shown.glide_ms,
+                ))
+                .child(slider_row(
+                    pal,
+                    tr!("pointer.momentum_repeat_boost"),
+                    tr!("pointer.momentum_repeat_boost_description"),
+                    &self.repeat_boost,
+                    shown.repeat_boost,
+                ))
+        });
         v_flex()
             .gap_4()
             .child(group_heading(tr!("pointer.momentum_section_wheel"), pal))
+            .child(toggle_row(
+                "momentum-follow-wheel-row",
+                pal,
+                tr!("pointer.momentum_follow_wheel"),
+                tr!("pointer.momentum_follow_wheel_description"),
+                Toggle::new("momentum-follow-wheel-toggle")
+                    .selected(momentum.follow_wheel)
+                    .on_change(move |on, _window, cx| {
+                        commit(cx, scope, |m| m.follow_wheel = *on);
+                    }),
+            ))
             .child(slider_row(
                 pal,
                 tr!("pointer.momentum_pixels_per_notch"),
@@ -330,41 +377,16 @@ impl MomentumPanel {
                 &self.notch_glide,
                 shown.notch_glide_ms,
             ))
-            .child(slider_row(
-                pal,
-                tr!("pointer.momentum_acceleration"),
-                tr!("pointer.momentum_acceleration_description"),
-                &self.acceleration,
-                shown.acceleration,
-            ))
-            .child(group_heading(tr!("pointer.momentum_section_glide"), pal))
-            .child(glide_shape_picker(
-                self.scope,
-                momentum.glide_shape,
-                &shown.params(),
-                pal,
-            ))
-            .child(slider_row(
-                pal,
-                tr!("pointer.momentum_max_glide_speed"),
-                tr!("pointer.momentum_max_glide_speed_description"),
-                &self.max_glide_speed,
-                shown.max_glide_speed,
-            ))
-            .child(slider_row(
-                pal,
-                tr!("pointer.momentum_glide_length"),
-                tr!("pointer.momentum_glide_length_description"),
-                &self.glide_length,
-                shown.glide_ms,
-            ))
-            .child(slider_row(
-                pal,
-                tr!("pointer.momentum_repeat_boost"),
-                tr!("pointer.momentum_repeat_boost_description"),
-                &self.repeat_boost,
-                shown.repeat_boost,
-            ))
+            .when(!momentum.follow_wheel, |this| {
+                this.child(slider_row(
+                    pal,
+                    tr!("pointer.momentum_acceleration"),
+                    tr!("pointer.momentum_acceleration_description"),
+                    &self.acceleration,
+                    shown.acceleration,
+                ))
+            })
+            .children(glide)
             .child(
                 h_flex()
                     .justify_end()

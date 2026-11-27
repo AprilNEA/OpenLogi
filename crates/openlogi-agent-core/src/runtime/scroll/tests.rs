@@ -2019,3 +2019,142 @@ fn released_reversal_keeps_original_acceleration_rate() {
         "{distance} vs {expected}"
     );
 }
+
+/// Following the wheel, a free spin never glides: the page moves exactly as
+/// far as the wheel turns, every report as it lands, and stops the moment the
+/// reports stop.
+#[test]
+fn following_the_wheel_moves_the_page_as_far_as_it_spins() {
+    let mut engine = momentum_engine_with(|m| m.follow_wheel = true);
+    let source = hidpp_source("mouse", 1);
+    let mut frames = Vec::new();
+    // A hard spin that slows as a free-spinning wheel does.
+    let stopped = drive_wheel(
+        &mut engine,
+        &source,
+        Instant::now(),
+        |t| (250.0 - 300.0 * t).max(20.0),
+        Duration::from_millis(700),
+        &mut frames,
+    );
+    assert!(
+        frames.iter().all(|f| f.kind != FrameKind::Glide),
+        "following the wheel glided"
+    );
+    let turned: f64 = frames.iter().map(in_ticks).sum();
+
+    let mut after = Vec::new();
+    run_on(&mut engine, stopped, Duration::from_millis(500), &mut after);
+    let tail: f64 = after.iter().map(in_ticks).sum();
+    // At most the eased step of one last ratchet notch, if the slowing
+    // wheel read as ratchet at the very end.
+    assert!(
+        tail.abs() <= 2.0 + 1e-9,
+        "the page moved {tail} ticks after the wheel stopped"
+    );
+
+    // Same spin with the glide: the page runs on far past the wheel.
+    let mut glide = momentum_engine();
+    let mut glided = Vec::new();
+    let end = drive_wheel(
+        &mut glide,
+        &source,
+        Instant::now(),
+        |t| (250.0 - 300.0 * t).max(20.0),
+        Duration::from_millis(700),
+        &mut glided,
+    );
+    run_on(&mut glide, end, Duration::from_millis(1500), &mut glided);
+    let glided: f64 = glided.iter().map(in_ticks).sum();
+    let followed = turned + tail;
+    assert!(followed > 0.0);
+    assert!(
+        (glided - followed).abs() > 0.1 * followed,
+        "follow {followed} and glide {glided} should differ"
+    );
+}
+
+/// Following the wheel, the page moves by each report the instant it lands,
+/// in step with the wheel rather than eased behind it.
+#[test]
+fn following_the_wheel_posts_each_free_spin_report_at_once() {
+    let mut engine = momentum_engine_with(|m| m.follow_wheel = true);
+    let source = hidpp_source("mouse", 1);
+    let mut frames = Vec::new();
+    let at = drive_wheel(
+        &mut engine,
+        &source,
+        Instant::now(),
+        |_| 200.0,
+        Duration::from_millis(400),
+        &mut frames,
+    );
+    // The wheel is spinning freely now: one more report.
+    let mut now = Vec::new();
+    engine.wheel_impulse(source, wheel(0.0, 2.0 * 3.0), 3.0, at, &mut |f| {
+        now.push(f);
+    });
+    let moved: f64 = now.iter().map(in_ticks).sum();
+    assert_delta(wheel(0.0, moved), wheel(0.0, 6.0));
+}
+
+/// Following the wheel, ratchet scrolling moves in whole notches: a finger
+/// rocking the wheel within a detent moves nothing, and a full notch made of
+/// high-resolution fractions eases in as one step of exactly its distance,
+/// never accelerated however quickly the notches come.
+#[test]
+fn following_the_wheel_ratchets_in_whole_eased_notches() {
+    let mut engine = momentum_engine_with(|m| {
+        m.follow_wheel = true;
+        m.notch_glide_ms = 300;
+        m.acceleration = 200;
+    });
+    let source = hidpp_source("mouse", 1);
+    let start = Instant::now();
+    let mut frames = Vec::new();
+    // Rocking within a detent, at 2x sensitivity.
+    for (i, notches) in [0.3, -0.2, 0.2, -0.3].into_iter().enumerate() {
+        let at = start + Duration::from_millis(30 * i as u64);
+        engine.wheel_impulse(
+            source.clone(),
+            wheel(0.0, 2.0 * notches),
+            notches,
+            at,
+            &mut |f| {
+                frames.push(f);
+            },
+        );
+    }
+    let at = run_on(&mut engine, start, Duration::from_millis(200), &mut frames);
+    assert!(
+        frames.is_empty(),
+        "rocking in a detent scrolled: {frames:?}"
+    );
+
+    // Three quick notches, each in fifteen 1/15 reports.
+    let mut at = at;
+    for _ in 0..3 {
+        for _ in 0..15 {
+            let notches = 1.0 / 15.0;
+            engine.wheel_impulse(
+                source.clone(),
+                wheel(0.0, 2.0 * notches),
+                notches,
+                at,
+                &mut |f| {
+                    frames.push(f);
+                },
+            );
+            at += Duration::from_millis(2);
+        }
+        at += Duration::from_millis(10);
+    }
+    run_on(&mut engine, at, Duration::from_millis(600), &mut frames);
+    assert!(frames.iter().all(|f| f.kind != FrameKind::Glide));
+    assert!(
+        frames.len() > 3,
+        "each notch should ease over several frames"
+    );
+    let moved: f64 = frames.iter().map(in_ticks).sum();
+    assert_delta(wheel(0.0, moved), wheel(0.0, 6.0));
+}
