@@ -1060,3 +1060,9 @@ change_not_reloaded = "Guardado, mas o OpenLogi ainda não o aplicou."
 camera_in_use = "Em utilização"
 camera_idle = "Não está em utilização"
 open_camera_preview = "Abrir pré-visualização…"
+
+[overlay]
+actions_ring_window_title = "OpenLogi Anel de ações"
+backlight_window_title = "OpenLogi Retroiluminação"
+lock_keys_window_title = "OpenLogi Teclas de bloqueio"
+notice_window_title = "OpenLogi Aviso"

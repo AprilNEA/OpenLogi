@@ -1060,3 +1060,9 @@ change_not_reloaded = "저장되었지만 OpenLogi에 아직 적용되지 않았
 camera_in_use = "사용 중"
 camera_idle = "사용 안 함"
 open_camera_preview = "미리 보기 열기…"
+
+[overlay]
+actions_ring_window_title = "OpenLogi 액션 링"
+backlight_window_title = "OpenLogi 백라이트"
+lock_keys_window_title = "OpenLogi 잠금 키"
+notice_window_title = "OpenLogi 알림"

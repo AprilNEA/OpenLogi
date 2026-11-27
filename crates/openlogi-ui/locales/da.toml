@@ -1060,3 +1060,9 @@ change_not_reloaded = "Gemt, men OpenLogi har ikke anvendt den endnu."
 camera_in_use = "I brug"
 camera_idle = "Ikke i brug"
 open_camera_preview = "Åbn forhåndsvisning…"
+
+[overlay]
+actions_ring_window_title = "OpenLogi Handlingsring"
+backlight_window_title = "OpenLogi Baggrundsbelysning"
+lock_keys_window_title = "OpenLogi Låsetaster"
+notice_window_title = "OpenLogi Meddelelse"

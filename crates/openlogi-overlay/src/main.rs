@@ -30,16 +30,14 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use anyhow::Result;
-use gpui::AppContext as _;
 use tracing::{debug, warn};
 
 use openlogi_core::action_ring::DISPLAY_LIFETIME;
 
-use crate::backlight::BacklightView;
 use crate::ipc::OverlayCommand;
 use crate::notice::NoticeShelf;
 use crate::platform::RingPlacement;
-use crate::ring::{Geometry, RingPointer, RingView};
+use crate::ring::Geometry;
 use crate::session::{
     ClickAwaySession, claim_the_role, close_all_ring_windows, close_ring_windows,
     spawn_click_away_dismissal,
@@ -160,28 +158,13 @@ fn main() -> Result<()> {
                     let commands = commands.clone();
                     let timeout_commands = commands.clone();
                     let session_id = invocation.session_id;
-                    // Wayland opens one window per display; they share where
-                    // the pointer was heard, so only one of them draws the ring.
-                    let pointer = cx.new(|_| RingPointer::default());
-                    let primary = platform::open_first(placement.openings(), |(options, panel)| {
-                        let invocation = invocation.clone();
-                        let commands = commands.clone();
-                        let pointer = pointer.clone();
-                        cx.open_window(options, |window, cx| {
-                            cx.new(|cx| {
-                                RingView::new(
-                                    invocation,
-                                    commands,
-                                    &live_session,
-                                    panel,
-                                    pointer,
-                                    window,
-                                    cx,
-                                )
-                            })
-                        })
-                    });
-                    let Some(primary) = primary else {
+                    let Some(primary) = ring::open_windows(
+                        cx,
+                        placement.openings(),
+                        &invocation,
+                        &commands,
+                        &live_session,
+                    ) else {
                         return;
                     };
                     if let Err(error) = primary
@@ -223,35 +206,7 @@ fn main() -> Result<()> {
                     warn!(%error, "could not connect to the display for the backlight indicator");
                     continue;
                 }
-                cx.update(|cx| {
-                    for handle in cx.windows() {
-                        if let Some(view) = handle.downcast::<BacklightView>() {
-                            let _ = view.update(cx, |view, _, cx| {
-                                view.observation = observation.clone();
-                                cx.notify();
-                            });
-                        }
-                    }
-                    if !observation.visible {
-                        for handle in cx.windows() {
-                            if handle.downcast::<BacklightView>().is_some() {
-                                let _ = handle.update(cx, |_, window, _| window.remove_window());
-                            }
-                        }
-                        return;
-                    }
-                    if cx
-                        .windows()
-                        .iter()
-                        .all(|handle| handle.downcast::<BacklightView>().is_none())
-                    {
-                        let options = backlight::window_options(cx);
-                        let opened = cx.open_window(options, |_, cx| {
-                            cx.new(|_| BacklightView::new(observation.clone()))
-                        });
-                        debug!(success = opened.is_ok(), "backlight window opened");
-                    }
-                });
+                cx.update(|cx| backlight::present(cx, &observation));
             }
         })
         .detach();

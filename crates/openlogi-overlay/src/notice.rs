@@ -13,10 +13,10 @@ use std::collections::BTreeSet;
 use std::rc::Rc;
 
 use gpui::{
-    AppContext as _, Context, FontWeight, Hsla, InteractiveElement, IntoElement, ParentElement,
-    Pixels, Render, SharedString, Size, StatefulInteractiveElement as _, Styled, Window,
-    WindowBackgroundAppearance, WindowKind, WindowOptions, div, prelude::FluentBuilder as _, px,
-    size, svg,
+    App, AppContext as _, Context, FontWeight, Hsla, InteractiveElement, IntoElement,
+    ParentElement, Pixels, Render, SharedString, Size, StatefulInteractiveElement as _, Styled,
+    Window, WindowBackgroundAppearance, WindowHandle, WindowKind, WindowOptions, div,
+    prelude::FluentBuilder as _, px, size, svg,
 };
 use openlogi_ipc::{Notice, NoticeKind};
 use openlogi_ui::action_icons::LOW_BATTERY_ICON;
@@ -189,8 +189,35 @@ pub(crate) fn notice_text(kind: &NoticeKind) -> NoticeText {
     }
 }
 
+/// Localized OS window title for the notice shelf window.
+pub(crate) fn window_title() -> String {
+    rust_i18n::t!("overlay.notice_window_title").into_owned()
+}
+
+/// Open the first notice window from `attempts` that succeeds, naming it
+/// inside `open_window`.
+pub(crate) fn open_window(
+    cx: &mut App,
+    attempts: Vec<WindowOptions>,
+    shelf: &Rc<RefCell<NoticeShelf>>,
+    cards: &[Notice],
+) -> Option<WindowHandle<NoticeView>> {
+    let title = window_title();
+    let alternatives = attempts.into_iter().map(|options| vec![options]);
+    crate::platform::open_first(alternatives.collect(), |options| {
+        let view = NoticeView {
+            cards: cards.to_vec(),
+            shelf: Rc::clone(shelf),
+        };
+        cx.open_window(options, |window, cx| {
+            window.set_window_title(&title);
+            cx.new(|_| view)
+        })
+    })
+}
+
 /// Show `cards`, replacing any notice window that is open.
-pub(crate) fn present(cx: &mut gpui::App, shelf: &Rc<RefCell<NoticeShelf>>, cards: &[Notice]) {
+pub(crate) fn present(cx: &mut App, shelf: &Rc<RefCell<NoticeShelf>>, cards: &[Notice]) {
     close_notice_windows(cx);
     if cards.is_empty() {
         return;
@@ -209,20 +236,7 @@ pub(crate) fn present(cx: &mut gpui::App, shelf: &Rc<RefCell<NoticeShelf>>, card
             return;
         }
     };
-    // Wayland offers a fallback for compositors without layer-shell: the
-    // first window that opens is the notice.
-    let alternatives = placement
-        .openings()
-        .into_iter()
-        .map(|options| vec![options]);
-    let opened = crate::platform::open_first(alternatives.collect(), |options| {
-        let view = NoticeView {
-            cards: cards.to_vec(),
-            shelf: Rc::clone(shelf),
-        };
-        cx.open_window(options, |_, cx| cx.new(|_| view))
-    });
-    let Some(handle) = opened else {
+    let Some(handle) = open_window(cx, placement.openings(), shelf, cards) else {
         return;
     };
     let placed = handle

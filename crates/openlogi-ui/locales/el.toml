@@ -1060,3 +1060,9 @@ change_not_reloaded = "Αποθηκεύτηκε, αλλά το OpenLogi δεν �
 camera_in_use = "Σε χρήση"
 camera_idle = "Εκτός χρήσης"
 open_camera_preview = "Άνοιγμα προεπισκόπησης…"
+
+[overlay]
+actions_ring_window_title = "OpenLogi Δακτύλιος ενεργειών"
+backlight_window_title = "OpenLogi Οπίσθιος φωτισμός"
+lock_keys_window_title = "OpenLogi Πλήκτρα κλειδώματος"
+notice_window_title = "OpenLogi Ειδοποίηση"

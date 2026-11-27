@@ -79,6 +79,11 @@ impl Render for LockKeyView {
     }
 }
 
+/// Localized OS window title for the lock-key indicator window.
+pub(crate) fn window_title() -> String {
+    rust_i18n::t!("overlay.lock_keys_window_title").into_owned()
+}
+
 /// Show `shown`, or close the indicator when it is `None`.
 ///
 /// A change while the window is open replaces its text in place, so presses
@@ -95,15 +100,20 @@ pub(crate) fn present(cx: &mut App, shown: Option<LockKeyChange>) {
         }
         return;
     };
+    let title = window_title();
     if open.is_empty() {
         let options = window_options(cx);
-        if let Err(error) = cx.open_window(options, |_, cx| cx.new(|_| LockKeyView { change })) {
+        if let Err(error) = cx.open_window(options, |window, cx| {
+            window.set_window_title(&title);
+            cx.new(|_| LockKeyView { change })
+        }) {
             warn!(%error, "could not open the lock-key indicator window");
         }
         return;
     }
     for view in open {
-        let _ = view.update(cx, |view, _, cx| {
+        let _ = view.update(cx, |view, window, cx| {
+            window.set_window_title(&title);
             view.change = change;
             cx.notify();
         });

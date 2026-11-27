@@ -1060,3 +1060,9 @@ change_not_reloaded = "Tallennettu, mutta OpenLogi ei ole vielä ottanut sitä k
 camera_in_use = "Käytössä"
 camera_idle = "Ei käytössä"
 open_camera_preview = "Avaa esikatselu…"
+
+[overlay]
+actions_ring_window_title = "OpenLogi Toimintorengas"
+backlight_window_title = "OpenLogi Taustavalo"
+lock_keys_window_title = "OpenLogi Lukitusnäppäimet"
+notice_window_title = "OpenLogi Ilmoitus"
