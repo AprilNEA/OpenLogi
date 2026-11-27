@@ -69,11 +69,6 @@ use crate::binding::{Binding, ButtonId, GestureDirection};
 /// persisted shape or enum vocabulary changes; readers inspect this value
 /// before consuming the rest of the file.
 ///
-/// v12 adds `notch_glide_ms`, `acceleration` and `follow_wheel` to
-/// `momentum_scrolling`. Nothing older needs migrating; the bump makes a v11
-/// build refuse a file that may hold any of them at the version check,
-/// instead of failing on the unknown field.
-///
 /// v11 adds the `[flow]` section for cross-machine device handoff. Nothing
 /// older needs migrating, and a file without it loads as disabled Flow. The
 /// bump makes a v10 build refuse a file that may hold `[flow]` at the version
@@ -137,7 +132,7 @@ use crate::binding::{Binding, ButtonId, GestureDirection};
 /// next save; [`Config::load_from_path`] accepts supported versions `1` through
 /// [`SCHEMA_VERSION`] so an invalid or forward file fails loudly instead of
 /// silently losing bindings.
-pub const SCHEMA_VERSION: u32 = 12;
+pub const SCHEMA_VERSION: u32 = 11;
 
 /// Top-level config document.
 #[derive(Debug, Clone, Serialize, Deserialize)]

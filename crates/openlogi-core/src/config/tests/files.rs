@@ -593,3 +593,37 @@ fn documented_config_schema() {
         "docs/CONFIGURATION.md must say: {stated}"
     );
 }
+
+/// The momentum settings added after v11 are optional: a v11 file without
+/// them loads with each one off, and a file that sets them saves and reloads
+/// at the same schema, so adding them needs no version bump.
+#[test]
+fn optional_momentum_fields_preserve_schema() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    fs::write(
+        &path,
+        "schema_version = 11\n\n[app_settings.momentum_scrolling]\nenabled = true\n",
+    )
+    .expect("write v11 config");
+    let mut cfg = Config::load_from_path(&path).expect("a v11 file loads");
+    let momentum = cfg.app_settings.momentum_scrolling;
+    assert_eq!(momentum.notch_glide_ms, 0);
+    assert_eq!(momentum.acceleration, 100);
+    assert!(!momentum.follow_wheel);
+
+    cfg.app_settings.momentum_scrolling.notch_glide_ms = 200;
+    cfg.app_settings.momentum_scrolling.acceleration = 150;
+    cfg.app_settings.momentum_scrolling.follow_wheel = true;
+    cfg.save_to_path(&path).expect("save");
+    let body = fs::read_to_string(&path).expect("read saved config");
+    assert!(
+        body.contains(&format!("schema_version = {SCHEMA_VERSION}")),
+        "got: {body}"
+    );
+    let reloaded = Config::load_from_path(&path).expect("the save loads");
+    assert_eq!(
+        reloaded.app_settings.momentum_scrolling,
+        cfg.app_settings.momentum_scrolling
+    );
+}

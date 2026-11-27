@@ -1840,8 +1840,8 @@ fn slow_strokes_after_a_spent_glide_and_a_catch_still_scroll() {
     );
     assert!(
         matches!(
-            engine.wheels.get(&source).map(|s| &s.glide),
-            Some(GlideState::Spent { .. })
+            engine.wheels.get(&source).map(|s| &s.mode),
+            Some(WheelMode::Modeled(GlideState::Spent { .. }))
         ),
         "the glide did not run out under the spinning wheel"
     );
@@ -2157,4 +2157,126 @@ fn following_the_wheel_ratchets_in_whole_eased_notches() {
     );
     let moved: f64 = frames.iter().map(in_ticks).sum();
     assert_delta(wheel(0.0, moved), wheel(0.0, 6.0));
+}
+
+/// A followed free spin that a finger stops is seen stopped between
+/// reports: a fraction turned a moment later is ratchet again, carried until
+/// it makes a whole notch instead of moving the page at once.
+#[test]
+fn followed_spin_silence_restores_whole_notches() {
+    let mut engine = momentum_engine_with(|m| m.follow_wheel = true);
+    let source = hidpp_source("mouse", 1);
+    let mut frames = Vec::new();
+    let stopped = drive_wheel(
+        &mut engine,
+        &source,
+        Instant::now(),
+        |_| 200.0,
+        Duration::from_millis(400),
+        &mut frames,
+    );
+    assert!(matches!(
+        engine.wheels.get(&source).map(|s| &s.mode),
+        Some(WheelMode::FollowFreeSpin { .. })
+    ));
+    // The finger holds the wheel: the frame checks see the silence.
+    let at = run_on(
+        &mut engine,
+        stopped,
+        Duration::from_millis(200),
+        &mut frames,
+    );
+    assert!(
+        matches!(
+            engine.wheels.get(&source).map(|s| &s.mode),
+            Some(WheelMode::FollowRatchet { .. })
+        ),
+        "the stop was not seen between reports"
+    );
+    let mut after = Vec::new();
+    engine.wheel_impulse(source.clone(), wheel(0.0, 2.0 * 0.4), 0.4, at, &mut |f| {
+        after.push(f);
+    });
+    assert!(
+        after.is_empty(),
+        "a fraction after the stop scrolled: {after:?}"
+    );
+    engine.wheel_impulse(
+        source.clone(),
+        wheel(0.0, 2.0 * 0.6),
+        0.6,
+        at + Duration::from_millis(20),
+        &mut |f| after.push(f),
+    );
+    run_on(
+        &mut engine,
+        at + Duration::from_millis(20),
+        Duration::from_millis(300),
+        &mut after,
+    );
+    let moved: f64 = after.iter().map(in_ticks).sum();
+    assert_delta(wheel(0.0, moved), wheel(0.0, 2.0));
+}
+
+/// Turning Follow the wheel on or off between reports leaves nothing of the
+/// other mode behind: a running glide stops at the switch and a carried
+/// fraction is dropped, so the wheel is only ever in one mode.
+#[test]
+fn switching_follow_leaves_no_state_of_the_other_mode() {
+    let mut engine = momentum_engine();
+    let source = hidpp_source("mouse", 1);
+    let mut frames = Vec::new();
+    let at = drive_wheel(
+        &mut engine,
+        &source,
+        Instant::now(),
+        |_| 200.0,
+        Duration::from_millis(300),
+        &mut frames,
+    );
+    assert!(
+        engine
+            .wheels
+            .get(&source)
+            .and_then(WheelState::gliding)
+            .is_some()
+    );
+
+    // On mid-glide: the next report follows the wheel, and the glide is gone.
+    engine.momentum = MomentumScrolling {
+        enabled: true,
+        follow_wheel: true,
+        ..MomentumScrolling::default()
+    }
+    .resolve();
+    let mut after = Vec::new();
+    engine.wheel_impulse(source.clone(), wheel(0.0, 2.0 * 0.4), 0.4, at, &mut |f| {
+        after.push(f);
+    });
+    let state = engine.wheels.get(&source).expect("wheel state");
+    assert!(state.mode.follows(), "still modeled after switching on");
+    assert!(state.gliding().is_none());
+    run_on(&mut engine, at, Duration::from_millis(800), &mut after);
+    assert!(
+        after.iter().all(|f| f.kind != FrameKind::Glide),
+        "the glide ran on after following was switched on"
+    );
+
+    // Off with a fraction carried: the glide model starts clean.
+    let at = at + Duration::from_millis(800);
+    engine.wheel_impulse(source.clone(), wheel(0.0, 2.0 * 0.3), 0.3, at, &mut |_| {});
+    engine.momentum = momentum_engine().momentum;
+    engine.wheel_impulse(
+        source.clone(),
+        wheel(0.0, 2.0),
+        1.0,
+        at + Duration::from_millis(500),
+        &mut |_| {},
+    );
+    let state = engine.wheels.get(&source).expect("wheel state");
+    assert!(
+        matches!(state.mode, WheelMode::Modeled(GlideState::Idle { .. })),
+        "following state survived switching off"
+    );
+    assert_eq!(state.next_tick(), None);
 }
