@@ -101,6 +101,20 @@ pub struct DeviceCapturePlan {
 impl DeviceCapturePlan {
     #[must_use]
     pub fn with_onboard(mut self, config: &Config, layout: Option<&GamingLayout>) -> Self {
+        // These controls cannot supply attributable native motion, and spy
+        // reports carry edges only. Ignore persisted unsupported gestures.
+        if let Some(layout) = layout {
+            self.dispatch
+                .side_gesture_bindings
+                .retain(|button, _| !layout.needs_host_mode(*button));
+            self.dispatch
+                .gesture_bindings
+                .retain(|button, _| !layout.needs_host_mode(*button));
+            self.target
+                .spec
+                .divert_gesture_buttons
+                .retain(|(_, button)| !layout.needs_host_mode(*button));
+        }
         let key = &self.dispatch.config_key;
         let shift = config.uses_gshift(key);
         // Spy reports carry no motion, so gesture buttons stay with the OS hook.
@@ -117,9 +131,11 @@ impl DeviceCapturePlan {
                 let diverted = &self.target.spec.divert_buttons;
                 OnboardTarget::Host(HostMode {
                     slots: layout
-                        .buttons()
-                        .map(|button| {
-                            let captured = layout.needs_host_mode(button)
+                        .slots
+                        .iter()
+                        .map(|slot| {
+                            let button = slot.button;
+                            let captured = slot.host_silent
                                 || (shift
                                     && may_capture(button)
                                     && !keeps_gestures(button)
@@ -564,6 +580,69 @@ mod tests {
             Some(OnboardTarget::Host(host)) => Some(host.slots.clone()),
             _ => None,
         }
+    }
+
+    #[test]
+    fn g603_side_rebinding_uses_device_reports_and_keeps_primary_clicks_native() {
+        let layout = GamingLayout::for_model_key("0b01c");
+        let make_plan = |cfg: &Config| {
+            super::plan_for_device(
+                cfg,
+                super::PlanDevice {
+                    physical_key: PhysicalDeviceKey::parse("receiver:cafe:slot:2").unwrap(),
+                    config_key: "g603",
+                    route: route(),
+                    layout,
+                },
+                None,
+                0,
+                true,
+            )
+            .with_onboard(cfg, layout)
+        };
+        let mut cfg = Config::default();
+        cfg.set_binding(
+            "g603",
+            ButtonId::Back,
+            Binding::Single(Action::MissionControl),
+        );
+        cfg.set_binding(
+            "g603",
+            ButtonId::Forward,
+            Binding::Single(Action::LaunchpadShow),
+        );
+        let plan = make_plan(&cfg);
+        let slots = host_slots(&plan).expect("G603 side bindings need device-owned spy capture");
+        assert!(slots.contains(&(ButtonId::Back, SlotRoute::Captured)));
+        assert!(slots.contains(&(ButtonId::Forward, SlotRoute::Captured)));
+        assert!(slots.contains(&(ButtonId::LeftClick, SlotRoute::Native)));
+        assert!(slots.contains(&(ButtonId::RightClick, SlotRoute::Native)));
+        assert!(slots.contains(&(ButtonId::MiddleClick, SlotRoute::Native)));
+        assert!(
+            slots.contains(&(ButtonId::DpiToggle, SlotRoute::Captured)),
+            "host mode must retain a working DPI button"
+        );
+
+        cfg.app_settings.capture_mouse_events = false;
+        let disabled = make_plan(&cfg);
+        assert_eq!(disabled.target.spec.onboard, None);
+        cfg.app_settings.capture_mouse_events = true;
+
+        cfg.set_binding(
+            "g603",
+            ButtonId::Back,
+            Binding::Single(default_binding(ButtonId::Back)),
+        );
+        cfg.set_binding(
+            "g603",
+            ButtonId::Forward,
+            Binding::Single(default_binding(ButtonId::Forward)),
+        );
+        let native = make_plan(&cfg);
+        assert_eq!(
+            native.target.spec.onboard, None,
+            "default bindings restore onboard behavior"
+        );
     }
 
     #[test]
