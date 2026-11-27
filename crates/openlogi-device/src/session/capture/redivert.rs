@@ -18,8 +18,9 @@ use futures_lite::StreamExt as _;
 use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
+use super::super::capture_restore::ArmedReporting;
 use super::{ArmedCapture, ReportingChangeStream};
-use crate::reprog_controls::CidReportingChangeEcho;
+use crate::reprog_controls::{CidReportingChangeEcho, ReprogControlsV4};
 
 /// The span over which the re-diverts of one control are counted.
 const WINDOW: Duration = Duration::from_mins(1);
@@ -87,51 +88,82 @@ impl RedivertBudget {
     }
 }
 
-/// One capture session's subscription to the reporting changes that other
-/// clients make, and the re-divert budget that answers them.
+/// How often a session reads its diverted controls back, to catch firmware
+/// that drops a diversion without any event.
+const AUDIT_INTERVAL: Duration = Duration::from_mins(1);
+
+/// One capture session's watch over its diverted controls: the reporting
+/// changes that other clients make, a periodic read-back for losses that no
+/// event announces, and the re-divert budget that answers both.
 pub(super) struct ReportingChanges {
     /// `None` when the session armed no `0x1b04` control, or once the
     /// subscription has closed.
     changes: Option<ReportingChangeStream>,
+    audit: tokio::time::Interval,
     budget: RedivertBudget,
+}
+
+/// Why a session reads its diverted controls back.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum Cause {
+    /// Another client wrote `setCidReporting` for one control.
+    Echo(CidReportingChangeEcho),
+    /// The periodic audit of every control, with no event behind it.
+    ///
+    /// Some firmware drops a diversion with no `0x1b04` echo and no `0x1d4b`
+    /// reconnect broadcast: the MX Keys S does it to its Lock key now and
+    /// then, and the key then locks the screen.
+    Audit,
 }
 
 impl ReportingChanges {
     pub(super) fn new(changes: Option<ReportingChangeStream>) -> Self {
+        // The first audit is one interval out: arming just wrote every control.
+        let mut audit = tokio::time::interval_at(Instant::now() + AUDIT_INTERVAL, AUDIT_INTERVAL);
+        audit.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         Self {
             changes,
+            audit,
             budget: RedivertBudget::default(),
         }
     }
 
-    /// The next change that another client made. Never resolves without a
-    /// subscription, or once the subscription has closed.
-    pub(super) async fn next(&mut self) -> CidReportingChangeEcho {
+    /// The next reason to read controls back: a change that another client
+    /// made, or a due audit.
+    pub(super) async fn next(&mut self) -> Cause {
         loop {
             let Some(changes) = self.changes.as_mut() else {
-                return std::future::pending().await;
+                self.audit.tick().await;
+                return Cause::Audit;
             };
-            if let Some(echo) = changes.next().await {
-                return echo;
+            tokio::select! {
+                echo = changes.next() => match echo {
+                    Some(echo) => return Cause::Echo(echo),
+                    None => self.changes = None,
+                },
+                _ = self.audit.tick() => return Cause::Audit,
             }
-            self.changes = None;
         }
     }
 
-    /// Answer `echo` for the controls that `armed` owns.
-    pub(super) async fn answer<A: ArmedCapture>(
-        &mut self,
-        armed: &A,
-        echo: CidReportingChangeEcho,
-    ) {
-        redivert_after(armed, echo, &mut self.budget).await;
+    /// Answer `cause` for the controls that `armed` owns.
+    pub(super) async fn answer<A: ArmedCapture>(&mut self, armed: &A, cause: Cause) {
+        match cause {
+            Cause::Echo(echo) => redivert_after(armed, echo, &mut self.budget).await,
+            Cause::Audit => {
+                let Some((controls, reporting)) = armed.armed_reporting() else {
+                    return;
+                };
+                for owned in reporting {
+                    redivert_if_lost(controls, owned, cause, &mut self.budget, A::NAME).await;
+                }
+            }
+        }
     }
 }
 
-/// Answer `echo`, another client's change to one control: read the control
-/// back, and divert it again when the change undid the diversion that `armed`
-/// owns and `budget` allows it. Failures are logged, not propagated: the next
-/// reconnect re-arms every control.
+/// Answer `echo`, another client's change to one control, for the controls
+/// that `armed` owns.
 async fn redivert_after<A: ArmedCapture>(
     armed: &A,
     echo: CidReportingChangeEcho,
@@ -141,7 +173,7 @@ async fn redivert_after<A: ArmedCapture>(
         return;
     };
     let cid = echo.cid.0;
-    let Some(owned) = reporting.iter().find(|owned| owned.cid == cid).copied() else {
+    let Some(owned) = reporting.iter().find(|owned| owned.cid == cid) else {
         debug!(
             cid = format_args!("{cid:#06x}"),
             capture = A::NAME,
@@ -150,22 +182,47 @@ async fn redivert_after<A: ArmedCapture>(
         );
         return;
     };
-    // The echo holds only the settings that the other client wrote, so read
+    redivert_if_lost(controls, owned, Cause::Echo(echo), budget, A::NAME).await;
+}
+
+/// Read `owned` back, and divert it again when its diversion is gone and
+/// `budget` allows it. Failures are logged, not propagated: the next audit or
+/// reconnect tries again.
+async fn redivert_if_lost(
+    controls: &ReprogControlsV4,
+    owned: &ArmedReporting,
+    cause: Cause,
+    budget: &mut RedivertBudget,
+    capture: &'static str,
+) {
+    let cid = owned.cid;
+    // An echo holds only the settings that the other client wrote, so read
     // the whole reporting state back.
     let current = match controls.get_cid_reporting(cid).await {
         Ok(current) => current,
+        // An audit of a sleeping device fails every interval; only a failure
+        // to answer an echo is worth a warning.
         Err(error) => {
-            warn!(cid = format_args!("{cid:#06x}"), capture = A::NAME, %error, "cannot read a control that another client changed — leaving it until the next re-arm");
+            match cause {
+                Cause::Echo(_) => {
+                    warn!(cid = format_args!("{cid:#06x}"), capture, ?cause, %error, "cannot read a captured control back — leaving it until the next check");
+                }
+                Cause::Audit => {
+                    debug!(cid = format_args!("{cid:#06x}"), capture, %error, "cannot read a captured control back — checking again next audit");
+                }
+            }
             return;
         }
     };
     let Some(change) = owned.redivert_change(current) else {
-        debug!(
-            cid = format_args!("{cid:#06x}"),
-            capture = A::NAME,
-            ?echo,
-            "another client changed a captured control; its diversion still holds"
-        );
+        if let Cause::Echo(echo) = cause {
+            debug!(
+                cid = format_args!("{cid:#06x}"),
+                capture,
+                ?echo,
+                "another client changed a captured control; its diversion still holds"
+            );
+        }
         return;
     };
     match budget.take(cid, Instant::now()) {
@@ -173,8 +230,9 @@ async fn redivert_after<A: ArmedCapture>(
         Redivert::Exhausted => {
             warn!(
                 cid = format_args!("{cid:#06x}"),
-                capture = A::NAME,
-                "another client keeps undoing a captured control's diversion — leaving it native for now"
+                capture,
+                ?cause,
+                "a captured control keeps losing its diversion — leaving it native for now"
             );
             return;
         }
@@ -182,12 +240,12 @@ async fn redivert_after<A: ArmedCapture>(
     }
     info!(
         cid = format_args!("{cid:#06x}"),
-        capture = A::NAME,
-        ?echo,
-        "another client undid a captured control's diversion — diverting it again"
+        capture,
+        ?cause,
+        "a captured control lost its diversion — diverting it again"
     );
     if let Err(error) = controls.set_cid_reporting_full(cid, change).await {
-        warn!(cid = format_args!("{cid:#06x}"), capture = A::NAME, %error, "re-divert after another client's change failed — control stays native until the next re-arm");
+        warn!(cid = format_args!("{cid:#06x}"), capture, %error, "re-divert failed — control stays native until the next check");
     }
 }
 
