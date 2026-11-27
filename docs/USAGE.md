@@ -110,6 +110,7 @@ openlogi api report-rate --device "$DEVICE_ID"
 openlogi api report-rate --device "$DEVICE_ID" --set 1000 --save
 openlogi api easy-switch --device "$DEVICE_ID"
 openlogi api easy-switch --device "$DEVICE_ID" --channel 2 --name "Work laptop"
+openlogi api haptic --device "$DEVICE_ID" --waveform confirm
 ```
 
 ### Output and compatibility
@@ -142,6 +143,7 @@ stdout cannot provide a JSON envelope.
 | `fn-lock` | `device`, `persistence`, `fn_lock`, `default_fn_lock` (boolean, or null when the keyboard reports no firmware default) |
 | `os-layout` | `device`, `persistence`, `keep_os_layout` (boolean) |
 | `report-rate` | `device`, `persistence`, `current` (integer, hertz), `supported` (array of integers in hertz, for the current connection) |
+| `haptic` | `device`, `waveform` (`tick` or `confirm`) |
 | `easy-switch` | `device`, `persistence`, `current_channel` (integer from 1, or null), `can_rename` (boolean), `channels`: array of `channel` (integer from 1), `paired` (boolean), `connection` (`unknown`, `unifying`, `usb`, `bluetooth`, or `bolt`), `name` (string or null), `name_max_len` (integer, UTF-8 bytes), `os` (string such as `macOS 15.2`, or null) |
 
 `inventory` is `scanning`, `ready`, or `unavailable`. Only `ready` with an empty
@@ -168,6 +170,11 @@ Not every readable setting has an inventory flag; a setting read can return
 `unsupported_feature`. Standalone lights are listed with their light capability
 descriptor and null battery. Cameras are not part of this agent inventory API.
 The response excludes pairing passkeys, application history, and model serials.
+
+`haptic` plays one pulse now and saves nothing, so `--save` fails with
+`invalid_value`. A device without measured haptic feedback, or one that does
+not advertise the waveform, returns `unsupported_feature`. The pulse plays as
+with `openlogi haptic play`, described below.
 
 ### Immediate control and saved preferences
 
@@ -254,6 +261,36 @@ Stable error codes: `agent_unavailable`, `handshake_failed`, `version_mismatch`,
 `config_error`, `config_conflict`, `config_busy`, `config_save_failed`,
 `config_reload_failed`, and `config_reload_unknown`. A protocol mismatch requires matching
 OpenLogi CLI and agent builds; it never triggers direct-hardware fallback.
+
+## Haptic feedback
+
+`openlogi haptic play` buzzes a mouse with HID++ haptic feedback (`0x19b0`),
+such as the MX Master 4, through the running agent, so a script or another
+app can confirm something on the hand. Like `backlight`, it needs a running,
+protocol-compatible agent in the same `OPENLOGI_PROFILE` and never opens HID
+directly.
+
+```sh
+openlogi haptic play                          # a light tick
+openlogi haptic play confirm                  # a firmer confirmation pulse
+openlogi haptic --device "MX Master 4" play tick
+```
+
+`tick` is the pulse the Actions Ring plays when it highlights another slot,
+and `confirm` the one it plays when an action runs. `--device NAME` selects as
+`backlight` does; without it the command picks the one online device with
+measured haptic feedback. Success prints one line and exits zero once the
+device played the pulse.
+
+Plays go through the agent's Actions Ring haptic worker. While another buzz
+is playing, only the newest waiting play survives; one replaced before it
+reached the device fails with "a newer haptic replaced this one". Plays that
+follow each other within 2 seconds share one haptic session, so after the
+first, each costs a single round-trip to the device. If the device's haptic
+engine was turned off, for example in Logi Options+, the first play of such a
+burst turns it on and the agent turns it back off 2 seconds after the last
+one. A device that does not advertise the waveform, or that reports it cannot
+play right now, fails before anything is sent.
 
 ## Asset synchronization
 

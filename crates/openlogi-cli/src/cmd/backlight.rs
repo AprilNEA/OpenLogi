@@ -6,16 +6,15 @@
 
 use std::io::{self, Write};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow};
 use clap::{Args, Subcommand};
-use openlogi_core::device::Capabilities;
 use openlogi_core::hid::backlight::max_backlight_level;
 use openlogi_core::hid::{
     BacklightChange, BacklightControls, BacklightDuration, BacklightMode, BacklightState,
-    BacklightStatus, DeviceRoute,
+    BacklightStatus,
 };
+use openlogi_ipc::AgentClient;
 use openlogi_ipc::client::ConnectError;
-use openlogi_ipc::{AgentClient, AgentSnapshot, InventoryHealth};
 use tarpc::context;
 
 use crate::agent::{self, CallFailure};
@@ -108,6 +107,13 @@ impl BacklightAction {
     }
 }
 
+/// What automatic selection looks for, and what a refusal names.
+const BACKLIGHT: agent::Feature = agent::Feature {
+    noun: "backlight",
+    measured: |caps| caps.backlight,
+    missing: "HID++ Backlight2 support",
+};
+
 pub async fn run(args: BacklightArgs) -> Result<()> {
     let connection = agent::connect().await;
     execute(args, connection, &mut io::stdout()).await
@@ -125,7 +131,7 @@ async fn execute(
         "backlight requires a running, compatible OpenLogi agent; start the matching OpenLogi build with the same OPENLOGI_PROFILE (no direct hardware fallback)",
     )?;
     let snapshot = agent::snapshot(&client).await?;
-    let (route, name) = select_device(&snapshot, args.device.as_deref())?;
+    let (route, name) = agent::select_device(&snapshot, args.device.as_deref(), &BACKLIGHT)?;
     writeln!(out, "device: {name} ({route})")?;
 
     let before = agent::call(client.read_backlight(context::current(), route.clone()))
@@ -166,85 +172,6 @@ fn call_error(failure: CallFailure) -> anyhow::Error {
         CallFailure::TimedOut => anyhow!("agent backlight call timed out"),
         CallFailure::Disconnected => anyhow!("agent disconnected during backlight call"),
     }
-}
-
-/// Human-readable selection differs from the JSON API's exact opaque IDs.
-/// Only the agent's HID++ inventory is eligible, never standalone raw-HID lights.
-fn select_device(snapshot: &AgentSnapshot, query: Option<&str>) -> Result<(DeviceRoute, String)> {
-    if snapshot.status.inventory != InventoryHealth::Ready {
-        bail!("agent inventory is not ready; wait for OpenLogi to finish scanning and try again");
-    }
-    let devices: Vec<_> = snapshot
-        .inventory
-        .iter()
-        .flat_map(|inventory| {
-            inventory
-                .paired
-                .iter()
-                .filter(|device| device.online)
-                .map(|device| {
-                    (
-                        DeviceRoute::for_slot(inventory, device.slot),
-                        device
-                            .codename
-                            .clone()
-                            .unwrap_or_else(|| format!("Slot {}", device.slot)),
-                        device.capabilities.as_ref(),
-                    )
-                })
-        })
-        .collect();
-    let needle = query.map(str::to_lowercase);
-    let matches: Vec<_> = devices
-        .iter()
-        .filter(|(_, name, caps)| {
-            needle.as_ref().map_or_else(
-                || caps.is_some_and(|caps: &Capabilities| caps.backlight),
-                |needle| name.to_lowercase().contains(needle),
-            )
-        })
-        .collect();
-    let selected = if let [selected] = matches.as_slice() {
-        *selected
-    } else {
-        let reason = if matches.is_empty() {
-            "no matching online backlight device"
-        } else {
-            "ambiguous backlight device selection"
-        };
-        let list = devices
-            .iter()
-            .map(|(route, name, _)| {
-                format!(
-                    "  - {name} ({})",
-                    route
-                        .as_ref()
-                        .map_or_else(|| "route unavailable".into(), ToString::to_string)
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        bail!(
-            "{reason}; use --device <unique name substring>. Automatic selection requires measured backlight support.\nOnline HID++ devices:\n{list}"
-        );
-    };
-    let (route, name, caps) = selected;
-    let route = route
-        .as_ref()
-        .context("selected device has no resolvable agent route")?;
-    // Distinct names cannot disambiguate identical direct VID/PID routes.
-    if devices
-        .iter()
-        .filter(|(candidate, _, _)| candidate.as_ref() == Some(route))
-        .count()
-        != 1
-    {
-        bail!("ambiguous agent route for {name} ({route}); no operation was attempted");
-    }
-    if caps.is_some_and(|caps| !caps.backlight) {
-        bail!("{name} does not advertise HID++ Backlight2 support");
-    }
-    Ok((route.clone(), name.clone()))
 }
 
 /// Whether `change` writes the stored mode back as it was read.

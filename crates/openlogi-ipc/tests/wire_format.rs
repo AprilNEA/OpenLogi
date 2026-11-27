@@ -119,7 +119,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// unreleased version and leave this pin alone (`crates/openlogi-ipc/AGENTS.md`).
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 46);
+    assert_eq!(PROTOCOL_VERSION, 47);
 }
 
 #[test]
@@ -474,6 +474,25 @@ fn lock_keys() {
         },
         "0301020000",
     );
+}
+
+/// Appended after `action_ring_unhover`; the pulse is a unit variant index,
+/// append-only like every other enum on the wire.
+#[test]
+fn play_haptic() {
+    use openlogi_core::hid::HapticPulse;
+    assert_wire(
+        &AgentRequest::PlayHaptic {
+            route: DeviceRoute::Bolt {
+                receiver_uid: "F00DCAFE".into(),
+                slot: 1,
+            },
+            pulse: HapticPulse::DampStateChange,
+        },
+        "3a000846303044434146450101",
+    );
+    assert_wire(&HapticPulse::SubtleCollision, "00");
+    assert_wire(&HapticPulse::DampStateChange, "01");
 }
 
 #[test]

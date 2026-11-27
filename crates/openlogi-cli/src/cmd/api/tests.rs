@@ -17,6 +17,7 @@ use openlogi_ipc::{
 use super::*;
 
 mod easy_switch;
+mod haptic;
 mod persistence;
 mod report_rate;
 

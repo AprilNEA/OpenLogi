@@ -176,9 +176,19 @@ impl Default for ActionRingManager {
 }
 
 impl ActionRingManager {
+    /// Take the next session ID without opening a ring.
+    ///
+    /// The agent's haptic worker orders the haptic sessions it owes an engine
+    /// restore by ID. Haptics played for another client than the ring open a
+    /// session of their own, and take its ID here so it orders against the
+    /// ring's.
+    pub fn reserve_session_id(&self) -> u64 {
+        self.next_session.fetch_add(1, Ordering::Relaxed)
+    }
+
     /// Open or replace the current session and wake the overlay long-poll.
     pub fn begin(&self, spec: ActionRingSessionSpec) -> ActionRingInvocation {
-        let session_id = self.next_session.fetch_add(1, Ordering::Relaxed);
+        let session_id = self.reserve_session_id();
         let mut actions = BTreeMap::new();
         let mut slots = BTreeMap::new();
         for (slot, entry) in spec.layout.slots {
