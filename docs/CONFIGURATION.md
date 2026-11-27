@@ -151,9 +151,9 @@ optional physical device key.
   a button). Moving within one element does not tick again. Only a managed,
   online device with HID++ haptics (`0x19B0`, e.g. MX Master 4) plays it, over
   the link it is selected on; the engine is not armed for it, so a device
-  whose haptics are turned off stays silent. Each tick is sent without waiting
-  for the device's reply, so a busy Bluetooth link loses single ticks rather
-  than stalling later ones. When the device refuses a tick for its haptic
+  whose haptics are turned off stays silent. Each tick is one attempt whose
+  reply is awaited for 250 ms at most, so a busy Bluetooth link loses single
+  ticks rather than stalling later ones. When the device refuses a tick for its haptic
   status, hover ticks pause for 5 seconds and the next one re-reads the status.
   Known limits: controls an application draws itself and reports to UI
   Automation only as a group, text or pane do not tick, and windows running

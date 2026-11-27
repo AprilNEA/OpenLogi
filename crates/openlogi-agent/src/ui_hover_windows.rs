@@ -5,9 +5,10 @@
 //! A dedicated COM (MTA) thread samples the physical cursor position at a
 //! bounded rate and asks UI Automation only after the pointer moved, so a
 //! resting pointer costs one `GetPhysicalCursorPos` per period. Ticks go to a
-//! latest-wins player that sends each play without waiting for the device's
-//! acknowledgement: over a busy Bluetooth link replies get dropped while the
-//! pointer moves, and waiting on them stalled every later tick for seconds.
+//! latest-wins player of their own, one attempt each, whose acknowledgement is
+//! awaited for only [`HOVER_REPLY_TIMEOUT`]: over a busy Bluetooth link replies
+//! get dropped while the pointer moves, and the ring player's retries and
+//! breaker stalled every later tick for seconds.
 
 #![expect(
     unsafe_code,
@@ -45,9 +46,13 @@ const PERIOD: Duration = Duration::from_millis(33);
 /// orchestrator. A setting or device change takes effect within this.
 const ROUTE_REFRESH: Duration = Duration::from_secs(1);
 
-/// How long one play may take. Only the first play on a channel waits on the
-/// device (to locate the haptic feature); later ones just write a report.
-const PLAY_BUDGET: Duration = Duration::from_millis(500);
+/// How long a hover play waits for its acknowledgement before the next tick
+/// may go. Only the play is bounded by it: waiting for the device and locating
+/// the haptic feature on a channel's first play keep their own limits, so a
+/// slow link still finds and caches the feature. A reply that misses this is
+/// left to the channel, which keeps the request's header reserved until it
+/// lands, so it never answers a later play such as a ring confirmation.
+const HOVER_REPLY_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// How many ancestors to search for the interactive element: the element
 /// under the pointer is often the text or image inside a button.
@@ -107,17 +112,18 @@ pub(crate) fn spawn(
     let player = tokio::spawn(play_ticks(rx, move |route, fresh_status| {
         let shared = shared.clone();
         async move {
-            let play = shared
+            shared
                 .device(&route)
                 .run(HidppOperation::PlayHaptic, move |c| async move {
-                    openlogi_hid::play_haptic_without_reply_on(
+                    openlogi_hid::play_hover_haptic_on(
                         &c,
                         HapticWaveform::SubtleCollision,
                         fresh_status,
+                        HOVER_REPLY_TIMEOUT,
                     )
                     .await
-                });
-            tokio::time::timeout(PLAY_BUDGET, play).await.ok()
+                })
+                .await
         }
     }));
     let thread_stop = Arc::clone(&stop);
@@ -155,13 +161,13 @@ async fn refresh_route<F, Fut>(
 
 /// Play the newest tick, one at a time; ticks queued behind a play collapse
 /// into one. `play` sends one hover tick to a route, re-reading the haptic
-/// status first when asked, and is `None` when it ran out of time. After a
+/// status first when asked. After a
 /// status refusal the device is left alone for [`STATUS_RETRY`], then the next
 /// tick re-reads the status.
 async fn play_ticks<P, Fut>(mut rx: tokio::sync::watch::Receiver<Option<DeviceRoute>>, mut play: P)
 where
     P: FnMut(DeviceRoute, bool) -> Fut,
-    Fut: Future<Output = Option<Result<(), WriteError>>>,
+    Fut: Future<Output = Result<(), WriteError>>,
 {
     let mut retry_at: Option<tokio::time::Instant> = None;
     while rx.changed().await.is_ok() {
@@ -174,13 +180,12 @@ where
             None => false,
         };
         match play(route, fresh_status).await {
-            Some(Ok(())) => retry_at = None,
-            Some(Err(WriteError::HapticsUnavailable { status })) => {
+            Ok(()) => retry_at = None,
+            Err(WriteError::HapticsUnavailable { status }) => {
                 debug!(status, "UI hover haptics refused by the device's status");
                 retry_at = Some(tokio::time::Instant::now() + STATUS_RETRY);
             }
-            Some(Err(error)) => debug!(%error, "UI hover haptic not sent"),
-            None => debug!("UI hover haptic ran out of time"),
+            Err(error) => debug!(%error, "UI hover haptic not sent"),
         }
     }
 }
@@ -190,10 +195,17 @@ fn lock(route: &Mutex<Option<DeviceRoute>>) -> std::sync::MutexGuard<'_, Option<
 }
 
 /// What the sampling loop remembers between samples.
-#[derive(Default)]
-struct Tracker {
-    last_point: Option<(i32, i32)>,
-    last_element: Option<Vec<i32>>,
+#[derive(Debug, Default, PartialEq, Eq)]
+enum Tracker {
+    /// Nothing sampled since the start or the last reset.
+    #[default]
+    Unseen,
+    /// The last sampled pointer position and the interactive element found
+    /// there, if any.
+    Sampled {
+        point: (i32, i32),
+        element: Option<Vec<i32>>,
+    },
 }
 
 impl Tracker {
@@ -212,17 +224,21 @@ impl Tracker {
             *self = Self::default();
             return None;
         };
-        if self.last_point == Some(point) {
-            return None;
-        }
-        self.last_point = Some(point);
+        let previous = match self {
+            Self::Sampled {
+                point: last,
+                element,
+            } if *last == point => return None,
+            Self::Sampled { element, .. } => element.take(),
+            Self::Unseen => None,
+        };
         let element = lookup();
         if lock(route).as_ref() != Some(&current) {
             *self = Self::default();
             return None;
         }
-        let tick = element.is_some() && element != self.last_element;
-        self.last_element = element;
+        let tick = element.is_some() && element != previous;
+        *self = Self::Sampled { point, element };
         tick.then_some(current)
     }
 }
@@ -371,6 +387,35 @@ mod tests {
     }
 
     #[test]
+    fn a_reset_or_discarded_lookup_leaves_no_element_behind() {
+        let route = Mutex::new(Some(mouse(0xb042)));
+        let mut tracker = Tracker::default();
+        tracker.step(&route, (1, 1), || Some(vec![42]));
+        assert_eq!(
+            tracker,
+            Tracker::Sampled {
+                point: (1, 1),
+                element: Some(vec![42])
+            }
+        );
+
+        *lock(&route) = None;
+        assert_eq!(tracker.step(&route, (2, 1), || unreachable!()), None);
+        assert_eq!(
+            tracker,
+            Tracker::Unseen,
+            "no route: the sample is forgotten"
+        );
+
+        *lock(&route) = Some(mouse(0xb042));
+        tracker.step(&route, (3, 1), || {
+            *lock(&route) = Some(mouse(0xb034));
+            Some(vec![42])
+        });
+        assert_eq!(tracker, Tracker::Unseen, "a discarded lookup keeps nothing");
+    }
+
+    #[test]
     fn route_changes_during_hover_lookup() {
         let route = Mutex::new(Some(mouse(0xb042)));
         let mut tracker = Tracker::default();
@@ -440,11 +485,11 @@ mod tests {
             seen.push(fresh_status);
             let refused = seen.len() == 1;
             async move {
-                Some(if refused {
+                if refused {
                     Err(WriteError::HapticsUnavailable { status: 2 })
                 } else {
                     Ok(())
-                })
+                }
             }
         }));
         let tick = || async {
