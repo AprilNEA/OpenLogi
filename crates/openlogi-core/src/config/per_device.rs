@@ -298,6 +298,17 @@ impl Config {
         self.devices.entry(device_key.to_string()).or_default().dpi = Some(dpi);
     }
 
+    /// [`Self::set_dpi`], and drop every link's override of the DPI, so `dpi`
+    /// applies on every route the device is reached by, the way a copied
+    /// setting replaces the target's overrides.
+    pub fn set_dpi_on_every_link(&mut self, device_key: &str, dpi: Dpi) {
+        let device = self.devices.entry(device_key.to_string()).or_default();
+        device.dpi = Some(dpi);
+        for link in device.links.values_mut() {
+            link.overrides.dpi = None;
+        }
+    }
+
     /// Known keys managed for `device_key`, or `None` when OpenLogi should not
     /// change the keyboard's current `DisableKeys` state.
     #[must_use]

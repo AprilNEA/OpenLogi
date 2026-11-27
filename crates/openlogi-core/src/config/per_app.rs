@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 
-use super::Config;
+use super::{Config, DeviceConfig};
 use crate::app::{overlay_for, profile_key_for};
 use crate::binding::{Action, Binding, ButtonId};
 
@@ -141,11 +141,21 @@ impl Config {
     pub(super) fn undefined_app_alias(&self) -> Option<(&str, &str)> {
         self.devices.iter().find_map(|(device_key, device)| {
             device
-                .per_app_bindings
-                .keys()
-                .chain(device.action_ring.per_app.keys())
+                .profile_keys()
                 .find(|key| self.apps.is_undefined_reference(key))
-                .map(|key| (device_key.as_str(), key.as_str()))
+                .map(|key| (device_key.as_str(), key))
         })
+    }
+}
+
+impl DeviceConfig {
+    /// The keys of every per-app profile this device stores: its button
+    /// overrides and its Actions Ring layouts. An `app:` key among them must
+    /// name an alias of [`Config::apps`].
+    pub(super) fn profile_keys(&self) -> impl Iterator<Item = &str> {
+        self.per_app_bindings
+            .keys()
+            .chain(self.action_ring.per_app.keys())
+            .map(String::as_str)
     }
 }

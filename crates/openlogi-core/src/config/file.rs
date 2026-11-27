@@ -296,6 +296,24 @@ impl Config {
         self.save_to_path(&paths::config_path()?)
     }
 
+    /// This config as the text of a config file, written from scratch. For a
+    /// copy kept outside the config folder, such as an export.
+    pub fn to_toml_string(&self) -> Result<String, ConfigError> {
+        Ok(toml::to_string_pretty(self)?)
+    }
+
+    /// Write [`Self::to_toml_string`] to `path`, for a copy kept outside the
+    /// config folder, such as an export. Atomic like a config save: a file
+    /// already at `path` is replaced only by the complete new one, and a
+    /// failed write leaves it as it was.
+    pub fn write_copy(&self, path: &Path) -> Result<(), ConfigError> {
+        let text = self.to_toml_string()?;
+        write_atomic(path, text.as_bytes()).map_err(|source| ConfigError::Write {
+            path: path.to_path_buf(),
+            source,
+        })
+    }
+
     /// Atomically save to `path`, preserving comments in its current content.
     /// Used by tests and one-shot tools; long-lived writers should use
     /// [`ConfigFile::save`].
