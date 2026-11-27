@@ -3,7 +3,7 @@
 //! `clippy::allow_attributes` makes every `#[allow]` justify itself, but an
 //! `allow` that stops suppressing anything stays silent forever. The only way
 //! to tell is to remove it and see whether its lint fires — on every host,
-//! because the five `allow`s left in this tree each fire on only some hosts or
+//! because the remaining `allow`s each fire on only some hosts or
 //! builds. `sweep-allows` does that on the current host; `merge-allows` joins
 //! the per-host reports and fails on an `allow` that no host needs.
 

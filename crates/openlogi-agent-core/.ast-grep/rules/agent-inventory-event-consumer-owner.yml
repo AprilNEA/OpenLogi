@@ -1,0 +1,15 @@
+id: agent-inventory-event-consumer-owner
+language: rust
+severity: error
+message: Apply watcher events through Orchestrator::apply_inventory_event so reconnect intent and confirmation scheduling stay with the snapshot consumer.
+files:
+  - crates/openlogi-agent/src/**/*.rs
+ignores:
+  - '**/tests.rs'
+  - '**/tests/**'
+rule:
+  any:
+    - pattern: $ORCHESTRATOR.reapply_volatile_on_next_refresh()
+    - pattern: $ORCHESTRATOR.reapply_reconnected_on_next_refresh()
+    - pattern: $ORCHESTRATOR.refresh_inventory_for_settings_confirmation($$$ARGS)
+    - pattern: $ORCHESTRATOR.refresh_inventory($INVENTORIES, $STANDALONE, $FAILURES)

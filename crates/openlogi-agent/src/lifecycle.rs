@@ -511,57 +511,14 @@ impl Running {
 
     /// Fold one inventory-watcher event into the orchestrator.
     async fn apply_inventory(&self, event: InventoryEvent, refresh: &InventoryRefresh) {
-        match event {
-            InventoryEvent::Snapshot {
-                inventories,
-                standalone,
-                hid_open_failures,
-                confirms_volatile_settings,
-            } => {
-                let mut orchestrator = self.orchestrator.lock().await;
-                if confirms_volatile_settings {
-                    orchestrator.refresh_inventory_for_settings_confirmation(
-                        &inventories,
-                        &standalone,
-                        hid_open_failures,
-                    );
-                } else {
-                    orchestrator.refresh_inventory(&inventories, &standalone, hid_open_failures);
-                }
-                let confirm_settings = orchestrator.needs_reapply_confirmation();
-                drop(orchestrator);
-                if confirm_settings {
-                    refresh.request_settings_confirmation();
-                }
-            }
-            InventoryEvent::Unavailable => {
-                self.orchestrator.lock().await.mark_inventory_unavailable();
-            }
-            // Devices likely power-cycled during the sleep; the next snapshot
-            // re-applies their volatile settings (#189).
-            InventoryEvent::SystemWake => {
-                self.orchestrator.lock().await.reapply_after_system_resume();
-            }
-            InventoryEvent::BacklightChanged {
-                device_index: _,
-                current_level,
-                levels,
-                visible,
-            } => {
-                self.backlight_overlay.show(current_level, levels, visible);
-            }
-            InventoryEvent::LockKeyChanged(change) => {
-                self.orchestrator.lock().await.announce_lock_key(change);
-            }
-            // A device broadcast its own reconnection (`0x1d4b`): reconfigure
-            // it on the next snapshot even if no reconciliation ever saw it
-            // offline.
-            InventoryEvent::DeviceWake => {
-                self.orchestrator
-                    .lock()
-                    .await
-                    .reapply_reconnected_on_next_refresh();
-            }
+        let backlight = self
+            .orchestrator
+            .lock()
+            .await
+            .apply_inventory_event(event, refresh);
+        if let Some(update) = backlight {
+            self.backlight_overlay
+                .show(update.current_level, update.levels, update.visible);
         }
     }
 

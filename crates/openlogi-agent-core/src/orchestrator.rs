@@ -66,6 +66,7 @@ use crate::watchers::light::{WatchedLight, WatchedLights};
 use crate::{DpiCycleState, DpiCycles, PointerSpeeds};
 
 mod devices;
+mod inventory_events;
 mod lights;
 mod settings;
 
