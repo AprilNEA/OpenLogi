@@ -108,7 +108,7 @@ async fn newer_activation_supersedes_a_stale_retry_immediately() {
 
     let (pending, _) = tokio::time::timeout(
         Duration::from_millis(20),
-        wait_for_retry(&mut rx, stale, Some(Instant::now() + DISPLAY_LIFETIME)),
+        wait_for_retry(&mut rx, stale, Instant::now() + DISPLAY_LIFETIME),
     )
     .await
     .expect("queued replacement should interrupt the retry delay")
@@ -204,30 +204,62 @@ async fn stalled_hover_stops_when_the_command_channel_closes() {
         .expect("command worker should not panic");
 }
 
-#[test]
-fn only_terminal_commands_are_retryable() {
+/// A hover keeps the ring up in the overlay for another lifetime, and the
+/// agent keeps its session only when it hears that hover. So a hover the
+/// agent did not take is sent again, or the ring would stay up with its
+/// session over and its slots doing nothing.
+#[tokio::test]
+async fn a_hover_the_agent_did_not_take_is_sent_again() {
     let hover = OverlayCommand::Hover {
         session_id: 1,
         slot: Some(ActionRingSlot::Top),
     };
-    let activation = OverlayCommand::Activate {
-        session_id: 1,
-        slot: ActionRingSlot::Top,
-    };
-    let cancellation = OverlayCommand::Cancel { session_id: 1 };
-    assert!(!hover.is_terminal());
-    assert!(activation.is_terminal());
-    assert!(cancellation.is_terminal());
+    let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let delivered = std::sync::Arc::new(tokio::sync::Notify::new());
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let worker = tokio::spawn({
+        let attempts = std::sync::Arc::clone(&attempts);
+        let delivered = std::sync::Arc::clone(&delivered);
+        async move {
+            send_commands_with(
+                &mut rx,
+                || Box::pin(async { Some(()) }),
+                move |(), command| {
+                    let attempts = std::sync::Arc::clone(&attempts);
+                    let delivered = std::sync::Arc::clone(&delivered);
+                    Box::pin(async move {
+                        assert_eq!(command, hover);
+                        let first = attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
+                        if !first {
+                            delivered.notify_one();
+                        }
+                        !first
+                    })
+                },
+            )
+            .await;
+        }
+    });
+
+    tx.send(hover).unwrap();
+    tokio::time::timeout(Duration::from_secs(1), delivered.notified())
+        .await
+        .expect("the lost hover is sent again");
+    assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+    drop(tx);
+    tokio::time::timeout(Duration::from_millis(100), worker)
+        .await
+        .expect("command worker should stop")
+        .expect("command worker should not panic");
 }
 
 #[test]
-fn terminal_retries_last_only_until_the_session_deadline() {
-    assert!(retry_before(Some(Instant::now() + Duration::from_secs(1))));
+fn retries_last_only_until_the_session_deadline() {
+    assert!(retry_before(Instant::now() + Duration::from_secs(1)));
     let past = Instant::now()
         .checked_sub(Duration::from_secs(1))
         .unwrap_or_else(Instant::now);
-    assert!(!retry_before(Some(past)));
-    assert!(!retry_before(None));
+    assert!(!retry_before(past));
 }
 
 #[test]

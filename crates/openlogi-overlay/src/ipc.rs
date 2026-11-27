@@ -3,7 +3,7 @@
 //!
 //! Reporting is not fire-and-forget. A hover that never lands leaves the ring
 //! showing the wrong slot, and a dropped activation loses the user's click
-//! outright — so terminal commands retry until the session's own deadline. A
+//! outright — so every command retries until the session's own deadline. A
 //! newer command for the same ring supersedes a stalled one rather than
 //! queueing behind it, which is what keeps the ring responsive when the agent
 //! is briefly slow.
@@ -42,12 +42,6 @@ pub(crate) enum OverlayCommand {
     Cancel {
         session_id: u64,
     },
-}
-
-impl OverlayCommand {
-    pub(crate) const fn is_terminal(self) -> bool {
-        matches!(self, Self::Activate { .. } | Self::Cancel { .. })
-    }
 }
 
 /// What the view holds to talk to the agent.
@@ -394,7 +388,7 @@ async fn send_commands_with<C>(
         while let Ok(next) = rx.try_recv() {
             command = coalesce_command(command, next);
         }
-        let mut deadline = command_deadline(command);
+        let mut deadline = command_deadline();
         loop {
             while let Ok(next) = rx.try_recv() {
                 (command, deadline) = merge_pending(command, deadline, next);
@@ -442,7 +436,7 @@ async fn send_commands_with<C>(
 #[derive(Debug)]
 enum CommandAttempt<T> {
     Completed(T),
-    Superseded(OverlayCommand, Option<Instant>),
+    Superseded(OverlayCommand, Instant),
     Expired,
     Closed,
 }
@@ -450,7 +444,7 @@ enum CommandAttempt<T> {
 async fn await_command_attempt<T>(
     rx: &mut mpsc::UnboundedReceiver<OverlayCommand>,
     command: OverlayCommand,
-    deadline: Option<Instant>,
+    deadline: Instant,
     attempt: impl Future<Output = T>,
 ) -> CommandAttempt<T> {
     tokio::pin!(attempt);
@@ -474,30 +468,31 @@ async fn await_command_attempt<T>(
     }
 }
 
-async fn deadline_elapsed(deadline: Option<Instant>) {
-    if let Some(deadline) = deadline {
-        tokio::time::sleep_until(deadline.into()).await;
-    } else {
-        std::future::pending::<()>().await;
-    }
+async fn deadline_elapsed(deadline: Instant) {
+    tokio::time::sleep_until(deadline.into()).await;
 }
 
-fn command_deadline(command: OverlayCommand) -> Option<Instant> {
-    command
-        .is_terminal()
-        .then(|| Instant::now() + DISPLAY_LIFETIME)
+/// How long a command is tried before it is given up: until the ring it was
+/// sent for would have closed. A newer command replaces one still waiting.
+///
+/// A hover is retried too. It keeps the ring up in this overlay for another
+/// [`DISPLAY_LIFETIME`], and the agent keeps its session up only when it
+/// hears that hover, so a hover lost on the way would leave a ring showing
+/// whose session the agent has ended.
+fn command_deadline() -> Instant {
+    Instant::now() + DISPLAY_LIFETIME
 }
 
 fn merge_pending(
     command: OverlayCommand,
-    deadline: Option<Instant>,
+    deadline: Instant,
     next: OverlayCommand,
-) -> (OverlayCommand, Option<Instant>) {
+) -> (OverlayCommand, Instant) {
     let pending = coalesce_command(command, next);
     let deadline = if pending == command {
         deadline
     } else {
-        command_deadline(pending)
+        command_deadline()
     };
     (pending, deadline)
 }
@@ -505,8 +500,8 @@ fn merge_pending(
 async fn wait_for_retry(
     rx: &mut mpsc::UnboundedReceiver<OverlayCommand>,
     command: OverlayCommand,
-    deadline: Option<Instant>,
-) -> Option<(OverlayCommand, Option<Instant>)> {
+    deadline: Instant,
+) -> Option<(OverlayCommand, Instant)> {
     if !retry_before(deadline) {
         return None;
     }
@@ -522,8 +517,8 @@ async fn wait_for_retry(
     }
 }
 
-fn retry_before(deadline: Option<Instant>) -> bool {
-    deadline.is_some_and(|deadline| Instant::now() < deadline)
+fn retry_before(deadline: Instant) -> bool {
+    Instant::now() < deadline
 }
 
 #[cfg(test)]

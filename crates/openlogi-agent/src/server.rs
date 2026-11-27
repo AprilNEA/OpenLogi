@@ -541,7 +541,9 @@ impl Agent for AgentServer {
         session_id: u64,
         slot: ActionRingSlot,
     ) -> Result<(), ActionRingCommandError> {
-        if let Some(hover) = self.action_ring.hover(session_id, slot)? {
+        let hover = self.action_ring.hover(session_id, slot)?;
+        self.ring_haptics.use_session(session_id);
+        if let Some(hover) = hover {
             self.ring_haptics
                 .play(hover.haptic_route, HapticWaveform::SubtleCollision, "hover");
         }
@@ -597,7 +599,9 @@ impl Agent for AgentServer {
         _: Context,
         session_id: u64,
     ) -> Result<(), ActionRingCommandError> {
-        self.action_ring.unhover(session_id)
+        self.action_ring.unhover(session_id)?;
+        self.ring_haptics.use_session(session_id);
+        Ok(())
     }
 }
 
@@ -662,10 +666,29 @@ struct Sessions {
 struct SessionNews {
     /// The newest session that opened with haptic feedback, and its device.
     opened: Option<(u64, DeviceRoute)>,
+    /// The newest session whose pointer moved onto or off a slot.
+    used: Option<u64>,
     /// The newest session that closed.
     closed: Option<u64>,
     /// Hand every engine back now, then answer here.
     hand_back: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl SessionNews {
+    /// Bring `ledger` up to date at `now`: the use first, then the close,
+    /// then the agent leaving. A use reported together with its session's
+    /// close therefore cannot keep the engine past that close.
+    fn record<R>(&self, ledger: &mut RestoreLedger<R>, now: Instant) {
+        if let Some(session) = self.used {
+            ledger.used(session, now);
+        }
+        if let Some(session) = self.closed {
+            ledger.closed(session, now);
+        }
+        if self.hand_back.is_some() {
+            ledger.leaving(now);
+        }
+    }
 }
 
 /// How long every attempt at one buzz may take together.
@@ -982,7 +1005,7 @@ impl RingHapticPlayer {
                         due.map_or_else(tokio::time::Instant::now, tokio::time::Instant::from_std),
                     ), if due.is_some() => false,
                 };
-                let (news, paused) = {
+                let (mut news, paused) = {
                     let mut sessions = worker_sessions
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner);
@@ -993,7 +1016,7 @@ impl RingHapticPlayer {
                 // spawning it separately let the first hover race (and lose
                 // to) a disarmed haptic engine. A session that already closed
                 // is not armed at all, nor is one while the agent is leaving.
-                if let Some((session, route)) = news.opened
+                if let Some((session, route)) = news.opened.take()
                     && !paused
                     && news.closed.is_none_or(|closed| closed < session)
                 {
@@ -1023,12 +1046,7 @@ impl RingHapticPlayer {
                         }
                     }
                 }
-                if let Some(session) = news.closed {
-                    ledger.closed(session, Instant::now());
-                }
-                if news.hand_back.is_some() {
-                    ledger.leaving(Instant::now());
-                }
+                news.record(&mut ledger, Instant::now());
                 while let Some(owed) = ledger.take_due(Instant::now()) {
                     if restore_firmware_haptics(&shared, &owed.route, owed.restore).await
                         == RestoreAttempt::Unreached
@@ -1059,6 +1077,19 @@ impl RingHapticPlayer {
         };
         self.sessions().news.opened = Some((session, route));
         let _ = self.tx.send(None);
+    }
+
+    /// Report that ring session `session` was used, which keeps it alive for
+    /// another [`SESSION_LIFETIME`]: an enable its arming made is not handed
+    /// back before then unless the session closes.
+    ///
+    /// [`SESSION_LIFETIME`]: openlogi_agent_core::action_ring::SESSION_LIFETIME
+    pub fn use_session(&self, session: u64) {
+        {
+            let mut sessions = self.sessions();
+            sessions.news.used = sessions.news.used.max(Some(session));
+        }
+        let _ = self.closed.send(());
     }
 
     /// Report that ring session `session` closed, after queueing any buzz it
@@ -1313,6 +1344,38 @@ mod tests {
     #[test]
     fn an_owed_restore_leaves_the_worker_mostly_idle() {
         assert!(RESTORE_BUDGET * 5 <= haptic_restore::RESTORE_RETRY);
+    }
+
+    /// A use reported to the player keeps the engine its session armed for
+    /// another lifetime, and a close reported with it still ends it.
+    #[test]
+    fn a_use_reported_to_the_player_keeps_the_engine_owed() {
+        use openlogi_agent_core::action_ring::SESSION_LIFETIME;
+        let (tx, _) = tokio::sync::watch::channel(None);
+        let (closed, _) = tokio::sync::watch::channel(());
+        let player = super::RingHapticPlayer {
+            tx,
+            sessions: Arc::default(),
+            closed,
+        };
+        let route = DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xb042,
+        };
+        let start = Instant::now();
+        let mut ledger = haptic_restore::RestoreLedger::default();
+        ledger.opened(1, route, Some(7_u8), start);
+
+        player.use_session(1);
+        let used = start + Duration::from_secs(10);
+        std::mem::take(&mut player.sessions().news).record(&mut ledger, used);
+        assert_eq!(ledger.next_due(), Some(used + SESSION_LIFETIME));
+
+        player.use_session(1);
+        player.end_session(1);
+        let ended = used + Duration::from_secs(1);
+        std::mem::take(&mut player.sessions().news).record(&mut ledger, ended);
+        assert_eq!(ledger.next_due(), Some(ended), "the close stands");
     }
 
     /// A session that closed before the worker looked is never armed, so it

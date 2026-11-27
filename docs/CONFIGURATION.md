@@ -679,6 +679,9 @@ and turning gestures back on restores the saved directions. The setting is per
 device, not per application: an app profile that gives the button its own
 action replaces the wheel hold in that application.
 
+An open Actions Ring closes after 15 seconds. Each time the pointer moves onto
+or off a slot, the 15 seconds start again, so a ring in use stays up.
+
 An Actions Ring entry wraps the action and may add an icon or literal label:
 
 ```toml
