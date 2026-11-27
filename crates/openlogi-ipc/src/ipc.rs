@@ -18,6 +18,10 @@ use openlogi_core::config::{ConfigRevision, FlowPeerName, FlowPublicKey, Lightin
 use openlogi_core::device::{
     BatteryInfo, ChangedOnLight, DeviceInventory, DeviceKind, LightState, LockKey, StandaloneDevice,
 };
+use openlogi_core::hid::g600::{
+    DpiSettings as G600DpiSettings, DpiStage as G600DpiStage, DpiState as G600DpiState,
+    OnboardProfile as G600Profile, StageAfterStore as G600StageAfterStore,
+};
 use openlogi_core::hid::{
     BacklightChange, BacklightState, DeviceRoute, DisableKeysMask, DisableKeysState, Dpi, DpiInfo,
     EasySwitchHosts, FnLockState, ForceSensingInfo, LightCommand, OnboardState, PairingError,
@@ -194,7 +198,17 @@ pub use succession::Identity;
 ///      and `ActionRingIcon::{Channel1, Channel2, Channel3}` appended after
 ///      them — a device's move to another Easy-Switch channel, bound to a
 ///      button or an Actions Ring slot.
-pub const PROTOCOL_VERSION: u32 = 46;
+/// v47: `Agent::{read_g600_dpi, set_g600_profile_dpi, set_g600_active_stage}`
+///      appended — the Logitech G600's onboard DPI stages and active stage,
+///      as the registry's validated G600 types. `WriteError::G600` with
+///      `G600Failure` and `HidppOperation::{ReadG600Dpi, WriteG600Profile,
+///      WriteG600Stage}` appended for its failures. A profile write carries
+///      the stage the mouse uses after it (`StageAfterStore`), selected in
+///      the same operation; `G600Failure::ProfileNotInUse` refuses one
+///      named for a profile the mouse is not using, and
+///      `G600Failure::ProfileSwitched` reports the mouse leaving the
+///      profile a stage was selected for.
+pub const PROTOCOL_VERSION: u32 = 47;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -1263,4 +1277,36 @@ pub trait Agent {
     /// held trigger cancels instead of choosing the slot last reported by
     /// [`Agent::action_ring_hover`].
     async fn action_ring_unhover(session_id: u64) -> Result<(), ActionRingCommandError>;
+
+    /// Read the active profile and DPI stage of the G600 on `route`, and the
+    /// DPI settings of its three onboard profiles.
+    async fn read_g600_dpi(route: DeviceRoute) -> Result<G600DpiState, WriteError>;
+    /// Store `settings` in onboard `profile` of the G600 on `route`,
+    /// confirm the write by reading the profile back, then put the mouse on
+    /// the stage `after` asks for, all in one operation. The mouse keeps its
+    /// DPI in onboard memory, so nothing is saved to the config. Takes over
+    /// a second: the mouse must store the profile before anything else
+    /// reaches it.
+    ///
+    /// A stage `after` names is refused before anything is written, with
+    /// [`openlogi_core::hid::g600::G600Failure::StageDisabled`] when
+    /// `settings` disable it and
+    /// [`openlogi_core::hid::g600::G600Failure::ProfileNotInUse`] when the
+    /// mouse is using another profile.
+    async fn set_g600_profile_dpi(
+        route: DeviceRoute,
+        profile: G600Profile,
+        settings: G600DpiSettings,
+        after: G600StageAfterStore,
+    ) -> Result<(), WriteError>;
+    /// Switch the G600 on `route` to DPI `stage` of its active profile and
+    /// confirm the switch. A stage that profile has disabled is refused with
+    /// [`openlogi_core::hid::g600::G600Failure::StageDisabled`] before
+    /// anything is written.
+    /// [`openlogi_core::hid::g600::G600Failure::ProfileSwitched`] reports a
+    /// profile change the mouse made before the switch was confirmed.
+    async fn set_g600_active_stage(
+        route: DeviceRoute,
+        stage: G600DpiStage,
+    ) -> Result<(), WriteError>;
 }

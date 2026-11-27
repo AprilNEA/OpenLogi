@@ -30,6 +30,8 @@
 //! - A standalone Litra light whose power / brightness / temperature writes
 //!   persist, and a `camera_active` flag that flips every 30s so the
 //!   camera-linked light rendering has something to follow.
+//! - A standalone G600 whose onboard DPI stages and active stage persist in
+//!   memory; a profile write takes as long as the real mouse's does.
 //! - DPI / SmartShift writes persist in memory and read back, so sliders and
 //!   toggles behave like a live device.
 //! - `start_pairing` runs a scripted Bolt flow: discovery → passkey → paired,
@@ -63,6 +65,10 @@ use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind, LockKey,
     PairedDevice, StandaloneDevice, prettify_codename,
 };
+use openlogi_core::hid::g600::{
+    DpiSettings as G600DpiSettings, DpiStage as G600DpiStage, DpiState as G600DpiState,
+    OnboardProfile as G600Profile, StageAfterStore as G600StageAfterStore,
+};
 use openlogi_core::hid::{DisableKeysMask, DisableKeysState, HidppOperation};
 use openlogi_core::single_instance::{self, InstanceError, Role};
 use openlogi_fixture::{DeviceProfile, FixtureError, ProfileDeviceSettings, ProfileSetting};
@@ -91,6 +97,8 @@ use tracing::{info, warn};
 mod control;
 #[path = "mock_agent/flow.rs"]
 mod flow;
+#[path = "mock_agent/g600.rs"]
+mod g600;
 #[path = "mock_agent/profile.rs"]
 mod profile;
 
@@ -202,7 +210,10 @@ fn state_from_args(args: impl Iterator<Item = OsString>) -> Result<State, String
         State::with_disable_keys_scenario(profile, MockClock::Test(Duration::ZERO), scenario)
             .map_err(|error| error.to_string())
     } else {
-        let profile = built_in_profile()?;
+        let mut profile = built_in_profile()?;
+        let (g600, settings) = g600::demo_device()?;
+        profile.standalone.push(g600);
+        profile.settings.push(settings);
         State::with_disable_keys_scenario(profile, MockClock::Demo(Instant::now()), scenario)
             .map_err(|error| error.to_string())
     }
@@ -421,6 +432,8 @@ struct State {
     disable_keys_writes: u64,
     reload_calls: u64,
     flow: flow::MockFlow,
+    /// Onboard DPI of each G600 the profile lists.
+    g600: g600::MockG600s,
 }
 
 impl State {
@@ -443,7 +456,9 @@ impl State {
             .max()
             .unwrap_or(0)
             .saturating_add(1);
+        let g600 = g600::MockG600s::for_devices(&profile.standalone);
         Ok(Self {
+            g600,
             profile,
             paired_extra: Vec::new(),
             next_slot,
@@ -1602,6 +1617,55 @@ impl Agent for MockAgent {
         _session_id: u64,
     ) -> Result<(), ActionRingCommandError> {
         Err(ActionRingCommandError::SessionNotFound)
+    }
+
+    async fn read_g600_dpi(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<G600DpiState, WriteError> {
+        let mouse = self.g600(&route).await?;
+        let mouse = mouse.lock().await;
+        Ok(*mouse)
+    }
+
+    async fn set_g600_profile_dpi(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        profile: G600Profile,
+        settings: G600DpiSettings,
+        after: G600StageAfterStore,
+    ) -> Result<(), WriteError> {
+        let mouse = self.g600(&route).await?;
+        let mut mouse = mouse.lock().await;
+        g600::store_profile(&mut mouse, profile, &settings, after).await?;
+        info!(%route, profile = profile.number(), ?after, "set_g600_profile_dpi");
+        Ok(())
+    }
+
+    async fn set_g600_active_stage(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        stage: G600DpiStage,
+    ) -> Result<(), WriteError> {
+        let mouse = self.g600(&route).await?;
+        let mut mouse = mouse.lock().await;
+        g600::select_stage(&mut mouse, stage)?;
+        info!(%route, stage = stage.number(), "set_g600_active_stage");
+        Ok(())
+    }
+}
+
+impl MockAgent {
+    /// The reachable G600 on `route`, whose lock a G600 call holds for as
+    /// long as it runs. The rest of the mock stays unlocked meanwhile, as
+    /// other devices keep answering.
+    async fn g600(&self, route: &DeviceRoute) -> Result<Arc<Mutex<G600DpiState>>, WriteError> {
+        let state = self.state.lock().await;
+        state.require_reachable(route)?;
+        state.g600.mouse(route)
     }
 }
 

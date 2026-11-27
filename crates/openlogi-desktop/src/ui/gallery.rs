@@ -2,9 +2,9 @@
 
 use super::theme::FocusRingStyle as _;
 use gpui::{
-    App, AppContext as _, Context, InteractiveElement, IntoElement, ParentElement, Render, Role,
-    SharedString, Size, StatefulInteractiveElement as _, Styled, Window, WindowOptions, div,
-    prelude::FluentBuilder as _, px, rems,
+    App, AppContext as _, Context, FocusHandle, InteractiveElement, IntoElement, ParentElement,
+    Render, Role, SharedString, Size, StatefulInteractiveElement as _, Styled, Window,
+    WindowOptions, div, prelude::FluentBuilder as _, px, rems,
 };
 use gpui_kit::base::Button as BaseButton;
 use gpui_kit::component::{
@@ -28,6 +28,7 @@ use super::commit_slider::{CommitSlider, SliderRange};
 use super::components::{
     MenuRow, PanelCard, Pill, PresetChip, ProfileTab, Toggle, stacked_row, toggle_row,
 };
+use super::log_track::{LogTrack, Nudge, TrackThumb, doubling_ticks};
 use super::slider_row::{SliderRow, disabled_track};
 use super::status::{retry_line, status_line};
 use super::theme::{
@@ -36,6 +37,9 @@ use super::theme::{
 };
 
 const TITLE: &str = "OpenLogi Component Gallery";
+/// The range of the gallery's log track.
+const TRACK_MIN: u16 = 200;
+const TRACK_MAX: u16 = 8200;
 
 /// Run the isolated development gallery application.
 pub(crate) fn run() {
@@ -117,6 +121,10 @@ struct ComponentGallery {
     compact_slider: CommitSlider<u8>,
     entry_slider: CommitSlider<u8>,
     entry_auto: bool,
+    /// The log track's dots, ascending, and the selected one.
+    track_values: Vec<u16>,
+    track_selected: usize,
+    track_focus: FocusHandle,
 }
 
 /// Where the gallery's slider row starts, and what it marks as the default.
@@ -163,6 +171,9 @@ impl ComponentGallery {
             compact_slider,
             entry_slider,
             entry_auto: true,
+            track_values: vec![400, 1600, 2000],
+            track_selected: 1,
+            track_focus: cx.focus_handle().tab_stop(true),
         }
     }
 
@@ -245,6 +256,7 @@ impl ComponentGallery {
             .child(self.pill_panel(pal, cx))
             .child(self.slider_panel(pal))
             .child(self.slider_row_panel(pal, cx))
+            .child(self.log_track_panel(pal, cx))
             .child(Self::battery_panel(pal))
             .child(gallery_panel(
                 "Status and retry",
@@ -549,6 +561,109 @@ impl ComponentGallery {
                 ),
             pal,
         )
+    }
+
+    /// The multi-thumb log track, as the G600 DPI editor uses it: a click
+    /// on empty rail adds a dot (up to four), a press on a dot or its label
+    /// selects it, a drag or the arrow keys move the selected one between
+    /// its neighbours, the first dot is filled like a default and the
+    /// second marked. Tab reaches the track, which shows a ring while it
+    /// has focus. Below it, the same track disabled.
+    fn log_track_panel(&self, pal: Palette, cx: &mut Context<Self>) -> gpui::Div {
+        let ticks = || {
+            doubling_ticks(TRACK_MIN, TRACK_MAX)
+                .into_iter()
+                .map(|tick| (tick, SharedString::from(tick.to_string())))
+        };
+        let thumbs = |selected: Option<usize>| {
+            self.track_values
+                .iter()
+                .enumerate()
+                .map(move |(index, value)| {
+                    TrackThumb::new(*value, value.to_string())
+                        .filled(index == 0)
+                        .selected(Some(index) == selected)
+                        .marked(index == 1)
+                })
+                .collect::<Vec<_>>()
+        };
+        let gallery = cx.entity().downgrade();
+        let edit = move |cx: &mut App, change: &dyn Fn(&mut Self)| {
+            gallery
+                .update(cx, |this, cx| {
+                    change(this);
+                    cx.notify();
+                })
+                .ok();
+        };
+        let (add, moved, select, nudge) = (edit.clone(), edit.clone(), edit.clone(), edit);
+        gallery_panel(
+            "LogTrack",
+            IconName::Settings,
+            v_flex()
+                .gap_4()
+                .child(
+                    LogTrack::new("gallery-log-track", TRACK_MIN, TRACK_MAX)
+                        .ticks(ticks())
+                        .thumbs(thumbs(Some(self.track_selected)))
+                        .track_focus(&self.track_focus)
+                        .on_add(move |value, _, cx| {
+                            add(cx, &|this| this.track_add(value));
+                        })
+                        .on_move(move |index, value, _, cx| {
+                            moved(cx, &|this| this.track_move(index, value));
+                        })
+                        .on_select(move |index, _, cx| {
+                            select(cx, &|this| this.track_selected = index);
+                        })
+                        .on_nudge(move |index, way, _, cx| {
+                            nudge(cx, &|this| {
+                                let value = this.track_values[index];
+                                let target = match way {
+                                    Nudge::Lower => value.saturating_sub(10),
+                                    Nudge::Higher => value.saturating_add(10),
+                                };
+                                this.track_move(index, target);
+                            });
+                        }),
+                )
+                .child(
+                    LogTrack::new("gallery-log-track-disabled", TRACK_MIN, TRACK_MAX)
+                        .ticks(ticks())
+                        .thumbs(thumbs(None))
+                        .disabled(true),
+                )
+                .child(
+                    div()
+                        .text_caption()
+                        .text_color(pal.text_muted)
+                        .child(format!("{TRACK_MIN}–{TRACK_MAX}, logarithmic")),
+                ),
+            pal,
+        )
+    }
+
+    fn track_add(&mut self, value: u16) {
+        if self.track_values.len() < 4 && !self.track_values.contains(&value) {
+            let index = self.track_values.partition_point(|dot| *dot < value);
+            self.track_values.insert(index, value);
+            self.track_selected = index;
+        }
+    }
+
+    /// Move dot `index` to `value`, short of its neighbours.
+    fn track_move(&mut self, index: usize, value: u16) {
+        let floor = index
+            .checked_sub(1)
+            .map_or(TRACK_MIN, |lower| self.track_values[lower] + 1);
+        let ceiling = self
+            .track_values
+            .get(index + 1)
+            .map_or(TRACK_MAX, |upper| upper - 1);
+        if let Some(dot) = self.track_values.get_mut(index) {
+            *dot = value.clamp(floor, ceiling);
+            self.track_selected = index;
+        }
     }
 
     /// A value typed in exactly, with a chip before it that hands the value

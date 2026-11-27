@@ -9,6 +9,7 @@ pub(crate) mod commit_slider;
 pub(crate) mod components;
 #[cfg(debug_assertions)]
 pub(crate) mod gallery;
+pub(crate) mod log_track;
 pub mod section;
 pub(crate) mod slider_row;
 pub mod spacing;

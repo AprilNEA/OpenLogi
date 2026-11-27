@@ -22,6 +22,10 @@ use openlogi_agent_core::runtime::ActionDispatcher;
 use openlogi_core::binding::ActionRingSlot;
 use openlogi_core::config::{ConfigFile, ConfigRevision, Lighting};
 use openlogi_core::device::DeviceInventory;
+use openlogi_core::hid::g600::{
+    DpiSettings as G600DpiSettings, DpiStage as G600DpiStage, DpiState as G600DpiState,
+    OnboardProfile as G600Profile, StageAfterStore as G600StageAfterStore,
+};
 use openlogi_hid::{
     BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
     ForceSensingInfo, HapticRestore, HapticRestoreOutcome, HapticWaveform, HidppOperation,
@@ -598,6 +602,41 @@ impl Agent for AgentServer {
         session_id: u64,
     ) -> Result<(), ActionRingCommandError> {
         self.action_ring.unhover(session_id)
+    }
+    async fn read_g600_dpi(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<G600DpiState, WriteError> {
+        self.shared.hardware().read_g600_dpi(&route).await
+    }
+
+    async fn set_g600_profile_dpi(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        profile: G600Profile,
+        settings: G600DpiSettings,
+        after: G600StageAfterStore,
+    ) -> Result<(), WriteError> {
+        info!(%route, profile = profile.number(), ?after, "set_g600_profile_dpi");
+        self.shared
+            .hardware()
+            .set_g600_profile_dpi(&route, profile, settings, after)
+            .await
+    }
+
+    async fn set_g600_active_stage(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        stage: G600DpiStage,
+    ) -> Result<(), WriteError> {
+        info!(%route, stage = stage.number(), "set_g600_active_stage");
+        self.shared
+            .hardware()
+            .set_g600_active_stage(&route, stage)
+            .await
     }
 }
 

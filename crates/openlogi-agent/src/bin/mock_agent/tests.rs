@@ -1,14 +1,265 @@
 use super::*;
+use openlogi_core::hid::g600::StageAfterStore;
 
 #[test]
-fn no_argument_mode_uses_the_canonical_profile_with_demo_time() {
+fn no_argument_mode_uses_the_canonical_profile_and_a_g600_with_demo_time() {
     let state = state_from_args(std::iter::empty()).expect("no-argument mock state");
-    let canonical: DeviceProfile =
+    let mut canonical: DeviceProfile =
         serde_json::from_str(openlogi_fixture::CANONICAL_DEVICE_PROFILE_JSON)
             .expect("canonical profile parses");
+    let (g600, settings) = g600::demo_device().expect("the demo G600");
+    canonical.standalone.push(g600);
+    canonical.settings.push(settings);
 
     assert_eq!(state.profile, canonical);
     assert!(state.clock.is_demo());
+}
+
+fn demo_g600_state() -> (State, DeviceRoute) {
+    let mut profile = built_in_profile().expect("built-in profile should construct");
+    let (g600, settings) = g600::demo_device().expect("the demo G600");
+    let route = g600.route();
+    profile.standalone.push(g600);
+    profile.settings.push(settings);
+    let state = State::new(profile, MockClock::Test(Duration::ZERO))
+        .expect("the demo G600 is a valid standalone device");
+    (state, route)
+}
+
+fn g600_stage(number: u8) -> openlogi_core::hid::g600::DpiStage {
+    openlogi_core::hid::g600::DpiStage::from_number(number).expect("a G600 stage")
+}
+
+#[tokio::test(start_paused = true)]
+async fn g600_profile_writes_put_the_mouse_on_the_stage_they_name_or_refuse_it() {
+    use openlogi_core::hid::g600::{DpiValue, G600Failure, OnboardProfile};
+
+    let (state, route) = demo_g600_state();
+    let agent = MockAgent::new(state);
+    let before = agent
+        .clone()
+        .read_g600_dpi(tarpc::context::current(), route.clone())
+        .await
+        .expect("the demo G600 answers");
+    let active = before.active.profile;
+    // On stage 2, 1600; 400 added below moves 1600 to stage 3.
+    assert_eq!(before.profile(active).dpi(g600_stage(2)), Some(1600));
+    let dpi = |value| Some(DpiValue::new(value).expect("a G600 DPI"));
+    let settings = G600DpiSettings::new([dpi(400), dpi(800), dpi(1600), dpi(3200)], g600_stage(1))
+        .expect("valid settings");
+
+    let other = OnboardProfile::ALL[1];
+    let not_in_use = agent
+        .clone()
+        .set_g600_profile_dpi(
+            tarpc::context::current(),
+            route.clone(),
+            other,
+            settings,
+            StageAfterStore::Use(g600_stage(3)),
+        )
+        .await;
+    assert_eq!(
+        not_in_use,
+        Err(WriteError::G600(G600Failure::ProfileNotInUse {
+            profile: other,
+            active,
+        }))
+    );
+
+    agent
+        .clone()
+        .set_g600_profile_dpi(
+            tarpc::context::current(),
+            route.clone(),
+            active,
+            settings,
+            StageAfterStore::Use(g600_stage(3)),
+        )
+        .await
+        .expect("the profile is stored");
+    let after = agent
+        .clone()
+        .read_g600_dpi(tarpc::context::current(), route.clone())
+        .await
+        .expect("the demo G600 answers");
+    assert_eq!(after.active.dpi_stage, g600_stage(3), "still on 1600");
+    assert_eq!(
+        after.profile(other),
+        before.profile(other),
+        "nothing stored"
+    );
+
+    // Unchanged settings still switch to a named stage the mouse is not on.
+    agent
+        .clone()
+        .set_g600_profile_dpi(
+            tarpc::context::current(),
+            route.clone(),
+            active,
+            settings,
+            StageAfterStore::Use(g600_stage(1)),
+        )
+        .await
+        .expect("the stage is selected");
+    let after = agent
+        .read_g600_dpi(tarpc::context::current(), route)
+        .await
+        .expect("the demo G600 answers");
+    assert_eq!(after.active.dpi_stage, g600_stage(1));
+}
+
+#[tokio::test(start_paused = true)]
+async fn g600_profile_writes_persist_and_reselect_a_disabled_active_stage() {
+    use openlogi_core::hid::g600::{DpiValue, OnboardProfile};
+
+    let (state, route) = demo_g600_state();
+    let agent = MockAgent::new(state);
+    let before = agent
+        .clone()
+        .read_g600_dpi(tarpc::context::current(), route.clone())
+        .await
+        .expect("the demo G600 answers");
+    let active = before.active.profile;
+    assert_eq!(before.active.dpi_stage, g600_stage(2));
+
+    // Turn the active stage off: the mouse moves to the new default.
+    let dpi = |value| Some(DpiValue::new(value).expect("a G600 DPI"));
+    let settings = G600DpiSettings::new([dpi(1000), None, None, dpi(5000)], g600_stage(4))
+        .expect("valid settings");
+    agent
+        .clone()
+        .set_g600_profile_dpi(
+            tarpc::context::current(),
+            route.clone(),
+            active,
+            settings,
+            StageAfterStore::Keep,
+        )
+        .await
+        .expect("the profile is stored");
+
+    let after = agent
+        .clone()
+        .read_g600_dpi(tarpc::context::current(), route.clone())
+        .await
+        .expect("the demo G600 answers");
+    assert_eq!(after.active.dpi_stage, g600_stage(4));
+    assert_eq!(after.profile(active).dpi(g600_stage(1)), Some(1000));
+    assert_eq!(after.profile(active).dpi(g600_stage(2)), None);
+    assert_eq!(after.profile(active).shift, before.profile(active).shift);
+    let other = OnboardProfile::ALL[1];
+    assert_eq!(after.profile(other), before.profile(other));
+}
+
+#[tokio::test(start_paused = true)]
+async fn g600_calls_wait_behind_a_profile_write_and_see_what_it_stored() {
+    use openlogi_core::hid::g600::{DpiValue, G600Failure, OnboardProfile};
+
+    let (state, route) = demo_g600_state();
+    let agent = MockAgent::new(state);
+    let profile = OnboardProfile::ALL[0];
+    let dpi = |value| Some(DpiValue::new(value).expect("a G600 DPI"));
+    let settings =
+        G600DpiSettings::new([dpi(1000), None, None, None], g600_stage(1)).expect("valid settings");
+
+    let started = tokio::time::Instant::now();
+    let writing = tokio::spawn({
+        let agent = agent.clone();
+        let route = route.clone();
+        async move {
+            agent
+                .set_g600_profile_dpi(
+                    tarpc::context::current(),
+                    route,
+                    profile,
+                    settings,
+                    StageAfterStore::Keep,
+                )
+                .await
+        }
+    });
+    tokio::task::yield_now().await;
+    // Stage 2 is enabled now, but the write turns it off.
+    let selected = agent
+        .clone()
+        .set_g600_active_stage(tarpc::context::current(), route.clone(), g600_stage(2))
+        .await;
+    let read = agent
+        .clone()
+        .read_g600_dpi(tarpc::context::current(), route.clone())
+        .await
+        .expect("the demo G600 answers");
+
+    assert!(started.elapsed() >= g600::PROFILE_WRITE_TIME);
+    writing
+        .await
+        .expect("the write task finishes")
+        .expect("the profile is stored");
+    assert!(
+        matches!(
+            &selected,
+            Err(WriteError::G600(G600Failure::StageDisabled { .. }))
+        ),
+        "the selection ran after the write: {selected:?}"
+    );
+    assert_eq!(read.profile(profile).dpi(g600_stage(1)), Some(1000));
+    assert_eq!(read.active.dpi_stage, g600_stage(1));
+
+    // Storing what the profile already holds answers at once.
+    let unchanged = tokio::time::Instant::now();
+    agent
+        .set_g600_profile_dpi(
+            tarpc::context::current(),
+            route,
+            profile,
+            settings,
+            StageAfterStore::Keep,
+        )
+        .await
+        .expect("nothing to store");
+    assert_eq!(unchanged.elapsed(), Duration::ZERO);
+}
+
+#[tokio::test]
+async fn g600_refuses_a_stage_its_active_profile_disables() {
+    use openlogi_core::hid::g600::G600Failure;
+
+    let (state, route) = demo_g600_state();
+    let agent = MockAgent::new(state);
+
+    // The demo's first profile has no fourth stage.
+    let refused = agent
+        .clone()
+        .set_g600_active_stage(tarpc::context::current(), route.clone(), g600_stage(4))
+        .await;
+    assert!(
+        matches!(
+            refused,
+            Err(WriteError::G600(G600Failure::StageDisabled { stage, .. })) if stage == g600_stage(4)
+        ),
+        "{refused:?}"
+    );
+
+    agent
+        .clone()
+        .set_g600_active_stage(tarpc::context::current(), route.clone(), g600_stage(3))
+        .await
+        .expect("stage 3 is enabled");
+    let state = agent
+        .clone()
+        .read_g600_dpi(tarpc::context::current(), route)
+        .await
+        .expect("the demo G600 answers");
+    assert_eq!(state.active.dpi_stage, g600_stage(3));
+
+    let not_g600 = agent
+        .read_g600_dpi(tarpc::context::current(), mouse_route())
+        .await;
+    assert!(
+        matches!(not_g600, Err(WriteError::G600(G600Failure::NotG600Route))),
+        "{not_g600:?}"
+    );
 }
 
 fn demo_state() -> State {

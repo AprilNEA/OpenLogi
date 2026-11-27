@@ -9,6 +9,7 @@ use thiserror::Error;
 
 use super::backlight::BacklightChange;
 use super::dpi::Dpi;
+use super::g600::G600Failure;
 use super::report_rate::ReportRate;
 
 /// Error returned by HID++ read/write operations.
@@ -272,6 +273,12 @@ pub enum WriteError {
         /// Number of host channels the device reports.
         host_count: u8,
     },
+    /// A G600 onboard-DPI read or write failed in a way only the G600's
+    /// feature reports can, or could not be confirmed.
+    ///
+    /// Appended last — variant order is wire format.
+    #[error(transparent)]
+    G600(#[from] G600Failure),
 }
 
 /// HID++ operation being performed when a device write/read failed.
@@ -362,9 +369,19 @@ pub enum HidppOperation {
     /// Read the `0x8300` sidetone level. Appended after `ChangeHost` —
     /// variant order is wire format.
     ReadSidetone,
-    /// Write the `0x8300` sidetone level. Appended last — variant order is
-    /// wire format.
+    /// Write the `0x8300` sidetone level. Appended after `ReadSidetone` —
+    /// variant order is wire format.
     WriteSidetone,
+    /// Read a G600's active selection and onboard-profile DPI feature
+    /// reports. Appended after `WriteSidetone` — variant order is wire
+    /// format.
+    ReadG600Dpi,
+    /// Write a G600 onboard-profile feature report. Appended after
+    /// `ReadG600Dpi` — variant order is wire format.
+    WriteG600Profile,
+    /// Write a G600's active-DPI-stage feature report. Appended last —
+    /// variant order is wire format.
+    WriteG600Stage,
 }
 
 /// HID++ feature error kind in a serializable wire-safe form.

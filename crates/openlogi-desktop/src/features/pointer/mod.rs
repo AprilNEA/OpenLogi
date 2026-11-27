@@ -1,6 +1,7 @@
 //! Pointer sensitivity and wheel controls.
 
 pub mod dpi;
+pub mod g600;
 mod glide_shape;
 pub mod momentum;
 mod pointer_speed;

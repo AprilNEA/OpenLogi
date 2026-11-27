@@ -1419,6 +1419,16 @@ fn pointer_scaling_shows_pointer_tab_without_adjustable_dpi() {
     );
 }
 
+/// A G600 answers no HID++, so it measures no pointer capability; its
+/// standalone driver owning onboard DPI stages earns it the Pointer tab, on
+/// every OS.
+#[test]
+fn a_g600_shows_the_pointer_tab_for_its_onboard_dpi() {
+    let mut g600 = record(DeviceKind::Mouse, Some(Capabilities::default()));
+    g600.driver_id = Some(openlogi_core::hid::g600::G600_DRIVER_ID.to_owned());
+    assert!(DetailTab::tabs_for(&g600).contains(&DetailTab::Pointer));
+}
+
 /// A keyboard that exposes ReprogControls (buttons=true) but has no resolved
 /// asset should not get the mouse-model Buttons panel — the generic mouse
 /// hotspot layout (Middle Click, DPI Toggle, …) is wrong for a keyboard.

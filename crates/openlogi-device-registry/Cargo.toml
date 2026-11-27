@@ -10,5 +10,13 @@ description = "Pure hardware identity registry for OpenLogi devices and receiver
 keywords = ["logitech", "hidpp", "device", "registry", "hid"]
 categories = ["hardware-support", "no-std"]
 
+[features]
+# Serialize and deserialize the G600 DPI types, so they can cross the agent's
+# IPC unchanged. Validated types re-validate on deserialize.
+serde = ["dep:serde"]
+
+[dependencies]
+serde = { version = "1", default-features = false, features = ["derive"], optional = true }
+
 [lints]
 workspace = true

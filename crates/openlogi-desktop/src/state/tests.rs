@@ -57,6 +57,7 @@ mod easy_switch;
 mod flow;
 mod fn_lock;
 pub(crate) mod force_sensing;
+mod g600;
 pub(crate) mod keypad_pages;
 mod light_adoption;
 mod lighting;

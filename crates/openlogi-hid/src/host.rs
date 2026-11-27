@@ -26,9 +26,10 @@ use openlogi_device::inventory::hid_only::HidOnlyProduct;
 use openlogi_device::inventory::{Enumerator, InventoryError};
 use openlogi_device::pairing::PairingReceiver;
 use openlogi_device::write::{
-    self as device, Dpi, DpiInfo, FeatureEntry, FirmwareEntity, HapticWaveform, LightingMethod,
-    LitraModel, PointerScaling, ReprogControlEntry, ScrollResolution, ScrollWheelMode,
-    SidetoneLevel,
+    self as device, Dpi, DpiInfo, FeatureEntry, FirmwareEntity, G600Dpi, G600DpiSettings,
+    G600DpiStage, G600Profile, G600ReadError, G600StageAfterStore, G600WriteError, HapticWaveform,
+    LightingMethod, LitraModel, PointerScaling, ReprogControlEntry, ScrollResolution,
+    ScrollWheelMode, SidetoneLevel,
 };
 use openlogi_device::{ButtonSpyError, ButtonSpyWatch, LightWatch};
 use openlogi_device::{DeviceIoGate, DeviceIoSignal, DeviceRoute};
@@ -274,6 +275,34 @@ pub async fn watch_litra(
     model: LitraModel,
 ) -> Result<Option<LightWatch>, WriteError> {
     device::watch_litra(&*native_backend(), route, model).await
+}
+
+/// Read the active selection and onboard DPI settings of the G600 `route`
+/// reaches, without writing to it.
+pub async fn read_g600_dpi(route: &DeviceRoute) -> Result<G600Dpi, G600ReadError> {
+    device::read_g600_dpi(&*native_backend(), route).await
+}
+
+/// Switch the G600 `route` reaches to DPI `stage` of its active profile, unless
+/// that profile has it disabled, and confirm the switch by reading it back.
+pub async fn set_g600_active_stage(
+    route: &DeviceRoute,
+    stage: G600DpiStage,
+) -> Result<(), G600WriteError> {
+    device::set_g600_active_stage(&*native_backend(), route, stage).await
+}
+
+/// Store `settings` in onboard `profile` of the G600 `route` reaches,
+/// writing back every other byte of the profile as read and confirming the
+/// write by reading it back, then put the mouse on the stage `after` asks
+/// for.
+pub async fn set_g600_profile_dpi(
+    route: &DeviceRoute,
+    profile: G600Profile,
+    settings: G600DpiSettings,
+    after: G600StageAfterStore,
+) -> Result<(), G600WriteError> {
+    device::set_g600_profile_dpi(&*native_backend(), route, profile, settings, after).await
 }
 
 /// Walk the HID++ feature table of the device `route` reaches.

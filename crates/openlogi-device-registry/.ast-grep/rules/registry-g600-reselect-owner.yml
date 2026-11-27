@@ -1,0 +1,16 @@
+# Owner: openlogi_device_registry::g600::ActiveSelection::stage_after_store —
+# which DPI stage the G600 is put on after a profile is stored.
+id: registry-g600-reselect-owner
+language: rust
+severity: error
+message: The stage a G600 is put on after a profile write is decided by ActiveSelection::stage_after_store (or DpiState::store) in openlogi-device-registry's g600 module; call it instead of testing the active stage against the new settings here.
+note: |
+  The driver's set_profile_dpi and the mock agent each kept their own copy of
+  the reselect rule, with nothing keeping them in sync. See "Single source of
+  truth" in AGENTS.md.
+files:
+  - crates/**/*.rs
+ignores:
+  - crates/openlogi-device-registry/src/g600.rs
+rule:
+  pattern: $SETTINGS.is_enabled($ACTIVE.dpi_stage)
