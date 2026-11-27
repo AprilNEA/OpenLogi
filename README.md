@@ -161,7 +161,8 @@ Feature coverage depends on what each device reports; the app shows only the con
 | Feature | macOS | Windows | Linux |
 | --- | --- | --- | --- |
 | Mouse button remapping and gestures | ✓ | ✓ | ✓ |
-| Keyboard F-key remapping | ✓ | ✓ | — |
+| Dedicated keyboard keys (media, emoji, screenshot, …) | ✓ | ✓ | ✓ |
+| Keyboard F-key (F1–F12) remapping | ✓ | ✓ | — |
 | Per-application profiles | ✓ | ✓ | X11, wlroots (sway, Hyprland), GNOME with the [companion extension](crates/openlogi-hook/gnome-shell-extension/README.md) |
 | Mouse profile follows the window under the pointer | ✓ | ✓ | X11 only |
 | Media keys | Native | Native | D-Bus MPRIS |
