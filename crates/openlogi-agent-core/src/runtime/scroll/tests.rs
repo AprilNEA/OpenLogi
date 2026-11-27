@@ -1314,48 +1314,53 @@ fn top_glide_speed(frames: &[ScrollFrame]) -> f64 {
         .fold(0.0, f64::max)
 }
 
-/// The wheel keeps spinning freely long after the glide it launched: the
-/// glide follows its own curve, not the wheel, and every shape covers about
-/// the same distance.
+/// Every response shape must sustain a steady wheel instead of exhausting
+/// a fixed-distance glide under continued input.
 #[test]
-fn every_glide_shape_covers_the_same_distance_under_a_spinning_wheel() {
-    let mut distances = Vec::new();
+fn every_glide_shape_sustains_a_spinning_wheel() {
     for shape in GlideShape::ALL {
         let mut engine = momentum_engine_with(|m| {
             m.glide_shape = shape;
             m.max_glide_speed = MomentumScrolling::MAX_GLIDE_SPEED_MAX;
         });
-        let mut frames = Vec::new();
-        drive_wheel(
+        let source = hidpp_source("mouse", 1);
+        let at = drive_wheel(
             &mut engine,
-            &hidpp_source("mouse", 1),
+            &source,
             Instant::now(),
             |_| 150.0,
             Duration::from_secs(4),
-            &mut frames,
+            &mut Vec::new(),
         );
-        distances.push(glide_pixels(&frames));
+        let mut late = Vec::new();
+        drive_wheel(
+            &mut engine,
+            &source,
+            at,
+            |_| 150.0,
+            Duration::from_millis(500),
+            &mut late,
+        );
+        // At 2x sensitivity, the base wheel pace alone is 8400 px/s.
+        assert!(
+            glide_pixels(&late) > 8400.0 * 0.5 * 0.9,
+            "{shape:?}: continued input ran out of motion"
+        );
     }
-    let (low, high) = distances
-        .iter()
-        .fold((f64::MAX, f64::MIN), |(lo, hi), d| (lo.min(*d), hi.max(*d)));
-    assert!(low > 0.0, "{distances:?}");
-    assert!(high / low < 1.05, "shapes glided apart: {distances:?}");
 }
 
-/// A glide covers its launch speed — the wheel's speed at the release, in
-/// pixels and the user's sensitivity, times the flick response — times the
-/// glide length, plus what it glided while the speed measure was still
-/// rising toward the wheel's speed.
+/// A wheel held at a steady speed continues scrolling near its configured
+/// launch speed, rather than consuming one glide-length distance budget.
 #[test]
-fn a_glide_covers_its_launch_speed_times_the_glide_length() {
+fn a_steady_wheel_continues_at_its_configured_speed() {
     let mut engine = momentum_engine_with(|m| {
         m.max_glide_speed = MomentumScrolling::MAX_GLIDE_SPEED_MAX;
     });
     let mut frames = Vec::new();
-    drive_wheel(
+    let source = hidpp_source("mouse", 1);
+    let at = drive_wheel(
         &mut engine,
-        &hidpp_source("mouse", 1),
+        &source,
         Instant::now(),
         |_| 120.0,
         Duration::from_secs(4),
@@ -1370,8 +1375,17 @@ fn a_glide_covers_its_launch_speed_times_the_glide_length() {
     .expect("on");
     // `drive_wheel` scrolls at 2× sensitivity.
     let launch = glide::launch_speed(120.0, 2.0, &params);
-    let glided = glide_pixels(&frames);
-    let (least, most) = (launch * 0.4 * 0.95, launch * (0.4 + 0.15) * 1.05);
+    let mut late = Vec::new();
+    drive_wheel(
+        &mut engine,
+        &source,
+        at,
+        |_| 120.0,
+        Duration::from_millis(500),
+        &mut late,
+    );
+    let glided = glide_pixels(&late);
+    let (least, most) = (launch * 0.5 * 0.85, launch * 0.5 * 1.05);
     assert!(
         (least..=most).contains(&glided),
         "glided {glided:.0} px, expected {least:.0}–{most:.0}"
@@ -1582,36 +1596,30 @@ fn recorded_repeated_flicks_glide_without_jumps() {
     );
 }
 
-/// A glide eases up from the pace the page was scrolling at to its launch
-/// speed, and a relaunch from the speed it is at — ~90% in within 70 ms,
-/// never in one frame — and covers its curve's distance less what easing in
-/// cost.
+/// Active speed transitions preserve velocity, reach their target, and
+/// emit the integral of the transition rather than a whole target-speed step.
 #[test]
-fn a_glide_eases_up_into_its_curve_instead_of_jumping() {
-    let momentum = MomentumScrolling {
+fn a_glide_eases_up_into_its_target_instead_of_jumping() {
+    let params = MomentumScrolling {
         enabled: true,
-        max_glide_speed: MomentumScrolling::MAX_GLIDE_SPEED_MAX,
         ..MomentumScrolling::default()
     }
     .resolve()
     .expect("on");
-    let at = Instant::now();
-    let ms = |n| at + Duration::from_millis(n);
-    let mut g = Glide::new(Direction::Up, 1.0, 1.0, (2000.0, 6000.0), &momentum, at);
-    assert!((g.speed(at) - 2000.0).abs() < 1e-9, "starts at the pace");
-    let one_frame = g.speed(ms(8));
-    assert!(one_frame < 3600.0, "{one_frame:.0} px/s after one frame");
-    let curve = g.curve.speed_at(Duration::from_millis(70));
-    assert!(g.speed(ms(70)) > 2000.0 + 0.85 * (curve - 2000.0));
-    // A relaunch eases up from where it is, not from the curve's start.
-    let before = g.speed(ms(100));
-    g.relaunch(12000.0, &momentum, ms(100));
-    assert!((g.speed(ms(100)) - before).abs() < 1e-9);
-    assert!(g.speed(ms(108)) < before + 0.5 * (12000.0 - before));
-    // It covers its curve's distance, less what easing in cost.
-    let shortfall = g.rise * glide::RISE_S;
-    let end = ms(100) + g.curve.duration();
-    assert!((g.position(end) - (g.curve.distance() - shortfall)).abs() < 1.0);
+    let start = Instant::now();
+    let mut glide = Glide::new(Direction::Up, 1.0, 1.0, (2000.0, 6000.0), &params, start);
+    assert!((glide.speed(start) - 2000.0).abs() < 1e-9);
+    assert!(glide.speed(start + FRAME_PERIOD) < 3600.0);
+    let ready = start + Duration::from_millis(140);
+    assert!(glide.speed(ready) > 5600.0);
+    let initial = glide
+        .advance(ready, params.pixels_per_notch())
+        .expect("motion");
+    assert!((280.0..840.0).contains(&initial.delta.y));
+    let before = glide.speed(ready);
+    glide.retarget(12000.0, &params, ready);
+    assert!((glide.speed(ready) - before).abs() < 1e-9);
+    assert!(glide.speed(ready + FRAME_PERIOD) < before + (12000.0 - before) * 0.5);
 }
 
 /// A wheel flicked again every `gap` seconds: each flick spins it up to 220
@@ -1820,12 +1828,11 @@ fn momentum_steps_stay_out_of_the_thumb_wheels_phased_gesture() {
     assert_eq!(thumb.last(), Some(&SmoothScrollPhase::Ended));
 }
 
-/// A glide runs out while the wheel still spins freely; a finger then
-/// catches the wheel and scrolls on slowly the same way. The silence of the
-/// catch must still read as a stop, so those slow strokes scroll instead of
-/// being swallowed as more of the spent spin.
+/// After a long spin, a finger catches the wheel and scrolls on slowly
+/// the same way. The catch must end the driven glide so those slow strokes
+/// are emitted individually.
 #[test]
-fn slow_strokes_after_a_spent_glide_and_a_catch_still_scroll() {
+fn slow_strokes_after_a_long_spin_and_a_catch_still_scroll() {
     let mut engine = momentum_engine();
     let source = hidpp_source("mouse", 1);
     let mut frames = Vec::new();
@@ -1841,9 +1848,9 @@ fn slow_strokes_after_a_spent_glide_and_a_catch_still_scroll() {
     assert!(
         matches!(
             engine.wheels.get(&source).map(|s| &s.glide),
-            Some(GlideState::Spent { .. })
+            Some(GlideState::Gliding(_))
         ),
-        "the glide did not run out under the spinning wheel"
+        "the glide stopped under the spinning wheel"
     );
     // The finger holds the wheel still for 150 ms…
     let resumed = run_on(&mut engine, caught, Duration::from_millis(150), &mut frames);
@@ -1891,4 +1898,385 @@ fn each_wheel_follows_its_own_devices_momentum_settings() {
     assert!(!engine.wheels.contains_key(&plain));
     assert!(engine.pixels_for(&gliding).is_some());
     assert_eq!(engine.pixels_for(&plain), None);
+}
+
+/// Replays the high-resolution reports from both observed Chrome slowdowns.
+/// A steadily driven wheel must not lose almost all of its scrolling pace.
+#[test]
+fn recorded_sustained_flicks_do_not_crawl_while_the_wheel_keeps_turning() {
+    let reports: Vec<(Duration, f64)> = include_str!("sustained_flicks_recording.txt")
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .flat_map(str::split_whitespace)
+        .map(|item| {
+            let (us, notches) = item.split_once(':').expect("timestamp:notches");
+            (
+                Duration::from_micros(us.parse().expect("microseconds")),
+                notches.parse().expect("notches"),
+            )
+        })
+        .collect();
+    for sign in [1.0, -1.0] {
+        let mut engine = momentum_engine_with(|m| {
+            m.pixels_per_notch = 52;
+            m.max_glide_speed = 15000;
+            m.glide_ms = 550;
+            m.repeat_boost = 150;
+        });
+        let source = hidpp_source("mouse", 1);
+        let start = Instant::now();
+        let mut next = reports.iter().peekable();
+        let mut bins = [0.0_f64; 100];
+        for ms in 0..10000 {
+            let t = Duration::from_millis(ms);
+            let at = start + t;
+            while let Some((when, notches)) = next.next_if(|(when, _)| *when <= t) {
+                engine.wheel_impulse(
+                    source.clone(),
+                    wheel(0.0, *notches * sign),
+                    *notches * sign,
+                    start + *when,
+                    &mut |frame| {
+                        bins[usize::try_from(ms / 100).expect("bin")] += frame.delta.y.abs() * 10.0;
+                    },
+                );
+            }
+            engine.advance_due(at, &mut |frame| {
+                bins[usize::try_from(ms / 100).expect("bin")] += frame.delta.y.abs() * 10.0;
+            });
+        }
+        let lows = [
+            bins[60..65].iter().copied().fold(f64::MAX, f64::min),
+            bins[84..89].iter().copied().fold(f64::MAX, f64::min),
+        ];
+        // Wheel input stays around 100 notches/s: a 52px notch gives roughly
+        // 5200px/s even without the repeat boost. Allow 20% for the varying input.
+        assert!(
+            lows.iter().all(|speed| *speed >= 4160.0),
+            "continued input crawled: {lows:?} px/s"
+        );
+        assert!(
+            bins[99].abs() < f64::EPSILON,
+            "output continued after the finger stop"
+        );
+    }
+}
+
+/// A long-running wheel must keep scrolling; stopping it cancels output.
+#[test]
+fn a_long_glide_keeps_wheel_movement_and_still_stops() {
+    let mut engine = momentum_engine();
+    let source = hidpp_source("mouse", 1);
+    let start = drive_wheel(
+        &mut engine,
+        &source,
+        Instant::now(),
+        |_| 200.0,
+        Duration::from_millis(2500),
+        &mut Vec::new(),
+    );
+    assert!(matches!(
+        engine.wheels.get(&source).map(|s| &s.glide),
+        Some(GlideState::Gliding(_))
+    ));
+    let mut frames = Vec::new();
+    let stopped = drive_wheel(
+        &mut engine,
+        &source,
+        start,
+        |_| 200.0,
+        Duration::from_millis(100),
+        &mut frames,
+    );
+    let pixels: f64 = frames.iter().map(|frame| frame.delta.y).sum();
+    assert!(
+        pixels > f64::from(MomentumScrolling::default().max_glide_speed) * 0.1 * 0.9,
+        "continued wheel movement only scrolled {pixels} px"
+    );
+    let mut late = Vec::new();
+    let from = run_on(
+        &mut engine,
+        stopped,
+        Duration::from_millis(100),
+        &mut Vec::new(),
+    );
+    run_on(&mut engine, from, Duration::from_millis(100), &mut late);
+    assert!(
+        late.iter().all(|frame| frame.delta.is_zero()),
+        "wheel output continued after a stop"
+    );
+}
+
+/// Steady repeated input must not alternate between boosted surges and a
+/// decaying tail. Replay the second live capture, including its idle lead-in.
+#[test]
+fn recorded_steady_input_does_not_make_scroll_speed_pulse() {
+    let reports: Vec<(Duration, f64)> = include_str!("uneven_flicks_recording.txt")
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .flat_map(str::split_whitespace)
+        .map(|item| {
+            let (us, n) = item.split_once(':').expect("timestamp:notches");
+            (
+                Duration::from_micros(us.parse().expect("microseconds")),
+                n.parse().expect("notches"),
+            )
+        })
+        .collect();
+    for sign in [1.0, -1.0] {
+        let mut engine = momentum_engine_with(|m| {
+            m.pixels_per_notch = 52;
+            m.max_glide_speed = 15000;
+            m.glide_ms = 550;
+            m.repeat_boost = 150;
+        });
+        let source = hidpp_source("mouse", 1);
+        let start = Instant::now();
+        let mut next = reports.iter().peekable();
+        let mut bins = [0.0_f64; 155];
+        let mut last_output = None;
+        for ms in 0..15500 {
+            let t = Duration::from_millis(ms);
+            let at = start + t;
+            let bin = usize::try_from(ms / 100).expect("bin");
+            let mut emit = |frame: ScrollFrame| {
+                if ms >= 7500 {
+                    assert!(
+                        frame.delta.y * sign >= 0.0,
+                        "output reversed against the wheel"
+                    );
+                }
+                if (10000..13000).contains(&ms) && !frame.delta.is_zero() {
+                    assert_eq!(
+                        frame.kind,
+                        FrameKind::Glide,
+                        "a second output stream interrupted the glide"
+                    );
+                    if let Some(last) = last_output {
+                        assert!(
+                            at.duration_since(last) >= FRAME_PERIOD,
+                            "wheel input emitted between scheduled frames"
+                        );
+                    }
+                    last_output = Some(at);
+                }
+                bins[bin] += frame.delta.y.abs() * 10.0;
+            };
+            while let Some((when, n)) = next.next_if(|(when, _)| *when <= t) {
+                engine.wheel_impulse(
+                    source.clone(),
+                    wheel(0.0, *n * sign),
+                    *n * sign,
+                    start + *when,
+                    &mut emit,
+                );
+            }
+            engine.advance_due(at, &mut emit);
+        }
+        let low = bins[100..130].iter().copied().fold(f64::MAX, f64::min);
+        let high = bins[100..130].iter().copied().fold(0.0, f64::max);
+        assert!(
+            high / low < 1.8,
+            "steady wheel input produced a speed swing of {:.2}×",
+            high / low
+        );
+        assert!(
+            bins[154].abs() < f64::EPSILON,
+            "output continued after the wheel stopped"
+        );
+    }
+}
+
+/// Retargeting downward must preserve instantaneous velocity and emit only
+/// forward distance while easing into the slower pace.
+#[test]
+fn a_slower_wheel_target_eases_down_without_a_jump_or_reversal() {
+    let momentum = MomentumScrolling {
+        enabled: true,
+        ..MomentumScrolling::default()
+    }
+    .resolve()
+    .expect("on");
+    for direction in [Direction::Up, Direction::Down] {
+        let start = Instant::now();
+        let mut glide = Glide::new(direction, 1.0, 1.0, (6000.0, 6000.0), &momentum, start);
+        let changed = start + Duration::from_millis(20);
+        glide
+            .advance(changed, momentum.pixels_per_notch())
+            .expect("initial motion");
+        let before = glide.speed(changed);
+        glide.retarget(2000.0, &momentum, changed);
+        assert!(
+            (glide.speed(changed) - before).abs() < 1e-9,
+            "retargeting snapped the velocity"
+        );
+        let next = glide.speed(changed + FRAME_PERIOD);
+        assert!(
+            next < before && next > before * 0.5,
+            "the slowdown jumped in one frame"
+        );
+        for frame in 1..=30 {
+            if let Some(output) =
+                glide.advance(changed + FRAME_PERIOD * frame, momentum.pixels_per_notch())
+            {
+                assert!(
+                    output.delta.y * direction.sign() > 0.0,
+                    "the slowdown scrolled backwards"
+                );
+            }
+        }
+    }
+}
+
+/// A held velocity target must be reached independently of the configured
+/// coast shape/length and output cadence.
+#[test]
+fn tracking_reaches_its_target_for_every_coast_setting_and_cadence() {
+    for shape in GlideShape::ALL {
+        for glide_ms in [150, 400, 1200] {
+            let params = MomentumScrolling {
+                enabled: true,
+                glide_shape: shape,
+                glide_ms,
+                ..MomentumScrolling::default()
+            }
+            .resolve()
+            .expect("on");
+            for step_ms in [8, 16, 33] {
+                let start = Instant::now();
+                let mut glide = Glide::new(Direction::Up, 1.0, 1.0, (0.0, 10000.0), &params, start);
+                for ms in (step_ms..=4000).step_by(step_ms) {
+                    let at = start + Duration::from_millis(u64::try_from(ms).expect("ms"));
+                    glide.advance(at, params.pixels_per_notch());
+                    glide.retarget(10000.0, &params, at);
+                }
+                let speed = glide.speed(start + Duration::from_secs(4));
+                assert!(
+                    (speed - 10000.0).abs() < 0.01,
+                    "{shape:?}, {glide_ms}ms, {step_ms}ms cadence: target 10000, got {speed}"
+                );
+            }
+        }
+    }
+}
+
+/// Target updates between output frames must retain all distance. Different
+/// sampling cadences must observe the same integrated velocity trajectory.
+#[test]
+fn tracking_conserves_distance_across_target_changes_and_frame_cadences() {
+    let params = MomentumScrolling {
+        enabled: true,
+        ..MomentumScrolling::default()
+    }
+    .resolve()
+    .expect("on");
+    let mut distances = Vec::new();
+    for step_ms in [8_u64, 16, 33] {
+        let start = Instant::now();
+        let mut glide = Glide::new(Direction::Up, 1.0, 1.0, (1000.0, 8000.0), &params, start);
+        let commands = [(103, 12000.0), (307, 4000.0), (709, 10000.0), (911, 0.0)];
+        let mut commands = commands.into_iter().peekable();
+        let mut distance = 0.0;
+        for ms in 1..=2000 {
+            let at = start + Duration::from_millis(ms);
+            if let Some((_, target)) = commands.next_if(|(when, _)| *when == ms) {
+                glide.retarget(target, &params, at);
+            }
+            if (ms % step_ms == 0 || ms == 2000)
+                && let Some(frame) = glide.advance(at, params.pixels_per_notch())
+            {
+                assert!(frame.delta.y >= 0.0);
+                distance += frame.delta.y;
+            }
+        }
+        distances.push(distance);
+    }
+    for distance in &distances[1..] {
+        assert!(
+            (distance - distances[0]).abs() < 1e-6,
+            "output cadence changed travelled distance: {distances:?}"
+        );
+    }
+}
+
+/// A naturally slowing wheel may never trigger a finger-stop rule. Once its
+/// remaining coast has finished, the worker must return to idle.
+#[test]
+fn a_natural_spin_down_finishes_and_leaves_no_frame_deadline() {
+    let mut engine = momentum_engine();
+    let source = hidpp_source("mouse", 1);
+    let mut frames = Vec::new();
+    let end = drive_wheel(
+        &mut engine,
+        &source,
+        Instant::now(),
+        |t| (200.0 - 33.0 * t).max(0.0),
+        Duration::from_secs(7),
+        &mut frames,
+    );
+    run_on(&mut engine, end, Duration::from_secs(3), &mut frames);
+    assert!(frames.iter().any(|frame| frame.kind == FrameKind::Glide));
+    assert!(
+        engine.next_deadline().is_none(),
+        "natural coast kept the worker ticking forever"
+    );
+    assert!(matches!(
+        engine.wheels.get(&source).map(|state| &state.glide),
+        Some(GlideState::Idle { .. })
+    ));
+}
+
+/// Quiet-input coasting keeps the configured distance and duration for every
+/// shape, while active tracking is independent of those coast settings.
+#[test]
+fn quiet_input_coasts_with_the_configured_shape_and_length() {
+    for shape in GlideShape::ALL {
+        for glide_ms in [150, 400, 1200] {
+            let params = MomentumScrolling {
+                enabled: true,
+                glide_shape: shape,
+                glide_ms,
+                ..MomentumScrolling::default()
+            }
+            .resolve()
+            .expect("on");
+            let start = Instant::now();
+            let mut velocity = Velocity::new(6000.0, 0.0, &params, start);
+            let mut distance = 0.0;
+            for ms in (7..7000).step_by(7) {
+                let at = start + Duration::from_millis(ms);
+                // Repeated zero measurements must not restart the coast.
+                velocity.retarget(0.0, &params, at);
+                distance += velocity.advance(at);
+            }
+            let end = start + Duration::from_secs(7);
+            distance += velocity.advance(end);
+            let expected = 6000.0 * f64::from(glide_ms) / 1000.0;
+            assert!(
+                (distance - expected).abs() < 1e-6,
+                "{shape:?}: {distance} != {expected}"
+            );
+            assert!(velocity.speed(end).abs() < f64::EPSILON);
+            assert!(velocity.finished(end));
+        }
+    }
+}
+
+/// Completion cannot discard a final coast distance that has not reached an
+/// output frame yet, even when no frames were sampled during the coast.
+#[test]
+fn coast_completion_waits_for_its_final_distance_to_be_emitted() {
+    let params = MomentumScrolling {
+        enabled: true,
+        ..MomentumScrolling::default()
+    }
+    .resolve()
+    .expect("on");
+    let start = Instant::now();
+    let mut velocity = Velocity::new(6000.0, 0.0, &params, start);
+    let end = start + Duration::from_secs(7);
+    assert!(!velocity.finished(end));
+    let distance = velocity.advance(end);
+    assert!((distance - 2400.0).abs() < 1e-6);
+    assert!(velocity.finished(end));
 }

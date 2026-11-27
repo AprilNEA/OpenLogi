@@ -1,5 +1,5 @@
-//! The glide model of momentum scrolling: how fast a free spin sends the page
-//! gliding. How the glide then slows is the shared [`GlideCurve`].
+//! Wheel-speed targets, repeat boosts, and the configured quiet-input coast.
+//! Continuous velocity tracking lives in the sibling `velocity` module.
 
 use openlogi_core::config::MomentumParams;
 use openlogi_core::scroll::GlideCurve;
@@ -23,14 +23,6 @@ pub(super) fn flick_response(wheel_speed: f64) -> f64 {
     let hardness = ((wheel_speed - GENTLE_SPIN) / (HARD_SPIN - GENTLE_SPIN)).clamp(0.0, 1.0);
     1.0 + (FLICK_MAX - 1.0) * hardness.powf(FLICK_GAMMA)
 }
-
-/// Time constant, in seconds, a rise of the glide's speed eases in with:
-/// a faster spin, a repeat's speed-up or the launch over the ratchet pace is
-/// ~90% in after 70 ms instead of jumping in one frame. The wheel's measured
-/// speed wobbles 15–25% from frame to frame with the quantization of its
-/// reports, and the flick response amplifies that, so a speed-up taken in one
-/// frame snaps the page forward several times a second.
-pub(super) const RISE_S: f64 = 0.03;
 
 /// The pace, in pixels per second, a wheel turning at `wheel_speed`
 /// notches per second scrolls the page at notch by notch, in the user's
