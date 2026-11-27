@@ -1190,9 +1190,9 @@ fn kwin_switch_desktop(method: &str) -> Option<()> {
     }
 }
 
-/// Send `command` to the first MPRIS-capable media player on the session bus,
-/// falling back to the corresponding XF86 multimedia key only if no MPRIS
-/// player is found. When a player is found but the call fails, the fallback
+/// Send `command` to the MPRIS player in use (see [`pick_player`]), falling
+/// back to the corresponding XF86 multimedia key when no player is clearly the
+/// one in use, so the desktop's media-key daemon picks it. When a player is found but the call fails, the fallback
 /// is suppressed to avoid double-toggling (the player likely handles the
 /// XF86 key too).
 fn mpris_command(command: &str) {
@@ -1219,15 +1219,23 @@ fn try_mpris_command(command: &str) -> Option<()> {
         )
         .ok()?;
     let names = reply.body().deserialize::<Vec<String>>().ok()?;
-    let Some(player) = names
-        .iter()
-        .find(|n| n.starts_with("org.mpris.MediaPlayer2."))
-    else {
-        tracing::debug!("no MPRIS player found — {command} via XF86 key fallback");
+    let players: Vec<(String, Option<String>)> = names
+        .into_iter()
+        .filter(|n| n.starts_with("org.mpris.MediaPlayer2."))
+        .map(|n| {
+            let status = playback_status(conn, &n);
+            (n, status)
+        })
+        .collect();
+    let Some(player) = pick_player(&players) else {
+        tracing::debug!(
+            players = players.len(),
+            "no MPRIS player clearly in use — {command} via XF86 key fallback"
+        );
         return None;
     };
     match conn.call_method(
-        Some(player.as_str()),
+        Some(player),
         "/org/mpris/MediaPlayer2",
         Some("org.mpris.MediaPlayer2.Player"),
         command,
@@ -1246,6 +1254,48 @@ fn try_mpris_command(command: &str) -> Option<()> {
     }
 }
 
+/// A player's `PlaybackStatus` (`Playing`, `Paused` or `Stopped`), or `None`
+/// when it does not answer.
+fn playback_status(conn: &DbusConn, player: &str) -> Option<String> {
+    let reply = conn
+        .call_method(
+            Some(player),
+            "/org/mpris/MediaPlayer2",
+            Some("org.freedesktop.DBus.Properties"),
+            "Get",
+            &("org.mpris.MediaPlayer2.Player", "PlaybackStatus"),
+        )
+        .ok()?;
+    let body = reply.body();
+    let value = body.deserialize::<zbus::zvariant::Value<'_>>().ok()?;
+    value.downcast::<String>().ok()
+}
+
+/// The player a media key should reach, from `(bus name, PlaybackStatus)`:
+/// the first one playing, else the only paused one, else the only player.
+/// `ListNames` order is arbitrary, so with several paused or stopped players
+/// there is no telling which one is in use: `None` hands the key to the
+/// desktop, which tracks the last-used player.
+fn pick_player(players: &[(String, Option<String>)]) -> Option<&str> {
+    let named = |status: &str| {
+        players
+            .iter()
+            .filter(|(_, s)| s.as_deref() == Some(status))
+            .map(|(n, _)| n.as_str())
+            .collect::<Vec<_>>()
+    };
+    if let Some(playing) = named("Playing").first() {
+        return Some(playing);
+    }
+    if let [only] = named("Paused")[..] {
+        return Some(only);
+    }
+    match players {
+        [(only, _)] => Some(only.as_str()),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -1258,10 +1308,53 @@ mod tests {
         HELPER_PREFIXES, KEY_CAPABILITIES, ScrollOutput, action_scroll, capture_region_mods, combo,
         desktop_switch_mods, generic_linux_lock_fallback_chord, hid_usage_to_linux,
         hyprland_helper, hyprland_lock_fallback_chord, hyprland_lock_helper,
-        hyprland_session_from_signature, key_ev, key_phase_events, modifiers_to_keycodes, rel_ev,
-        resolve_allowlisted_under, scroll_events, syn, unheld_modifiers, wait_with_retry,
+        hyprland_session_from_signature, key_ev, key_phase_events, modifiers_to_keycodes,
+        pick_player, rel_ev, resolve_allowlisted_under, scroll_events, syn, unheld_modifiers,
+        wait_with_retry,
     };
     use crate::inject::{HeldChordKind, HeldOutput, KeyPhase};
+
+    fn players(list: &[(&str, Option<&str>)]) -> Vec<(String, Option<String>)> {
+        list.iter()
+            .map(|(n, s)| (format!("org.mpris.MediaPlayer2.{n}"), s.map(str::to_owned)))
+            .collect()
+    }
+
+    #[test]
+    fn a_media_key_goes_to_the_player_in_use_not_the_first_name_on_the_bus() {
+        // #2636: an idle Electron app listed first must not swallow the key.
+        let bus = players(&[
+            ("chromium.instance1", Some("Stopped")),
+            ("firefox.instance_1_2", Some("Playing")),
+            ("spotify", Some("Paused")),
+        ]);
+        assert_eq!(
+            pick_player(&bus),
+            Some("org.mpris.MediaPlayer2.firefox.instance_1_2")
+        );
+
+        let one_paused = players(&[
+            ("chromium.instance1", Some("Stopped")),
+            ("spotify", Some("Paused")),
+        ]);
+        assert_eq!(
+            pick_player(&one_paused),
+            Some("org.mpris.MediaPlayer2.spotify")
+        );
+
+        // Several paused players: the bus cannot tell which was last used, the desktop can.
+        let two_paused = players(&[
+            ("chromium.instance1", Some("Stopped")),
+            ("firefox.instance_1_2", Some("Paused")),
+            ("spotify", Some("Paused")),
+        ]);
+        assert_eq!(pick_player(&two_paused), None);
+
+        // A lone player is still driven directly, whatever it reports.
+        let alone = players(&[("spotify", None)]);
+        assert_eq!(pick_player(&alone), Some("org.mpris.MediaPlayer2.spotify"));
+        assert_eq!(pick_player(&[]), None);
+    }
 
     #[test]
     fn held_chord_edges_use_inverse_key_order() {
