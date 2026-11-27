@@ -1,4 +1,4 @@
-use super::EdgeSide;
+use super::{DesktopPoint, EdgeSide};
 
 /// A display rectangle in the global desktop coordinate space (see the
 /// module docs), where x grows rightward and y downward.
@@ -114,6 +114,16 @@ impl EdgeSegment {
     #[must_use]
     pub const fn end(self) -> f64 {
         self.end
+    }
+
+    /// Where `position` lies along the edge: its y for left/right, its x for
+    /// top/bottom. The same axis [`Self::start`] and [`Self::end`] measure.
+    #[must_use]
+    pub const fn along(self, position: DesktopPoint) -> f64 {
+        match self.side {
+            EdgeSide::Left | EdgeSide::Right => position.y,
+            EdgeSide::Top | EdgeSide::Bottom => position.x,
+        }
     }
 }
 

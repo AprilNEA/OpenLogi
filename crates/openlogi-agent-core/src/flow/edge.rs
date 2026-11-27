@@ -13,6 +13,8 @@
 mod detector;
 mod geometry;
 
+#[cfg(target_os = "linux")]
+pub use detector::crossing_through;
 pub use detector::{
     ArmedSides, EdgeCrossing, EdgeDetector, EdgeDetectorParams, InvalidEdgeDetectorParams, Velocity,
 };

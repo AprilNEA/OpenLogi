@@ -19,6 +19,9 @@ evdev = { workspace = true }
 futures-lite = { workspace = true }
 libc = "0.2"
 wayland-client = "0.31"
+# Only for xdg-output, which is still an unstable protocol: the screen layout
+# in the compositor's logical coordinates.
+wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 x11rb = { version = "0.13", features = ["randr"] }
 zbus = "5"

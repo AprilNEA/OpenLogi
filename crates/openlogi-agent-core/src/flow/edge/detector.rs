@@ -403,9 +403,32 @@ fn normalized_position(edges: &ExposedEdges, segment_index: usize, position: Des
         .filter(|part| part.side() == segment.side())
         .map(segment_length)
         .sum();
-    let local =
-        along_coordinate(segment, position).clamp(segment.start(), segment.end()) - segment.start();
+    let local = segment
+        .along(position)
+        .clamp(segment.start(), segment.end())
+        - segment.start();
     ((preceding_length + local) / total_length).clamp(0.0, 1.0)
+}
+
+/// The crossing of a cursor that left through the exposed segment
+/// `segment_index`, at `position` along it.
+///
+/// A caller that hears of a crossing from the compositor instead of watching
+/// motion knows no approach velocity, so it is zero. `None` when there is no
+/// such segment.
+#[cfg(target_os = "linux")]
+#[must_use]
+pub fn crossing_through(
+    edges: &ExposedEdges,
+    segment_index: usize,
+    position: DesktopPoint,
+) -> Option<EdgeCrossing> {
+    let side = edges.segments().get(segment_index)?.side();
+    Some(EdgeCrossing {
+        side,
+        t: normalized_position(edges, segment_index, position),
+        velocity: Velocity::default(),
+    })
 }
 
 fn is_near_armed_edge(
@@ -423,13 +446,6 @@ fn segment_length(segment: EdgeSegment) -> f64 {
     segment.end() - segment.start()
 }
 
-fn along_coordinate(segment: EdgeSegment, position: DesktopPoint) -> f64 {
-    match segment.side() {
-        EdgeSide::Left | EdgeSide::Right => position.y,
-        EdgeSide::Top | EdgeSide::Bottom => position.x,
-    }
-}
-
 fn normal_coordinate(segment: EdgeSegment, position: DesktopPoint) -> f64 {
     match segment.side() {
         EdgeSide::Left | EdgeSide::Right => position.x,
@@ -441,7 +457,7 @@ fn normal_coordinate(segment: EdgeSegment, position: DesktopPoint) -> f64 {
 /// its half-open span along it. The end is excluded because the point there
 /// leads into the display that ends the exposed stretch, or lies off this one.
 fn contains_with_tolerance(segment: EdgeSegment, position: DesktopPoint, tolerance: f64) -> bool {
-    let along = along_coordinate(segment, position);
+    let along = segment.along(position);
     (normal_coordinate(segment, position) - segment.coordinate()).abs() <= tolerance
         && along >= segment.start()
         && along < segment.end()
@@ -449,7 +465,7 @@ fn contains_with_tolerance(segment: EdgeSegment, position: DesktopPoint, toleran
 
 fn distance_to(segment: EdgeSegment, position: DesktopPoint) -> f64 {
     let normal = (normal_coordinate(segment, position) - segment.coordinate()).abs();
-    let along = along_coordinate(segment, position);
+    let along = segment.along(position);
     let along_distance = if along < segment.start() {
         segment.start() - along
     } else if along > segment.end() {

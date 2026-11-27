@@ -36,12 +36,19 @@ pub enum Device {
     /// The device that synthesizes the keys, clicks, and scrolls of bound
     /// actions.
     ActionInjector,
+    /// The absolute pointer that places the cursor where a Flow handoff
+    /// arrives, on a session that cannot move it directly.
+    PointerPlacement,
 }
 
 impl Device {
     /// Every variant, so the naming tests cannot miss a new device.
     #[cfg(test)]
-    const ALL: [Self; 2] = [Self::PassThroughMouse, Self::ActionInjector];
+    const ALL: [Self; 3] = [
+        Self::PassThroughMouse,
+        Self::ActionInjector,
+        Self::PointerPlacement,
+    ];
 
     /// The name the device registers with the kernel, and that libinput, the
     /// display server, and `xinput` show.
@@ -50,6 +57,7 @@ impl Device {
         match self {
             Self::PassThroughMouse => "OL virtual mouse",
             Self::ActionInjector => "OL action injector",
+            Self::PointerPlacement => "OL pointer placement",
         }
     }
 }

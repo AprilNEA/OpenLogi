@@ -1,0 +1,18 @@
+{
+    "KPackageStructure": "KWin/Script",
+    "KPlugin": {
+        "Authors": [
+            {
+                "Name": "OpenLogi contributors"
+            }
+        ],
+        "Description": "Tells the OpenLogi agent when the cursor pushes into a screen edge, so Flow can hand the devices to another computer on KDE Wayland. It never captures, moves or blocks input.",
+        "Id": "openlogi-edge",
+        "License": "MIT OR Apache-2.0",
+        "Name": "OpenLogi Flow Edges",
+        "Version": "1",
+        "Website": "https://github.com/AprilNEA/OpenLogi"
+    },
+    "X-Plasma-API": "javascript",
+    "X-Plasma-MainScript": "code/main.js"
+}

@@ -48,6 +48,9 @@ pub use pointer::{
 mod probe;
 pub use probe::{DesktopPoint, DisplayBounds, PointerProbe, PointerState, WarpError};
 
+#[cfg(target_os = "linux")]
+pub use linux::kwin_edge::{KwinCrossing, KwinEdge, KwinSide};
+
 /// Logitech's USB/Bluetooth vendor id (`0x046D`), widened from
 /// [`openlogi_core::hid::LOGITECH_VENDOR_ID`] because the hook's identity
 /// sources (IOKit, evdev) hand it back as a `u32`.

@@ -29,6 +29,9 @@
 
 mod button_debounce;
 mod foreground;
+pub(crate) mod kwin_edge;
+mod outputs;
+mod placement;
 pub(crate) mod pointer;
 pub(crate) mod probe;
 mod supervisor;
