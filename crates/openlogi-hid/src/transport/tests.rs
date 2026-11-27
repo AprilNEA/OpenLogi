@@ -148,3 +148,34 @@ fn granted_open_hint_names_the_exclusive_holders() {
 fn a_test_binary_is_not_the_agent() {
     assert!(!process_is_agent());
 }
+
+#[cfg(target_os = "macos")]
+fn refused_write() -> async_hid::HidError {
+    async_hid::HidError::from_backend(std::io::Error::new(
+        std::io::ErrorKind::PermissionDenied,
+        "macOS refused the HID report write (kIOReturnNotPermitted 0xE00002E2)",
+    ))
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn kernel_refused_write_is_told_apart_from_other_failures() {
+    assert!(transfer_refused(&refused_write()));
+    assert!(!transfer_refused(&async_hid::HidError::Disconnected));
+    assert!(!transfer_refused(&async_hid::HidError::message(
+        "report writer callback error: 0xE00002D6"
+    )));
+    assert!(!transfer_refused(&async_hid::HidError::from_backend(
+        std::io::Error::other("unrelated")
+    )));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn kernel_refused_write_names_secure_input_not_permissions() {
+    let BackendError::Backend(message) = backend_error(refused_write()) else {
+        panic!("a refused write is not a disconnect");
+    };
+    assert!(message.contains("0xE00002E2"), "{message}");
+    assert!(message.contains("Secure Input"), "{message}");
+}
