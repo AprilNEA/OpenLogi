@@ -228,8 +228,9 @@ Common device fields are:
 - `lighting`: `enabled`, `color` as `"RRGGBB"`, and `brightness` from 0 to 100.
   The Lighting tab sets `color` from its nine presets or from the custom-color
   control after them, which opens a color picker with a palette, sliders and a
-  hex field. A palette or hex pick applies at once; a slider drag applies once,
-  when the picker closes
+  hex field. A palette pick applies at once, a slider drag when you let go of
+  the slider, and a typed hex value on Enter, when the picker closes, or when
+  you leave the hex field
 - `smartshift` and camera controls / profiles
 - `camera_stream_mode`: the live preview's mode, a table of `width`, `height`
   (pixels) and `fps`. All three are required and must be positive, or the file

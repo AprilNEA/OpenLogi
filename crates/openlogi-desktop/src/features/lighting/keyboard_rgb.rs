@@ -13,9 +13,9 @@ use gpui::{
 };
 use gpui_kit::base::Button as BaseButton;
 use gpui_kit::component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
-use gpui_kit::component::{
-    IconName, Selectable as _, Sizable as _, Size, h_flex, slider::Slider, v_flex,
-};
+use gpui_kit::component::input::InputEvent;
+use gpui_kit::component::slider::{Slider, SliderEvent};
+use gpui_kit::component::{IconName, Selectable as _, Sizable as _, Size, h_flex, v_flex};
 use openlogi_core::color::Rgb;
 use openlogi_core::config::Lighting;
 
@@ -66,47 +66,71 @@ fn rgb_of(color: Hsla) -> Rgb {
     Rgb::new(channel(color.r), channel(color.g), channel(color.b))
 }
 
+/// One report from the custom-color picker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PickerReport {
+    /// It opened, closed or redrew, showing `shown`.
+    Notified { shown: Option<Rgb> },
+    /// Its color changed to this one.
+    Changed(Rgb),
+    /// A slider thumb was let go on this color.
+    Released(Rgb),
+    /// Its hex field was typed in.
+    Typed,
+    /// Its hex field lost focus, showing `shown`. Leaving the page does that
+    /// too, by no longer drawing the field.
+    FieldLeft { shown: Option<Rgb> },
+}
+
 /// Where an edit in the custom-color picker stands.
 ///
 /// A palette pick or a hex commit closes the picker before it reports the
 /// color, so a color a closed picker reports is final. A slider drag reports
-/// every step while the picker stays open; only its last color is written,
-/// once, when the picker closes.
+/// every step while the picker stays open; its release writes it, the way
+/// [`CommitSlider`] does, because leaving the page does not close the picker.
+/// A typed hex color is only previewed, so it is written on Enter, when the
+/// picker is dismissed, or when the field loses focus — which leaving the
+/// page does without closing the picker.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PickerEdit {
     /// The picker is closed and holds nothing to write.
     Closed,
-    /// The picker is open and nothing was dragged yet.
+    /// The picker is open with nothing waiting to be written.
     Open,
-    /// The picker is open after a drag that ended on this color.
-    Dragged(Rgb),
+    /// The picker is open on a typed color it only previews.
+    Typed,
 }
 
 impl PickerEdit {
-    /// The edit after the picker reports `open` and, on a change, `color`,
-    /// and the color to write now, if any.
-    fn next(self, open: bool, color: Option<Rgb>) -> (Self, Option<Rgb>) {
-        match (open, color, self) {
-            (false, Some(color), _) | (false, None, Self::Dragged(color)) => {
-                (Self::Closed, Some(color))
-            }
-            (true, Some(color), _) => (Self::Dragged(color), None),
-            (false, None, _) => (Self::Closed, None),
-            (true, None, Self::Closed) => (Self::Open, None),
-            (true, None, edit) => (edit, None),
+    /// The edit after the picker, now `open`, sent `report`, and the color
+    /// to write now, if any.
+    fn next(self, open: bool, report: PickerReport) -> (Self, Option<Rgb>) {
+        let resting = if open { Self::Open } else { Self::Closed };
+        match report {
+            PickerReport::Changed(color) if !open => (Self::Closed, Some(color)),
+            // A drag step; it replaces a typed color, and its release writes.
+            PickerReport::Changed(_) => (Self::Open, None),
+            PickerReport::Released(color) => (resting, Some(color)),
+            PickerReport::Typed if open => (Self::Typed, None),
+            PickerReport::Typed => (Self::Closed, None),
+            PickerReport::FieldLeft { shown } => match self {
+                Self::Typed => (resting, shown),
+                _ => (resting, None),
+            },
+            PickerReport::Notified { shown } => match (self, open) {
+                (Self::Typed, false) => (Self::Closed, shown),
+                (Self::Closed, true) => (Self::Open, None),
+                (edit, true) => (edit, None),
+                (_, false) => (Self::Closed, None),
+            },
         }
     }
 }
 
-/// Light the keys in `color`, unless they already are.
-fn commit_color(color: Rgb, cx: &mut App) {
-    let unchanged = AppState::try_read(cx).is_some_and(|state| {
-        let lighting = state.lighting();
-        lighting.enabled && lighting.color == color
-    });
-    if unchanged {
-        return;
-    }
+/// Turn the lighting on in `color`. Every explicit pick is written, even one
+/// that matches what the panel shows: with nothing saved, that is only the
+/// default.
+fn light_the_keys(color: Rgb, cx: &mut App) {
     AppState::apply(cx, |state| {
         let mut next = state.lighting();
         next.enabled = true;
@@ -119,10 +143,10 @@ pub struct LightingPanel {
     brightness: CommitSlider<u8>,
     /// The picker behind the custom-color control.
     picker: Entity<ColorPickerState>,
-    /// The edit in that picker. Only [`Self::picker_changed`] moves it.
+    /// The edit in that picker. Only [`Self::picker_reported`] moves it.
     edit: PickerEdit,
     _state_obs: Subscription,
-    _picker_subscriptions: [Subscription; 2],
+    _picker_subscriptions: Vec<Subscription>,
 }
 
 impl LightingPanel {
@@ -146,29 +170,66 @@ impl LightingPanel {
         let state_obs =
             AppState::repaint_on(cx, |event| matches!(event, StateEvent::LightingChanged(_)));
         let picker = cx.new(|cx| ColorPickerState::new(window, cx));
-        let change = cx.subscribe(&picker, |this, _, event: &ColorPickerEvent, cx| {
-            if let ColorPickerEvent::Change(Some(color)) = event {
-                this.picker_changed(Some(rgb_of(*color)), cx);
-            }
-        });
-        // Opening and closing only notify.
-        let open = cx.observe(&picker, |this, _, cx| this.picker_changed(None, cx));
+        let (hex_input, sliders) = {
+            let picker = picker.read(cx);
+            (picker.hex_input().clone(), picker.sliders().clone())
+        };
+        let hex_focus = hex_input.read(cx).focus_handle(cx);
+        let mut subscriptions = vec![
+            cx.subscribe(&picker, |this, _, event: &ColorPickerEvent, cx| {
+                if let ColorPickerEvent::Change(Some(color)) = event {
+                    this.picker_reported(PickerReport::Changed(rgb_of(*color)), cx);
+                }
+            }),
+            // Opening and closing only notify.
+            cx.observe(&picker, |this, picker, cx| {
+                let shown = picker.read(cx).displayed_color().map(rgb_of);
+                this.picker_reported(PickerReport::Notified { shown }, cx);
+            }),
+            // Only a typed edit changes the field; the picker writes it
+            // without an event.
+            cx.subscribe(&hex_input, |this, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.picker_reported(PickerReport::Typed, cx);
+                }
+            }),
+            cx.on_blur(&hex_focus, window, |this, _, cx| {
+                let shown = this.picker.read(cx).displayed_color().map(rgb_of);
+                this.picker_reported(PickerReport::FieldLeft { shown }, cx);
+            }),
+        ];
+        for slider in [
+            sliders.hue(),
+            sliders.saturation(),
+            sliders.lightness(),
+            sliders.alpha(),
+        ] {
+            // Each drag step already moved the picker's color, so it holds
+            // the released one.
+            subscriptions.push(cx.subscribe(slider, |this, _, event: &SliderEvent, cx| {
+                if let SliderEvent::Release(_) = event
+                    && let Some(color) = this.picker.read(cx).value()
+                {
+                    this.picker_reported(PickerReport::Released(rgb_of(color)), cx);
+                }
+            }));
+        }
         Self {
             brightness,
             picker,
             edit: PickerEdit::Closed,
             _state_obs: state_obs,
-            _picker_subscriptions: [change, open],
+            _picker_subscriptions: subscriptions,
         }
     }
 
     /// Move the picker edit on a picker report, and write what it settles.
-    fn picker_changed(&mut self, color: Option<Rgb>, cx: &mut Context<Self>) {
+    fn picker_reported(&mut self, report: PickerReport, cx: &mut Context<Self>) {
         let open = self.picker.read(cx).is_open();
-        let (edit, write) = self.edit.next(open, color);
+        let (edit, write) = self.edit.next(open, report);
         self.edit = edit;
         if let Some(color) = write {
-            commit_color(color, cx);
+            light_the_keys(color, cx);
         }
     }
 
@@ -341,14 +402,7 @@ fn swatch(color: Rgb, current: &Lighting, pal: Palette) -> impl IntoElement {
                 .border_color(pal.border)
                 .bg(rgb(color.packed())),
         )
-        .on_click(move |_event, _window, cx| {
-            AppState::apply(cx, |state| {
-                let mut next = state.lighting();
-                next.enabled = true;
-                next.color = color;
-                state.commit_lighting(next)
-            });
-        })
+        .on_click(move |_event, _window, cx| light_the_keys(color, cx))
 }
 
 #[cfg(test)]

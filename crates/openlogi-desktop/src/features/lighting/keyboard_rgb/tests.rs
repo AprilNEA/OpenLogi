@@ -2,7 +2,7 @@ use gpui::{Hsla, rgb};
 use openlogi_core::color::Rgb;
 use openlogi_core::config::Lighting;
 
-use super::{PALETTE, PickerEdit, custom_color, rgb_of};
+use super::{PALETTE, PickerEdit, PickerReport, custom_color, rgb_of};
 
 fn lighting(enabled: bool, color: Rgb) -> Lighting {
     Lighting {
@@ -45,17 +45,18 @@ fn picker_colors_convert_without_alpha() {
 }
 
 const DRAGGED: Rgb = Rgb::new(0x11, 0x22, 0x33);
+const TYPED: Rgb = Rgb::new(0x00, 0xff, 0xaa);
+
+fn notified(shown: Rgb) -> PickerReport {
+    PickerReport::Notified { shown: Some(shown) }
+}
 
 #[test]
 fn a_color_reported_by_a_closed_picker_is_written_at_once() {
     // A palette pick or a hex commit closes the picker, then reports.
-    for from in [
-        PickerEdit::Closed,
-        PickerEdit::Open,
-        PickerEdit::Dragged(DRAGGED),
-    ] {
+    for from in [PickerEdit::Closed, PickerEdit::Open, PickerEdit::Typed] {
         assert_eq!(
-            from.next(false, Some(Rgb::WHITE)),
+            from.next(false, PickerReport::Changed(Rgb::WHITE)),
             (PickerEdit::Closed, Some(Rgb::WHITE)),
             "{from:?}"
         );
@@ -63,43 +64,92 @@ fn a_color_reported_by_a_closed_picker_is_written_at_once() {
 }
 
 #[test]
-fn a_drag_is_held_until_the_picker_closes() {
-    let (edit, write) = PickerEdit::Closed.next(true, None);
+fn a_drag_is_written_on_release_and_the_picker_stays_open() {
+    let (edit, write) = PickerEdit::Closed.next(true, notified(Rgb::WHITE));
     assert_eq!((edit, write), (PickerEdit::Open, None));
-    let (edit, write) = edit.next(true, Some(Rgb::WHITE));
-    assert_eq!((edit, write), (PickerEdit::Dragged(Rgb::WHITE), None));
-    let (edit, write) = edit.next(true, Some(DRAGGED));
-    assert_eq!((edit, write), (PickerEdit::Dragged(DRAGGED), None));
-    assert_eq!(edit.next(false, None), (PickerEdit::Closed, Some(DRAGGED)));
-}
-
-#[test]
-fn closing_without_a_drag_writes_nothing() {
+    let (edit, write) = edit.next(true, PickerReport::Changed(Rgb::WHITE));
+    assert_eq!((edit, write), (PickerEdit::Open, None));
+    let (edit, write) = edit.next(true, PickerReport::Changed(DRAGGED));
+    assert_eq!((edit, write), (PickerEdit::Open, None));
+    let (edit, write) = edit.next(true, PickerReport::Released(DRAGGED));
+    assert_eq!((edit, write), (PickerEdit::Open, Some(DRAGGED)));
     assert_eq!(
-        PickerEdit::Open.next(false, None),
-        (PickerEdit::Closed, None)
-    );
-    assert_eq!(
-        PickerEdit::Closed.next(false, None),
-        (PickerEdit::Closed, None)
+        edit.next(false, notified(DRAGGED)),
+        (PickerEdit::Closed, None),
+        "closing does not write the released drag again"
     );
 }
 
 #[test]
-fn a_finished_drag_is_not_written_twice() {
-    let (edit, write) = PickerEdit::Dragged(DRAGGED).next(false, None);
-    assert_eq!(write, Some(DRAGGED));
-    assert_eq!(edit.next(false, None), (PickerEdit::Closed, None));
+fn a_typed_color_is_written_once_when_the_picker_is_dismissed() {
+    let (edit, write) = PickerEdit::Open.next(true, PickerReport::Typed);
+    assert_eq!((edit, write), (PickerEdit::Typed, None));
+    let (edit, write) = edit.next(true, notified(TYPED));
+    assert_eq!(
+        (edit, write),
+        (PickerEdit::Typed, None),
+        "a redraw keeps it"
+    );
+    let (edit, write) = edit.next(false, notified(TYPED));
+    assert_eq!((edit, write), (PickerEdit::Closed, Some(TYPED)));
+    assert_eq!(
+        edit.next(false, notified(TYPED)),
+        (PickerEdit::Closed, None)
+    );
+}
+
+#[test]
+fn a_typed_color_is_written_once_when_its_field_is_left() {
+    let left = PickerReport::FieldLeft { shown: Some(TYPED) };
+    assert_eq!(
+        PickerEdit::Typed.next(true, left),
+        (PickerEdit::Open, Some(TYPED)),
+        "the picker stays open, with nothing left to write"
+    );
+    assert_eq!(
+        PickerEdit::Open.next(false, notified(TYPED)),
+        (PickerEdit::Closed, None)
+    );
+    for from in [PickerEdit::Open, PickerEdit::Closed] {
+        assert_eq!(
+            from.next(false, left),
+            (PickerEdit::Closed, None),
+            "{from:?}"
+        );
+    }
+}
+
+#[test]
+fn a_drag_after_typing_replaces_the_typed_color() {
+    let (edit, _) = PickerEdit::Typed.next(true, PickerReport::Changed(DRAGGED));
+    assert_eq!(edit, PickerEdit::Open);
+    assert_eq!(
+        edit.next(false, notified(DRAGGED)),
+        (PickerEdit::Closed, None)
+    );
+}
+
+#[test]
+fn closing_without_an_edit_writes_nothing() {
+    for from in [PickerEdit::Open, PickerEdit::Closed] {
+        assert_eq!(
+            from.next(false, notified(Rgb::WHITE)),
+            (PickerEdit::Closed, None),
+            "{from:?}"
+        );
+    }
 }
 
 mod picker {
     use std::sync::Arc;
 
     use gpui::{
-        AppContext as _, Entity, Focusable as _, Modifiers, TestAppContext, VisualTestContext,
-        point, px, rgb, size,
+        AppContext as _, Context, Entity, Focusable as _, IntoElement, Modifiers,
+        ParentElement as _, Render, Styled as _, TestAppContext, VisualTestContext, Window, div,
+        point, prelude::FluentBuilder as _, px, size,
     };
     use gpui_kit::component::color_picker::ColorPickerState;
+    use gpui_kit::component::slider::{SliderEvent, SliderState};
     use openlogi_core::color::Rgb;
     use openlogi_core::config::{Config, UiScale};
     use openlogi_core::device::{Capabilities, DeviceKind};
@@ -121,8 +171,33 @@ mod picker {
         UnboundedReceiver<Command>,
         &mut VisualTestContext,
     ) {
+        let receiver = install_keyboard(cx);
+        let (panel, cx) = cx.add_window_view(LightingPanel::new);
+        cx.simulate_resize(size(px(800.), px(600.)));
+        // Focus events, and so `on_blur`, reach only the active window.
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        (panel, receiver, cx)
+    }
+
+    /// A page that shows the panel until it is navigated away from.
+    struct Page {
+        panel: Entity<LightingPanel>,
+        shown: bool,
+    }
+
+    impl Render for Page {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .when(self.shown, |page| page.child(self.panel.clone()))
+        }
+    }
+
+    /// A lighting keyboard as the selected device, without a window yet.
+    fn install_keyboard(cx: &mut TestAppContext) -> UnboundedReceiver<Command> {
         cx.update(gpui_kit::init);
-        let receiver = cx.update(|cx| {
+        cx.update(|cx| {
             let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
             let mut inventory = crate::state::tests::direct_inventory([1, 2, 3, 4]);
             inventory.paired[0].kind = DeviceKind::Keyboard;
@@ -147,11 +222,7 @@ mod picker {
             });
             AppState::set_global(state, cx);
             receiver
-        });
-        let (panel, cx) = cx.add_window_view(LightingPanel::new);
-        cx.simulate_resize(size(px(800.), px(600.)));
-        cx.run_until_parked();
-        (panel, receiver, cx)
+        })
     }
 
     fn picker_of(
@@ -206,11 +277,7 @@ mod picker {
         lighting_writes(&mut receiver);
         let picker = picker_of(&panel, cx);
         click_custom_control(cx);
-        let hex = cx.read(|cx| picker.read(cx).hex_input().clone());
-        cx.update(|window, cx| hex.update(cx, |input, cx| input.focus(window, cx)));
-        // The field holds the current color as `#RRGGBB`; keep the `#`.
-        cx.simulate_keystrokes("end backspace backspace backspace backspace backspace backspace");
-        cx.simulate_input("00ffaa");
+        type_hex(&picker, "00ffaa", cx);
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
         assert!(!is_open(&picker, cx));
@@ -284,33 +351,200 @@ mod picker {
         );
     }
 
-    /// The popover's sliders carry no debug selector in gpui-kit, so a test
-    /// cannot drag them; this drives the slider's reports through the picker
-    /// state the sliders update, then closes the picker by clicking outside.
+    /// Type `hex` (without its `#`) into the open picker's hex field.
+    fn type_hex(picker: &Entity<ColorPickerState>, hex: &str, cx: &mut VisualTestContext) {
+        let field = cx.read(|cx| picker.read(cx).hex_input().clone());
+        cx.update(|window, cx| field.update(cx, |input, cx| input.focus(window, cx)));
+        // The field holds the current color as `#RRGGBB`; keep the `#`.
+        cx.simulate_keystrokes("end backspace backspace backspace backspace backspace backspace");
+        cx.simulate_input(hex);
+        cx.run_until_parked();
+    }
+
+    /// Drag the open picker's lightness slider through `steps`, as its
+    /// thumb reports them, without letting go.
+    ///
+    /// The popover's sliders carry no debug selector in gpui-kit, so this
+    /// sends the reports a drag makes from the slider itself, the way the
+    /// force-sensing panel's tests do.
+    fn drag_lightness(
+        picker: &Entity<ColorPickerState>,
+        steps: &[f32],
+        cx: &mut VisualTestContext,
+    ) -> Entity<SliderState> {
+        let slider = cx.read(|cx| picker.read(cx).sliders().lightness().clone());
+        for &step in steps {
+            cx.update(|window, cx| {
+                slider.update(cx, |slider, cx| {
+                    slider.set_value(step, window, cx);
+                    cx.emit(SliderEvent::Change(step.into()));
+                });
+            });
+        }
+        cx.run_until_parked();
+        slider
+    }
+
+    fn release(slider: &Entity<SliderState>, cx: &mut VisualTestContext) {
+        cx.update(|_, cx| {
+            slider.update(cx, |slider, cx| {
+                let value = slider.value();
+                cx.emit(SliderEvent::Release(value));
+            });
+        });
+        cx.run_until_parked();
+    }
+
+    fn picker_color(picker: &Entity<ColorPickerState>, cx: &mut VisualTestContext) -> Rgb {
+        cx.read(|cx| super::super::rgb_of(picker.read(cx).value().expect("a color")))
+    }
+
+    fn click_outside(cx: &mut VisualTestContext) {
+        cx.simulate_click(point(px(790.), px(590.)), Modifiers::none());
+        cx.run_until_parked();
+    }
+
+    /// Leaving the page by ⌥← never closes the picker, so a drag that waited
+    /// for the close was lost; the release itself writes it.
     #[gpui::test]
-    fn a_slider_drag_is_written_once_when_the_picker_closes(cx: &mut TestAppContext) {
+    fn a_slider_release_writes_the_color_while_the_picker_stays_open(cx: &mut TestAppContext) {
         let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
         let (panel, mut receiver, cx) = panel(cx);
         lighting_writes(&mut receiver);
         let before = current(cx);
         let picker = picker_of(&panel, cx);
         click_custom_control(cx);
-        cx.update(|window, cx| {
-            picker.update(cx, |picker, cx| {
-                picker.update_color(rgb(0x0011_2233).into(), window, cx);
-                picker.update_color(rgb(CUSTOM.packed()).into(), window, cx);
+        let slider = drag_lightness(&picker, &[0.7, 0.4], cx);
+        assert_eq!(current(cx), before, "a drag in progress writes nothing");
+        assert_eq!(lighting_writes(&mut receiver), 0);
+
+        release(&slider, cx);
+        assert!(is_open(&picker, cx));
+        let dragged = picker_color(&picker, cx);
+        assert_ne!(dragged, before.1);
+        assert_eq!(current(cx), (true, dragged));
+        assert_eq!(lighting_writes(&mut receiver), 1, "the release writes once");
+
+        click_outside(cx);
+        assert_eq!(lighting_writes(&mut receiver), 0, "closing writes no more");
+    }
+
+    /// Type a color without Enter, dismiss the picker with `dismiss`, and
+    /// check the typed color was written once.
+    fn dismissing_writes_the_typed_color(
+        cx: &mut TestAppContext,
+        dismiss: impl FnOnce(&mut VisualTestContext),
+    ) {
+        let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+        let (panel, mut receiver, cx) = panel(cx);
+        lighting_writes(&mut receiver);
+        let picker = picker_of(&panel, cx);
+        click_custom_control(cx);
+        type_hex(&picker, "00ffaa", cx);
+        assert_eq!(lighting_writes(&mut receiver), 0, "typing writes nothing");
+        let typed = gpui::Hsla::from(gpui::rgb(CUSTOM.packed()));
+        let sliders = cx.read(|cx| {
+            let sliders = picker.read(cx).sliders();
+            [sliders.hue(), sliders.saturation(), sliders.lightness()]
+                .map(|slider| slider.read(cx).value().start())
+        });
+        for (slider, expected) in sliders.into_iter().zip([typed.h, typed.s, typed.l]) {
+            assert!(
+                (slider - expected).abs() < 0.01,
+                "the sliders preview the typed color: {sliders:?} vs {typed:?}"
+            );
+        }
+        dismiss(cx);
+        assert!(!is_open(&picker, cx));
+        assert_eq!(current(cx), (true, CUSTOM));
+        assert_eq!(lighting_writes(&mut receiver), 1);
+    }
+
+    #[gpui::test]
+    fn a_typed_hex_color_is_written_when_a_click_outside_dismisses_it(cx: &mut TestAppContext) {
+        dismissing_writes_the_typed_color(cx, click_outside);
+    }
+
+    #[gpui::test]
+    fn a_typed_hex_color_is_written_when_escape_dismisses_it(cx: &mut TestAppContext) {
+        dismissing_writes_the_typed_color(cx, |cx| {
+            cx.simulate_keystrokes("escape");
+            cx.run_until_parked();
+        });
+    }
+
+    /// A keyboard with no saved lighting shows the default, white; picking
+    /// white is still the first explicit choice, so it is saved and sent.
+    #[gpui::test]
+    fn the_first_pick_is_written_even_when_it_matches_the_default(cx: &mut TestAppContext) {
+        let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+        let (panel, mut receiver, cx) = panel(cx);
+        lighting_writes(&mut receiver);
+        assert_eq!(current(cx), (true, Rgb::WHITE), "nothing saved yet");
+        let picker = picker_of(&panel, cx);
+        click_custom_control(cx);
+        type_hex(&picker, "FFFFFF", cx);
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(!is_open(&picker, cx));
+        // `commit_lighting` saves before it sends, so the send proves both.
+        assert_eq!(lighting_writes(&mut receiver), 1);
+    }
+
+    /// Leaving the page (⌥←, the back button, another tab or device) stops
+    /// drawing the panel without closing the picker; the typed color must
+    /// not be lost with it.
+    #[gpui::test]
+    fn a_typed_hex_color_is_written_when_the_page_is_left(cx: &mut TestAppContext) {
+        let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+        let mut receiver = install_keyboard(cx);
+        let (page, cx) = cx.add_window_view(|window, cx| Page {
+            panel: cx.new(|cx| LightingPanel::new(window, cx)),
+            shown: true,
+        });
+        cx.simulate_resize(size(px(800.), px(600.)));
+        // Focus events, and so `on_blur`, reach only the active window.
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        lighting_writes(&mut receiver);
+        let panel = cx.read(|cx| page.read(cx).panel.clone());
+        let picker = picker_of(&panel, cx);
+        click_custom_control(cx);
+        type_hex(&picker, "00ffaa", cx);
+        assert_eq!(lighting_writes(&mut receiver), 0, "typing writes nothing");
+
+        cx.update(|_, cx| {
+            page.update(cx, |page, cx| {
+                page.shown = false;
+                cx.notify();
             });
         });
-        cx.run_until_parked();
-        assert_eq!(current(cx), before, "a drag writes nothing");
-        assert_eq!(lighting_writes(&mut receiver), 0);
-        cx.simulate_click(point(px(790.), px(590.)), Modifiers::none());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
         cx.run_until_parked();
         assert_eq!(current(cx), (true, CUSTOM));
-        assert_eq!(
-            lighting_writes(&mut receiver),
-            1,
-            "closing writes the last color once"
-        );
+        assert_eq!(lighting_writes(&mut receiver), 1);
+    }
+
+    /// Clicking into the picker's sliders after typing leaves the hex field
+    /// too; the typed color is written once, and a drag from there is its
+    /// own write.
+    #[gpui::test]
+    fn a_typed_color_is_written_once_when_the_field_loses_focus(cx: &mut TestAppContext) {
+        let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+        let (panel, mut receiver, cx) = panel(cx);
+        lighting_writes(&mut receiver);
+        let picker = picker_of(&panel, cx);
+        click_custom_control(cx);
+        type_hex(&picker, "00ffaa", cx);
+        cx.update(|window, cx| {
+            picker.read(cx).focus_handle(cx).focus(window, cx);
+            window.draw(cx).clear(cx);
+        });
+        cx.run_until_parked();
+        assert!(is_open(&picker, cx));
+        assert_eq!(current(cx), (true, CUSTOM));
+        assert_eq!(lighting_writes(&mut receiver), 1);
+        click_outside(cx);
+        assert_eq!(lighting_writes(&mut receiver), 0, "closing writes no more");
     }
 }
