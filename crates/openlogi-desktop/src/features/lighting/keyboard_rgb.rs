@@ -19,7 +19,7 @@ use gpui_kit::component::{IconName, Selectable as _, Sizable as _, Size, h_flex,
 use openlogi_core::color::Rgb;
 use openlogi_core::config::Lighting;
 
-use crate::state::{AppState, StateEvent};
+use crate::state::{AppState, DeviceRecord, StateEvent};
 use crate::ui::commit_slider::{CommitSlider, SliderRange};
 use crate::ui::components::{Toggle, toggle_row};
 use crate::ui::slider_row::SliderRow;
@@ -91,38 +91,58 @@ enum PickerReport {
 /// A typed hex color is only previewed, so it is written on Enter, when the
 /// picker is dismissed, or when the field loses focus — which leaving the
 /// page does without closing the picker.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// Those last two can come after the selection moved to another device: a
+/// deep link opens it before the old field stops drawing, and the one panel
+/// serves every device. A typed color therefore keeps the device it was typed
+/// for, and is dropped unless that device is still the selected one.
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum PickerEdit {
     /// The picker is closed and holds nothing to write.
     Closed,
     /// The picker is open with nothing waiting to be written.
     Open,
-    /// The picker is open on a typed color it only previews.
-    Typed,
+    /// The picker is open on a color typed for `owner`, only previewed.
+    Typed { owner: Owner },
 }
 
+/// The device an edit is for: the selected record's key, if any.
+type Owner = Option<String>;
+
 impl PickerEdit {
-    /// The edit after the picker, now `open`, sent `report`, and the color
-    /// to write now, if any.
-    fn next(self, open: bool, report: PickerReport) -> (Self, Option<Rgb>) {
+    /// The edit after the picker, now `open` with `current` selected, sent
+    /// `report`, and the color to write now, if any.
+    fn next(self, open: bool, current: &Owner, report: PickerReport) -> (Self, Option<Rgb>) {
         let resting = if open { Self::Open } else { Self::Closed };
         match report {
             PickerReport::Changed(color) if !open => (Self::Closed, Some(color)),
             // A drag step; it replaces a typed color, and its release writes.
             PickerReport::Changed(_) => (Self::Open, None),
             PickerReport::Released(color) => (resting, Some(color)),
-            PickerReport::Typed if open => (Self::Typed, None),
+            PickerReport::Typed if open => (
+                Self::Typed {
+                    owner: current.clone(),
+                },
+                None,
+            ),
             PickerReport::Typed => (Self::Closed, None),
-            PickerReport::FieldLeft { shown } => match self {
-                Self::Typed => (resting, shown),
-                _ => (resting, None),
-            },
+            PickerReport::FieldLeft { shown } => (resting, self.typed_for(current, shown)),
             PickerReport::Notified { shown } => match (self, open) {
-                (Self::Typed, false) => (Self::Closed, shown),
+                (edit @ Self::Typed { .. }, false) => {
+                    (Self::Closed, edit.typed_for(current, shown))
+                }
                 (Self::Closed, true) => (Self::Open, None),
                 (edit, true) => (edit, None),
                 (_, false) => (Self::Closed, None),
             },
+        }
+    }
+
+    /// `shown`, when this edit is a color typed for `current`.
+    fn typed_for(&self, current: &Owner, shown: Option<Rgb>) -> Option<Rgb> {
+        match self {
+            Self::Typed { owner } if owner == current => shown,
+            _ => None,
         }
     }
 }
@@ -226,7 +246,11 @@ impl LightingPanel {
     /// Move the picker edit on a picker report, and write what it settles.
     fn picker_reported(&mut self, report: PickerReport, cx: &mut Context<Self>) {
         let open = self.picker.read(cx).is_open();
-        let (edit, write) = self.edit.next(open, report);
+        let current = AppState::try_read(cx)
+            .and_then(AppState::current_record)
+            .map(DeviceRecord::record_key);
+        let (edit, write) =
+            std::mem::replace(&mut self.edit, PickerEdit::Closed).next(open, &current, report);
         self.edit = edit;
         if let Some(color) = write {
             light_the_keys(color, cx);

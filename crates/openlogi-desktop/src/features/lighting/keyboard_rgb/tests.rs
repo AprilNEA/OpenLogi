@@ -2,7 +2,7 @@ use gpui::{Hsla, rgb};
 use openlogi_core::color::Rgb;
 use openlogi_core::config::Lighting;
 
-use super::{PALETTE, PickerEdit, PickerReport, custom_color, rgb_of};
+use super::{Owner, PALETTE, PickerEdit, PickerReport, custom_color, rgb_of};
 
 fn lighting(enabled: bool, color: Rgb) -> Lighting {
     Lighting {
@@ -51,12 +51,27 @@ fn notified(shown: Rgb) -> PickerReport {
     PickerReport::Notified { shown: Some(shown) }
 }
 
+/// The device selected as `key`.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "an `Owner` is what `PickerEdit::next` takes; `None` is no selection"
+)]
+fn device(key: &str) -> Owner {
+    Some(key.to_string())
+}
+
+/// A color typed on the page of the device selected as `key`.
+fn typed_on(key: &str) -> PickerEdit {
+    PickerEdit::Typed { owner: device(key) }
+}
+
 #[test]
 fn a_color_reported_by_a_closed_picker_is_written_at_once() {
     // A palette pick or a hex commit closes the picker, then reports.
-    for from in [PickerEdit::Closed, PickerEdit::Open, PickerEdit::Typed] {
+    for from in [PickerEdit::Closed, PickerEdit::Open, typed_on("a")] {
         assert_eq!(
-            from.next(false, PickerReport::Changed(Rgb::WHITE)),
+            from.clone()
+                .next(false, &device("a"), PickerReport::Changed(Rgb::WHITE)),
             (PickerEdit::Closed, Some(Rgb::WHITE)),
             "{from:?}"
         );
@@ -65,16 +80,17 @@ fn a_color_reported_by_a_closed_picker_is_written_at_once() {
 
 #[test]
 fn a_drag_is_written_on_release_and_the_picker_stays_open() {
-    let (edit, write) = PickerEdit::Closed.next(true, notified(Rgb::WHITE));
-    assert_eq!((edit, write), (PickerEdit::Open, None));
-    let (edit, write) = edit.next(true, PickerReport::Changed(Rgb::WHITE));
-    assert_eq!((edit, write), (PickerEdit::Open, None));
-    let (edit, write) = edit.next(true, PickerReport::Changed(DRAGGED));
-    assert_eq!((edit, write), (PickerEdit::Open, None));
-    let (edit, write) = edit.next(true, PickerReport::Released(DRAGGED));
-    assert_eq!((edit, write), (PickerEdit::Open, Some(DRAGGED)));
+    let a = device("a");
+    let (edit, write) = PickerEdit::Closed.next(true, &a, notified(Rgb::WHITE));
+    assert_eq!((edit.clone(), write), (PickerEdit::Open, None));
+    let (edit, write) = edit.next(true, &a, PickerReport::Changed(Rgb::WHITE));
+    assert_eq!((edit.clone(), write), (PickerEdit::Open, None));
+    let (edit, write) = edit.next(true, &a, PickerReport::Changed(DRAGGED));
+    assert_eq!((edit.clone(), write), (PickerEdit::Open, None));
+    let (edit, write) = edit.next(true, &a, PickerReport::Released(DRAGGED));
+    assert_eq!((edit.clone(), write), (PickerEdit::Open, Some(DRAGGED)));
     assert_eq!(
-        edit.next(false, notified(DRAGGED)),
+        edit.next(false, &a, notified(DRAGGED)),
         (PickerEdit::Closed, None),
         "closing does not write the released drag again"
     );
@@ -82,49 +98,86 @@ fn a_drag_is_written_on_release_and_the_picker_stays_open() {
 
 #[test]
 fn a_typed_color_is_written_once_when_the_picker_is_dismissed() {
-    let (edit, write) = PickerEdit::Open.next(true, PickerReport::Typed);
-    assert_eq!((edit, write), (PickerEdit::Typed, None));
-    let (edit, write) = edit.next(true, notified(TYPED));
+    let a = device("a");
+    let (edit, write) = PickerEdit::Open.next(true, &a, PickerReport::Typed);
+    assert_eq!((edit.clone(), write), (typed_on("a"), None));
+    let (edit, write) = edit.next(true, &a, notified(TYPED));
     assert_eq!(
-        (edit, write),
-        (PickerEdit::Typed, None),
+        (edit.clone(), write),
+        (typed_on("a"), None),
         "a redraw keeps it"
     );
-    let (edit, write) = edit.next(false, notified(TYPED));
-    assert_eq!((edit, write), (PickerEdit::Closed, Some(TYPED)));
+    let (edit, write) = edit.next(false, &a, notified(TYPED));
+    assert_eq!((edit.clone(), write), (PickerEdit::Closed, Some(TYPED)));
     assert_eq!(
-        edit.next(false, notified(TYPED)),
+        edit.next(false, &a, notified(TYPED)),
         (PickerEdit::Closed, None)
     );
 }
 
 #[test]
 fn a_typed_color_is_written_once_when_its_field_is_left() {
+    let a = device("a");
     let left = PickerReport::FieldLeft { shown: Some(TYPED) };
     assert_eq!(
-        PickerEdit::Typed.next(true, left),
+        typed_on("a").next(true, &a, left),
         (PickerEdit::Open, Some(TYPED)),
         "the picker stays open, with nothing left to write"
     );
     assert_eq!(
-        PickerEdit::Open.next(false, notified(TYPED)),
+        PickerEdit::Open.next(false, &a, notified(TYPED)),
         (PickerEdit::Closed, None)
     );
     for from in [PickerEdit::Open, PickerEdit::Closed] {
         assert_eq!(
-            from.next(false, left),
+            from.clone().next(false, &a, left),
             (PickerEdit::Closed, None),
             "{from:?}"
         );
     }
 }
 
+/// A deep link can select another device before the typed-on page stops
+/// drawing; the color typed for one device never lands on another.
+#[test]
+fn a_color_typed_for_another_device_is_dropped() {
+    let b = device("b");
+    let left = PickerReport::FieldLeft { shown: Some(TYPED) };
+    assert_eq!(typed_on("a").next(true, &b, left), (PickerEdit::Open, None));
+    assert_eq!(
+        typed_on("a").next(false, &b, left),
+        (PickerEdit::Closed, None)
+    );
+    assert_eq!(
+        typed_on("a").next(false, &b, notified(TYPED)),
+        (PickerEdit::Closed, None),
+        "dismissing on the other device's page drops it too"
+    );
+    assert_eq!(
+        typed_on("a").next(false, &None, notified(TYPED)),
+        (PickerEdit::Closed, None),
+        "with no device selected there is nothing to write it to"
+    );
+}
+
+#[test]
+fn typing_again_on_the_new_page_makes_the_color_its_own() {
+    let b = device("b");
+    let (edit, _) = typed_on("a").next(true, &b, PickerReport::Typed);
+    assert_eq!(edit, typed_on("b"));
+    assert_eq!(
+        edit.next(false, &b, notified(TYPED)),
+        (PickerEdit::Closed, Some(TYPED))
+    );
+}
+
 #[test]
 fn a_drag_after_typing_replaces_the_typed_color() {
-    let (edit, _) = PickerEdit::Typed.next(true, PickerReport::Changed(DRAGGED));
+    let a = device("a");
+    let (edit, _) = typed_on("a").next(true, &a, PickerReport::Changed(DRAGGED));
     assert_eq!(edit, PickerEdit::Open);
     assert_eq!(
-        edit.next(false, notified(DRAGGED)),
+        edit.next(false, &a, notified(DRAGGED)),
         (PickerEdit::Closed, None)
     );
 }
@@ -133,7 +186,7 @@ fn a_drag_after_typing_replaces_the_typed_color() {
 fn closing_without_an_edit_writes_nothing() {
     for from in [PickerEdit::Open, PickerEdit::Closed] {
         assert_eq!(
-            from.next(false, notified(Rgb::WHITE)),
+            from.clone().next(false, &device("a"), notified(Rgb::WHITE)),
             (PickerEdit::Closed, None),
             "{from:?}"
         );
@@ -158,7 +211,7 @@ mod picker {
     use super::super::LightingPanel;
     use crate::services::assets::AssetResolver;
     use crate::services::ipc::Command;
-    use crate::state::{AppState, ConfigPersistence, Sources};
+    use crate::state::{AppState, ConfigPersistence, DeviceRecord, Sources};
     use crate::ui::theme;
 
     const CUSTOM: Rgb = Rgb::new(0x00, 0xff, 0xaa);
@@ -196,21 +249,36 @@ mod picker {
 
     /// A lighting keyboard as the selected device, without a window yet.
     fn install_keyboard(cx: &mut TestAppContext) -> UnboundedReceiver<Command> {
+        install_keyboards(cx, &[[1, 2, 3, 4]])
+    }
+
+    /// One lighting keyboard per unit ID, the first selected, without a
+    /// window yet.
+    fn install_keyboards(
+        cx: &mut TestAppContext,
+        unit_ids: &[[u8; 4]],
+    ) -> UnboundedReceiver<Command> {
         cx.update(gpui_kit::init);
         cx.update(|cx| {
             let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
-            let mut inventory = crate::state::tests::direct_inventory([1, 2, 3, 4]);
-            inventory.paired[0].kind = DeviceKind::Keyboard;
-            inventory.paired[0].capabilities = Some(Capabilities {
-                lighting: true,
-                ..Capabilities::default()
-            });
+            let inventories: Vec<_> = unit_ids
+                .iter()
+                .map(|&unit_id| {
+                    let mut inventory = crate::state::tests::direct_inventory(unit_id);
+                    inventory.paired[0].kind = DeviceKind::Keyboard;
+                    inventory.paired[0].capabilities = Some(Capabilities {
+                        lighting: true,
+                        ..Capabilities::default()
+                    });
+                    inventory
+                })
+                .collect();
             let runtime: Arc<dyn swr_core::Runtime> = Arc::new(swr_gpui::GpuiRuntime::new(cx));
             let client = swr_core::SwrClient::builder().build(runtime.clone());
             let state = cx.new(|_| {
                 let mut state = AppState::new(Sources {
                     config: Config::ephemeral(),
-                    inventories: &[inventory],
+                    inventories: &inventories,
                     standalone: &[],
                     resolver: &AssetResolver::new(),
                     cameras: &[],
@@ -546,5 +614,64 @@ mod picker {
         assert_eq!(lighting_writes(&mut receiver), 1);
         click_outside(cx);
         assert_eq!(lighting_writes(&mut receiver), 0, "closing writes no more");
+    }
+
+    /// Select the device at `index`, as a deep link or the gallery does.
+    fn select(index: usize, cx: &mut VisualTestContext) -> String {
+        cx.update(|_, cx| {
+            AppState::apply(cx, |state| state.select_device(index));
+            AppState::try_read(cx)
+                .and_then(AppState::current_record)
+                .map(DeviceRecord::record_key)
+                .expect("a selected device")
+        })
+    }
+
+    /// Type a color on keyboard A's page, then select keyboard B before the
+    /// page draws again, and let `finish` end the edit; B must stay as it was.
+    fn typed_color_device_switch(
+        cx: &mut TestAppContext,
+        finish: impl FnOnce(&Entity<Page>, &mut VisualTestContext),
+    ) {
+        let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+        let mut receiver = install_keyboards(cx, &[[1, 2, 3, 4], [5, 6, 7, 8]]);
+        let (page, cx) = cx.add_window_view(|window, cx| Page {
+            panel: cx.new(|cx| LightingPanel::new(window, cx)),
+            shown: true,
+        });
+        cx.simulate_resize(size(px(800.), px(600.)));
+        cx.update(|window, _| window.activate_window());
+        let a = select(0, cx);
+        cx.run_until_parked();
+        lighting_writes(&mut receiver);
+        let panel = cx.read(|cx| page.read(cx).panel.clone());
+        let picker = picker_of(&panel, cx);
+        click_custom_control(cx);
+        type_hex(&picker, "00ffaa", cx);
+
+        let b = select(1, cx);
+        assert_ne!(a, b, "two keyboards");
+        finish(&page, cx);
+        assert_eq!(current(cx), (true, Rgb::WHITE), "B keeps its lighting");
+        assert_eq!(lighting_writes(&mut receiver), 0, "A's draft is dropped");
+    }
+
+    #[gpui::test]
+    fn a_draft_is_not_written_to_a_device_opened_by_a_link(cx: &mut TestAppContext) {
+        typed_color_device_switch(cx, |page, cx| {
+            cx.update(|_, cx| {
+                page.update(cx, |page, cx| {
+                    page.shown = false;
+                    cx.notify();
+                });
+            });
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            cx.run_until_parked();
+        });
+    }
+
+    #[gpui::test]
+    fn a_draft_is_not_written_when_dismissed_on_another_devices_page(cx: &mut TestAppContext) {
+        typed_color_device_switch(cx, |_, cx| click_outside(cx));
     }
 }
