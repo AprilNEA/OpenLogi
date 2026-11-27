@@ -53,6 +53,7 @@ mod tests {
     /// panel must name it rather than find no catalog key for it.
     #[test]
     fn a_live_key_activation_has_a_label() {
+        let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
         let label = super::localized_action_label(&Action::ActivateLiveKey(ButtonId::grid(
             GridKey::Middle,
         )));
