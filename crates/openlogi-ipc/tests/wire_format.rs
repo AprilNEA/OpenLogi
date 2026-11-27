@@ -34,8 +34,9 @@ use std::fmt::Write;
 use bincode::Options;
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{
-    Action, ActionRingIcon, ActionRingSize, ActionRingSlot, ButtonId, GKey, GKeyProfile, GKeySlot,
-    GridKey, GridSlot, KeyCombo, KeypadPage, ModeKey,
+    Action, ActionRingIcon, ActionRingSize, ActionRingSlot, ButtonId, FlashBinding,
+    FlashBindingsState, FlashFunction, FlashWrite, GKey, GKeyProfile, GKeySlot, GridKey, GridSlot,
+    KeyCombo, KeypadPage, ModeKey, MouseButtonNumber,
 };
 use openlogi_core::config::{
     ConfigRevision, FlowPeerName, FlowPublicKey, Lighting, ScrollResolution,
@@ -47,8 +48,9 @@ use openlogi_core::device::{
 };
 use openlogi_core::hid::{
     BacklightChange, BacklightControls, BacklightDuration, BacklightMode, BacklightState,
-    BacklightStatus, Click, DeviceRoute, DisableKeysMask, DisableKeysState, Dpi, DpiCapabilities,
-    DpiInfo, EasySwitchHosts, EasySwitchSlot, FnLockState, ForceSensingInfo, HidppFeatureErrorKind,
+    BacklightStatus, Click, DeviceRoute, DisableKeysMask, DisableKeysState, DisabledProfile, Dpi,
+    DpiCapabilities, DpiInfo, EasySwitchHosts, EasySwitchSlot, FlashProfileEdit,
+    FlashProfileSettings, FlashProfiles, FnLockState, ForceSensingInfo, HidppFeatureErrorKind,
     HidppOperation, HostConnection, HostOsInfo, HostOsKind, LightCommand, OnboardMode,
     OnboardProfile, OnboardState, PasskeyMethod, ProfileIndex, ReceiverSelector, ReportRate,
     ReportRateInfo, ScrollReportingTarget, ScrollWheelMode, SidetoneLevel, SmartShiftAutoDisengage,
@@ -119,7 +121,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// unreleased version and leave this pin alone (`crates/openlogi-ipc/AGENTS.md`).
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 46);
+    assert_eq!(PROTOCOL_VERSION, 47);
 }
 
 #[test]
@@ -975,6 +977,7 @@ fn device_inventory() {
                 m_keys: false,
                 macro_record: false,
                 change_host: false,
+                flash_bindings: false,
             }),
             settings_revision: 7,
             hidpp10: false,
@@ -982,7 +985,7 @@ fn device_inventory() {
     }];
     assert_wire(
         &inventory,
-        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b01010100000101010101000101010101010100000001000000000700",
+        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b0101010000010101010100010101010101010000000100000000000700",
     );
 }
 
@@ -1010,6 +1013,52 @@ fn onboard_state() {
         },
         "0001050105010553746f636b01",
     );
+}
+
+#[test]
+fn flash_bindings_state() {
+    let sixteen = MouseButtonNumber::try_new(16).expect("a mouse button number");
+    assert_wire(
+        &AgentRequest::ReadFlashBindings {
+            route: DeviceRoute::Unifying {
+                receiver_uid: "C531".into(),
+                slot: 1,
+            },
+        },
+        "3a01044335333101",
+    );
+    assert_wire(
+        &FlashBindingsState {
+            profile: Some(0),
+            slots: vec![
+                FlashBinding::MouseButtons(0x0001),
+                FlashBinding::Key {
+                    modifiers: 0x05,
+                    usage: 0x06,
+                },
+                FlashBinding::Consumer(0x00e9),
+                FlashBinding::Function(FlashFunction::ResolutionUp),
+                FlashBinding::Function(FlashFunction::Other(0x0099)),
+                FlashBinding::Disabled,
+                FlashBinding::Macro {
+                    page: 6,
+                    word_offset: 0x10,
+                },
+                FlashBinding::Raw([0x8f, 0x01, 0x02]),
+            ],
+            routed: BTreeMap::from([(sixteen, ButtonId::G6)]),
+            unrouted: vec![ButtonId::G11],
+            write: FlashWrite::Failed("gone".into()),
+            page: Some(4),
+        },
+        "010008000101050602e90303030b9904050610068f0102011002473601034731310304676f6e650104",
+    );
+    assert_wire(&FlashWrite::Writing, "02");
+    assert_wire(&Action::ShowBatteryLevel, "41");
+    assert_wire(&Action::CycleOnboardProfiles, "44");
+    assert_wire(&Action::MouseButton(sixteen), "4510");
+    assert_wire(&ButtonId::G10, "03473130");
+    assert_wire(&ButtonId::Numbered(sixteen), "08427574746f6e3136");
 }
 
 #[test]
@@ -1513,5 +1562,72 @@ fn disable_keys_requests_are_appended() {
             desired: DisableKeysMask::CAPS_LOCK,
         },
         "2d000846303044434146450101",
+    );
+}
+
+#[test]
+fn flash_profiles() {
+    let route = DeviceRoute::Unifying {
+        receiver_uid: "C531".into(),
+        slot: 1,
+    };
+    let first = ProfileIndex::new(1).expect("profile 1");
+    assert_wire(
+        &AgentRequest::ReadFlashProfiles {
+            route: route.clone(),
+        },
+        "3b01044335333101",
+    );
+    assert_wire(
+        &AgentRequest::EditFlashProfiles {
+            route,
+            edit: FlashProfileEdit::Rename {
+                profile: first,
+                name: "Игры".into(),
+            },
+        },
+        "3c01044335333101030108d098d0b3d180d18b",
+    );
+    assert_wire(
+        &FlashProfiles {
+            onboard: OnboardState {
+                mode: OnboardMode::Onboard,
+                active_profile: Some(first),
+                profiles: vec![
+                    OnboardProfile {
+                        index: first,
+                        name: Some("\u{1f}@>D8;L 1".into()),
+                        enabled: true,
+                    },
+                    OnboardProfile {
+                        index: ProfileIndex::new(2).expect("profile 2"),
+                        name: None,
+                        enabled: false,
+                    },
+                ],
+            },
+            active: Some(FlashProfileSettings {
+                dpi_modes: vec![Some(Dpi::new(850)), None],
+                default_mode: Some(0),
+                report_rate: Some(ReportRate::new(250)),
+            }),
+            disabled: vec![DisabledProfile {
+                page: 8,
+                name: None,
+            }],
+            can_create: true,
+            write: FlashWrite::Pending,
+            pages: vec![2],
+        },
+        "000101020101091f403e44383b4c203101020000010201fb520300010001fa01080001010102",
+    );
+    assert_wire(&HidppOperation::SelectOnboardProfile, "21");
+    assert_wire(&FlashProfileEdit::Activate(first), "0001");
+    assert_wire(&FlashProfileEdit::Enable { page: 8 }, "0108");
+    assert_wire(&FlashProfileEdit::Disable(first), "0201");
+    assert_wire(&FlashProfileEdit::Duplicate(first), "0401");
+    assert_wire(
+        &FlashProfileEdit::DpiModes(vec![Dpi::new(400), Dpi::new(5700)]),
+        "0502fb9001fb4416",
     );
 }

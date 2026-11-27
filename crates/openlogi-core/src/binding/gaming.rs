@@ -1,8 +1,10 @@
-//! `0x8110` button layouts of G-series mice, dumped from real hardware.
-//! Slot `n` is spy bit `n` and asset slot `g{n + 1}`.
+//! Button layouts of G-series mice: the `0x8110` slots dumped from real
+//! hardware, where slot `n` is spy bit `n` and asset slot `g{n + 1}`, and the
+//! binding slots of a mouse that keeps its bindings in onboard flash.
 
 use super::action::Action;
 use super::button::ButtonId;
+use super::flash::{FlashBinding, FlashFunction};
 use crate::device::Capabilities;
 
 /// One `0x8110` slot of a G-series mouse.
@@ -62,6 +64,10 @@ pub struct GamingLayout {
     pub slots: &'static [Slot],
     /// Stock DPI levels, used until the user sets presets.
     pub stock_dpi_presets: &'static [u16],
+    /// What each slot does from the factory, for a mouse whose flash holds
+    /// its bindings (see [`GamingButtons::Flash`]); empty for every other
+    /// layout. Resetting a slot writes this back.
+    pub flash_defaults: &'static [FlashBinding],
 }
 
 /// G502 LIGHTSPEED (wpid `0x407f`). The extended model id tells the colours
@@ -87,6 +93,7 @@ pub const G502_LIGHTSPEED: GamingLayout = GamingLayout {
         Slot::silent(ButtonId::WheelTiltLeft),
     ],
     stock_dpi_presets: &[400, 800, 1600, 3200, 6400],
+    flash_defaults: &[],
 };
 
 /// G903 LIGHTSPEED (wpid `0x4087`), dumped in #2178. Ambidextrous: the left
@@ -109,6 +116,53 @@ pub const G903_LIGHTSPEED: GamingLayout = GamingLayout {
         Slot::silent(ButtonId::WheelTiltRight),
     ],
     stock_dpi_presets: &[400, 800, 1600, 3200, 6400],
+    flash_defaults: &[],
+};
+
+/// Logitech G700 / G700s: the thirteen binding slots of each onboard
+/// profile, slot `n` at index `n` of the profile's binding table (libratbag's
+/// button order, Piper's `button{n}`).
+///
+/// The left, right, middle, back and forward slots and the wheel tilts are
+/// libratbag's. Where slots 5 to 10 sit on the mouse has not been checked
+/// against the hardware yet, so they carry neutral names, G6 to G11 by slot
+/// number as the G502's do. This table and `flash_defaults` are the one
+/// place a hardware pass corrects.
+pub const G700: GamingLayout = GamingLayout {
+    model_keys: &[],
+    slots: &[
+        Slot::native(ButtonId::LeftClick),
+        Slot::native(ButtonId::RightClick),
+        Slot::native(ButtonId::MiddleClick),
+        Slot::native(ButtonId::Back),
+        Slot::native(ButtonId::Forward),
+        Slot::native(ButtonId::G6),
+        Slot::native(ButtonId::G7),
+        Slot::native(ButtonId::G8),
+        Slot::native(ButtonId::G9),
+        Slot::native(ButtonId::G10),
+        Slot::native(ButtonId::G11),
+        Slot::native(ButtonId::WheelTiltLeft),
+        Slot::native(ButtonId::WheelTiltRight),
+    ],
+    stock_dpi_presets: &[],
+    // libratbag's defaults and the user profiles dumped on 2026-10-31:
+    // buttons 1 to 7, then the battery, DPI and profile functions.
+    flash_defaults: &[
+        FlashBinding::MouseButtons(1 << 0),
+        FlashBinding::MouseButtons(1 << 1),
+        FlashBinding::MouseButtons(1 << 2),
+        FlashBinding::MouseButtons(1 << 3),
+        FlashBinding::MouseButtons(1 << 4),
+        FlashBinding::MouseButtons(1 << 5),
+        FlashBinding::MouseButtons(1 << 6),
+        FlashBinding::Function(FlashFunction::BatteryLevel),
+        FlashBinding::Function(FlashFunction::ResolutionDown),
+        FlashBinding::Function(FlashFunction::ResolutionUp),
+        FlashBinding::Function(FlashFunction::ProfileCycleUp),
+        FlashBinding::Function(FlashFunction::WheelLeft),
+        FlashBinding::Function(FlashFunction::WheelRight),
+    ],
 };
 
 /// A gaming mouse whose layout nobody has dumped. Its first five slots are
@@ -127,6 +181,7 @@ pub const STANDARD_BUTTONS: GamingLayout = GamingLayout {
         Slot::native(ButtonId::Forward),
     ],
     stock_dpi_presets: &[],
+    flash_defaults: &[],
 };
 
 const LAYOUTS: &[&GamingLayout] = &[&G502_LIGHTSPEED, &G903_LIGHTSPEED];
@@ -142,6 +197,11 @@ pub enum GamingButtons {
     /// nobody has dumped: only [`STANDARD_BUTTONS`], which the OS hook
     /// remaps.
     Standard,
+    /// A mouse that keeps its bindings in onboard flash
+    /// ([`Capabilities::flash_bindings`]): the agent writes them there, and
+    /// the OS hook catches only the buttons it gave actions the mouse cannot
+    /// run (see [`crate::binding::flash`]).
+    Flash(&'static GamingLayout),
 }
 
 impl GamingButtons {
@@ -153,17 +213,42 @@ impl GamingButtons {
         if let Some(layout) = GamingLayout::for_model_key(model_key) {
             return Some(Self::Dumped(layout));
         }
+        if let Some(layout) = Self::flash_layout_for(capabilities) {
+            return Some(Self::Flash(layout));
+        }
         capabilities
             .is_some_and(Capabilities::no_button_diversion)
             .then_some(Self::Standard)
+    }
+
+    /// The layout of a mouse whose flash holds its bindings, judged by its
+    /// `capabilities` alone: the agent's flash writes need no model key,
+    /// which a HID++ 1.0 mouse does not report.
+    #[must_use]
+    pub fn flash_layout_for(capabilities: Option<&Capabilities>) -> Option<&'static GamingLayout> {
+        // Only the G700 sets the flag; a second such model would need its
+        // own key to tell its layout apart.
+        capabilities
+            .is_some_and(|capabilities| capabilities.flash_bindings)
+            .then_some(&G700)
     }
 
     /// The buttons the Buttons panel draws.
     #[must_use]
     pub const fn layout(self) -> &'static GamingLayout {
         match self {
-            Self::Dumped(layout) => layout,
+            Self::Dumped(layout) | Self::Flash(layout) => layout,
             Self::Standard => &STANDARD_BUTTONS,
+        }
+    }
+
+    /// The layout of a mouse whose flash holds its bindings, `None` for any
+    /// other verdict.
+    #[must_use]
+    pub const fn flash_layout(self) -> Option<&'static GamingLayout> {
+        match self {
+            Self::Flash(layout) => Some(layout),
+            Self::Dumped(_) | Self::Standard => None,
         }
     }
 }
@@ -219,6 +304,14 @@ impl GamingLayout {
 
     fn slot(&self, button: ButtonId) -> Option<&Slot> {
         self.slots.iter().find(|slot| slot.button == button)
+    }
+
+    /// What slot `button` does from the factory, on a flash layout.
+    #[must_use]
+    pub fn flash_default(&self, button: ButtonId) -> Option<FlashBinding> {
+        self.flash_defaults
+            .get(usize::from(self.slot_of(button)?))
+            .copied()
     }
 }
 

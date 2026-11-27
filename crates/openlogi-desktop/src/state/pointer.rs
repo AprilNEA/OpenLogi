@@ -29,6 +29,14 @@ pub(super) struct PointerState {
     /// save it.
     pub(super) pending_force_sensing_writes: HashMap<DeviceKey, u64>,
     pub(super) next_force_sensing_write: u64,
+    /// The agent's refusal of the last profile edit asked of each flash
+    /// mouse, until the next edit; a refusal met while writing shows in its
+    /// profiles reading instead.
+    pub(super) flash_edit_refusals: HashMap<DeviceKey, String>,
+    /// A profile copy asked of each flash mouse whose new page is not seen
+    /// yet: the copy takes the source profile's OpenLogi bindings once it
+    /// lands.
+    pub(super) flash_copies: HashMap<DeviceKey, super::onboard::PendingCopy>,
 }
 
 impl Default for PointerState {
@@ -41,6 +49,8 @@ impl Default for PointerState {
             next_dpi_write: 0,
             refused_pointer_speeds: HashSet::new(),
             refused_force_sensing: HashSet::new(),
+            flash_edit_refusals: HashMap::new(),
+            flash_copies: HashMap::new(),
             pending_force_sensing_writes: HashMap::new(),
             next_force_sensing_write: 0,
         }

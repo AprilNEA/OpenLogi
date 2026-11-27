@@ -49,6 +49,7 @@ use crate::ui::theme::{
 
 mod backlight;
 mod easy_switch;
+mod flash_profiles;
 
 /// The preview plus the card's padding and its 1 px border. The border stays
 /// one pixel at every interface scale, so keep a little slack for it below 100 %.
@@ -281,6 +282,7 @@ fn buttons_tab(
         .w_full()
         .min_w_0()
         .min_h_0()
+        .children(flash_profiles::flash_profile_bar(cx))
         .children(button_profile_scope_bar(profile_icons, app_catalog, cx))
         .children(gshift_layer_bar(cx))
         .child(mouse_model.clone())
@@ -451,6 +453,13 @@ fn pointer_tab(
                     .child(scrolling_card(pal, cx)),
             )
             .children(onboard_card(pal, cx).map(pointer_grid_card))
+            .children(
+                flash_profiles::flash_profiles_card(
+                    flash_profiles::FlashProfilesFacts::current(cx),
+                    pal,
+                )
+                .map(pointer_grid_card),
+            )
             // Full width, so it always starts its own row at the bottom.
             .child(
                 div().w_full().child(

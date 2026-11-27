@@ -6008,6 +6008,8 @@ dependencies = [
  "openlogi-ipc",
  "openlogi-ui",
  "resvg 0.46.0",
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",

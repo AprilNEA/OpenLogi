@@ -8,6 +8,7 @@
 use std::cell::RefCell;
 
 use core_graphics::event::{CGEvent, CGEventField, CGEventFlags, CGEventType, EventField};
+use openlogi_core::binding::MouseButtonNumber;
 use tracing::debug;
 
 use super::sender::{event_sender_id, sender_device_info};
@@ -16,7 +17,9 @@ use crate::{ButtonId, KeyEvent, KeyModifiers, MouseEvent, ScrollDelta};
 /// Translate a raw OS button number to a [`ButtonId`].
 ///
 /// Logi's convention: button 0 = left, 1 = right, 2 = middle, 3 = back,
-/// 4 = forward. Numbers ≥5 don't map to a `ButtonId` we track.
+/// 4 = forward. Numbers 8 to 15 are HID buttons 9 to 16, reported as
+/// [`ButtonId::Numbered`] for the agent buttons of a flash-bindings mouse;
+/// 5 to 7 and anything past 15 don't map to a `ButtonId` we track.
 fn button_number_to_id(n: i64) -> Option<ButtonId> {
     match n {
         0 => Some(ButtonId::LeftClick),
@@ -24,6 +27,10 @@ fn button_number_to_id(n: i64) -> Option<ButtonId> {
         2 => Some(ButtonId::MiddleClick),
         3 => Some(ButtonId::Back),
         4 => Some(ButtonId::Forward),
+        8..=15 => u8::try_from(n + 1)
+            .ok()
+            .and_then(|number| MouseButtonNumber::try_new(number).ok())
+            .map(ButtonId::Numbered),
         _ => None,
     }
 }
@@ -374,11 +381,23 @@ mod tests {
     use core_graphics::event::{CGEvent, CGEventType, EventField};
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 
+    use openlogi_core::binding::MouseButtonNumber;
+
     use super::{
-        LAST_ATTRIBUTION, last_attribution, remember_attribution, resolve_button_source,
-        translate_key,
+        LAST_ATTRIBUTION, button_number_to_id, last_attribution, remember_attribution,
+        resolve_button_source, translate_key,
     };
     use crate::ButtonId;
+
+    #[test]
+    fn buttons_nine_to_sixteen_are_numbered() {
+        let numbered = |n| ButtonId::Numbered(MouseButtonNumber::try_new(n).unwrap());
+        assert_eq!(button_number_to_id(3), Some(ButtonId::Back));
+        assert_eq!(button_number_to_id(5), None);
+        assert_eq!(button_number_to_id(8), Some(numbered(9)));
+        assert_eq!(button_number_to_id(15), Some(numbered(16)));
+        assert_eq!(button_number_to_id(16), None);
+    }
 
     fn key_down(vk: u16) -> CGEvent {
         let source = CGEventSource::new(CGEventSourceStateID::Private).expect("an event source");

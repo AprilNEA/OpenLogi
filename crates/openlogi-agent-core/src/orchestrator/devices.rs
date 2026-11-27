@@ -6,8 +6,8 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
 use openlogi_core::config::{Config, DeviceConfig, ScrollResolution};
-use openlogi_core::device::{DeviceInventory, StandaloneDevice};
-use openlogi_core::device_order::{DeviceIdentity, DeviceStableId};
+use openlogi_core::device::{DeviceInventory, PairedDevice, StandaloneDevice};
+use openlogi_core::device_order::{DeviceIdentity, DeviceStableId, PhysicalDeviceKey};
 use openlogi_hid::session::gesture::MainWheelDivert;
 use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute, Dpi, LeadCookie, ReportRate};
 
@@ -184,6 +184,27 @@ pub(super) fn assignments_changed(previous: &Config, config: &Config, key: &str)
         || before.action_ring != after.action_ring
 }
 
+/// The configuration key of `paired`, reached by `route`, as the GUI keys
+/// it; `None` when nothing could be stored for it.
+///
+/// A device with no model info (a HID++ 1.0 mouse) has no identity beyond
+/// its route. An offline probe reports an all-zero unit id, which is not a
+/// physical identity — it is offered only while the device is online,
+/// exactly as the GUI does, or every sleeping device would resolve to the
+/// same non-key.
+pub(super) fn paired_config_key(
+    config: &Config,
+    route: Option<&DeviceRoute>,
+    paired: &PairedDevice,
+) -> Option<PhysicalDeviceKey> {
+    let (serial, unit_id) = paired.model_info.as_ref().map_or((None, [0; 4]), |model| {
+        (model.serial_number.as_deref(), model.unit_id)
+    });
+    let stable_id = DeviceStableId::from_parts(route, paired.slot, serial, unit_id);
+    let identity = DeviceIdentity::from_parts(serial, unit_id);
+    config.resolve_device_key(&stable_id, paired.online.then_some(&identity))
+}
+
 /// Build the agent device list from an inventory snapshot. Mirrors the GUI's
 /// `build_device_list` minus the asset/display fields: a device is included
 /// only once its HID++ DeviceInformation (`model_info`) has resolved, since the
@@ -206,21 +227,7 @@ pub(super) fn build_devices(
                 continue;
             };
             let route = DeviceRoute::for_slot(inv, paired.slot);
-            let stable_id = DeviceStableId::from_parts(
-                route.as_ref(),
-                paired.slot,
-                model.serial_number.as_deref(),
-                model.unit_id,
-            );
-            // An offline probe reports an all-zero unit id, which is not a
-            // physical identity — offer it only while the device is online,
-            // exactly as the GUI does, or every sleeping device would resolve
-            // to the same non-key.
-            let identity =
-                DeviceIdentity::from_parts(model.serial_number.as_deref(), model.unit_id);
-            let Some(config_key) =
-                config.resolve_device_key(&stable_id, paired.online.then_some(&identity))
-            else {
+            let Some(config_key) = paired_config_key(config, route.as_ref(), paired) else {
                 continue;
             };
             devices.push(AgentDevice {

@@ -79,11 +79,15 @@ impl<Node: Eq, Channel> NodeRegistry<Node, Channel> {
     }
 
     fn lookup(&self, route: &DeviceRoute) -> Option<&Channel> {
+        self.lookup_publication(route)
+            .map(|publication| &publication.channel)
+    }
+
+    fn lookup_publication(&self, route: &DeviceRoute) -> Option<&Publication<Node, Channel>> {
         self.publications
             .iter()
             .filter(|publication| publication.routes.contains(route))
             .min_by_key(|publication| publication.sequence)
-            .map(|publication| &publication.channel)
     }
 
     fn any_current(&self, mut predicate: impl FnMut(&DeviceRoute, &Channel) -> bool) -> bool {
@@ -207,6 +211,17 @@ impl<Node: Eq, Channel: Clone> Registry<Node, Channel> {
     }
 }
 
+impl<Node: Eq + Clone, Channel: Clone> Registry<Node, Channel> {
+    /// [`Self::lookup`], with the node that publishes the winner.
+    fn lookup_with_node(&self, route: &DeviceRoute) -> Option<(Node, Channel)> {
+        self.state
+            .read()
+            .ok()?
+            .lookup_publication(route)
+            .map(|publication| (publication.node.clone(), publication.channel.clone()))
+    }
+}
+
 impl<Node: Eq, Channel> Registry<Node, Channel> {
     fn any_current(&self, predicate: impl FnMut(&DeviceRoute, &Channel) -> bool) -> bool {
         self.state
@@ -298,8 +313,8 @@ impl ChannelRegistry {
     #[must_use]
     pub fn lookup(&self, route: &DeviceRoute) -> Option<SharedChannel> {
         self.inner
-            .lookup(route)
-            .map(|channel| SharedChannel::new(channel, route.clone()))
+            .lookup_with_node(route)
+            .map(|(node, channel)| SharedChannel::on_node(channel, route.clone(), node))
     }
 
     /// Whether `shared` is still the winning publication for its exact route

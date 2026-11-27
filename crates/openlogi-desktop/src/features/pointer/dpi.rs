@@ -8,6 +8,7 @@
 //! reports). Capability discovery runs in the background and the UI only
 //! exposes exact device-supported values once the list is known.
 
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, Context, Entity, IntoElement, ParentElement, Render, Styled, Subscription, Window,
     div, px,
@@ -64,12 +65,28 @@ struct DpiPanelSnapshot {
     /// device sits in `Unknown` forever (discovery can't start without a
     /// route), so the UI must say "offline" rather than "reading…".
     reachable: bool,
+    /// How many presets the active device can hold: the DPI modes of a
+    /// flash mouse's played profile, which also needs at least one; `None`
+    /// for a device whose presets live in configuration, unbounded.
+    flash_slots: Option<usize>,
+}
+
+impl DpiPanelSnapshot {
+    fn can_add_preset(&self) -> bool {
+        self.flash_slots
+            .is_none_or(|slots| self.presets.len() < slots)
+    }
+
+    fn can_remove_preset(&self) -> bool {
+        self.flash_slots.is_none() || self.presets.len() > 1
+    }
 }
 
 impl DpiPanel {
     pub fn new(cx: &mut Context<Self>) -> Self {
         // Repaint when the active device changes, DPI discovery completes,
-        // or the report-rate read lands. The slider entity is rebuilt in
+        // the report-rate read lands, or a flash mouse's profiles (which
+        // hold its presets) are read again. The slider entity is rebuilt in
         // `render` whenever the selected device or reported range changes,
         // because SliderState's range is builder-only.
         let state_obs = AppState::repaint_on(cx, |event| {
@@ -78,6 +95,7 @@ impl DpiPanel {
                 StateEvent::DpiChanged(_)
                     | StateEvent::ReportRateChanged(_)
                     | StateEvent::PointerSpeedChanged(_)
+                    | StateEvent::OnboardChanged(_)
             )
         });
 
@@ -195,7 +213,13 @@ impl DpiPanel {
                     .map_or(*value, |state| state.normalize_active_dpi(*value));
                 let active = !already_highlighted && normalized == snapshot.dpi;
                 already_highlighted |= active;
-                preset_chip(idx, *value, active, &snapshot.presets)
+                preset_chip(
+                    idx,
+                    *value,
+                    active,
+                    &snapshot.presets,
+                    snapshot.can_remove_preset(),
+                )
             })
             .collect();
 
@@ -236,8 +260,18 @@ impl DpiPanel {
                             .gap_2()
                             .flex_wrap()
                             .children(preset_chips)
-                            .child(add_preset_chip()),
-                    ),
+                            .when(snapshot.can_add_preset(), |row| {
+                                row.child(add_preset_chip())
+                            }),
+                    )
+                    .when(snapshot.flash_slots.is_some(), |column| {
+                        column.child(
+                            div()
+                                .text_caption()
+                                .text_color(pal.text_muted)
+                                .child(tr!("pointer.dpi_presets_stored_on_mouse")),
+                        )
+                    }),
             )
             .into_any_element()
     }
@@ -261,6 +295,7 @@ fn dpi_panel_snapshot(cx: &mut Context<DpiPanel>) -> DpiPanelSnapshot {
                 dpi: s.dpi(),
                 presets: s.dpi_presets(),
                 reachable: record.route.is_some(),
+                flash_slots: s.current_flash_dpi_slots(),
             })
         })
         .unwrap_or_else(|| DpiPanelSnapshot {
@@ -269,6 +304,7 @@ fn dpi_panel_snapshot(cx: &mut Context<DpiPanel>) -> DpiPanelSnapshot {
             presets: Vec::new(),
             status: DpiLoad::Unsupported(tr!("device.no_active_device").to_string()),
             reachable: false,
+            flash_slots: None,
         })
 }
 
@@ -349,7 +385,13 @@ const CHIP_H: f32 = 28.;
 
 /// One DPI preset rendered as a chip. Clicking the chip writes that DPI to
 /// the device and updates `AppState.dpi`; the small × removes the preset.
-fn preset_chip(idx: usize, value: Dpi, active: bool, presets: &[Dpi]) -> impl IntoElement {
+fn preset_chip(
+    idx: usize,
+    value: Dpi,
+    active: bool,
+    presets: &[Dpi],
+    removable: bool,
+) -> impl IntoElement {
     let presets_for_remove: Vec<Dpi> = presets.to_vec();
     let remove_label = tr!("common.remove_named_item", name => format!("{value} DPI"));
     PresetChip::new(("dpi-preset-chip", idx))
@@ -375,7 +417,7 @@ fn preset_chip(idx: usize, value: Dpi, active: bool, presets: &[Dpi]) -> impl In
                     AppState::apply(cx, |state| state.commit_dpi(dpi));
                 }),
         )
-        .child(
+        .children(removable.then(|| {
             Button::new(("dpi-preset-remove", idx))
                 .small()
                 .ghost()
@@ -387,9 +429,9 @@ fn preset_chip(idx: usize, value: Dpi, active: bool, presets: &[Dpi]) -> impl In
                     if idx < next.len() {
                         next.remove(idx);
                     }
-                    AppState::apply(cx, |state| state.commit_dpi_presets(next));
-                }),
-        )
+                    AppState::edit_dpi_presets(cx, next);
+                })
+        }))
 }
 
 /// "+" chip that snapshots `AppState.dpi` as a new preset.
@@ -404,10 +446,13 @@ fn add_preset_chip() -> impl IntoElement {
             // Append the current DPI to the active device's preset list.
             // Duplicates are allowed — the user might want the same value
             // appearing at multiple cycle positions for muscle-memory reasons.
-            AppState::apply(cx, |state| {
+            let Some(presets) = AppState::try_read(cx).map(|state| {
                 let mut presets = state.dpi_presets();
                 presets.push(state.dpi());
-                state.commit_dpi_presets(presets)
-            });
+                presets
+            }) else {
+                return;
+            };
+            AppState::edit_dpi_presets(cx, presets);
         })
 }

@@ -13,7 +13,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use openlogi_core::binding::{
-    Action, Binding, ButtonId, GestureDirection, SwipeAccumulator, default_binding,
+    Action, Binding, ButtonId, GestureDirection, MouseButtonNumber, SwipeAccumulator,
+    default_binding, flash::is_flash_bindings_input,
 };
 use openlogi_core::config::KeyTrigger;
 use openlogi_hid::DeviceRoute;
@@ -61,9 +62,36 @@ pub struct HookMaps {
     /// Devices with a G-Shift button held, set by HID++ capture. Survives map
     /// rebuilds like `diverted_buttons`.
     pub(crate) shift_held: BTreeSet<String>,
+    /// The bindings of the slots of each onboard profile of a
+    /// flash-bindings mouse (the G700), by the profile's flash page, for the
+    /// app in front. Configuration, rebuilt with the rest.
+    pub(crate) flash_slot_bindings: BTreeMap<u8, BTreeMap<ButtonId, Binding>>,
+    /// The profile slot each agent button of that mouse stands for, as the
+    /// flash-write task last found or wrote its flash. A hardware
+    /// observation, so it survives map rebuilds.
+    pub(crate) flash_routes: BTreeMap<MouseButtonNumber, FlashRoute>,
+}
+
+/// The slot of one onboard profile an agent button stands for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FlashRoute {
+    /// The flash page of the profile.
+    pub(crate) page: u8,
+    /// The slot's button.
+    pub(crate) slot: ButtonId,
 }
 
 impl HookMaps {
+    /// The binding of the profile slot that presses agent button `number`
+    /// on a flash-bindings mouse, if the flash routes one there.
+    fn flash_binding(&self, number: MouseButtonNumber) -> Option<Binding> {
+        let route = self.flash_routes.get(&number)?;
+        self.flash_slot_bindings
+            .get(&route.page)?
+            .get(&route.slot)
+            .cloned()
+    }
+
     /// The held G-Shift layer's binding for `id`, which replaces the
     /// selected device's own binding and gestures for the press.
     fn shift_binding(&self, id: ButtonId) -> Option<&Binding> {
@@ -424,6 +452,19 @@ fn try_queue_action(
     }
 }
 
+/// Whether `device` is a mouse whose buttons its own flash binds. Every
+/// button it reports is already what its flash made of the press, so the
+/// hook leaves all of them alone except the agent buttons it routes.
+fn is_flash_source(device: Option<&EventDevice>) -> bool {
+    device.is_some_and(|device| {
+        let id = |id: Option<u32>| id.and_then(|id| u16::try_from(id).ok());
+        matches!(
+            (id(device.vendor_id), id(device.product_id)),
+            (Some(vendor), Some(product)) if is_flash_bindings_input(vendor, product)
+        )
+    })
+}
+
 /// Remap path for Middle/Back/Forward. Must stay lock-light and non-blocking.
 fn handle_button(
     id: ButtonId,
@@ -433,6 +474,9 @@ fn handle_button(
     dispatcher: &ActionDispatcher,
     capture_safari_pid: impl FnOnce() -> Option<i32>,
 ) -> EventDisposition {
+    if is_flash_source(device) {
+        return handle_flash_button(id, pressed, hooks, dispatcher, capture_safari_pid);
+    }
     // Primary L/R always pass through (suppressing them would brick the mouse).
     if !id.is_os_hook_button() || !button_source_may_remap(device) {
         return EventDisposition::PassThrough;
@@ -551,6 +595,55 @@ fn end_press(
             dispatcher.try_hook_button_up(id);
         }
         PressPhase::Diverted(_) | PressPhase::Passthrough => {}
+    }
+    disposition
+}
+
+/// A button of a flash-bindings mouse. Only an agent button the flash
+/// routes a slot to runs that slot's binding; every other button, the
+/// mouse's own Back and Forward among them, is what the user bound on the
+/// mouse and passes through.
+fn handle_flash_button(
+    id: ButtonId,
+    pressed: bool,
+    hooks: &SharedHookMaps,
+    dispatcher: &ActionDispatcher,
+    capture_safari_pid: impl FnOnce() -> Option<i32>,
+) -> EventDisposition {
+    let ButtonId::Numbered(number) = id else {
+        return EventDisposition::PassThrough;
+    };
+    if !pressed {
+        // Drop the PRESSES borrow before any queueing (re-entrancy freeze hazard).
+        let released = PRESSES.with_borrow_mut(|presses| presses.release(id));
+        return end_press(id, released, hooks, dispatcher);
+    }
+    // The slot's binding is the flash mouse's own, not a layer of the selected
+    // device, so the press carries the pointer context without a button scope.
+    let (binding, pointer) = hooks.try_read().map_or((None, None), |maps| {
+        (
+            maps.flash_binding(number),
+            maps.pointer.as_ref().map(PointerSelection::unscoped_press),
+        )
+    });
+    let phase = match binding {
+        Some(binding) => {
+            info!(button = %id, action = %binding.click_action().label(), "agent button → handling binding");
+            start_press(
+                id,
+                Some(binding),
+                false,
+                ActionDispatchTarget::for_pointer(pointer, capture_safari_pid),
+                dispatcher,
+            )
+        }
+        None => PressPhase::Passthrough,
+    };
+    let disposition = phase.disposition();
+    let restarted = matches!(phase, PressPhase::Suppressed);
+    let displaced = PRESSES.with_borrow_mut(|presses| presses.press(id, phase));
+    if !restarted && let Some(PressPhase::HeldAsGesture { hold }) = displaced {
+        dispatcher.cancel_stale_hook_press(&hold.press);
     }
     disposition
 }

@@ -329,6 +329,7 @@ macro_rules! derive_action_icon {
                 match action {
                     $( Action::$variant => Self::$icon, )*
                     Action::SetDpiPreset(_) => Self::Gauge,
+                    Action::MouseButton(_) => Self::Mouse,
                     Action::CustomShortcut(_)
                     | Action::TypeText(_)
                     | Action::Workflow(_)

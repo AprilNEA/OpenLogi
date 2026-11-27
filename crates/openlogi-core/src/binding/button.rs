@@ -11,6 +11,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use thiserror::Error;
 
 use super::control::Cid;
+use super::flash::MouseButtonNumber;
 use super::g_keys::{GKey, GKeyProfile, GKeySlot, ModeKey};
 
 /// One of the user-rebindable controls on a Logi device: a mouse hotspot,
@@ -87,6 +88,17 @@ pub enum ButtonId {
     G8,
     /// G-series button G9.
     G9,
+    /// G-series button G10.
+    G10,
+    /// G-series button G11.
+    G11,
+    /// A mouse button by the number the HID report gives it, for the
+    /// buttons past those above that a mouse reports to the OS (9 to 16).
+    /// The OS hook reports them and passes them through; only the agent
+    /// buttons a flash-bindings mouse presses for an action it cannot run
+    /// (see [`crate::binding::flash`]) are caught. Persisted as `Button9` …
+    /// `Button16`.
+    Numbered(MouseButtonNumber),
     /// A key on a keypad's 3×3 LCD grid, on one of the keypad's binding pages.
     /// These keys report through a vendor report rather than `0x1b04`, so they
     /// have no control ID and no divertable state: bound or not, they emit
@@ -141,7 +153,14 @@ impl ButtonId {
     ];
 
     /// G-series buttons, kept out of [`Self::ALL`].
-    pub const G_BUTTONS: [ButtonId; 4] = [ButtonId::G6, ButtonId::G7, ButtonId::G8, ButtonId::G9];
+    pub const G_BUTTONS: [ButtonId; 6] = [
+        ButtonId::G6,
+        ButtonId::G7,
+        ButtonId::G8,
+        ButtonId::G9,
+        ButtonId::G10,
+        ButtonId::G11,
+    ];
 
     /// The keyboard key bound to `0x1b04` control `cid`.
     #[must_use]
@@ -258,7 +277,7 @@ impl ButtonId {
     /// string form read this one table; `unit_name` is a match without a
     /// wildcard over the unit variants, so a new variant that is missing here
     /// fails to compile rather than failing to parse.
-    const UNIT_NAMES: [(ButtonId, &'static str); 17] = [
+    const UNIT_NAMES: [(ButtonId, &'static str); 19] = [
         (ButtonId::LeftClick, "LeftClick"),
         (ButtonId::RightClick, "RightClick"),
         (ButtonId::MiddleClick, "MiddleClick"),
@@ -276,10 +295,13 @@ impl ButtonId {
         (ButtonId::G7, "G7"),
         (ButtonId::G8, "G8"),
         (ButtonId::G9, "G9"),
+        (ButtonId::G10, "G10"),
+        (ButtonId::G11, "G11"),
     ];
 
-    /// The name a mouse button is persisted under. Keyboard controls have no
-    /// fixed name here; see [`Cid::config_name`].
+    /// The name a mouse button is persisted under. Numbered buttons and
+    /// keyboard controls have no fixed name here; see [`Self::config_name`]
+    /// and [`Cid::config_name`].
     const fn unit_name(self) -> Option<&'static str> {
         Some(match self {
             ButtonId::LeftClick => Self::UNIT_NAMES[0].1,
@@ -299,13 +321,17 @@ impl ButtonId {
             ButtonId::G7 => Self::UNIT_NAMES[14].1,
             ButtonId::G8 => Self::UNIT_NAMES[15].1,
             ButtonId::G9 => Self::UNIT_NAMES[16].1,
-            // Grid keys, keyboard controls and gaming keys have no fixed name
-            // in this table; see [`GridKey::config_name`],
-            // [`Cid::config_name`], [`GKeySlot::config_name`] and
-            // [`ModeKey::config_name`].
-            ButtonId::Grid(_) | ButtonId::Control(_) | ButtonId::GKey(_) | ButtonId::ModeKey(_) => {
-                return None;
-            }
+            ButtonId::G10 => Self::UNIT_NAMES[17].1,
+            ButtonId::G11 => Self::UNIT_NAMES[18].1,
+            // Numbered buttons, grid keys, keyboard controls and gaming keys
+            // have no fixed name in this table; see [`Self::config_name`],
+            // [`GridKey::config_name`], [`Cid::config_name`],
+            // [`GKeySlot::config_name`] and [`ModeKey::config_name`].
+            ButtonId::Numbered(_)
+            | ButtonId::Grid(_)
+            | ButtonId::Control(_)
+            | ButtonId::GKey(_)
+            | ButtonId::ModeKey(_) => return None,
         })
     }
 
@@ -317,6 +343,7 @@ impl ButtonId {
             ButtonId::Grid(slot) => slot.config_name(),
             ButtonId::GKey(slot) => slot.config_name(),
             ButtonId::ModeKey(key) => Cow::Borrowed(key.config_name()),
+            ButtonId::Numbered(number) => Cow::Owned(format!("{NUMBERED_PREFIX}{number}")),
             other => Cow::Borrowed(other.unit_name().unwrap_or_default()),
         }
     }
@@ -343,6 +370,9 @@ impl ButtonId {
             ButtonId::G8 => "G8",
             ButtonId::G9 => "G9",
             ButtonId::Grid(slot) => return slot.label(),
+            ButtonId::G10 => "G10",
+            ButtonId::G11 => "G11",
+            ButtonId::Numbered(number) => return Cow::Owned(format!("Button {number}")),
             ButtonId::Control(cid) => return cid.label(),
             ButtonId::GKey(slot) => return slot.label(),
             ButtonId::ModeKey(key) => key.label(),
@@ -373,6 +403,9 @@ impl ButtonId {
             // The page is context the caller shows beside the key, not part
             // of the key's name.
             ButtonId::Grid(slot) => slot.key.translation_key(),
+            ButtonId::G10 => "actions.g10",
+            ButtonId::G11 => "actions.g11",
+            ButtonId::Numbered(_) => "actions.numbered_mouse_button",
             ButtonId::Control(cid) => cid.translation_key(),
             // Like a grid key's page, the profile is shown beside the key.
             ButtonId::GKey(slot) => slot.key.translation_key(),
@@ -380,6 +413,9 @@ impl ButtonId {
         }
     }
 }
+
+/// What a [`ButtonId::Numbered`] is persisted under, before its number.
+const NUMBERED_PREFIX: &str = "Button";
 
 impl fmt::Display for ButtonId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -693,6 +729,12 @@ impl FromStr for ButtonId {
             .or_else(|| GridSlot::from_config_name(name).map(Self::Grid))
             .or_else(|| GKeySlot::from_config_name(name).map(Self::GKey))
             .or_else(|| ModeKey::from_config_name(name).map(Self::ModeKey))
+            .or_else(|| {
+                name.strip_prefix(NUMBERED_PREFIX)
+                    .and_then(|number| number.parse::<u8>().ok())
+                    .and_then(|number| MouseButtonNumber::try_new(number).ok())
+                    .map(ButtonId::Numbered)
+            })
             .or_else(|| Cid::from_config_name(name).map(ButtonId::Control))
             .ok_or_else(|| ParseButtonIdError(name.to_owned()))
     }

@@ -25,7 +25,7 @@ use crate::features::binding_editor::{
     ActionOffer, GESTURE_BUTTON_ICON, PickFn, action_icon_path, action_rows_with,
     application_editor, command_editor, editor_section, gesture_direction_icon,
 };
-use crate::state::AppState;
+use crate::state::{AppState, FlashStatus, FlashView, SlotNote};
 use crate::ui::action::localized_action_label;
 use crate::ui::components::{MenuRow, Toggle, control_button, control_input, toggle_row};
 use crate::ui::theme::{
@@ -57,6 +57,8 @@ pub(super) struct BindingInspectorData<'a> {
     pub extra_actions: &'a [Action],
     /// Catalog actions the picker leaves out.
     pub hidden_actions: &'a [Action],
+    /// What a mouse whose flash holds its bindings holds and who runs what.
+    pub flash: Option<&'a FlashView>,
 }
 
 #[derive(Clone, Copy)]
@@ -125,7 +127,8 @@ pub(super) fn binding_inspector(
             data.editing_app,
             data.overridden.map_or(0, BTreeMap::len),
             pal,
-        ),
+        )
+        .children(flash_status_row(data.flash, pal)),
         Some(selection) => match selection.button() {
             Some((button, direction)) => {
                 button_inspector(button, direction, &data, picker, pal, cx)
@@ -223,6 +226,7 @@ fn button_inspector(
     let observer = picker.view.clone();
     let on_pick: PickFn = Rc::new(move |action, _window, cx| {
         AppState::apply(cx, |state| state.commit_binding(button, action));
+        AppState::refresh_flash_bindings_later(cx);
         observer.update(cx, |view, cx| {
             view.close_action_picker();
             cx.notify();
@@ -237,6 +241,9 @@ fn button_inspector(
             pal,
         ))
         .child(current_action_card(&action, picker, pal))
+        .children(flash_note_row(button, data.flash, pal))
+        .children(flash_reset_row(button, &action, data, picker.view))
+        .children(flash_status_row(data.flash, pal))
         .children(wheel_hold_section(
             button,
             data,
@@ -253,6 +260,7 @@ fn button_inspector(
                     .label(tr!("profiles.use_the_default_profile"))
                     .on_click(move |_, _, cx| {
                         AppState::apply(cx, |state| state.clear_app_binding(button));
+                        AppState::refresh_flash_bindings_later(cx);
                         observer.update(cx, |view, cx| {
                             view.close_action_picker();
                             cx.notify();
@@ -305,6 +313,83 @@ fn button_inspector(
                 cx,
             ))
         })
+}
+
+/// Who runs `button`'s action on a mouse whose flash holds its bindings.
+fn flash_note_row(button: ButtonId, flash: Option<&FlashView>, pal: Palette) -> Option<gpui::Div> {
+    let text = match flash?.notes.get(&button)? {
+        SlotNote::OnMouse => tr!("actions.flash_on_mouse"),
+        SlotNote::ByOpenLogi(Some(number)) => {
+            tr!("actions.flash_by_openlogi", number => number.to_string())
+        }
+        SlotNote::ByOpenLogi(None) => tr!("actions.flash_by_openlogi_pending"),
+        SlotNote::NoFreeButton => tr!("actions.flash_no_free_button"),
+        SlotNote::Macro => tr!("actions.flash_macro"),
+        SlotNote::Unknown => tr!("actions.flash_unknown"),
+        SlotNote::PrimaryKept => tr!("actions.flash_primary_kept"),
+        SlotNote::Unavailable => tr!("actions.flash_unavailable_here"),
+    };
+    Some(
+        div()
+            .debug_selector(|| "inspector-flash-note".into())
+            .text_body()
+            .text_color(pal.text_muted)
+            .child(text),
+    )
+}
+
+/// "Reset to default" for a flash slot that does something else than its
+/// layout default: it binds the default, which the agent writes back to the
+/// mouse — clearing the slot would leave the mouse as it is.
+fn flash_reset_row(
+    button: ButtonId,
+    action: &Action,
+    data: &BindingInspectorData<'_>,
+    view: &Entity<MouseModelView>,
+) -> Option<impl IntoElement> {
+    if data.editing_app.is_some() {
+        return None;
+    }
+    let default = data.flash?.defaults.get(&button)?.clone();
+    if *action == default {
+        return None;
+    }
+    let observer = view.clone();
+    Some(
+        control_button("inspector-flash-reset")
+            .w_full()
+            .icon(IconName::Undo)
+            .label(tr!("actions.flash_reset_to_default"))
+            .on_click(move |_, _, cx| {
+                AppState::apply(cx, |state| state.commit_binding(button, default.clone()));
+                AppState::refresh_flash_bindings_later(cx);
+                observer.update(cx, |view, cx| {
+                    view.close_action_picker();
+                    cx.notify();
+                });
+            }),
+    )
+}
+
+/// Where a write of the mouse's flash stands, while there is something to
+/// say: one is queued or running, the last failed, or the mouse plays its
+/// factory profile, whose bindings cannot change.
+fn flash_status_row(flash: Option<&FlashView>, pal: Palette) -> Option<gpui::Div> {
+    let (text, color) = match flash?.status.as_ref()? {
+        FlashStatus::Writing => (tr!("actions.flash_writing"), pal.text_muted),
+        FlashStatus::Failed(error) => (
+            tr!("actions.flash_write_failed", error => error.clone()),
+            gpui::Hsla::from(rgb(theme::STATUS_DISABLED)),
+        ),
+        FlashStatus::FactoryProfile => (tr!("actions.flash_factory_profile"), pal.text_muted),
+    };
+    Some(
+        div()
+            .debug_selector(|| "inspector-flash-status".into())
+            .text_body()
+            .text_color(color)
+            .child(text),
+    )
 }
 
 /// The heading's status line. A button that holds the wheel is customized
@@ -400,6 +485,7 @@ fn inherited_gesture_inspector(
     let observer = picker.view.clone();
     let on_pick: PickFn = Rc::new(move |action, _window, cx| {
         AppState::apply(cx, |state| state.commit_binding(button, action));
+        AppState::refresh_flash_bindings_later(cx);
         observer.update(cx, |view, cx| {
             view.close_action_picker();
             cx.notify();
@@ -1089,6 +1175,7 @@ mod tests {
             dpi_gestures: false,
             extra_actions: &[],
             hidden_actions: &[],
+            flash: None,
             virtual_thumbwheel: true,
             wheel_hold,
             editing_app: None,

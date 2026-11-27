@@ -23,6 +23,7 @@ pub use openlogi_core::hid::route::{
 
 use tracing::{debug, warn};
 
+use crate::SharedChannel;
 use crate::backend::{BackendError, HidBackend, NodeInfo};
 use crate::host_lock::{RECEIVER_REGISTER_TIMEOUT, lock_receiver_registers};
 use crate::write::WriteError;
@@ -45,6 +46,17 @@ pub(crate) async fn open_route_channel(
     backend: &dyn HidBackend,
     route: &DeviceRoute,
 ) -> Result<Option<Arc<HidppChannel>>, BackendError> {
+    Ok(open_route_shared(backend, route)
+        .await?
+        .map(|shared| Arc::clone(shared.channel())))
+}
+
+/// [`open_route_channel`], as a [`SharedChannel`] that also names the node
+/// it opened, for callers that take the node's register phase afterwards.
+pub(crate) async fn open_route_shared(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+) -> Result<Option<SharedChannel>, BackendError> {
     if matches!(route, DeviceRoute::RawHid { .. }) {
         return Ok(None);
     }
@@ -79,7 +91,11 @@ pub(crate) async fn open_route_channel(
                 if let Ok(uid) = bolt.get_unique_id().await
                     && uid.eq_ignore_ascii_case(receiver_uid)
                 {
-                    return Ok(Some(channel));
+                    return Ok(Some(SharedChannel::on_node(
+                        channel,
+                        route.clone(),
+                        node.id,
+                    )));
                 }
             }
             DeviceRoute::Unifying { receiver_uid, .. } => {
@@ -96,10 +112,20 @@ pub(crate) async fn open_route_channel(
                 if let Ok(uid) = unifying.get_unique_id().await
                     && uid.eq_ignore_ascii_case(receiver_uid)
                 {
-                    return Ok(Some(channel));
+                    return Ok(Some(SharedChannel::on_node(
+                        channel,
+                        route.clone(),
+                        node.id,
+                    )));
                 }
             }
-            DeviceRoute::Direct { .. } => return Ok(Some(channel)),
+            DeviceRoute::Direct { .. } => {
+                return Ok(Some(SharedChannel::on_node(
+                    channel,
+                    route.clone(),
+                    node.id,
+                )));
+            }
             DeviceRoute::RawHid { .. } => unreachable!("raw HID route entered HID++ channel path"),
         }
     }

@@ -25,7 +25,7 @@ use crate::backend::HidBackend;
 use crate::channel::route::DeviceRoute;
 
 use super::{
-    HidppOperation, WriteError, classify_hidpp_error, open_feature, with_route,
+    HidppOperation, WriteError, classify_hidpp_error, open_feature, with_shared_route,
     write_whole_raw_report,
 };
 
@@ -142,8 +142,7 @@ impl LightingWrite {
         cancelled: impl Fn() -> bool,
         available: impl Fn() -> bool,
     ) -> Result<Option<RgbControlLease>, WriteError> {
-        with_route(backend, route, |channel| async move {
-            let shared = SharedChannel::new(channel, route.clone());
+        with_shared_route(backend, route, |shared| async move {
             self.apply_on(&shared, cancelled, available).await
         })
         .await
@@ -326,8 +325,7 @@ pub async fn walk_per_key_zones(
     lit: openlogi_core::color::Rgb,
     observe: impl AsyncFnMut(LitZone) -> ZoneWalkStep,
 ) -> Result<(), WriteError> {
-    with_route(backend, route, |channel| async move {
-        let shared = SharedChannel::new(channel, route.clone());
+    with_shared_route(backend, route, |shared| async move {
         walk_per_key_zones_on(&shared, lit, observe).await
     })
     .await

@@ -68,8 +68,10 @@ pub enum Effect<'a> {
     /// Type this text via unicode input.
     Text(&'a str),
     /// Handled entirely by the agent/hook layer — DPI presets, SmartShift,
-    /// the Actions Ring, and launching an application. The injector logs
-    /// and does nothing.
+    /// the Actions Ring, and launching an application — or by the mouse
+    /// itself: the firmware functions only a mouse's onboard flash runs
+    /// ([`Action::ShowBatteryLevel`], the onboard-profile steps,
+    /// [`Action::MouseButton`]). The injector logs and does nothing.
     ///
     /// [`Action::OpenApplication`] is included here even though
     /// `openlogi_inject::execute` does open it: that happens in the
@@ -288,7 +290,16 @@ impl Action {
             | Action::PreviousKeypadPage
             | Action::NextKeypadPage
             | Action::OpenApplication(_)
-            | Action::HoldModifier(_) => Effect::AgentSide,
+            | Action::HoldModifier(_)
+            // Firmware functions of a mouse whose onboard flash holds its
+            // bindings: the mouse runs them and the injector has nothing to
+            // send. Classed with the agent-side actions so a binding of one
+            // on another device stays the injector's logged no-op.
+            | Action::ShowBatteryLevel
+            | Action::NextOnboardProfile
+            | Action::PreviousOnboardProfile
+            | Action::CycleOnboardProfiles
+            | Action::MouseButton(_) => Effect::AgentSide,
 
             Action::ScrollUp => Effect::Scroll { dx: 0, dy: 1 },
             Action::ScrollDown => Effect::Scroll { dx: 0, dy: -1 },

@@ -502,6 +502,34 @@ mod tests {
     }
 
     #[test]
+    fn long_register_write_sends_a_long_set_frame() {
+        futures::executor::block_on(async {
+            let (raw, handle) = MockRawHidChannel::new();
+            let channel = Arc::new(channel_with_reader(raw).await);
+            // The device acknowledges a long write with a short report.
+            handle.queue_response(HidppMessage::Short([
+                0x01,
+                MessageType::SetLongRegister.into(),
+                0x63,
+                0x00,
+                0x00,
+                0x00,
+            ]));
+            let mut payload = [0u8; 16];
+            payload[..4].copy_from_slice(&[0x24, 0x00, 0x24, 0x00]);
+
+            channel
+                .write_long_register(0x01, 0x63, payload)
+                .await
+                .expect("the acknowledgement answers the write");
+
+            let mut expected = vec![0x11, 0x01, 0x82, 0x63];
+            expected.extend_from_slice(&payload);
+            assert_eq!(handle.written_reports(), [expected]);
+        });
+    }
+
+    #[test]
     fn plain_register_read_matches_on_the_header_alone() {
         futures::executor::block_on(async {
             let (raw, handle) = MockRawHidChannel::new();

@@ -8,6 +8,7 @@ use std::collections::HashMap;
 fn resolver_over(roots: &[&Path], index: Option<Index>) -> AssetResolver {
     AssetResolver {
         read_roots: roots.iter().map(|root| root.to_path_buf()).collect(),
+        local_roots: Vec::new(),
         write_root: roots[roots.len() - 1].to_path_buf(),
         has_bundle: roots.len() > 1,
         index,
@@ -412,6 +413,7 @@ fn resolves_depot_with_named_manifest_and_non_standard_render() {
 
     let resolver = AssetResolver {
         read_roots: vec![root.path().to_path_buf()],
+        local_roots: Vec::new(),
         write_root: root.path().to_path_buf(),
         has_bundle: false,
         index: None,
@@ -894,6 +896,7 @@ fn resolves_camera_depot_without_hotspot_metadata() {
 
     let resolver = AssetResolver {
         read_roots: vec![root.path().to_path_buf()],
+        local_roots: Vec::new(),
         write_root: root.path().to_path_buf(),
         has_bundle: false,
         index: None,
@@ -941,6 +944,7 @@ fn metadata_publishing_depot_without_cached_metadata_still_misses() {
 
     let resolver = AssetResolver {
         read_roots: vec![root.path().to_path_buf()],
+        local_roots: Vec::new(),
         write_root: root.path().to_path_buf(),
         has_bundle: false,
         index: None,
@@ -978,6 +982,7 @@ fn depot_without_any_render_still_misses() {
 
     let resolver = AssetResolver {
         read_roots: vec![root.path().to_path_buf()],
+        local_roots: Vec::new(),
         write_root: root.path().to_path_buf(),
         has_bundle: false,
         index: None,
@@ -1298,4 +1303,63 @@ fn a_webp_colour_variant_gets_both_views_at_their_own_size() {
     assert_eq!((side.png_width, side.png_height), (1157, 2800));
     assert_eq!(asset.image_path, dir.join(G502X_PLUS_EXT2_FRONT));
     assert_eq!((asset.png_width, asset.png_height), (1662, 2800));
+}
+
+/// A G700 has no model info and no depot in Logi's index: the depot
+/// OpenLogi ships serves it by its wpid model key, front render beside the
+/// side render, with the hotspots of its G-series layout.
+#[test]
+fn a_shipped_depot_serves_a_model_the_index_lacks() {
+    let root = tempfile::tempdir().expect("create temp dir");
+    let dir = root.path().join("g700");
+    std::fs::create_dir_all(&dir).expect("create depot dir");
+    std::fs::write(
+        dir.join("core_metadata.json"),
+        r#"{"images":[
+            {"key":"device_image","origin":{"width":1000,"height":1600},"assignments":[
+                {"slotId":"g700_g3_m1","marker":{"x":500,"y":300}},
+                {"slotId":"g700_g10_m1","marker":{"x":520,"y":700}}]},
+            {"key":"device_side","origin":{"width":600,"height":1600},"assignments":[
+                {"slotId":"g700_g4_m1","marker":{"x":300,"y":900}}]}]}"#,
+    )
+    .expect("write metadata");
+    std::fs::write(dir.join("front_core.png"), png_header(1000, 1600)).expect("write front");
+    std::fs::write(dir.join("side.png"), png_header(600, 1600)).expect("write side");
+    let mut resolver = resolver_over(&[root.path()], None);
+    resolver.local_roots = vec![root.path().to_path_buf()];
+
+    assert!(resolver.resolve_local_model("wpid4082").is_none());
+    let asset = resolver
+        .resolve_local_model("wpid1023")
+        .expect("the shipped G700 depot resolves");
+    assert_eq!(asset.display_name, "G700");
+    assert_eq!(asset.kind, Some(DeviceKind::Mouse));
+    assert_eq!(
+        asset.image_path.file_name().expect("image has a file name"),
+        "front_core.png"
+    );
+    assert_eq!((asset.png_width, asset.png_height), (1000, 1600));
+    let side = asset
+        .side_view
+        .as_ref()
+        .expect("the side render is drawn beside");
+    assert_eq!((side.png_width, side.png_height), (600, 1600));
+    let numbers: Vec<u8> = asset
+        .metadata
+        .images
+        .iter()
+        .flat_map(|image| &image.assignments)
+        .filter_map(openlogi_assets::Assignment::g_number)
+        .collect();
+    assert_eq!(numbers, [3, 10, 4]);
+}
+
+/// Without its files a shipped depot resolves to nothing, so the device
+/// keeps the synthetic silhouette.
+#[test]
+fn a_shipped_depot_without_files_resolves_to_nothing() {
+    let root = tempfile::tempdir().expect("create temp dir");
+    let mut resolver = resolver_over(&[root.path()], None);
+    resolver.local_roots = vec![root.path().to_path_buf()];
+    assert!(resolver.resolve_local_model("wpid1023").is_none());
 }

@@ -57,13 +57,15 @@ use openlogi_agent_core::backlight_overlay::BacklightOverlayManager;
 use openlogi_agent_core::lock_keys::LockKeyIndicator;
 use openlogi_agent_core::notices::{LowBatteryWatch, NoticeBoard};
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::ActionRingSlot;
+use openlogi_core::binding::{ActionRingSlot, FlashBindingsState};
 use openlogi_core::config::{AppSettings, Config, Lighting};
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind, LockKey,
     PairedDevice, StandaloneDevice, prettify_codename,
 };
-use openlogi_core::hid::{DisableKeysMask, DisableKeysState, HidppOperation};
+use openlogi_core::hid::{
+    DisableKeysMask, DisableKeysState, FlashProfileEdit, FlashProfiles, HidppOperation,
+};
 use openlogi_core::single_instance::{self, InstanceError, Role};
 use openlogi_fixture::{DeviceProfile, FixtureError, ProfileDeviceSettings, ProfileSetting};
 use openlogi_hid::{
@@ -91,10 +93,13 @@ use tracing::{info, warn};
 mod control;
 #[path = "mock_agent/flow.rs"]
 mod flow;
+#[path = "mock_agent/g700.rs"]
+mod g700;
 #[path = "mock_agent/profile.rs"]
 mod profile;
 
 use control::Fault;
+use g700::MockG700;
 use profile::{built_in_profile, parse_profile, unsupported_settings, validate_light_command};
 
 /// Unique ID of the scripted Bolt receiver; Bolt routes are matched against it.
@@ -417,6 +422,9 @@ struct State {
     /// keeps it.
     low_battery: LowBatteryWatch,
     disable_keys_scenario: DisableKeysScenario,
+    /// The scripted G700 on its own receiver, in demo mode only: a fixture
+    /// describes every device it serves.
+    g700: Option<MockG700>,
     disable_keys_reads: u64,
     disable_keys_writes: u64,
     reload_calls: u64,
@@ -435,6 +443,7 @@ impl State {
         disable_keys_scenario: DisableKeysScenario,
     ) -> Result<Self, FixtureError> {
         profile.validate()?;
+        let demo = clock.is_demo();
         let next_slot = profile
             .inventories
             .iter()
@@ -456,6 +465,7 @@ impl State {
             faults: Vec::new(),
             low_battery: LowBatteryWatch::default(),
             disable_keys_scenario,
+            g700: demo.then(MockG700::dumped),
             disable_keys_reads: 0,
             disable_keys_writes: 0,
             reload_calls: 0,
@@ -619,6 +629,9 @@ impl State {
         {
             receiver.paired.extend_from_slice(&self.paired_extra);
         }
+        if self.g700.is_some() {
+            inventories.push(MockG700::inventory());
+        }
         for inventory in &mut inventories {
             let routes = slot_routes(inventory);
             for (device, route) in inventory.paired.iter_mut().zip(routes) {
@@ -642,6 +655,11 @@ impl State {
             device.online &= keyboard_online;
         }
         inventories
+    }
+
+    /// The scripted G700, when `route` is it.
+    fn g700_at(&mut self, route: &DeviceRoute) -> Option<&mut MockG700> {
+        self.g700.as_mut().filter(|_| MockG700::is_route(route))
     }
 
     fn standalone(&self) -> Vec<StandaloneDevice> {
@@ -1083,6 +1101,11 @@ impl Agent for MockAgent {
 
     async fn set_dpi(self, _: Context, route: DeviceRoute, dpi: Dpi) -> Result<(), WriteError> {
         let mut state = self.state.lock().await;
+        let now = state.clock.elapsed();
+        if let Some(mouse) = state.g700_at(&route) {
+            info!(%route, %dpi, "set_dpi (G700, saved to its played profile)");
+            return mouse.set_dpi(dpi, now);
+        }
         let settings = state.settings_for_mut(&route)?;
         let dpi_state = profile_value_mut(&mut settings.dpi, &route, 0x2201)?;
         dpi_state.current = dpi_state.capabilities.nearest(dpi);
@@ -1121,7 +1144,10 @@ impl Agent for MockAgent {
     }
 
     async fn read_dpi(self, _: Context, route: DeviceRoute) -> Result<DpiInfo, WriteError> {
-        let state = self.state.lock().await;
+        let mut state = self.state.lock().await;
+        if let Some(mouse) = state.g700_at(&route) {
+            return mouse.dpi();
+        }
         profile_value(&state.settings_for(&route)?.dpi, &route, 0x2201).cloned()
     }
 
@@ -1182,6 +1208,45 @@ impl Agent for MockAgent {
         })
     }
 
+    async fn read_flash_bindings(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<FlashBindingsState, WriteError> {
+        let mut state = self.state.lock().await;
+        let now = state.clock.elapsed();
+        let found = state.g700_at(&route).map(|mouse| mouse.bindings(now));
+        info!(%route, flash_held = found.is_some(), "read_flash_bindings");
+        found.ok_or(WriteError::DeviceNotFound)
+    }
+
+    async fn read_flash_profiles(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<FlashProfiles, WriteError> {
+        let mut state = self.state.lock().await;
+        let now = state.clock.elapsed();
+        let found = state.g700_at(&route).map(|mouse| mouse.profiles(now));
+        info!(%route, found = found.is_some(), "read_flash_profiles");
+        found.ok_or(WriteError::DeviceNotFound)
+    }
+
+    async fn edit_flash_profiles(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        edit: FlashProfileEdit,
+    ) -> Result<(), WriteError> {
+        let mut state = self.state.lock().await;
+        let now = state.clock.elapsed();
+        info!(%route, ?edit, "edit_flash_profiles");
+        state
+            .g700_at(&route)
+            .ok_or(WriteError::DeviceNotFound)?
+            .edit(edit, now)
+    }
+
     async fn unpair_device(self, _: Context, route: DeviceRoute) -> Result<(), PairingFailure> {
         let result = self.state.lock().await.unpair(&route);
         info!(%route, ok = result.is_ok(), "unpair_device");
@@ -1192,7 +1257,10 @@ impl Agent for MockAgent {
         _: Context,
         route: DeviceRoute,
     ) -> Result<ReportRateInfo, WriteError> {
-        let state = self.state.lock().await;
+        let mut state = self.state.lock().await;
+        if let Some(mouse) = state.g700_at(&route) {
+            return Ok(mouse.report_rate());
+        }
         profile_value(&state.settings_for(&route)?.report_rate, &route, 0x8061).cloned()
     }
     async fn set_report_rate(
@@ -1202,6 +1270,11 @@ impl Agent for MockAgent {
         rate: ReportRate,
     ) -> Result<ReportRateInfo, WriteError> {
         let mut state = self.state.lock().await;
+        let now = state.clock.elapsed();
+        if let Some(mouse) = state.g700_at(&route) {
+            info!(%route, %rate, "set_report_rate (G700, saved to its played profile)");
+            return mouse.set_report_rate(rate, now);
+        }
         let settings = state.settings_for_mut(&route)?;
         let stored = profile_value_mut(&mut settings.report_rate, &route, 0x8061)?;
         if !stored.supports(rate) {

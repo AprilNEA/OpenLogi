@@ -17,6 +17,7 @@ mod category;
 mod control;
 mod defaults;
 mod effect;
+pub mod flash;
 mod g_keys;
 mod gaming;
 mod gesture;
@@ -41,12 +42,19 @@ pub use defaults::{
     default_binding, default_binding_for, default_binding_on, default_gesture_binding,
 };
 pub use effect::{Effect, MediaKey, MouseButton, NativeAction, Script, Shortcut};
+pub use flash::{
+    AgentButtonHook, FlashBinding, FlashBindingsState, FlashFunction, FlashHost, FlashPlan,
+    FlashSync, FlashWrite, MouseButtonNumber, MouseButtonNumberError, ProfileRequest, RefusedSlot,
+    SlotIntent,
+};
 pub use g_keys::{GKey, GKeyProfile, GKeySlot, ModeKey};
 pub use gaming::{
-    G502_LIGHTSPEED, G903_LIGHTSPEED, GamingButtons, GamingLayout, STANDARD_BUTTONS, Slot,
+    G502_LIGHTSPEED, G700, G903_LIGHTSPEED, GamingButtons, GamingLayout, STANDARD_BUTTONS, Slot,
 };
 pub use gesture::GestureDirection;
-pub use key_combo::{KeyCombo, KeyComboParseError, KeyboardUsage, KeyboardUsageError};
+pub use key_combo::{
+    KeyCombo, KeyComboParseError, KeyboardUsage, KeyboardUsageError, ModifierHost,
+};
 pub use modifiers::{BareModifiers, BareModifiersParseError, Modifiers};
 pub use swipe::{
     GESTURE_HOLD_FOR_SWIPE, GESTURE_REARM_PAUSE, GESTURE_REPEAT_DISTANCE, GESTURE_SWIPE_DEADZONE,

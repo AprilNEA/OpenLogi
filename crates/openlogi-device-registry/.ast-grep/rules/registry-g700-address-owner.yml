@@ -1,0 +1,39 @@
+# Owner: openlogi_device_registry::g700 — which HID++ address is a G700
+# (`g700_link`, `is_g700`, `G700Link::device_indexes`). The inventory probe,
+# the device layer and the CLI ask it; tests may pin a literal id as an
+# oracle.
+id: registry-g700-address-owner
+language: rust
+severity: error
+message: Which HID++ address is a G700 is openlogi_device_registry::g700's decision (g700_link, is_g700, G700Link::device_indexes); ask it instead of comparing G700 ids or slots here.
+note: |
+  The G700 was once found by a discovery path of its own that hard-coded its
+  receiver slot beside the inventory's. See "Single source of truth" in
+  AGENTS.md.
+files:
+  - crates/**/*.rs
+ignores:
+  - crates/openlogi-device-registry/**
+  - "**/tests.rs"
+  - "**/tests/**"
+  - "**/*_tests.rs"
+  # The test-only G700 simulator and the mock agent's scripted G700 play
+  # the hardware, so they pin its ids as fixtures.
+  - crates/openlogi-device/src/write/g700/sim.rs
+  - crates/openlogi-agent/src/bin/mock_agent/**
+rule:
+  all:
+    - any:
+        - all:
+            - kind: identifier
+            - regex: '^G700_(RECEIVER|WIRED|WIRELESS)_[A-Z_]+$'
+        - all:
+            - kind: integer_literal
+            - regex: '^0x(c531|C531|c06b|C06B)$'
+    - not:
+        inside:
+          kind: mod_item
+          stopBy: end
+          has:
+            field: name
+            regex: '^tests$'

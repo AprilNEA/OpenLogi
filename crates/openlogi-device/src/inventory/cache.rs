@@ -191,12 +191,13 @@ pub(super) fn seen(id: Option<CacheKey>) -> CacheOutcome {
 /// The device a probe addresses, and the register access its caller holds.
 #[derive(Clone, Copy)]
 pub(super) struct ProbeTarget<'a> {
-    /// A receiver slot, or `0xff` for a direct device.
+    /// A receiver slot, or `0xff` for a direct device — or whichever of its
+    /// cable indexes a G700 on its cable answers at.
     pub(super) index: u8,
     /// The receiver's register phase, when the caller holds it for the whole
     /// probe. A HID++ 1.0 device's registers are read only under it, because
-    /// their replies carry no software id. Only the Unifying slot walk holds
-    /// it that long.
+    /// their replies carry no software id. Only the Unifying slot walk and
+    /// the probe of a G700 on its cable hold it that long.
     pub(super) registers: Option<&'a ReceiverRegisterPhase>,
 }
 

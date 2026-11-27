@@ -66,6 +66,7 @@ use crate::watchers::light::{WatchedLight, WatchedLights};
 use crate::{DpiCycleState, DpiCycles, PointerSpeeds};
 
 mod devices;
+mod flash;
 mod lights;
 mod settings;
 
@@ -218,6 +219,9 @@ pub struct SharedHandles {
     /// operations reach (see [`Self::reaching`]); `None` for the agent's own
     /// handles, which reach whichever device is on a route.
     reaching: Option<[u8; 4]>,
+    /// The onboard-flash writes, run to their end one at a time. The agent
+    /// starts its task once the runtime runs and waits for it on leaving.
+    pub flash_writes: crate::flash_writes::FlashWrites,
 }
 
 impl SharedHandles {
@@ -758,6 +762,13 @@ pub struct Orchestrator {
     observable: Arc<ObservableState>,
     /// Which devices' low batteries have been announced.
     low_battery: LowBatteryWatch,
+    /// The mice whose flash holds their bindings, from the latest inventory.
+    /// Kept apart from [`Self::devices`]: a HID++ 1.0 mouse reports no model
+    /// info, and nothing else the agent does to a device applies to it.
+    flash_devices: Vec<flash::FlashDevice>,
+    /// What each online flash mouse was last asked to hold, so a rebuild
+    /// asks again only for a change or a mouse that came back.
+    flash_requested: HashMap<DeviceRoute, crate::flash_writes::FlashBindingsRequest>,
 }
 
 /// See [`Orchestrator::inventory`] (the field) — the agent-side superset of
@@ -929,6 +940,7 @@ impl Orchestrator {
             disabled_keys_order: WriteOrder::default(),
             inventory_refresh: Arc::new(RwLock::new(None)),
             reaching: None,
+            flash_writes: crate::flash_writes::FlashWrites::default(),
         };
         let orch = Self {
             config,
@@ -965,6 +977,8 @@ impl Orchestrator {
             shared,
             observable,
             low_battery: LowBatteryWatch::default(),
+            flash_devices: Vec::new(),
+            flash_requested: HashMap::new(),
         };
         orch.rebuild();
         orch.observable
@@ -1040,8 +1054,12 @@ impl Orchestrator {
         // A disabled selected device gets empty maps: the OS hook then passes
         // its events through untouched instead of applying remaps to a device
         // the user asked OpenLogi to leave alone.
+        let flash_slot_bindings = self.flash_hook_bindings();
         if key.is_some_and(|k| !self.config.device_enabled(k)) {
-            return HookMaps::default();
+            return HookMaps {
+                flash_slot_bindings,
+                ..HookMaps::default()
+            };
         }
         let (app, pointer_target) = self.mouse_context();
         let pointer = self.pointer_selection(key, app, pointer_target);
@@ -1077,6 +1095,7 @@ impl Orchestrator {
             // names a link its capture session is not on.
             selected_route: selected.and_then(|device| device.route.clone()),
             shift_bindings,
+            flash_slot_bindings,
             ..HookMaps::default()
         }
     }
@@ -1102,6 +1121,7 @@ impl Orchestrator {
             Ok(mut current) => {
                 maps.shift_held = std::mem::take(&mut current.shift_held);
                 maps.diverted_buttons = std::mem::take(&mut current.diverted_buttons);
+                maps.flash_routes = std::mem::take(&mut current.flash_routes);
                 *current = maps;
             }
             Err(error) => {
@@ -1649,6 +1669,7 @@ impl Orchestrator {
             hid_open_failures,
         };
         self.publish_inventory();
+        self.refresh_flash_devices();
         let devices = build_devices(&self.config, inventories, standalone);
         // Retire departing routes before forgetting them. Offline routes that
         // remain in inventory still observe config changes without doing I/O.
@@ -2400,6 +2421,7 @@ impl Orchestrator {
         self.manual_light_overrides
             .retain(|key, _| retained_overrides.contains(key));
         self.current = pick_current(&self.devices, self.config.selected_device());
+        self.refresh_flash_devices();
         self.rebuild();
         self.apply_native_wheel_modes();
         self.apply_changed_fn_locks(&previous);

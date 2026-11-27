@@ -60,7 +60,10 @@ use super::features::{BatteryProbe, ProbedFeatures};
 /// which also records HID++ 1.0, and adds the HID++ 1.0 battery registers to
 /// `BatteryProbe`.
 /// v20 adds the `Capabilities::change_host` flag (`0x1814` host switching).
-const SCHEMA_VERSION: u32 = 20;
+/// v21 gives HID++ 1.0 the capabilities measured from a G700's registers.
+/// v22 adds the `Capabilities::flash_bindings` flag (a G700's onboard-profile
+/// bindings).
+const SCHEMA_VERSION: u32 = 22;
 
 impl ProbeCacheError {
     /// Report why a store could not keep a snapshot.

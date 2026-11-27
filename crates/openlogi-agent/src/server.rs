@@ -19,9 +19,10 @@ use openlogi_agent_core::event_monitor::SharedEventMonitor;
 use openlogi_agent_core::observable::ObservableState;
 use openlogi_agent_core::orchestrator::{self, Orchestrator, SharedHandles};
 use openlogi_agent_core::runtime::ActionDispatcher;
-use openlogi_core::binding::ActionRingSlot;
+use openlogi_core::binding::{ActionRingSlot, FlashBindingsState};
 use openlogi_core::config::{ConfigFile, ConfigRevision, Lighting};
 use openlogi_core::device::DeviceInventory;
+use openlogi_core::hid::{FlashProfileEdit, FlashProfiles};
 use openlogi_hid::{
     BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
     ForceSensingInfo, HapticRestore, HapticRestoreOutcome, HapticWaveform, HidppOperation,
@@ -206,6 +207,9 @@ impl Agent for AgentServer {
     }
 
     async fn set_dpi(self, _: Context, route: DeviceRoute, dpi: Dpi) -> Result<(), WriteError> {
+        if self.orchestrator.lock().await.is_flash_device(&route) {
+            return self.shared.set_flash_dpi(&route, dpi).await;
+        }
         self.shared.set_dpi(&route, dpi).await
     }
 
@@ -303,6 +307,71 @@ impl Agent for AgentServer {
             .await
     }
 
+    async fn read_flash_bindings(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<FlashBindingsState, WriteError> {
+        let state = self.orchestrator.lock().await.read_flash_bindings(&route)?;
+        // A profile button on the mouse changes what it plays without a
+        // word to the host: a look at its current-profile register, while
+        // no flash write is due, tells the sync to follow.
+        if self.shared.flash_writes.played(&route).is_some() {
+            match self.shared.read_played_flash_profile(&route).await {
+                Ok(played) => self
+                    .orchestrator
+                    .lock()
+                    .await
+                    .note_played_profile(&route, played),
+                Err(error) => debug!(%error, "the G700's played profile did not read"),
+            }
+        }
+        Ok(state)
+    }
+
+    async fn read_flash_profiles(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<FlashProfiles, WriteError> {
+        if !self.orchestrator.lock().await.is_flash_device(&route) {
+            return Err(WriteError::DeviceNotFound);
+        }
+        let profiles = self.shared.read_flash_profiles(&route).await?;
+        let played = profiles
+            .onboard
+            .active_profile
+            .map(|profile| profile.get().get() - 1);
+        self.orchestrator
+            .lock()
+            .await
+            .note_played_profile(&route, played);
+        Ok(profiles)
+    }
+
+    async fn edit_flash_profiles(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        edit: FlashProfileEdit,
+    ) -> Result<(), WriteError> {
+        if !self.orchestrator.lock().await.is_flash_device(&route) {
+            return Err(WriteError::DeviceNotFound);
+        }
+        let selected = match &edit {
+            FlashProfileEdit::Activate(profile) => Some(profile.get().get() - 1),
+            _ => None,
+        };
+        self.shared.edit_flash_profiles(&route, edit).await?;
+        if let Some(selected) = selected {
+            self.orchestrator
+                .lock()
+                .await
+                .note_played_profile(&route, Some(selected));
+        }
+        Ok(())
+    }
+
     async fn request_accessibility_prompt(self, _: Context) {
         Hook::prompt_accessibility();
     }
@@ -344,7 +413,11 @@ impl Agent for AgentServer {
         route: DeviceRoute,
         rate: ReportRate,
     ) -> Result<ReportRateInfo, WriteError> {
-        self.shared.set_report_rate(&route, rate).await
+        let info = self.shared.set_report_rate(&route, rate).await?;
+        if info.current == rate && self.orchestrator.lock().await.is_flash_device(&route) {
+            self.shared.save_flash_report_rate(&route, rate);
+        }
+        Ok(info)
     }
     async fn read_pointer_speed(
         self,

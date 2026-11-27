@@ -40,7 +40,8 @@ use crate::backend::HidBackend;
 use crate::channel::route::{DIRECT_DEVICE_INDEX, DeviceRoute};
 use openlogi_core::hid::{ReportRate, ReportRateInfo};
 
-use super::{HidppOperation, WriteError, classify_hidpp_error, open_feature, with_route};
+use super::g700::{G700Link, g700_report_rate_info, set_g700_report_rate};
+use super::{HidppOperation, WriteError, classify_hidpp_error, open_feature, with_shared_route};
 
 /// The intervals `0x8060` can express, in milliseconds.
 fn legacy_intervals_ms() -> RangeInclusive<u8> {
@@ -227,16 +228,18 @@ pub async fn get_report_rate_info(
     backend: &dyn HidBackend,
     route: &DeviceRoute,
 ) -> Result<ReportRateInfo, WriteError> {
-    let index = route.device_index();
-    with_route(backend, route, move |channel| async move {
-        get_report_rate_info_on_channel(&channel, index).await
+    with_shared_route(backend, route, |shared| async move {
+        get_report_rate_info_on(&shared).await
     })
     .await
 }
 
 /// Read the report rate and the rates the device lists on an already-open
-/// [`SharedChannel`].
+/// [`SharedChannel`]. A G700 answers from its live report-interval register.
 pub async fn get_report_rate_info_on(shared: &SharedChannel) -> Result<ReportRateInfo, WriteError> {
+    if let Some(link) = G700Link::on_shared(shared).await? {
+        return g700_report_rate_info(&link).await;
+    }
     get_report_rate_info_on_channel(shared.channel(), shared.device_index()).await
 }
 
@@ -258,19 +261,23 @@ pub async fn set_report_rate(
     route: &DeviceRoute,
     rate: ReportRate,
 ) -> Result<ReportRateInfo, WriteError> {
-    let index = route.device_index();
-    with_route(backend, route, move |channel| async move {
-        set_report_rate_on_channel(&channel, index, rate).await
+    with_shared_route(backend, route, |shared| async move {
+        set_report_rate_on(&shared, rate).await
     })
     .await
 }
 
 /// Set the report rate on an already-open [`SharedChannel`] — the fast path
-/// that skips enumeration and channel setup.
+/// that skips enumeration and channel setup. A G700 takes the rate in its
+/// live report-interval register; see `g700::live` for why its onboard
+/// profile is left alone.
 pub async fn set_report_rate_on(
     shared: &SharedChannel,
     rate: ReportRate,
 ) -> Result<ReportRateInfo, WriteError> {
+    if let Some(link) = G700Link::on_shared(shared).await? {
+        return set_g700_report_rate(&link, rate).await;
+    }
     set_report_rate_on_channel(shared.channel(), shared.device_index(), rate).await
 }
 

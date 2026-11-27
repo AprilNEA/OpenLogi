@@ -13,16 +13,16 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::{ActionRingIcon, ActionRingSize, ActionRingSlot};
+use openlogi_core::binding::{ActionRingIcon, ActionRingSize, ActionRingSlot, FlashBindingsState};
 use openlogi_core::config::{ConfigRevision, FlowPeerName, FlowPublicKey, Lighting};
 use openlogi_core::device::{
     BatteryInfo, ChangedOnLight, DeviceInventory, DeviceKind, LightState, LockKey, StandaloneDevice,
 };
 use openlogi_core::hid::{
     BacklightChange, BacklightState, DeviceRoute, DisableKeysMask, DisableKeysState, Dpi, DpiInfo,
-    EasySwitchHosts, FnLockState, ForceSensingInfo, LightCommand, OnboardState, PairingError,
-    PasskeyMethod, PointerSpeed, ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode,
-    SidetoneLevel, SmartShiftStatus, WriteError,
+    EasySwitchHosts, FlashProfileEdit, FlashProfiles, FnLockState, ForceSensingInfo, LightCommand,
+    OnboardState, PairingError, PasskeyMethod, PointerSpeed, ReceiverSelector, ReportRate,
+    ReportRateInfo, ScrollWheelMode, SidetoneLevel, SmartShiftStatus, WriteError,
 };
 use serde::{Deserialize, Serialize};
 pub use succession::Identity;
@@ -194,7 +194,18 @@ pub use succession::Identity;
 ///      and `ActionRingIcon::{Channel1, Channel2, Channel3}` appended after
 ///      them — a device's move to another Easy-Switch channel, bound to a
 ///      button or an Actions Ring slot.
-pub const PROTOCOL_VERSION: u32 = 46;
+/// v47: `Capabilities::flash_bindings` appended — the G700's flash-held
+///      bindings. `Action::{ShowBatteryLevel, NextOnboardProfile,
+///      PreviousOnboardProfile, CycleOnboardProfiles, MouseButton}` appended
+///      after the Easy-Switch actions. `ButtonId` gains the `G10`, `G11` and
+///      `ButtonN` names. `Agent::read_flash_bindings` appended, then
+///      `Agent::read_flash_profiles` and `Agent::edit_flash_profiles` with
+///      [`FlashProfiles`] and [`FlashProfileEdit`] — the G700's onboard
+///      profiles and their DPI modes, edited in its flash.
+///      `HidppOperation::SelectOnboardProfile` appended after `WriteSidetone`.
+///      `FlashBindingsState::page` and `FlashProfiles::pages` appended — the
+///      flash page each profile's own bindings are kept under.
+pub const PROTOCOL_VERSION: u32 = 47;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -1263,4 +1274,26 @@ pub trait Agent {
     /// held trigger cancels instead of choosing the slot last reported by
     /// [`Agent::action_ring_hover`].
     async fn action_ring_unhover(session_id: u64) -> Result<(), ActionRingCommandError>;
+
+    /// The button bindings a mouse holds in its onboard flash (the G700),
+    /// as the agent last read or wrote them, and where the write of a
+    /// configuration change stands. Answers from the agent's own record
+    /// without device I/O; a route that is no such mouse is
+    /// [`WriteError::DeviceNotFound`].
+    async fn read_flash_bindings(route: DeviceRoute) -> Result<FlashBindingsState, WriteError>;
+
+    /// The onboard profiles of a mouse whose flash is the source of truth
+    /// for its settings (the G700), read from the mouse, with where its
+    /// queued flash writes stand. A route that is no such mouse is
+    /// [`WriteError::DeviceNotFound`].
+    async fn read_flash_profiles(route: DeviceRoute) -> Result<FlashProfiles, WriteError>;
+
+    /// Change a flash mouse's onboard profiles. Selecting a profile is
+    /// written before this returns; every other edit is checked, queued
+    /// with the mouse's other flash writes and run to its end afterwards —
+    /// [`FlashProfiles::write`] says how it went.
+    async fn edit_flash_profiles(
+        route: DeviceRoute,
+        edit: FlashProfileEdit,
+    ) -> Result<(), WriteError>;
 }

@@ -365,6 +365,8 @@ pub enum HidppOperation {
     /// Write the `0x8300` sidetone level. Appended last — variant order is
     /// wire format.
     WriteSidetone,
+    /// Select the onboard profile a mouse plays. Appended last.
+    SelectOnboardProfile,
 }
 
 /// HID++ feature error kind in a serializable wire-safe form.

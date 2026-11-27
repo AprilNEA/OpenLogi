@@ -22,13 +22,15 @@ use openlogi_core::hid::smartshift::{
 use openlogi_device::ChannelPool;
 use openlogi_device::backend::{HidBackend, HotplugStream};
 use openlogi_device::backlight::{BacklightChange, BacklightState};
+use openlogi_device::g700::{CurrentProfile, Page, ReportInterval, Resolution};
 use openlogi_device::inventory::hid_only::HidOnlyProduct;
 use openlogi_device::inventory::{Enumerator, InventoryError};
 use openlogi_device::pairing::PairingReceiver;
 use openlogi_device::write::{
-    self as device, Dpi, DpiInfo, FeatureEntry, FirmwareEntity, HapticWaveform, LightingMethod,
-    LitraModel, PointerScaling, ReprogControlEntry, ScrollResolution, ScrollWheelMode,
-    SidetoneLevel,
+    self as device, BackupOrigin, Dpi, DpiInfo, FeatureEntry, FirmwareEntity, G700Error,
+    G700MemoryDump, HapticWaveform, LightingMethod, LitraModel, PointerScaling, ProfileDpiChange,
+    ProfileDpiWrite, ProfileRateChange, ProfileRateWrite, ReprogControlEntry, RestoredPage,
+    ScrollResolution, ScrollWheelMode, SidetoneLevel,
 };
 use openlogi_device::{ButtonSpyError, ButtonSpyWatch, LightWatch};
 use openlogi_device::{DeviceIoGate, DeviceIoSignal, DeviceRoute};
@@ -163,6 +165,67 @@ pub async fn set_scroll_wheel_mode(
 /// Read the onboard memory of the device on `route`.
 pub async fn get_onboard(route: &DeviceRoute) -> Result<OnboardState, WriteError> {
     device::get_onboard(&*native_backend(), route).await
+}
+
+/// Dump the settings registers and every onboard memory page of the G700 at
+/// `route`; read-only.
+pub async fn read_g700_memory(route: &DeviceRoute) -> Result<G700MemoryDump, WriteError> {
+    device::read_g700_memory(&*native_backend(), route).await
+}
+
+/// Put the `backup` pages back where they differ on the G700 at `route`,
+/// every write verified by reading it back; refused before any write when
+/// `origin` names another mouse.
+pub async fn restore_g700_pages(
+    route: &DeviceRoute,
+    origin: &BackupOrigin,
+    backup: Vec<(u8, Page)>,
+) -> Result<Vec<RestoredPage>, G700Error> {
+    device::restore_g700_pages(&*native_backend(), route, origin, backup).await
+}
+
+/// Change one DPI mode of one onboard profile of the G700 at `route`.
+pub async fn set_g700_profile_dpi(
+    route: &DeviceRoute,
+    change: ProfileDpiChange,
+) -> Result<ProfileDpiWrite, G700Error> {
+    device::set_g700_profile_dpi(&*native_backend(), route, change).await
+}
+
+/// Change the report interval one onboard profile of the G700 at `route`
+/// plays at.
+pub async fn set_g700_profile_report_interval(
+    route: &DeviceRoute,
+    change: ProfileRateChange,
+) -> Result<ProfileRateWrite, G700Error> {
+    device::set_g700_profile_report_interval(&*native_backend(), route, change).await
+}
+
+/// Set the report interval of the G700 at `route` until it next switches
+/// profile; returns the interval it reads back.
+pub async fn set_g700_report_interval(
+    route: &DeviceRoute,
+    interval: ReportInterval,
+) -> Result<ReportInterval, G700Error> {
+    device::set_g700_report_interval(&*native_backend(), route, interval).await
+}
+
+/// Set the resolution the sensor of the G700 at `route` runs at; returns the
+/// resolution it reads back.
+pub async fn set_g700_resolution(
+    route: &DeviceRoute,
+    resolution: Resolution,
+) -> Result<Resolution, G700Error> {
+    device::set_g700_resolution(&*native_backend(), route, resolution).await
+}
+
+/// Make the G700 at `route` play `profile`; returns the profile it reads
+/// back.
+pub async fn set_g700_current_profile(
+    route: &DeviceRoute,
+    profile: CurrentProfile,
+) -> Result<CurrentProfile, G700Error> {
+    device::set_g700_current_profile(&*native_backend(), route, profile).await
 }
 
 /// Read the HID++ `0x8110` slot mapping of the mouse `route` reaches and

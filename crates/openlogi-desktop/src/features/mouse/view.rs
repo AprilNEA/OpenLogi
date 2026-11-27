@@ -33,7 +33,9 @@ use crate::features::binding_editor::{Recording, RecordsShortcut, ShortcutRecord
 use crate::features::keyboard::editors::{PowerUserKind, text_editor_placeholder};
 use crate::features::profiles::{profile_canvas_status, profile_name};
 use crate::services::assets::{GlowGeometry, ResolvedAsset};
-use crate::state::{AppState, BindingLayer, DeviceKey, DeviceRecord, StateEvent};
+use crate::state::{
+    AppState, BindingLayer, DeviceKey, DeviceRecord, FlashView, SlotNote, StateEvent, picker_extras,
+};
 use crate::ui::theme::{self, ACCENT_BLUE};
 
 const SIDE_GAP: f32 = 24.;
@@ -75,7 +77,9 @@ fn held_actions(offer_gshift: bool) -> &'static [Action] {
 const MODEL_VERTICAL_RESERVE: f32 = 154.;
 
 mod labels;
-use labels::{CardSize, MAX_VALUE_LINES, ValueMetrics, binding_label_for_control, label_control};
+use labels::{
+    BindingLabel, CardSize, MAX_VALUE_LINES, ValueMetrics, binding_label_for_control, label_control,
+};
 /// Floor for the scaled model height. Below this the evenly-slotted side labels
 /// (≈[`LABEL_H`](super::geometry::LABEL_H) each) start to overlap; the window's minimum height is sized to
 /// keep the viewport above [`MODEL_VERTICAL_RESERVE`] + this.
@@ -108,6 +112,8 @@ struct MouseWorkspaceData<'a> {
     extra_actions: &'static [Action],
     /// Catalog actions the picker leaves out.
     hidden_actions: &'static [Action],
+    /// What a mouse whose flash holds its bindings holds and who runs what.
+    flash: Option<FlashView>,
 }
 
 impl<'a> MouseWorkspaceData<'a> {
@@ -144,10 +150,14 @@ impl<'a> MouseWorkspaceData<'a> {
                 state.editing_app().map(|app| profile_name(state, app))
             },
             overridden: state.editing_app_overrides(),
-            extra_actions: held_actions(
-                state.current_gaming_layout().is_some()
-                    && state.binding_layer() == BindingLayer::Normal,
-            ),
+            extra_actions: if state.current_flash_layout().is_some() {
+                picker_extras(state.editing_app().is_some())
+            } else {
+                held_actions(
+                    state.current_gaming_layout().is_some()
+                        && state.binding_layer() == BindingLayer::Normal,
+                )
+            },
             hidden_actions: if state
                 .current_record()
                 .is_none_or(crate::app::offers_actions_ring)
@@ -156,6 +166,7 @@ impl<'a> MouseWorkspaceData<'a> {
             } else {
                 NO_ACTIONS_RING
             },
+            flash: state.current_flash_view(),
         })
     }
 
@@ -179,6 +190,7 @@ impl<'a> MouseWorkspaceData<'a> {
             overridden: None,
             extra_actions: &[],
             hidden_actions: &[],
+            flash: None,
         }
     }
 }
@@ -523,7 +535,10 @@ impl Render for MouseModelView {
             overridden,
             extra_actions,
             hidden_actions,
+            flash,
         } = MouseWorkspaceData::read(cx).unwrap_or_else(MouseWorkspaceData::empty);
+        let flash_bindings = with_flash_contents(bindings, flash.as_ref());
+        let bindings = flash_bindings.as_ref().unwrap_or(bindings);
 
         let gesture_buttons: Vec<ButtonId> = gesture_maps
             .keys()
@@ -569,7 +584,7 @@ impl Render for MouseModelView {
             .child(breathing_art)
             .child(leader_canvas)
             .children(labels_outer.iter().enumerate().map(|(idx, label)| {
-                let binding = binding_label_for_control(label.id, bindings, &gesture_buttons);
+                let binding = control_label(flash.as_ref(), label.id, bindings, &gesture_buttons);
                 label_control(
                     idx,
                     *label,
@@ -597,12 +612,51 @@ impl Render for MouseModelView {
                 press_force: PressForce::of(force_sensing.as_ref(), self.press_force()),
                 extra_actions,
                 hidden_actions,
+                flash: flash.as_ref(),
             },
             self.action_picker_context(&view),
             cx,
         );
         workspace_layout(canvas, profile_status, inspector, &self.focus_handle, view)
     }
+}
+
+/// `bindings` with what the mouse holds on each flash slot nothing
+/// configures; `None` when that adds nothing.
+fn with_flash_contents(
+    bindings: &BTreeMap<ButtonId, Action>,
+    flash: Option<&FlashView>,
+) -> Option<BTreeMap<ButtonId, Action>> {
+    let flash = flash.filter(|flash| !flash.shown.is_empty())?;
+    let mut shown = bindings.clone();
+    shown.extend(flash.shown.clone());
+    Some(shown)
+}
+
+/// A control's label: what its binding does, or what the mouse holds on a
+/// flash slot no action names.
+fn control_label(
+    flash: Option<&FlashView>,
+    control: MouseControlId,
+    bindings: &BTreeMap<ButtonId, Action>,
+    gesture_buttons: &[ButtonId],
+) -> BindingLabel {
+    held_on_mouse_label(flash, control)
+        .unwrap_or_else(|| binding_label_for_control(control, bindings, gesture_buttons))
+}
+
+/// The label of a flash slot that holds what no action names.
+fn held_on_mouse_label(flash: Option<&FlashView>, control: MouseControlId) -> Option<BindingLabel> {
+    let text = match flash?.notes.get(&control.button()?)? {
+        SlotNote::Macro => tr!("actions.flash_macro_label"),
+        SlotNote::Unknown => tr!("actions.flash_unknown_label"),
+        SlotNote::OnMouse
+        | SlotNote::ByOpenLogi(_)
+        | SlotNote::NoFreeButton
+        | SlotNote::PrimaryKept
+        | SlotNote::Unavailable => return None,
+    };
+    Some(BindingLabel::held_on_mouse(text))
 }
 
 /// The canvas around `band`, which holds the model and its cards laid out

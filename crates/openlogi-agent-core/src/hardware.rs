@@ -400,6 +400,31 @@ impl DeviceOp {
         .await
     }
 
+    /// [`Self::run`] with no response deadline, for an operation that must
+    /// not be abandoned once it starts: a flash page rewrite, which leaves the
+    /// mouse on its factory profile or a half-written page if dropped midway.
+    /// Its only caller is [`crate::flash_writes`]'s task, which never cancels
+    /// it; anything a requester awaits uses [`Self::run`] instead.
+    ///
+    /// [`WriteError::DeviceNotFound`] when device I/O is suspended or no
+    /// channel serves `route`.
+    pub(crate) async fn run_to_completion<F, Fut, T>(self, f: F) -> Result<T, WriteError>
+    where
+        F: FnOnce(SharedChannel) -> Fut,
+        Fut: Future<Output = T>,
+    {
+        if !self.access.device_io.allows_io() {
+            return Err(WriteError::DeviceNotFound);
+        }
+        let turn = self.access.transport_turns.turn_for(&self.route);
+        let _lease = self.access.receiver_access.acquire_for_io().await;
+        after_transport_turn(&turn, async {
+            let shared = self.resolve()?;
+            Ok(f(shared).await)
+        })
+        .await
+    }
+
     /// [`Self::run`] for a write ordered by `ticket`: lease the receiver,
     /// wait for the device's earlier writes of the same setting, then resolve
     /// the channel and give `write` — or `superseded`, when a newer write was

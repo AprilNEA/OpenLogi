@@ -16,8 +16,9 @@ use hidpp::{
     feature::{CreatableFeature, disable_keys::DisableKeysFeature},
 };
 
+use crate::SharedChannel;
 use crate::backend::HidBackend;
-use crate::channel::route::{DeviceRoute, open_route_channel};
+use crate::channel::route::{DeviceRoute, open_route_channel, open_route_shared};
 
 mod backlight;
 mod button_spy;
@@ -29,6 +30,7 @@ mod easy_switch;
 mod error;
 mod fn_lock;
 mod force_sensing;
+mod g700;
 mod haptic;
 mod hires_wheel;
 mod key_display;
@@ -66,6 +68,16 @@ pub use easy_switch::{
 pub use error::{HidppFeatureErrorKind, HidppOperation, WriteError};
 pub use fn_lock::{get_fn_lock, get_fn_lock_on, set_fn_lock, set_fn_lock_on};
 pub use force_sensing::{get_force_sensing_on, set_force_sensing_on};
+pub(crate) use g700::wired_device_index as g700_wired_device_index;
+pub use g700::{
+    BackupOrigin, DpiSave as G700DpiSave, G700Error, G700Identity, G700Job, G700MemoryDump,
+    G700Register, G700Sync, PROFILE_PAGES as G700_PROFILE_PAGES, PageRead, ProfileDpiChange,
+    ProfileDpiWrite, ProfileRateChange, ProfileRateWrite, RestoreOutcome, RestoredPage,
+    activate_g700_profile_on, check_g700_edit, find_g700_route, read_g700_memory,
+    read_g700_played_profile_on, read_g700_profiles_on, restore_g700_pages,
+    set_g700_current_profile, set_g700_profile_dpi, set_g700_profile_report_interval,
+    set_g700_report_interval, set_g700_resolution, sync_g700_on,
+};
 pub use haptic::{
     HapticRestore, HapticRestoreOutcome, ensure_haptics_armed_on, play_haptic, play_haptic_on,
     restore_haptics_on,
@@ -216,6 +228,23 @@ pub(crate) async fn write_whole_raw_report(
             "{operation:?} report wrote {written} of {} bytes",
             report.len()
         )))
+    }
+}
+
+/// [`with_route`], handing `f` the channel as a [`SharedChannel`] that names
+/// the node it opened, so the `*_on` entry points serve both paths.
+pub(crate) async fn with_shared_route<F, Fut, T>(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+    f: F,
+) -> Result<T, WriteError>
+where
+    F: FnOnce(SharedChannel) -> Fut,
+    Fut: std::future::Future<Output = Result<T, WriteError>>,
+{
+    match open_route_shared(backend, route).await? {
+        Some(shared) => f(shared).await,
+        None => Err(WriteError::DeviceNotFound),
     }
 }
 

@@ -17,6 +17,7 @@ pub mod battery;
 pub mod controls;
 pub mod dpi;
 pub mod features;
+pub mod g700;
 pub mod hidpp;
 pub mod host_switch;
 pub mod lighting;
@@ -58,6 +59,8 @@ pub enum DiagCmd {
     Sidetone(sidetone::SidetoneArgs),
     /// Light each HID++ 0x8081 zone of a keyboard alone and record its key.
     Zones(zones::ZonesArgs),
+    /// Logitech G700 (HID++ 1.0) onboard profiles: read-only dump and backup.
+    G700(g700::G700Args),
 }
 
 impl DiagCmd {
@@ -82,6 +85,7 @@ impl DiagCmd {
             Self::HostSwitch(args) => host_switch::run(args).await,
             Self::Sidetone(args) => sidetone::run(args).await,
             Self::Zones(args) => zones::run(args).await,
+            Self::G700(args) => g700::run(args).await,
         }
     }
 
