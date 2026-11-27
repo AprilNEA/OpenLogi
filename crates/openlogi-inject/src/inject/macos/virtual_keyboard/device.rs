@@ -9,9 +9,12 @@
 use std::ffi::CStr;
 use std::ptr::NonNull;
 
-use objc2_core_foundation::{CFData, CFDictionary, CFIndex, CFRetained, CFString, CFType};
+use objc2_core_foundation::{
+    CFData, CFDictionary, CFIndex, CFNumber, CFRetained, CFString, CFType,
+};
 use objc2_io_kit::{
-    IOHIDUserDevice, kIOHIDProductKey, kIOHIDReportDescriptorKey, kIOReturnSuccess,
+    IOHIDUserDevice, kIOHIDProductIDKey, kIOHIDProductKey, kIOHIDReportDescriptorKey,
+    kIOHIDVendorIDKey, kIOReturnSuccess,
 };
 
 use super::{REPORT_LEN, Report, SendError, Sink};
@@ -34,24 +37,49 @@ unsafe impl Send for Device {}
 
 impl Device {
     /// Create a HID device with `descriptor` as its report descriptor and
-    /// `product` as its product name. `None` when the system refuses, as it
-    /// does for a process without the
+    /// `product`, `vendor_id` and `product_id` as its identity. `None` when
+    /// the system refuses, as it does for a process without the
     /// `com.apple.developer.hid.virtual.device` entitlement.
-    pub(super) fn create(product: &str, descriptor: &[u8]) -> Option<Self> {
-        let descriptor_key = key(kIOHIDReportDescriptorKey)?;
-        let product_key = key(kIOHIDProductKey)?;
-        let descriptor = CFData::from_bytes(descriptor);
-        let product = CFString::from_str(product);
-        let properties = CFDictionary::<CFString, CFType>::from_slices(
-            &[&descriptor_key, &product_key],
-            &[&descriptor, &product],
-        );
-        // SAFETY: every key is a `CFString` and every value has the type its
-        // key documents (`CFData` for the descriptor, `CFString` for the
-        // product); `None` selects the default allocator and `0` no options.
+    pub(super) fn create(
+        product: &str,
+        vendor_id: u16,
+        product_id: u16,
+        descriptor: &[u8],
+    ) -> Option<Self> {
+        let properties = properties(product, vendor_id, product_id, descriptor)?;
+        // SAFETY: `properties` maps each key to the type its key documents;
+        // `None` selects the default allocator and `0` no options.
         let device = unsafe { IOHIDUserDevice::with_properties(None, properties.as_opaque(), 0) }?;
         Some(Self(device))
     }
+}
+
+/// The properties a device is created with: its report descriptor as
+/// `CFData`, its product name as a `CFString`, and its vendor and product
+/// IDs as `CFNumber`s.
+pub(super) fn properties(
+    product: &str,
+    vendor_id: u16,
+    product_id: u16,
+    descriptor: &[u8],
+) -> Option<CFRetained<CFDictionary<CFString, CFType>>> {
+    let descriptor_key = key(kIOHIDReportDescriptorKey)?;
+    let product_key = key(kIOHIDProductKey)?;
+    let vendor_id_key = key(kIOHIDVendorIDKey)?;
+    let product_id_key = key(kIOHIDProductIDKey)?;
+    let descriptor = CFData::from_bytes(descriptor);
+    let product = CFString::from_str(product);
+    let vendor_id = CFNumber::new_i32(i32::from(vendor_id));
+    let product_id = CFNumber::new_i32(i32::from(product_id));
+    Some(CFDictionary::from_slices(
+        &[
+            &descriptor_key,
+            &product_key,
+            &vendor_id_key,
+            &product_id_key,
+        ],
+        &[&descriptor, &product, &vendor_id, &product_id],
+    ))
 }
 
 impl Sink for Device {
