@@ -503,6 +503,12 @@ device has no `self` slot, or two machines share one slot.
 Action names are the serialized Rust variant names, including `Copy`,
 `BrowserBack`, `PlayPause`, `CycleDpiPresets`, and `ShowActionsRing`.
 
+On Linux, `PlayPause`, `NextTrack`, and `PrevTrack` go over D-Bus MPRIS to
+the player in use: the first one playing, else the only paused one, else the
+only player on the bus. When several players are paused or stopped, the bus
+cannot tell which one was used last, so OpenLogi presses the media key instead
+and the desktop's media-key daemon picks the player.
+
 `TogglePrecisionMode` switches a mouse between its saved speed and its
 slowest speed, as in Logi Options+:
 
