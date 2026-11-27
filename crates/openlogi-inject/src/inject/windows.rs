@@ -326,6 +326,14 @@ pub(super) fn run_shell_command(cmd: &str) {
     super::run_to_end(shell_command(cmd), "shell command");
 }
 
+/// The creation flags [`shell_command`] starts the shell with. Without
+/// `CREATE_NO_WINDOW` `cmd.exe` allocates and briefly flashes a visible
+/// console window, since the agent itself is a console-less GUI/background
+/// process and the child would otherwise get one of its own. A caller that
+/// adds a flag combines it with these: `creation_flags` replaces what was set
+/// before.
+pub(super) const SHELL_CREATION_FLAGS: u32 = CREATE_NO_WINDOW;
+
 /// The process that runs `cmd` through the platform shell.
 pub(super) fn shell_command(cmd: &str) -> std::process::Command {
     let mut command = std::process::Command::new("cmd");
@@ -335,10 +343,7 @@ pub(super) fn shell_command(cmd: &str) -> std::process::Command {
     // whole command is one executable name, like an unquoted path with spaces:
     // it keeps them then, which is why this can't use `/S`.
     command.raw_arg(format!("/C \"{cmd}\""));
-    // Without this flag `cmd.exe` allocates and briefly flashes a visible
-    // console window, since the agent itself is a console-less GUI/background
-    // process and the child would otherwise get one of its own.
-    command.creation_flags(CREATE_NO_WINDOW);
+    command.creation_flags(SHELL_CREATION_FLAGS);
     command
 }
 
