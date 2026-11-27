@@ -656,6 +656,125 @@ async fn a_direct_channel_capture_reports_dead_retires_on_the_next_pass() {
         .expect("the initial probe cassette is consumed");
 }
 
+/// Upper bound on one enumeration pass in the channel-replacement tests
+/// below, so a pass that stops returning fails the test instead of hanging
+/// it. A failing pass over the replay backend takes milliseconds.
+const PASS_DEADLINE: Duration = Duration::from_secs(10);
+
+/// One enumeration pass, bounded by [`PASS_DEADLINE`].
+async fn bounded_pass(enumerator: &mut Enumerator) {
+    tokio::time::timeout(PASS_DEADLINE, enumerator.enumerate())
+        .await
+        .expect("an enumeration pass stalled past its deadline")
+        .expect("a pass still yields a snapshot");
+}
+
+/// A probed direct node on a replay backend, with its last-good inventory
+/// established, for the channel-replacement tests below.
+async fn probed_direct_node() -> (
+    Arc<ReplayBackend>,
+    ChannelRegistry,
+    Enumerator,
+    crate::backend::NodeId,
+    crate::DeviceRoute,
+) {
+    let fixture = direct_fixture(OpenOutcome::Hidpp, 1);
+    let node_id = fixture.node_id.clone();
+    let route = crate::DeviceRoute::Direct {
+        vendor_id: fixture.inventory.receiver.vendor_id,
+        product_id: fixture.inventory.receiver.product_id,
+    };
+    let backend = Arc::new(
+        ReplayBackend::new(
+            ReplayTopology {
+                nodes: vec![fixture.node],
+                channels: vec![fixture.channel],
+            },
+            vec![fixture.cassette],
+        )
+        .expect("valid direct replay"),
+    );
+    let registry = ChannelRegistry::default();
+    let mut enumerator = Enumerator::with_backend(backend.clone()).with_registry(registry.clone());
+    bounded_pass(&mut enumerator).await;
+    (backend, registry, enumerator, node_id, route)
+}
+
+/// Failed passes the node's channel generation `opens` sits through before
+/// the enumerator retires it. Passes spent draining the previous generation
+/// are not counted.
+async fn failed_passes_until_retired(
+    backend: &ReplayBackend,
+    enumerator: &mut Enumerator,
+    node_id: &crate::backend::NodeId,
+    opens: usize,
+) -> usize {
+    let mut failed = 0;
+    for _ in 0..64 {
+        bounded_pass(enumerator).await;
+        if backend.open_count(node_id).expect("known node") < opens {
+            continue;
+        }
+        failed += 1;
+        if enumerator.channels.is_retiring(node_id) {
+            return failed;
+        }
+    }
+    panic!("generation {opens} was never retired");
+}
+
+/// A replacement that fails the way the channel it replaced did is not a
+/// cure, so it is held to twice the failures before it is replaced in turn:
+/// a node the OS keeps listing but will not let us reach (while another
+/// process holds Secure Event Input, #1799) must not churn handles every few
+/// seconds.
+#[tokio::test]
+async fn a_replacement_that_keeps_failing_is_retired_after_twice_the_failures() {
+    let (backend, _registry, mut enumerator, node_id, _route) = probed_direct_node().await;
+    backend
+        .set_channel_connection(DIRECT_CHANNEL, ChannelConnection::Disconnected)
+        .expect("known channel");
+
+    let original = failed_passes_until_retired(&backend, &mut enumerator, &node_id, 1).await;
+    let replacement = failed_passes_until_retired(&backend, &mut enumerator, &node_id, 2).await;
+    let next = failed_passes_until_retired(&backend, &mut enumerator, &node_id, 3).await;
+
+    assert_eq!(
+        original, 2,
+        "the original channel retires at the base threshold"
+    );
+    assert_eq!(replacement, original * 2);
+    assert_eq!(next, replacement * 2);
+}
+
+/// Capture reporting a channel dead is not the ledger's failure streak, even
+/// when it lands mid-streak: the channel opened in its place starts from the
+/// base threshold.
+#[tokio::test]
+async fn a_capture_reported_retirement_does_not_raise_the_threshold() {
+    let (backend, registry, mut enumerator, node_id, route) = probed_direct_node().await;
+    let stale = registry.lookup(&route).expect("direct route published");
+    backend
+        .set_channel_connection(DIRECT_CHANNEL, ChannelConnection::Disconnected)
+        .expect("known channel");
+    bounded_pass(&mut enumerator).await;
+    assert!(
+        !enumerator.channels.is_retiring(&node_id),
+        "one failure is below the threshold"
+    );
+    assert!(registry.report_dead(&stale));
+    tokio::time::timeout(Duration::from_secs(1), enumerator.dead_channel_reported())
+        .await
+        .expect("a report wakes the inventory watcher");
+    bounded_pass(&mut enumerator).await;
+    assert!(enumerator.channels.is_retiring(&node_id));
+    drop(stale);
+
+    let replacement = failed_passes_until_retired(&backend, &mut enumerator, &node_id, 2).await;
+
+    assert_eq!(replacement, 2, "the replacement keeps the base threshold");
+}
+
 /// A receiver's channel carries every paired slot, so a silent device behind
 /// it must not take the channel down for the others.
 #[tokio::test]

@@ -43,6 +43,8 @@ const WAKE_GAP: Duration = Duration::from_mins(1);
 /// Fast passes after the scan that first found an unhealthy node. Four are
 /// enough to cross the ledger's second-failure retirement, let users release
 /// the old channel, defer reopen for one pass, and then probe the replacement.
+/// A replacement that fails too is held to a raised threshold, which only the
+/// following recovery scans reach; that spacing is intended.
 const FAST_RETRY_LIMIT: u8 = 4;
 
 /// One explicit reason for an authoritative reconciliation.
