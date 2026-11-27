@@ -12,8 +12,8 @@
 
 use std::ffi::{c_int, c_void};
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{LazyLock, mpsc};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{LazyLock, Mutex, Once, PoisonError, mpsc};
 use std::time::{Duration, Instant};
 
 use block2::RcBlock;
@@ -33,10 +33,10 @@ use objc2_foundation::{
     ns_string,
 };
 
-use super::super::DesktopSwitch;
 use super::super::space_switch::{
     self, Backend, Direction, Failure, Lease, Pace, PostGate, SlideFrame, SlidePhase, SpaceState,
 };
+use super::super::{DesktopSwitch, SpacePosition, SpaceSwipePhase};
 use super::{app_services, app_services_symbol};
 
 static BUSY: AtomicBool = AtomicBool::new(false);
@@ -103,6 +103,57 @@ fn start(direction: Direction) {
     if let Err(error) = result {
         tracing::warn!(?error, "Space switch preparation failed — no retry");
     }
+}
+
+/// The SkyLight display identifier of `display`.
+fn display_uuid(api: &Api, display: u32) -> Option<String> {
+    // SAFETY: dynamically resolved CGDisplayCreateUUIDFromDisplayID accepts
+    // a public CGDirectDisplayID and returns a Create-rule CFUUID or null.
+    let uuid = NonNull::new(unsafe { (api.display_uuid)(display) })?;
+    // SAFETY: adopt the Create-rule result once; release via CFRetained.
+    let uuid = unsafe { CFRetained::from_raw(uuid) };
+    Some(CFUUID::new_string(None, Some(&uuid))?.to_string())
+}
+
+/// Where the display under the cursor is in its row of Spaces, read-only;
+/// `None` when the Space list is unavailable.
+pub(in crate::inject) fn space_position() -> Option<SpacePosition> {
+    let api = API.as_ref()?;
+    let uuid = display_uuid(api, cursor_display()?)?;
+    let state = api.state(&uuid)?;
+    Some(SpacePosition {
+        current: state.current,
+        has_previous: state.target(Direction::Previous).ok()?.is_some(),
+        has_next: state.target(Direction::Next).ok()?.is_some(),
+    })
+}
+
+static SPACE_CHANGES: AtomicU64 = AtomicU64::new(0);
+static SPACE_CHANGE_WATCH: Once = Once::new();
+
+/// A count of active-Space changes since the first call, which subscribes to
+/// them for the rest of the process.
+pub(in crate::inject) fn space_change_count() -> u64 {
+    SPACE_CHANGE_WATCH.call_once(|| {
+        let block: RcBlock<dyn Fn(NonNull<NSNotification>)> = RcBlock::new(|_| {
+            SPACE_CHANGES.fetch_add(1, Ordering::Relaxed);
+        });
+        let workspace = NSWorkspace::sharedWorkspace();
+        let center = workspace.notificationCenter();
+        // SAFETY: the notification name and object are valid AppKit objects;
+        // the block is copied by AppKit and only touches a static atomic.
+        let token = unsafe {
+            center.addObserverForName_object_queue_usingBlock(
+                Some(NSWorkspaceActiveSpaceDidChangeNotification),
+                Some(&workspace),
+                None,
+                &block,
+            )
+        };
+        // Observed for the life of the process.
+        std::mem::forget(token);
+    });
+    SPACE_CHANGES.load(Ordering::Relaxed)
 }
 
 fn cursor_display() -> Option<u32> {
@@ -223,15 +274,7 @@ struct Native {
 impl Native {
     fn new(display: u32, switch: DesktopSwitch) -> Result<Self, Failure> {
         let api = API.as_ref().ok_or(Failure::Unavailable)?;
-        // SAFETY: dynamically resolved CGDisplayCreateUUIDFromDisplayID accepts
-        // a public CGDirectDisplayID and returns a Create-rule CFUUID or null.
-        let uuid =
-            NonNull::new(unsafe { (api.display_uuid)(display) }).ok_or(Failure::Unavailable)?;
-        // SAFETY: adopt the Create-rule result once; release via CFRetained.
-        let uuid = unsafe { CFRetained::from_raw(uuid) };
-        let uuid = CFUUID::new_string(None, Some(&uuid))
-            .ok_or(Failure::Unavailable)?
-            .to_string();
+        let uuid = display_uuid(api, display).ok_or(Failure::Unavailable)?;
         // Subscribe before the first state query and before any output event.
         let (observer, changed) = Observer::new();
         Ok(Self {
@@ -413,20 +456,47 @@ fn field_swipe_events(direction: Direction) -> Option<[CFRetained<CGEvent>; 2]> 
 
 /// The events of a slide in `direction`, each with its time from the first.
 fn slide_events(direction: Direction) -> Option<Vec<(Duration, CFRetained<CGEvent>)>> {
-    let frames = space_switch::slide(direction);
+    let frames: Vec<SlideFrame> = space_switch::slide(direction)
+        .into_iter()
+        .map(|frame| SlideFrame {
+            progress: dock_progress(frame.progress),
+            ..frame
+        })
+        .collect();
     match *DOCK_SWIPE_LAYOUT {
         DockSwipeLayout::HidEvent => hid_slide_events(&frames, natural_scrolling()),
         DockSwipeLayout::Fields => frames
             .into_iter()
-            .map(|frame| Some((frame.at, slide_event(frame)?)))
+            .map(|frame| Some((frame.at, slide_event(frame, EMPHATIC_EXIT)?)))
             .collect(),
     }
 }
 
+/// Dock swipe progress per desktop width of travel. The Dock draws a
+/// progress of 1.0 as 0.8 of the way to the next desktop (0.7999, measured
+/// from screen recordings on macOS 26.7), so a frame at a full desktop posts
+/// 1.25 to show that desktop whole and leave its Ended nothing to jump.
+const DOCK_PROGRESS_PER_DESKTOP: f64 = 1.25;
+
+/// `desktops` of travel as the progress a Dock swipe frame carries.
+fn dock_progress(desktops: f64) -> f64 {
+    desktops * DOCK_PROGRESS_PER_DESKTOP
+}
+
+/// Exit velocity of an Ended that should land at once: the instant switch,
+/// and a slide, whose last frame is within 5% of the desktop.
+const EMPHATIC_EXIT: f64 = 9999.0;
+
+/// Fastest exit velocity, in Dock progress per second, a live swipe passes
+/// on. Up to about 10 the Dock eases out in steps of at most 0.12 desktop per
+/// frame; from about 30 it covers the rest in a frame or two.
+const MAX_LIVE_EXIT: f64 = 10.0;
+
 /// One frame of a slide, in the fields a trackpad's three-finger swipe
 /// fills. The layout follows Mac Mouse Fix's `TouchSimulator`, as proposed in
-/// #1672.
-fn slide_event(frame: SlideFrame) -> Option<CFRetained<CGEvent>> {
+/// #1672. An Ended frame carries `exit`, an exit velocity toward the
+/// progress sign in Dock progress per second.
+fn slide_event(frame: SlideFrame, exit: f64) -> Option<CFRetained<CGEvent>> {
     let event = CGEvent::new(None)?;
     CGEvent::set_type(Some(&event), CGEventType(30));
     let phase = i64::from(slide_phase(frame.phase));
@@ -448,9 +518,10 @@ fn slide_event(frame: SlideFrame) -> Option<CFRetained<CGEvent>> {
     CGEvent::set_double_value_field(Some(&event), CGEventField(139), horizontal);
     CGEvent::set_integer_value_field(Some(&event), CGEventField(136), 1);
     if frame.phase == SlidePhase::Ended {
-        // An emphatic exit velocity toward the progress sign asks the Dock to
-        // finish the switch rather than spring back, as the instant switch does.
-        let velocity = frame.progress.signum() * 9999.0;
+        // The Dock finishes an Ended toward its progress sign at any exit
+        // velocity, easing out from it: zero takes about 470 ms, 9999 lands
+        // in one frame.
+        let velocity = frame.progress.signum() * exit;
         CGEvent::set_double_value_field(Some(&event), CGEventField(129), velocity);
         CGEvent::set_double_value_field(Some(&event), CGEventField(130), velocity);
     }
@@ -468,6 +539,7 @@ const fn slide_phase(phase: SlidePhase) -> u32 {
         SlidePhase::Began => 1,
         SlidePhase::Changed => 2,
         SlidePhase::Ended => 4,
+        SlidePhase::Cancelled => 8,
     }
 }
 
@@ -539,9 +611,10 @@ impl HidSwipe {
         })
     }
 
-    /// A swipe event at `progress`, signed the way the private fields sign it.
-    fn event(&self, phase: u32, progress: f64) -> Option<CFRetained<CGEvent>> {
-        let hid = dock_swipe_hid_event(self.class, phase, self.flip * progress)?;
+    /// A swipe event at `progress`, signed the way the private fields sign it,
+    /// with `exit` as the end phase's exit velocity (see [`slide_event`]).
+    fn event(&self, phase: u32, progress: f64, exit: f64) -> Option<CFRetained<CGEvent>> {
+        let hid = dock_swipe_hid_event(self.class, phase, self.flip * progress, exit)?;
         let event = CGEvent::new(None)?;
         CGEvent::set_type(Some(&event), CGEventType(30));
         // SAFETY: both objects are live; SkyLight retains the HID event.
@@ -559,8 +632,8 @@ impl HidSwipe {
 fn hid_swipe_events(direction: Direction, natural: bool) -> Option<[CFRetained<CGEvent>; 2]> {
     let swipe = HidSwipe::new(natural)?;
     Some([
-        swipe.event(1, direction.sign())?,
-        swipe.event(4, direction.sign())?,
+        swipe.event(1, direction.sign(), EMPHATIC_EXIT)?,
+        swipe.event(4, direction.sign(), EMPHATIC_EXIT)?,
     ])
 }
 
@@ -576,19 +649,21 @@ fn hid_slide_events(
         .map(|frame| {
             Some((
                 frame.at,
-                swipe.event(slide_phase(frame.phase), frame.progress)?,
+                swipe.event(slide_phase(frame.phase), frame.progress, EMPHATIC_EXIT)?,
             ))
         })
         .collect()
 }
 
 /// macOS 27 requires a velocity child on the end phase of a DockSwipe; it
-/// points the way `progress` does. Private fields follow Mac Mouse Fix's event
-/// investigation: <https://github.com/noah-nuebling/mac-mouse-fix/commit/f92d2d53a>.
+/// points the way `progress` does, at `exit`. Private fields follow Mac Mouse
+/// Fix's event investigation:
+/// <https://github.com/noah-nuebling/mac-mouse-fix/commit/f92d2d53a>.
 fn dock_swipe_hid_event(
     class: &AnyClass,
     phase: u32,
     progress: f64,
+    exit: f64,
 ) -> Option<Retained<AnyObject>> {
     let hid = hid_event(class, HID_TYPE_DOCK_SWIPE)?;
     // SAFETY: private `HIDEvent` setters taking (u32), (NSInteger, u32),
@@ -602,7 +677,7 @@ fn dock_swipe_hid_event(
         let _: () = msg_send![&*hid, setDoubleValue: progress, forField: HID_FIELD_PROGRESS];
         if phase == 4 {
             let velocity = hid_event(class, HID_TYPE_VELOCITY)?;
-            let speed = progress.signum() * 9999.0;
+            let speed = progress.signum() * exit;
             let _: () =
                 msg_send![&*velocity, setDoubleValue: speed, forField: HID_FIELD_VELOCITY_X];
             let _: () =
@@ -611,6 +686,96 @@ fn dock_swipe_hid_event(
         }
     }
     Some(hid)
+}
+
+/// Post one frame of a live Space transition; see
+/// [`crate::post_space_swipe`].
+/// The one-shot switch's lease, held by a live transition from its Began
+/// frame to its Ended or Cancelled one, so a one-shot switch and a live swipe
+/// never drive the Dock at once. It also admits one live transition at a
+/// time: a second hold's Began is refused rather than sharing the first
+/// hold's Dock gesture.
+static LIVE_LEASE: Mutex<Option<Lease<'static>>> = Mutex::new(None);
+
+pub(in crate::inject) fn post_space_swipe(progress: f64, phase: SpaceSwipePhase) -> bool {
+    let mut lease = LIVE_LEASE.lock().unwrap_or_else(PoisonError::into_inner);
+    match phase {
+        SpaceSwipePhase::Began => {
+            if lease.is_some() {
+                tracing::debug!("live Space swipe already in flight — not started");
+                return false;
+            }
+            let Some(acquired) = Lease::acquire(&BUSY) else {
+                tracing::debug!("Space switch pending — live swipe not started");
+                return false;
+            };
+            *lease = Some(acquired);
+        }
+        // Later frames belong to the transition that owns the lease. Without
+        // one (its Began was refused), they must not reach the Dock while a
+        // one-shot switch may be driving it.
+        _ if lease.is_none() => {
+            tracing::debug!(?phase, "no live Space swipe in flight — frame dropped");
+            return false;
+        }
+        _ => {}
+    }
+    let posted = if let Some(event) = live_swipe_event(progress, phase) {
+        CGEvent::post(CGEventTapLocation::SessionEventTap, Some(&event));
+        true
+    } else {
+        tracing::warn!(?phase, "could not build a live Space swipe event");
+        false
+    };
+    // The transition ends with a posted Ended or any Cancelled, and a Began
+    // that never reached the Dock never started one. A refused Ended keeps
+    // the lease so the caller's Cancelled fallback can still close the Dock
+    // gesture; that Cancelled releases it even when its own event cannot be
+    // built, so a failed live swipe never locks one-shot switches out.
+    let finished = match phase {
+        SpaceSwipePhase::Began => !posted,
+        SpaceSwipePhase::Changed => false,
+        SpaceSwipePhase::Ended { .. } => posted,
+        SpaceSwipePhase::Cancelled => true,
+    };
+    if finished {
+        *lease = None;
+    }
+    posted
+}
+
+/// One live-swipe frame in the Dock swipe layout this macOS reads: the same
+/// frame a slide posts, at the hand's progress rather than a scheduled one.
+/// An Ended exits at the hand's speed, so the Dock eases on from where the
+/// hand let go instead of jumping the rest of the way.
+fn live_swipe_event(progress: f64, phase: SpaceSwipePhase) -> Option<CFRetained<CGEvent>> {
+    let (phase, exit) = match phase {
+        SpaceSwipePhase::Began => (SlidePhase::Began, 0.0),
+        SpaceSwipePhase::Changed => (SlidePhase::Changed, 0.0),
+        SpaceSwipePhase::Ended { speed } => (SlidePhase::Ended, live_exit(speed)),
+        SpaceSwipePhase::Cancelled => (SlidePhase::Cancelled, 0.0),
+    };
+    let progress = dock_progress(progress);
+    match *DOCK_SWIPE_LAYOUT {
+        DockSwipeLayout::HidEvent => {
+            HidSwipe::new(natural_scrolling())?.event(slide_phase(phase), progress, exit)
+        }
+        DockSwipeLayout::Fields => slide_event(
+            SlideFrame {
+                phase,
+                progress,
+                at: Duration::ZERO,
+            },
+            exit,
+        ),
+    }
+}
+
+/// The Dock exit velocity for a hand released at `speed` desktop widths per
+/// second toward the switch: the same motion in Dock progress, at rest when
+/// the hand was, and capped at [`MAX_LIVE_EXIT`].
+fn live_exit(speed: f64) -> f64 {
+    dock_progress(speed).clamp(0.0, MAX_LIVE_EXIT)
 }
 
 type Dictionary = CFDictionary<CFString, CFType>;

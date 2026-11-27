@@ -1,0 +1,525 @@
+//! Live, follow-the-hand Space transitions for desktop-bound gestures.
+//!
+//! A horizontal swipe bound to Next/Previous Desktop opens a live transition
+//! instead of firing the one-shot switch: the Dock drags the neighbouring
+//! Space in as the hand keeps moving, every full desktop width of travel
+//! completes one switch, and the release finishes the switch (past halfway,
+//! or flicked) or lets it spring back — a trackpad's three-finger swipe,
+//! driven by the gesture button. A finish carries the hand's speed, so the
+//! Dock eases on from where the hand let go.
+//!
+//! The Dock takes one swipe at a time, so a long sweep settles between
+//! desktops: after a switch completes, motion is dropped until the Space
+//! change lands, and the next transition starts from zero rather than jumping
+//! to where the hand has got to. At the first and last desktop the transition
+//! holds at the edge instead of asking for a switch the Dock cannot make.
+//!
+//! This is pure policy: it turns hold events into frames, and the dispatcher
+//! posts them.
+
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
+
+use openlogi_core::binding::{Action, ButtonId, GestureDirection};
+use openlogi_inject::{SpacePosition, SpaceSwipePhase};
+
+use crate::runtime::HidppSessionId;
+
+/// Raw-XY travel that drags the transition across one full desktop, unless
+/// [`openlogi_core::env::SPACE_SWIPE_TRAVEL`] overrides it.
+pub(super) const DEFAULT_TRAVEL: f64 = 800.0;
+/// Progress past which a release finishes the switch instead of springing back.
+const COMPLETE_AT: f64 = 0.5;
+/// Release speed, in desktop widths per second along the transition, that
+/// finishes a switch short of [`COMPLETE_AT`], like a trackpad flick.
+const FLICK_SPEED: f64 = 2.5;
+/// Least progress a flick needs, so a twitch at the commit never switches.
+const FLICK_MIN: f64 = 0.1;
+/// A motion gap this long means the hand stopped: the release carries no speed.
+const STALE_MOTION: Duration = Duration::from_millis(100);
+/// Reports closer together than this move the transition but are no speed
+/// sample: a gap that short measures the report timing, not the hand.
+const MIN_SPEED_SAMPLE: Duration = Duration::from_millis(2);
+/// Longest wait for a completed switch to land before the next transition
+/// starts anyway (the Dock may not report a change it did not make). A switch
+/// on a large display was seen landing ~0.9 s after its Ended.
+const SETTLE_TIMEOUT: Duration = Duration::from_millis(1500);
+
+/// The travel per desktop in effect; `None` when live transitions are off.
+pub(super) fn configured_travel() -> Option<f64> {
+    let travel = std::env::var(openlogi_core::env::SPACE_SWIPE_TRAVEL)
+        .ok()
+        .and_then(|value| value.trim().parse::<f64>().ok())
+        .unwrap_or(DEFAULT_TRAVEL);
+    (travel.is_finite() && travel > 0.0).then_some(travel)
+}
+
+/// What the transition asks of the desktop it runs on.
+#[derive(Clone, Copy)]
+pub(super) struct SpaceProbe {
+    /// Where the display under the cursor is in its row of desktops; `None`
+    /// when unknown (then both neighbours are assumed and a landing is read
+    /// from `changes` alone).
+    pub(super) position: fn() -> Option<SpacePosition>,
+    /// A count that ticks when any display's active desktop changes; `None`
+    /// when the platform does not report it.
+    pub(super) changes: fn() -> Option<u64>,
+}
+
+impl SpaceProbe {
+    /// The live desktop.
+    #[cfg_attr(test, expect(dead_code, reason = "unit tests read a fake desktop"))]
+    pub(super) const NATIVE: Self = Self {
+        position: openlogi_inject::space_position,
+        changes: openlogi_inject::space_change_count,
+    };
+}
+
+/// When one hold event happened. `arrived` is when its report came off the
+/// device, and times the hand: a batch drained late keeps the gaps between
+/// its reports. `now` is when its frames go out, and times the Dock: a
+/// switch lands some time after its Ended is posted, however old the reports
+/// that finished it.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Timing {
+    pub(super) arrived: Instant,
+    pub(super) now: Instant,
+}
+
+/// One frame for the Dock: cumulative progress in desktop widths (positive
+/// toward the next desktop) and its lifecycle phase.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct Frame {
+    pub(super) progress: f64,
+    pub(super) phase: SpaceSwipePhase,
+}
+
+impl Frame {
+    const fn new(progress: f64, phase: SpaceSwipePhase) -> Self {
+        Self { progress, phase }
+    }
+}
+
+/// The progress sign of a desktop action: `+1` toward the next desktop.
+fn desktop_sign(action: &Action) -> Option<f64> {
+    match action {
+        Action::NextDesktop => Some(1.0),
+        Action::PreviousDesktop => Some(-1.0),
+        _ => None,
+    }
+}
+
+/// The raw-XY sign of a horizontal swipe: `+1` rightward.
+fn horizontal_sign(direction: GestureDirection) -> Option<f64> {
+    match direction {
+        GestureDirection::Right => Some(1.0),
+        GestureDirection::Left => Some(-1.0),
+        GestureDirection::Up | GestureDirection::Down | GestureDirection::Click => None,
+    }
+}
+
+/// Which way a transition may complete from the current desktop.
+#[derive(Clone, Copy)]
+struct Bounds {
+    previous: bool,
+    next: bool,
+}
+
+impl Bounds {
+    fn read(probe: SpaceProbe) -> Self {
+        (probe.position)().map_or(
+            Self {
+                previous: true,
+                next: true,
+            },
+            |position| Self {
+                previous: position.has_previous,
+                next: position.has_next,
+            },
+        )
+    }
+
+    /// Whether a desktop exists toward progress of `sign`.
+    fn allows(self, sign: f64) -> bool {
+        if sign > 0.0 { self.next } else { self.previous }
+    }
+}
+
+/// A completed switch the Dock may still be animating.
+#[derive(Clone, Copy)]
+struct Landing {
+    since: Instant,
+    /// The change count when the switch completed.
+    changes: Option<u64>,
+    /// This display's desktop when the switch completed, so a change on
+    /// another display is not mistaken for this one landing.
+    space: Option<u64>,
+}
+
+impl Landing {
+    fn at(probe: SpaceProbe, now: Instant) -> Self {
+        Self {
+            since: now,
+            changes: (probe.changes)(),
+            space: (probe.position)().map(|position| position.current),
+        }
+    }
+
+    /// Whether the switch landed, or waiting for it has timed out. Landed
+    /// once a change was reported and this display's own desktop moved on;
+    /// either signal alone is not enough on a multi-display desktop.
+    fn is_over(self, probe: SpaceProbe, now: Instant) -> bool {
+        if now.saturating_duration_since(self.since) >= SETTLE_TIMEOUT {
+            return true;
+        }
+        let ticked = (probe.changes)()
+            .zip(self.changes)
+            .map(|(current, at_end)| current != at_end);
+        let moved = (probe.position)()
+            .map(|position| position.current)
+            .zip(self.space)
+            .map(|(current, at_end)| current != at_end);
+        match (ticked, moved) {
+            (None, None) => false,
+            (ticked, moved) => ticked.unwrap_or(true) && moved.unwrap_or(true),
+        }
+    }
+}
+
+/// How a live transition opened.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum Opened {
+    /// Post this first frame now.
+    Now(Frame),
+    /// The last switch is still landing: the Began follows with the first
+    /// motion after it lands.
+    AfterLanding,
+}
+
+impl Opened {
+    /// The frame to post now, if any.
+    pub(super) fn frame(self) -> Option<Frame> {
+        match self {
+            Self::Now(frame) => Some(frame),
+            Self::AfterLanding => None,
+        }
+    }
+}
+
+/// Where one hold's transition is. Waiting for a landing comes in two kinds,
+/// since only a hold that has posted nothing yet has a one-shot fallback.
+/// Motion is dropped while either waits, and the leg's Began waits too: the
+/// Dock does not take a new swipe mid-animation, which then falls through to
+/// the app.
+enum Stage {
+    /// The hold opened while the last switch was still landing, and has
+    /// posted nothing. `action` is its binding, switched one-shot should the
+    /// Began be refused or the hold end first.
+    WaitingFirst { landing: Landing, action: Action },
+    /// A Dock transition is following the hand.
+    InFlight { progress: f64, bounds: Bounds },
+    /// This hold completed a switch that is still landing.
+    WaitingNext(Landing),
+}
+
+impl Stage {
+    /// The switch this stage waits on, if it waits.
+    fn landing(&self) -> Option<Landing> {
+        match self {
+            Self::WaitingFirst { landing, .. } | Self::WaitingNext(landing) => Some(*landing),
+            Self::InFlight { .. } => None,
+        }
+    }
+}
+
+struct Transition {
+    /// Progress per unit of rightward raw travel's sign: `+1` when moving
+    /// right heads toward the next desktop.
+    polarity: f64,
+    /// The progress sign the hand may not drag back across, when the opposite
+    /// swipe is not bound to the opposite desktop action; `None` lets the
+    /// transition swing to either neighbour.
+    keep_sign: Option<f64>,
+    stage: Stage,
+    /// Opened by a commit and not moved since: the commit's own travel is
+    /// still to come.
+    fresh: bool,
+    /// Smoothed speed along the transition, desktop widths per second.
+    velocity: f64,
+    moved_at: Instant,
+}
+
+/// Move a leg to `progress`: follow the hand below a full desktop, hold at the
+/// edge of the last desktop, or finish the switch at a full width and settle.
+/// `velocity` is the hand's speed along the transition, which a finish
+/// carries toward its desktop; `now` is when the frame goes out.
+fn step(
+    progress: f64,
+    velocity: f64,
+    bounds: Bounds,
+    probe: SpaceProbe,
+    now: Instant,
+) -> (Stage, Frame) {
+    let follow = |progress: f64, bounds: Bounds| {
+        (
+            Stage::InFlight { progress, bounds },
+            Frame::new(progress, SpaceSwipePhase::Changed),
+        )
+    };
+    if progress.abs() < 1.0 {
+        return follow(progress, bounds);
+    }
+    let sign = progress.signum();
+    // The edge read at the start can predate a switch WindowServer has not
+    // reported yet: read it again before holding there.
+    let bounds = if bounds.allows(sign) {
+        bounds
+    } else {
+        Bounds::read(probe)
+    };
+    if !bounds.allows(sign) {
+        return follow(sign, bounds);
+    }
+    let waiting = Stage::WaitingNext(Landing::at(probe, now));
+    let speed = velocity * sign;
+    (waiting, Frame::new(sign, SpaceSwipePhase::Ended { speed }))
+}
+
+/// Live transitions by capture session and held gesture source. A hold keeps
+/// its entry from the first desktop swipe until release, so later swipes in
+/// the same hold are motion for the transition rather than new actions.
+pub(super) struct SpaceSwipes {
+    travel: Option<f64>,
+    probe: SpaceProbe,
+    active: HashMap<(HidppSessionId, ButtonId), Transition>,
+    /// The last switch a release finished, until it lands.
+    landing: Option<Landing>,
+}
+
+impl SpaceSwipes {
+    /// Live transitions dragging `travel` raw-XY units per desktop (or none),
+    /// reading the desktop through `probe`.
+    pub(super) fn new(travel: Option<f64>, probe: SpaceProbe) -> Self {
+        Self {
+            travel,
+            probe,
+            active: HashMap::new(),
+            landing: None,
+        }
+    }
+
+    /// Whether `button`'s hold on `session` is driving a live transition.
+    pub(super) fn is_active(&self, session: &HidppSessionId, button: ButtonId) -> bool {
+        self.active.contains_key(&(session.clone(), button))
+    }
+
+    /// Whether `button`'s hold on `session` just opened its transition and
+    /// has not moved it yet, so the opening commit's travel is still owed.
+    pub(super) fn awaits_commit_travel(&self, session: &HidppSessionId, button: ButtonId) -> bool {
+        self.active
+            .get(&(session.clone(), button))
+            .is_some_and(|t| t.fresh)
+    }
+
+    /// Open a live transition for a committed swipe bound to a desktop action,
+    /// saying whether it begins at once; `None` (nothing opened) for anything
+    /// else. `opposite` is the action bound to the reverse swipe. It opens at
+    /// zero: the commit's own travel follows as the hold's first motion.
+    pub(super) fn begin(
+        &mut self,
+        session: &HidppSessionId,
+        button: ButtonId,
+        direction: GestureDirection,
+        action: &Action,
+        opposite: Option<&Action>,
+        at: Timing,
+    ) -> Option<Opened> {
+        // Live transitions are off without a travel per desktop.
+        self.travel?;
+        let source = horizontal_sign(direction)?;
+        let target = desktop_sign(action)?;
+        let swings_both_ways = opposite.and_then(desktop_sign) == Some(-target);
+        // Subscribe to Space changes before the first switch can land.
+        let _ = (self.probe.changes)();
+        let stage = match self
+            .landing
+            .take()
+            .filter(|landing| !landing.is_over(self.probe, at.now))
+        {
+            Some(landing) => Stage::WaitingFirst {
+                landing,
+                action: action.clone(),
+            },
+            None => Stage::InFlight {
+                progress: 0.0,
+                bounds: Bounds::read(self.probe),
+            },
+        };
+        let waits = matches!(stage, Stage::WaitingFirst { .. });
+        self.active.insert(
+            (session.clone(), button),
+            Transition {
+                polarity: target * source,
+                keep_sign: (!swings_both_ways).then_some(target),
+                stage,
+                fresh: true,
+                velocity: 0.0,
+                moved_at: at.arrived,
+            },
+        );
+        Some(if waits {
+            Opened::AfterLanding
+        } else {
+            Opened::Now(Frame::new(0.0, SpaceSwipePhase::Began))
+        })
+    }
+
+    /// The action `button`'s hold is bound to, while its transition waits to
+    /// begin and has posted nothing yet.
+    pub(super) fn unstarted(&self, session: &HidppSessionId, button: ButtonId) -> Option<Action> {
+        match &self.active.get(&(session.clone(), button))?.stage {
+            Stage::WaitingFirst { action, .. } => Some(action.clone()),
+            Stage::InFlight { .. } | Stage::WaitingNext(_) => None,
+        }
+    }
+
+    /// Forget a transition whose Began, for its first leg or a later one,
+    /// could not be posted.
+    pub(super) fn abandon(&mut self, session: &HidppSessionId, button: ButtonId) {
+        self.active.remove(&(session.clone(), button));
+    }
+
+    /// Spring back the transition `button`'s hold is driving, if any.
+    pub(super) fn cancel(&mut self, session: &HidppSessionId, button: ButtonId) -> Vec<Frame> {
+        let Some(t) = self.active.remove(&(session.clone(), button)) else {
+            return Vec::new();
+        };
+        if let Stage::InFlight { progress, .. } = t.stage {
+            return vec![Frame::new(progress, SpaceSwipePhase::Cancelled)];
+        }
+        self.landing = t.stage.landing();
+        Vec::new()
+    }
+
+    /// Follow one raw-XY report of the hold, returning the frames to post.
+    pub(super) fn motion(
+        &mut self,
+        session: &HidppSessionId,
+        button: ButtonId,
+        dx: i32,
+        at: Timing,
+    ) -> Vec<Frame> {
+        let (Some(travel), probe) = (self.travel, self.probe) else {
+            return Vec::new();
+        };
+        let Some(t) = self.active.get_mut(&(session.clone(), button)) else {
+            return Vec::new();
+        };
+        let commit_travel = std::mem::replace(&mut t.fresh, false);
+        let delta = t.polarity * f64::from(dx) / travel;
+        let elapsed = at.arrived.saturating_duration_since(t.moved_at);
+        if elapsed >= STALE_MOTION {
+            t.velocity = 0.0;
+        }
+        // The commit's travel built up before the transition opened, over a
+        // time this gap does not measure: it moves the transition, but how
+        // fast the hand went is learnt from the reports after it.
+        if !commit_travel && elapsed >= MIN_SPEED_SAMPLE {
+            t.velocity = 0.5 * t.velocity + 0.5 * delta / elapsed.as_secs_f64();
+        }
+        t.moved_at = at.arrived;
+        let velocity = t.velocity;
+        let keep_sign = t.keep_sign;
+        let hold_sign = |progress: f64| match keep_sign {
+            Some(sign) if progress * sign < 0.0 => 0.0,
+            _ => progress,
+        };
+
+        match &t.stage {
+            Stage::WaitingFirst { landing, .. } | Stage::WaitingNext(landing) => {
+                if !landing.is_over(probe, at.now) {
+                    return Vec::new();
+                }
+                // The switch landed: the next transition starts from this
+                // report, not from wherever the hand got to meanwhile, and
+                // the report gets the same edge and completion checks as any
+                // other (a full desktop's worth finishes at once, with no
+                // speed sample yet).
+                t.velocity = 0.0;
+                let (stage, frame) =
+                    step(hold_sign(delta), 0.0, Bounds::read(probe), probe, at.now);
+                t.stage = stage;
+                match frame.phase {
+                    SpaceSwipePhase::Ended { .. } => {
+                        vec![Frame::new(0.0, SpaceSwipePhase::Began), frame]
+                    }
+                    _ => vec![Frame::new(frame.progress, SpaceSwipePhase::Began)],
+                }
+            }
+            &Stage::InFlight { progress, bounds } => {
+                let (stage, frame) =
+                    step(hold_sign(progress + delta), velocity, bounds, probe, at.now);
+                t.stage = stage;
+                vec![frame]
+            }
+        }
+    }
+
+    /// Release the hold: finish the switch in flight when it is past halfway
+    /// or flicked toward a desktop that exists, otherwise let it spring back.
+    /// The Dock finishes an Ended from any progress, easing out from the
+    /// hand's speed, so a flick ends where the hand let go rather than
+    /// jumping ahead first.
+    pub(super) fn end(
+        &mut self,
+        session: &HidppSessionId,
+        button: ButtonId,
+        at: Timing,
+    ) -> Vec<Frame> {
+        let Some(t) = self.active.remove(&(session.clone(), button)) else {
+            return Vec::new();
+        };
+        let Stage::InFlight { progress, bounds } = t.stage else {
+            self.landing = t.stage.landing();
+            return Vec::new();
+        };
+        let sign = progress.signum();
+        let speed = if at.arrived.saturating_duration_since(t.moved_at) >= STALE_MOTION {
+            0.0
+        } else {
+            t.velocity * sign
+        };
+        let past_halfway = progress.abs() >= COMPLETE_AT && speed > -FLICK_SPEED;
+        let flicked = progress.abs() >= FLICK_MIN && speed >= FLICK_SPEED;
+        if bounds.allows(sign) && (past_halfway || flicked) {
+            self.landing = Some(Landing::at(self.probe, at.now));
+            vec![Frame::new(progress, SpaceSwipePhase::Ended { speed })]
+        } else {
+            vec![Frame::new(progress, SpaceSwipePhase::Cancelled)]
+        }
+    }
+
+    /// Spring back every transition `session` has in flight.
+    pub(super) fn cancel_session(&mut self, session: &HidppSessionId) -> Vec<Frame> {
+        let mut frames = Vec::new();
+        let mut landing = None;
+        self.active.retain(|(candidate, _), t| {
+            if candidate != session {
+                return true;
+            }
+            if let Stage::InFlight { progress, .. } = t.stage {
+                frames.push(Frame::new(progress, SpaceSwipePhase::Cancelled));
+            } else {
+                landing = t.stage.landing();
+            }
+            false
+        });
+        if landing.is_some() {
+            self.landing = landing;
+        }
+        frames
+    }
+}
+
+#[cfg(test)]
+mod tests;

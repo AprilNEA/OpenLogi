@@ -996,6 +996,7 @@ async fn a_pointer_only_plan_refresh_keeps_a_held_gesture() {
         &id,
         session.dispatch(),
         CapturedInput::ButtonDown(ButtonId::GestureButton),
+        std::time::Instant::now(),
     );
     assert!(dispatcher.holds_gesture_press(&id, ButtonId::GestureButton));
 
@@ -1028,6 +1029,593 @@ async fn a_pointer_only_plan_refresh_keeps_a_held_gesture() {
         &mut dispatcher,
     );
     assert!(!dispatcher.holds_gesture_press(&id, ButtonId::GestureButton));
+
+    scroll.shutdown();
+    actions.shutdown();
+}
+
+#[tokio::test]
+async fn a_desktop_swipe_drives_one_live_transition_until_release() {
+    use std::cell::RefCell;
+
+    use crate::runtime::scroll::{ScrollPreferences, ScrollRuntime};
+    use openlogi_inject::SpaceSwipePhase;
+
+    thread_local! {
+        static POSTED: RefCell<Vec<SpaceSwipePhase>> = const { RefCell::new(Vec::new()) };
+    }
+    fn record(_progress: f64, phase: SpaceSwipePhase) -> bool {
+        POSTED.with_borrow_mut(|posted| posted.push(phase));
+        true
+    }
+
+    let (_signal, device_io) = openlogi_hid::device_io_channel();
+    let (ring, _ring_rx) = mpsc::unbounded_channel();
+    let device_access = DeviceAccess {
+        channel: CaptureChannelSlot::default(),
+        registry: openlogi_hid::ChannelRegistry::default(),
+        receiver_access: ReceiverAccess::default(),
+        device_io,
+        transport_turns: crate::hardware::TransportTurns::default(),
+    };
+    let mut actions =
+        crate::runtime::ActionRuntime::new(Arc::default(), Arc::default(), device_access, ring)
+            .unwrap();
+    let mut scroll = ScrollRuntime::spawn(Arc::new(ScrollPreferences::new(
+        false,
+        VerticalScrollSensitivity::default(),
+    )))
+    .unwrap();
+    let mut dispatcher = InputDispatcher::new(GestureOutputs::new(
+        actions.dispatcher(),
+        scroll.input(),
+        Arc::default(),
+    ))
+    .with_space_output(800.0, record);
+
+    let mut held = plan();
+    held.dispatch.gesture_bindings.insert(
+        ButtonId::GestureButton,
+        [
+            (GestureDirection::Left, Action::PreviousDesktop),
+            (GestureDirection::Right, Action::NextDesktop),
+        ]
+        .into(),
+    );
+    let session = live_session_from_plan(7, held);
+    let id = session.id().clone();
+    let button = ButtonId::GestureButton;
+    for input in [
+        CapturedInput::ButtonDown(button),
+        CapturedInput::Gesture(button, GestureDirection::Right),
+        CapturedInput::GestureMotion {
+            button,
+            dx: 400,
+            dy: 0,
+        },
+        // A later commit in the same hold is motion for the transition.
+        CapturedInput::Gesture(button, GestureDirection::Left),
+        CapturedInput::ButtonUp(button),
+    ] {
+        dispatcher.dispatch(&id, session.dispatch(), input, std::time::Instant::now());
+    }
+    let posted = POSTED.with_borrow(Clone::clone);
+    assert!(
+        matches!(
+            posted.as_slice(),
+            [
+                SpaceSwipePhase::Began,
+                SpaceSwipePhase::Changed,
+                SpaceSwipePhase::Ended { .. }
+            ]
+        ),
+        "{posted:?}"
+    );
+
+    scroll.shutdown();
+    actions.shutdown();
+}
+
+#[tokio::test]
+async fn an_invalidated_press_springs_its_live_transition_back_on_release() {
+    use std::cell::RefCell;
+
+    use crate::runtime::scroll::{ScrollPreferences, ScrollRuntime};
+    use openlogi_inject::SpaceSwipePhase;
+
+    thread_local! {
+        static POSTED: RefCell<Vec<SpaceSwipePhase>> = const { RefCell::new(Vec::new()) };
+    }
+    fn record(_progress: f64, phase: SpaceSwipePhase) -> bool {
+        POSTED.with_borrow_mut(|posted| posted.push(phase));
+        true
+    }
+
+    let (_signal, device_io) = openlogi_hid::device_io_channel();
+    let (ring, _ring_rx) = mpsc::unbounded_channel();
+    let device_access = DeviceAccess {
+        channel: CaptureChannelSlot::default(),
+        registry: openlogi_hid::ChannelRegistry::default(),
+        receiver_access: ReceiverAccess::default(),
+        device_io,
+        transport_turns: crate::hardware::TransportTurns::default(),
+    };
+    let mut actions =
+        crate::runtime::ActionRuntime::new(Arc::default(), Arc::default(), device_access, ring)
+            .unwrap();
+    let mut scroll = ScrollRuntime::spawn(Arc::new(ScrollPreferences::new(
+        false,
+        VerticalScrollSensitivity::default(),
+    )))
+    .unwrap();
+    let mut dispatcher = InputDispatcher::new(GestureOutputs::new(
+        actions.dispatcher(),
+        scroll.input(),
+        Arc::default(),
+    ))
+    .with_space_output(800.0, record);
+
+    let mut held = plan();
+    held.dispatch.gesture_bindings.insert(
+        ButtonId::GestureButton,
+        [
+            (GestureDirection::Left, Action::PreviousDesktop),
+            (GestureDirection::Right, Action::NextDesktop),
+        ]
+        .into(),
+    );
+    let session = live_session_from_plan(7, held);
+    let id = session.id().clone();
+    let button = ButtonId::GestureButton;
+    for input in [
+        CapturedInput::ButtonDown(button),
+        CapturedInput::Gesture(button, GestureDirection::Right),
+        // Past halfway: a live release here would finish the switch.
+        CapturedInput::GestureMotion {
+            button,
+            dx: 500,
+            dy: 0,
+        },
+    ] {
+        dispatcher.dispatch(&id, session.dispatch(), input, std::time::Instant::now());
+    }
+    // A configuration reload invalidates every press, but leaves unchanged
+    // gesture bindings (and so this capture session) in place.
+    actions.dispatcher().cancel_all_buttons();
+    // The hand stopped: the release is the first input after the reload.
+    dispatcher.dispatch(
+        &id,
+        session.dispatch(),
+        CapturedInput::ButtonUp(button),
+        std::time::Instant::now(),
+    );
+
+    let posted = POSTED.with_borrow(Clone::clone);
+    assert_eq!(
+        posted,
+        vec![
+            SpaceSwipePhase::Began,
+            SpaceSwipePhase::Changed,
+            SpaceSwipePhase::Cancelled
+        ]
+    );
+    assert!(!dispatcher.holds_gesture_press(&id, button));
+
+    scroll.shutdown();
+    actions.shutdown();
+}
+
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "two scenarios share the runtime setup"
+)]
+async fn only_a_transition_its_commit_opens_takes_the_commit_travel() {
+    use std::cell::RefCell;
+
+    use crate::runtime::scroll::{ScrollPreferences, ScrollRuntime};
+    use openlogi_inject::SpaceSwipePhase;
+
+    thread_local! {
+        static POSTED: RefCell<Vec<(SpaceSwipePhase, f64)>> = const { RefCell::new(Vec::new()) };
+    }
+    fn record(progress: f64, phase: SpaceSwipePhase) -> bool {
+        POSTED.with_borrow_mut(|posted| posted.push((phase, progress)));
+        true
+    }
+
+    let (_signal, device_io) = openlogi_hid::device_io_channel();
+    let (ring, _ring_rx) = mpsc::unbounded_channel();
+    let device_access = DeviceAccess {
+        channel: CaptureChannelSlot::default(),
+        registry: openlogi_hid::ChannelRegistry::default(),
+        receiver_access: ReceiverAccess::default(),
+        device_io,
+        transport_turns: crate::hardware::TransportTurns::default(),
+    };
+    let mut actions =
+        crate::runtime::ActionRuntime::new(Arc::default(), Arc::default(), device_access, ring)
+            .unwrap();
+    let mut scroll = ScrollRuntime::spawn(Arc::new(ScrollPreferences::new(
+        false,
+        VerticalScrollSensitivity::default(),
+    )))
+    .unwrap();
+    let new_dispatcher = || {
+        InputDispatcher::new(GestureOutputs::new(
+            actions.dispatcher(),
+            scroll.input(),
+            Arc::default(),
+        ))
+        .with_space_output(800.0, record)
+    };
+    let mut dispatcher = new_dispatcher();
+    let button = ButtonId::GestureButton;
+    let motion = |dx| CapturedInput::GestureMotion { button, dx, dy: 0 };
+    let commit_travel = |dx| CapturedInput::GestureCommitTravel { button, dx, dy: 0 };
+
+    // Only Right is a desktop swipe: a Left first commits nothing live, and
+    // the reversal's travel reaches the transition its Right commit opens.
+    let mut right_only = plan();
+    right_only.dispatch.gesture_bindings.insert(
+        button,
+        [(GestureDirection::Right, Action::NextDesktop)].into(),
+    );
+    let session = live_session_from_plan(7, right_only);
+    let id = session.id().clone();
+    for input in [
+        CapturedInput::ButtonDown(button),
+        CapturedInput::Gesture(button, GestureDirection::Left),
+        commit_travel(-60),
+        motion(30),
+        motion(440),
+        CapturedInput::Gesture(button, GestureDirection::Right),
+        commit_travel(470),
+        CapturedInput::ButtonUp(button),
+    ] {
+        dispatcher.dispatch(&id, session.dispatch(), input, std::time::Instant::now());
+    }
+    let posted = POSTED.with_borrow_mut(std::mem::take);
+    assert!(
+        matches!(
+            posted.as_slice(),
+            [
+                (SpaceSwipePhase::Began, _),
+                (SpaceSwipePhase::Changed, progress),
+                (SpaceSwipePhase::Ended { .. }, _),
+            ] if (progress - 470.0 / 800.0).abs() < 1e-9
+        ),
+        "the full stroke past halfway finishes the switch: {posted:?}"
+    );
+
+    // A transition already following the hand saw the reversal as motion; a
+    // later commit's travel must not move it again. A fresh dispatcher: the
+    // switch above would otherwise hold the next transition off until it lands.
+    let mut dispatcher = new_dispatcher();
+    let mut both = plan();
+    both.dispatch.gesture_bindings.insert(
+        button,
+        [
+            (GestureDirection::Left, Action::PreviousDesktop),
+            (GestureDirection::Right, Action::NextDesktop),
+        ]
+        .into(),
+    );
+    let session = live_session_from_plan(8, both);
+    let id = session.id().clone();
+    for input in [
+        CapturedInput::ButtonDown(button),
+        CapturedInput::Gesture(button, GestureDirection::Right),
+        commit_travel(60),
+        motion(-30),
+        motion(-40),
+        CapturedInput::Gesture(button, GestureDirection::Left),
+        commit_travel(-70),
+    ] {
+        dispatcher.dispatch(&id, session.dispatch(), input, std::time::Instant::now());
+    }
+    let progress: Vec<f64> = POSTED.with_borrow(|posted| {
+        posted
+            .iter()
+            .filter(|(phase, _)| *phase == SpaceSwipePhase::Changed)
+            .map(|(_, progress)| *progress)
+            .collect()
+    });
+    assert_eq!(progress.len(), 3, "{progress:?}");
+    assert!((progress[2] - (-10.0 / 800.0)).abs() < 1e-9, "{progress:?}");
+
+    scroll.shutdown();
+    actions.shutdown();
+}
+
+#[tokio::test]
+async fn a_refused_next_leg_drops_the_holds_live_transition() {
+    use std::cell::{Cell, RefCell};
+
+    use crate::runtime::scroll::{ScrollPreferences, ScrollRuntime};
+    use openlogi_inject::SpaceSwipePhase;
+
+    thread_local! {
+        static POSTED: RefCell<Vec<SpaceSwipePhase>> = const { RefCell::new(Vec::new()) };
+        static BEGANS: Cell<u32> = const { Cell::new(0) };
+    }
+    /// Accepts the hold's first Began and refuses the next, as when a one-shot
+    /// switch takes the Dock between two legs.
+    fn refuse_second_began(_progress: f64, phase: SpaceSwipePhase) -> bool {
+        POSTED.with_borrow_mut(|posted| posted.push(phase));
+        if phase != SpaceSwipePhase::Began {
+            return true;
+        }
+        BEGANS.set(BEGANS.get() + 1);
+        BEGANS.get() == 1
+    }
+
+    let (_signal, device_io) = openlogi_hid::device_io_channel();
+    let (ring, _ring_rx) = mpsc::unbounded_channel();
+    let device_access = DeviceAccess {
+        channel: CaptureChannelSlot::default(),
+        registry: openlogi_hid::ChannelRegistry::default(),
+        receiver_access: ReceiverAccess::default(),
+        device_io,
+        transport_turns: crate::hardware::TransportTurns::default(),
+    };
+    let mut actions =
+        crate::runtime::ActionRuntime::new(Arc::default(), Arc::default(), device_access, ring)
+            .unwrap();
+    let mut scroll = ScrollRuntime::spawn(Arc::new(ScrollPreferences::new(
+        false,
+        VerticalScrollSensitivity::default(),
+    )))
+    .unwrap();
+    let mut dispatcher = InputDispatcher::new(GestureOutputs::new(
+        actions.dispatcher(),
+        scroll.input(),
+        Arc::default(),
+    ))
+    .with_landing_space_output(800.0, refuse_second_began);
+
+    let mut held = plan();
+    held.dispatch.gesture_bindings.insert(
+        ButtonId::GestureButton,
+        [
+            (GestureDirection::Left, Action::PreviousDesktop),
+            (GestureDirection::Right, Action::NextDesktop),
+        ]
+        .into(),
+    );
+    let session = live_session_from_plan(7, held);
+    let id = session.id().clone();
+    let button = ButtonId::GestureButton;
+    let motion = |dx| CapturedInput::GestureMotion { button, dx, dy: 0 };
+    for input in [
+        CapturedInput::ButtonDown(button),
+        CapturedInput::Gesture(button, GestureDirection::Right),
+        // A full desktop width finishes the first leg; the switch lands at once.
+        motion(800),
+        // The next leg's Began is refused. The report spans a desktop, so the
+        // leg's own Ended rides in the same batch and must not follow: it
+        // would end whichever swipe owns the Dock now.
+        motion(900),
+        // Nothing owns the Dock for this hold any more.
+        motion(100),
+        CapturedInput::ButtonUp(button),
+    ] {
+        dispatcher.dispatch(&id, session.dispatch(), input, std::time::Instant::now());
+    }
+    let posted = POSTED.with_borrow(Clone::clone);
+    assert!(
+        matches!(
+            posted.as_slice(),
+            [
+                SpaceSwipePhase::Began,
+                SpaceSwipePhase::Ended { .. },
+                SpaceSwipePhase::Began
+            ]
+        ),
+        "{posted:?}"
+    );
+
+    scroll.shutdown();
+    actions.shutdown();
+}
+
+#[tokio::test]
+async fn queued_motion_preserves_release_speed() {
+    use std::cell::RefCell;
+
+    use crate::runtime::scroll::{ScrollPreferences, ScrollRuntime};
+    use openlogi_inject::SpaceSwipePhase;
+
+    thread_local! {
+        static POSTED: RefCell<Vec<SpaceSwipePhase>> = const { RefCell::new(Vec::new()) };
+    }
+    fn record(_progress: f64, phase: SpaceSwipePhase) -> bool {
+        POSTED.with_borrow_mut(|posted| posted.push(phase));
+        true
+    }
+
+    let (_signal, device_io) = openlogi_hid::device_io_channel();
+    let (ring, _ring_rx) = mpsc::unbounded_channel();
+    let device_access = DeviceAccess {
+        channel: CaptureChannelSlot::default(),
+        registry: openlogi_hid::ChannelRegistry::default(),
+        receiver_access: ReceiverAccess::default(),
+        device_io,
+        transport_turns: crate::hardware::TransportTurns::default(),
+    };
+    let mut actions =
+        crate::runtime::ActionRuntime::new(Arc::default(), Arc::default(), device_access, ring)
+            .unwrap();
+    let mut scroll = ScrollRuntime::spawn(Arc::new(ScrollPreferences::new(
+        false,
+        VerticalScrollSensitivity::default(),
+    )))
+    .unwrap();
+    let new_dispatcher = || {
+        InputDispatcher::new(GestureOutputs::new(
+            actions.dispatcher(),
+            scroll.input(),
+            Arc::default(),
+        ))
+        .with_space_output(800.0, record)
+    };
+    let button = ButtonId::GestureButton;
+    let mut held = plan();
+    held.dispatch.gesture_bindings.insert(
+        button,
+        [
+            (GestureDirection::Left, Action::PreviousDesktop),
+            (GestureDirection::Right, Action::NextDesktop),
+        ]
+        .into(),
+    );
+    // A short, fast stroke: a quarter of a desktop, short of halfway, at
+    // 5 desktops/s, so only its speed can finish the switch.
+    let motion = CapturedInput::GestureMotion {
+        button,
+        dx: 40,
+        dy: 0,
+    };
+    let stroke = [
+        CapturedInput::ButtonDown(button),
+        CapturedInput::Gesture(button, GestureDirection::Right),
+        CapturedInput::GestureCommitTravel {
+            button,
+            dx: 40,
+            dy: 0,
+        },
+        motion,
+        motion,
+        motion,
+        motion,
+        CapturedInput::ButtonUp(button),
+    ];
+
+    // Each report dispatched as it arrives, 10 ms apart.
+    let session = live_session_from_plan(7, held.clone());
+    let id = session.id().clone();
+    let mut dispatcher = new_dispatcher();
+    let mut arrivals = Vec::new();
+    for input in stroke {
+        std::thread::sleep(Duration::from_millis(10));
+        let at = std::time::Instant::now();
+        arrivals.push(at);
+        dispatcher.dispatch(&id, session.dispatch(), input, at);
+    }
+    let immediate = POSTED.with_borrow_mut(std::mem::take);
+
+    // The same reports queued behind other work, then drained in one batch.
+    std::thread::sleep(Duration::from_millis(200));
+    let session = live_session_from_plan(8, held);
+    let id = session.id().clone();
+    let mut dispatcher = new_dispatcher();
+    for (input, at) in stroke.into_iter().zip(arrivals) {
+        dispatcher.dispatch(&id, session.dispatch(), input, at);
+    }
+    let queued = POSTED.with_borrow_mut(std::mem::take);
+
+    assert!(
+        matches!(
+            immediate.last(),
+            Some(SpaceSwipePhase::Ended { speed }) if *speed > 0.0
+        ),
+        "the flick finishes the switch: {immediate:?}"
+    );
+    assert_eq!(
+        queued, immediate,
+        "a drained batch releases at the same speed"
+    );
+
+    scroll.shutdown();
+    actions.shutdown();
+}
+
+#[tokio::test]
+async fn queued_motion_waits_for_actual_landing() {
+    use std::cell::RefCell;
+
+    use crate::runtime::scroll::{ScrollPreferences, ScrollRuntime};
+    use openlogi_inject::SpaceSwipePhase;
+
+    thread_local! {
+        static POSTED: RefCell<Vec<SpaceSwipePhase>> = const { RefCell::new(Vec::new()) };
+    }
+    fn record(_progress: f64, phase: SpaceSwipePhase) -> bool {
+        POSTED.with_borrow_mut(|posted| posted.push(phase));
+        true
+    }
+
+    let (_signal, device_io) = openlogi_hid::device_io_channel();
+    let (ring, _ring_rx) = mpsc::unbounded_channel();
+    let device_access = DeviceAccess {
+        channel: CaptureChannelSlot::default(),
+        registry: openlogi_hid::ChannelRegistry::default(),
+        receiver_access: ReceiverAccess::default(),
+        device_io,
+        transport_turns: crate::hardware::TransportTurns::default(),
+    };
+    let mut actions =
+        crate::runtime::ActionRuntime::new(Arc::default(), Arc::default(), device_access, ring)
+            .unwrap();
+    let mut scroll = ScrollRuntime::spawn(Arc::new(ScrollPreferences::new(
+        false,
+        VerticalScrollSensitivity::default(),
+    )))
+    .unwrap();
+    // The test desktop never reports a change, so a switch lands only when
+    // the settle times out.
+    let mut dispatcher = InputDispatcher::new(GestureOutputs::new(
+        actions.dispatcher(),
+        scroll.input(),
+        Arc::default(),
+    ))
+    .with_space_output(800.0, record);
+    let button = ButtonId::GestureButton;
+    let mut held = plan();
+    held.dispatch.gesture_bindings.insert(
+        button,
+        [
+            (GestureDirection::Left, Action::PreviousDesktop),
+            (GestureDirection::Right, Action::NextDesktop),
+        ]
+        .into(),
+    );
+    let session = live_session_from_plan(7, held);
+    let id = session.id().clone();
+
+    // A hold that queued behind other work for over two seconds, drained in
+    // one batch now: its first desktop's worth finishes a switch, and its
+    // later reports arrived more than the settle timeout after that.
+    let start = std::time::Instant::now()
+        .checked_sub(Duration::from_millis(2500))
+        .expect("the clock reaches back 2.5 s");
+    let motion = |dx| CapturedInput::GestureMotion { button, dx, dy: 0 };
+    for (input, after) in [
+        (CapturedInput::ButtonDown(button), 0),
+        (CapturedInput::Gesture(button, GestureDirection::Right), 0),
+        (
+            CapturedInput::GestureCommitTravel {
+                button,
+                dx: 800,
+                dy: 0,
+            },
+            0,
+        ),
+        (motion(40), 1700),
+        (motion(40), 1708),
+    ] {
+        let at = start + Duration::from_millis(after);
+        dispatcher.dispatch(&id, session.dispatch(), input, at);
+    }
+
+    let posted = POSTED.with_borrow(Clone::clone);
+    assert!(
+        matches!(
+            posted.as_slice(),
+            [SpaceSwipePhase::Began, SpaceSwipePhase::Ended { .. }]
+        ),
+        "the switch just went out, so the next leg waits for it to land: {posted:?}"
+    );
 
     scroll.shutdown();
     actions.shutdown();
