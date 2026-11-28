@@ -89,6 +89,34 @@ pub const G502_LIGHTSPEED: GamingLayout = GamingLayout {
     stock_dpi_presets: &[400, 800, 1600, 3200, 6400],
 };
 
+/// G502 X PLUS (wpid `0x4099`, extended model id `0`), dumped 2026-11-20 from
+/// fw MPM27.00_B0016 over a Lightspeed receiver: 11 slots, shipped mapping the
+/// identity `01..0b`. The markings do not follow the slots — the mapping
+/// follows the button (see the G502 X note in `openlogi-device`'s spy): the
+/// sniper G6 sits on slot 4 with Forward on slot 5, the wheel tilts on slots 6
+/// and 7, the profile-cycle G9 on slot 8, and the LMB-edge DPI pair is
+/// reversed, G8 on slot 9 and G7 on slot 10. The wheel's free-spin toggle is
+/// mechanical and reports nothing. The stock DPI presets are the shipped
+/// G-series five; no other unit (wired-only, other colour) has been dumped.
+pub const G502_X_PLUS: GamingLayout = GamingLayout {
+    model_keys: &["04099"],
+    slots: &[
+        Slot::native(ButtonId::LeftClick),
+        Slot::native(ButtonId::RightClick),
+        Slot::native(ButtonId::MiddleClick),
+        Slot::native(ButtonId::Back),
+        Slot::stock(ButtonId::G6, Action::DpiShift),
+        Slot::native(ButtonId::Forward),
+        Slot::silent(ButtonId::WheelTiltLeft),
+        Slot::silent(ButtonId::WheelTiltRight),
+        // G9 cycles the onboard profiles, which has no host equivalent.
+        Slot::stock(ButtonId::G9, Action::None),
+        Slot::stock(ButtonId::G8, Action::PreviousDpiPreset),
+        Slot::stock(ButtonId::G7, Action::NextDpiPreset),
+    ],
+    stock_dpi_presets: &[400, 800, 1600, 3200, 6400],
+};
+
 /// G903 LIGHTSPEED (wpid `0x4087`), dumped in #2178. Ambidextrous: the left
 /// side pair is Back and Forward, the right side pair is G6 and G7, and the
 /// DPI keys are G8 (down, left) and G9 (up, right). Slot 11 never reports.
@@ -129,7 +157,7 @@ pub const STANDARD_BUTTONS: GamingLayout = GamingLayout {
     stock_dpi_presets: &[],
 };
 
-const LAYOUTS: &[&GamingLayout] = &[&G502_LIGHTSPEED, &G903_LIGHTSPEED];
+const LAYOUTS: &[&GamingLayout] = &[&G502_LIGHTSPEED, &G903_LIGHTSPEED, &G502_X_PLUS];
 
 /// Whether a device is a G-series mouse, and which buttons it offers. The
 /// agent, the tabs and the Buttons panel all ask this one verdict.
@@ -343,8 +371,52 @@ mod tests {
 
     #[test]
     fn unknown_models_have_no_layout() {
-        assert_eq!(GamingLayout::for_model_key("04099"), None);
         assert_eq!(GamingLayout::for_model_key("2b042"), None);
+    }
+
+    #[test]
+    fn g502_x_plus_slots_match_the_hardware_dump() {
+        let layout = GamingLayout::for_model_key("04099").unwrap();
+        // The markings do not follow the slots: G6 on slot 4 with Forward on
+        // slot 5, G9 on slot 8, and the DPI pair reversed, G8 on slot 9 and
+        // G7 on slot 10 (dumped 2026-11-20, fw MPM27.00_B0016).
+        assert_eq!(layout.slot_of(ButtonId::G6), Some(4));
+        assert_eq!(layout.slot_of(ButtonId::Forward), Some(5));
+        assert_eq!(layout.slot_of(ButtonId::WheelTiltLeft), Some(6));
+        assert_eq!(layout.slot_of(ButtonId::WheelTiltRight), Some(7));
+        assert_eq!(layout.slot_of(ButtonId::G9), Some(8));
+        assert_eq!(layout.slot_of(ButtonId::G8), Some(9));
+        assert_eq!(layout.slot_of(ButtonId::G7), Some(10));
+        assert_eq!(layout.button_for_g_number(4), Some(ButtonId::Back));
+        assert_eq!(layout.button_for_g_number(5), Some(ButtonId::G6));
+        assert_eq!(layout.button_for_g_number(11), Some(ButtonId::G7));
+        assert_eq!(layout.button_for_g_number(0), None);
+        assert_eq!(layout.button_for_g_number(12), None);
+    }
+
+    #[test]
+    fn g502_x_plus_keeps_its_stock_functions() {
+        let layout = &G502_X_PLUS;
+        assert_eq!(layout.stock_action(ButtonId::G6), Some(Action::DpiShift));
+        // The LMB-edge pair is reversed relative to the slots: G8 is DPI
+        // down, G7 is DPI up.
+        assert_eq!(
+            layout.stock_action(ButtonId::G8),
+            Some(Action::PreviousDpiPreset)
+        );
+        assert_eq!(
+            layout.stock_action(ButtonId::G7),
+            Some(Action::NextDpiPreset)
+        );
+        // G9 cycles the onboard profiles, which has no host equivalent.
+        assert_eq!(layout.stock_action(ButtonId::G9), Some(Action::None));
+        assert_eq!(layout.stock_action(ButtonId::Back), None);
+        assert!(layout.needs_host_mode(ButtonId::G6));
+        assert!(layout.needs_host_mode(ButtonId::G7));
+        assert!(layout.needs_host_mode(ButtonId::G8));
+        assert!(layout.needs_host_mode(ButtonId::G9));
+        assert!(layout.needs_host_mode(ButtonId::WheelTiltLeft));
+        assert!(!layout.needs_host_mode(ButtonId::Forward));
     }
 
     #[test]

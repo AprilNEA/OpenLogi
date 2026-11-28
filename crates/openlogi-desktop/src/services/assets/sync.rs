@@ -456,4 +456,100 @@ mod tests {
             "standalone:model:8c900"
         );
     }
+
+    /// #2606: the g502x_plus depot names its variant renders
+    /// `images/device/<uuid>`. The nested name must pass the depot-relative
+    /// path check and the fetch must create the missing directories: both
+    /// reverts (the single-component check, or dropping the
+    /// `create_dir_all` in `fetch_entry_if_stale`) leave the nested file
+    /// unwritten and this test fails on the read-back.
+    #[test]
+    fn nested_variant_renders_download_into_fresh_directories() {
+        use std::io::{Read, Write};
+        use std::net::{TcpListener, TcpStream};
+
+        let front = b"front render bytes";
+        let side = b"side render bytes";
+        let front_name = "images/device/85641870-0a46-49dc-ab7a-9a152e74d77a";
+        let side_name = "images/device/55d70c6f-0d74-4045-aed4-e450baa4eeff";
+        let manifest = format!(
+            r#"{{"devices":[{{"modelId":"g502x_plus","resources":[
+                {{"key":"device_image","src":"{front_name}"}},
+                {{"key":"device_side","src":"{side_name}"}}]}}]}}"#
+        );
+        let mut entry = openlogi_assets::DeviceEntry {
+            model_id: "c095".into(),
+            model_ids: vec!["c095".into(), "4099".into()],
+            display_name: "G502 X PLUS".into(),
+            kind: "MOUSE".into(),
+            asset_path: "assets/g502x_plus/".into(),
+            files: Vec::new(),
+        };
+        for (name, bytes) in [
+            ("manifest.json", manifest.as_bytes()),
+            (front_name, &front[..]),
+            (side_name, &side[..]),
+        ] {
+            entry.files.push(openlogi_assets::FileEntry {
+                name: name.into(),
+                sha256: openlogi_assets::http::sha256_hex(bytes),
+                bytes: bytes.len() as u64,
+            });
+        }
+
+        let root = tempfile::tempdir().expect("asset root");
+        let dir = root.path().join("g502x_plus");
+        // Deliberately no `images/device/` parent: the fetch creates it.
+        std::fs::create_dir(&dir).unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            // manifest.json, then the two nested renders, in fetch order.
+            for _ in 0..3 {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                let mut request = Vec::new();
+                let mut byte = [0];
+                while stream.read(&mut byte).unwrap() != 0 {
+                    request.push(byte[0]);
+                    if request.ends_with(b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let path = String::from_utf8_lossy(&request);
+                let body: &[u8] = if path.contains("manifest.json") {
+                    manifest.as_bytes()
+                } else if path.contains("85641870") {
+                    front
+                } else {
+                    side
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                stream.write_all(body).unwrap();
+            }
+        });
+        let client = openlogi_assets::http::AssetClient::new(&format!("http://{address}"));
+        super::sync_depot(&client, root.path(), "g502x_plus", &entry, 0).unwrap();
+        // Release the server even when a regression skips a fetch.
+        drop(TcpStream::connect(address));
+        server.join().unwrap();
+
+        assert_eq!(
+            std::fs::read(dir.join(front_name)).unwrap(),
+            front,
+            "the nested front render"
+        );
+        assert_eq!(
+            std::fs::read(dir.join(side_name)).unwrap(),
+            side,
+            "the nested side render"
+        );
+    }
 }

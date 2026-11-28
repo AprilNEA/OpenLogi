@@ -200,9 +200,15 @@ impl AssetClient {
         dir: &Path,
         file: &FileEntry,
     ) -> Result<FetchOutcome, AssetError> {
-        // `name` comes from remote metadata; validate it down to a single
-        // path component before any path is built.
+        // `name` comes from remote metadata; validate it to a depot-relative
+        // path before any path is built.
         let dst = safe_component_path(dir, &file.name, "asset file name")?;
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| AssetError::WriteFile {
+                path: parent.to_owned(),
+                source,
+            })?;
+        }
         if cached_matches(&dst, &file.sha256) {
             return Ok(FetchOutcome::CacheHit);
         }
@@ -296,6 +302,15 @@ pub fn read_bytes(path: &Path) -> Result<Vec<u8>, AssetError> {
 /// Remote asset metadata is expected to carry depot and file *names*, not
 /// paths. Rejecting separators, absolute prefixes, and `.`/`..` keeps every
 /// sync write inside the cache or bundle directory chosen by the caller.
+/// Joins `component` under `base`, rejecting anything that could escape it.
+///
+/// `component` comes from remote metadata, so every path segment is checked
+/// before any path is built: each `/`-separated part must be a plain normal
+/// component — non-empty, not `.` or `..`, no backslash, no absolute or
+/// platform prefix — so `images/device/<uuid>` renders from the newer depot
+/// schema resolve while `../`, absolute, and backslash paths still fail.
+/// The returned path is `base` joined with the whole name; creating any
+/// missing directories is the caller's job.
 pub fn safe_component_path(
     base: &Path,
     component: &str,
@@ -305,16 +320,26 @@ pub fn safe_component_path(
         label: label.to_owned(),
         component: component.to_owned(),
     };
-    // `Path::components` never yields separators on the platform that didn't
-    // produce them, so reject both kinds explicitly before consulting it.
-    if component.is_empty() || component.contains('/') || component.contains('\\') {
+    // Backslash is a separator on the platforms that would produce one, so
+    // reject it before consulting `Path::components`, which only sees the
+    // separators of the host.
+    if component.is_empty() || component.contains('\\') || component.starts_with('/') {
         return Err(reject());
     }
-    let mut parts = Path::new(component).components();
-    match (parts.next(), parts.next()) {
-        (Some(Component::Normal(_)), None) => Ok(base.join(component)),
-        _ => Err(reject()),
+    for part in component.split('/') {
+        if part.is_empty() || part == "." || part == ".." {
+            return Err(reject());
+        }
     }
+    // `Path::components` also catches platform prefixes (a Windows drive or
+    // verbatim path) that the `/` split above cannot see.
+    if !Path::new(component)
+        .components()
+        .all(|c| matches!(c, Component::Normal(_)))
+    {
+        return Err(reject());
+    }
+    Ok(base.join(component))
 }
 
 /// Write `bytes` beside `dst` and atomically rename into place.
@@ -411,7 +436,7 @@ mod tests {
     }
 
     #[test]
-    fn safe_component_path_accepts_plain_names() {
+    fn safe_component_path_accepts_plain_and_nested_names() {
         assert_eq!(
             safe_component_path(Path::new("/cache"), "front_core.png", "asset").ok(),
             Some(Path::new("/cache").join("front_core.png"))
@@ -419,6 +444,11 @@ mod tests {
         assert_eq!(
             safe_component_path(Path::new("/cache"), "mx_master_4", "depot").ok(),
             Some(Path::new("/cache").join("mx_master_4"))
+        );
+        // The newer depot schema nests renders under `images/device/`.
+        assert_eq!(
+            safe_component_path(Path::new("/cache"), "images/device/55d70c6f", "asset").ok(),
+            Some(Path::new("/cache").join("images/device/55d70c6f"))
         );
     }
 
@@ -429,7 +459,9 @@ mod tests {
             ".",
             "..",
             "../LaunchAgents/x",
-            "nested/file.png",
+            "a/../../b",
+            "a//b",
+            "a/./b",
             "nested\\file.png",
             "/etc/passwd",
         ] {
@@ -438,6 +470,18 @@ mod tests {
                 "{name:?} should be rejected"
             );
         }
+    }
+
+    /// A drive-letter path is a Windows prefix and escapes the cache root
+    /// there; on Unix it is a plain (odd-looking) directory name.
+    #[test]
+    fn safe_component_path_rejects_a_drive_prefix_only_on_windows() {
+        let verdict = safe_component_path(Path::new("/cache"), "C:/temp/x", "asset").is_err();
+        assert_eq!(
+            verdict,
+            cfg!(windows),
+            "C:/temp/x rejection must match the platform"
+        );
     }
 
     #[test]

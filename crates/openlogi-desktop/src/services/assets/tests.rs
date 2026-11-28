@@ -1224,6 +1224,10 @@ fn a_drawable_colour_variant_keeps_its_renders_and_metadata() {
 
 const G502X_PLUS_EXT2_FRONT: &str = "3253a30b-28e6-4704-85ea-a14a2e5b5df6";
 const G502X_PLUS_EXT2_SIDE: &str = "1b909bb1-911c-42b7-bf07-b60be1655de5";
+/// The base variant's renders, as the g502x_plus depot's manifest names them
+/// under `images/device/`.
+const G502X_PLUS_FRONT: &str = "85641870-0a46-49dc-ab7a-9a152e74d77a";
+const G502X_PLUS_SIDE: &str = "55d70c6f-0d74-4045-aed4-e450baa4eeff";
 
 /// A depot whose colour variant ships its renders as WebP and no `side.png`,
 /// sized like the G502 X PLUS `ext2` (#2460). Its metadata origins are smaller
@@ -1298,4 +1302,92 @@ fn a_webp_colour_variant_gets_both_views_at_their_own_size() {
     assert_eq!((side.png_width, side.png_height), (1157, 2800));
     assert_eq!(asset.image_path, dir.join(G502X_PLUS_EXT2_FRONT));
     assert_eq!((asset.png_width, asset.png_height), (1662, 2800));
+}
+
+/// The G502 X PLUS depot as the catalog ships it: the manifest is keyed on
+/// the depot name, not on a registry model id, and the base variant's
+/// renders sit under `images/device/`. Both at once are what made the side
+/// view vanish: the side lookup ran on the model ids alone and every nested
+/// name was rejected as a path escape.
+fn write_depot_keyed_nested_depot(root: &Path) -> PathBuf {
+    let dir = root.join("g502x_plus");
+    std::fs::create_dir_all(dir.join("images/device")).expect("create depot dirs");
+    std::fs::write(
+        dir.join("manifest.json"),
+        format!(
+            r#"{{"devices":[
+                {{"modelId":"g502x_plus","resources":[
+                    {{"key":"device_image","src":"images/device/{G502X_PLUS_FRONT}"}},
+                    {{"key":"device_side","src":"images/device/{G502X_PLUS_SIDE}"}}]}}
+            ]}}"#,
+        ),
+    )
+    .expect("write manifest");
+    std::fs::write(
+        dir.join("metadata.json"),
+        r#"{"images":[
+            {"key":"device_image","origin":{"width":1391,"height":2700},
+             "assignments":[{"slotId":"g502x-plus_g1_m1",
+                             "marker":{"x":480,"y":450}}]},
+            {"key":"device_side","origin":{"width":936,"height":2700},
+             "assignments":[{"slotId":"g502x-plus_g4_m1",
+                             "marker":{"x":580,"y":1800}}]}
+        ]}"#,
+    )
+    .expect("write metadata");
+    std::fs::write(
+        dir.join("images/device").join(G502X_PLUS_FRONT),
+        png_header(1391, 2700),
+    )
+    .expect("write front render");
+    std::fs::write(
+        dir.join("images/device").join(G502X_PLUS_SIDE),
+        png_header(936, 2700),
+    )
+    .expect("write side render");
+    dir
+}
+
+/// Both fixes together: the depot-name manifest base reaches the side
+/// render's `device_side` resource, and the nested name survives the
+/// depot-relative path check. Reverting the `resolve_side_view` candidate
+/// bases (model ids alone) leaves no `side.png` to fall back to and the
+/// side view is `None`; reverting the `safe_component_path` change makes
+/// every nested candidate fail and the main view falls back to nothing.
+#[test]
+fn a_depot_keyed_on_its_name_resolves_its_nested_renders() {
+    let root = tempfile::tempdir().expect("create temp dir");
+    let dir = write_depot_keyed_nested_depot(root.path());
+    let index = index_of(
+        "g502x_plus",
+        DeviceEntry {
+            model_id: "c095".into(),
+            model_ids: vec!["c095".into(), "4099".into()],
+            display_name: "G502 X PLUS".into(),
+            kind: "MOUSE".into(),
+            asset_path: "v1/devices/g502x_plus/".into(),
+            files: Vec::new(),
+        },
+    );
+    let resolver = resolver_over(&[root.path()], Some(index));
+    let model = DeviceModelInfo {
+        model_ids: [0x4099, 0xc095, 0x0000],
+        extended_model_id: 0,
+        ..bare_model()
+    };
+
+    let asset = resolver
+        .resolve(&model, None)
+        .expect("the G502 X PLUS resolves");
+    assert_eq!(
+        asset.image_path,
+        dir.join("images/device").join(G502X_PLUS_FRONT)
+    );
+    assert_eq!((asset.png_width, asset.png_height), (1391, 2700));
+    let side = asset.side_view.as_ref().expect("the nested side view");
+    assert_eq!(
+        side.image_path,
+        dir.join("images/device").join(G502X_PLUS_SIDE)
+    );
+    assert_eq!((side.png_width, side.png_height), (936, 2700));
 }
