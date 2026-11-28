@@ -16,6 +16,7 @@ use tarpc::context;
 
 use crate::agent;
 
+mod lighting;
 mod output;
 mod persistence;
 use output::{ApiError, devices, envelope, inventory_health, select_device, virtual_keyboard};
@@ -32,6 +33,20 @@ pub struct ApiArgs {
     command: ApiCommand,
 }
 
+impl ApiArgs {
+    fn validate(&self) -> Result<(), ApiError> {
+        if let ApiCommand::Lighting(args) = &self.command {
+            let persistence = if self.save {
+                lighting::Persistence::Save
+            } else {
+                lighting::Persistence::Read
+            };
+            args.validate(persistence)?;
+        }
+        Ok(())
+    }
+}
+
 /// Machine-readable commands. Writes affect live hardware; saving is opt-in.
 #[derive(Debug, Subcommand)]
 pub enum ApiCommand {
@@ -39,6 +54,8 @@ pub enum ApiCommand {
     Status,
     /// List agent-known devices, opaque IDs, battery and measured capabilities.
     Devices,
+    /// Read saved RGB keyboard lighting, or change it with --save.
+    Lighting(lighting::LightingArgs),
     /// Read DPI, or set it immediately (add --save to persist).
     Dpi {
         /// Exact opaque ID returned by `api devices`; names are not accepted.
@@ -144,18 +161,22 @@ impl Switch {
 
 /// Emit one JSON envelope and a matching process status, including runtime failures.
 pub async fn run(args: ApiArgs) -> Result<ExitCode> {
-    let result = match agent::connect().await {
-        Ok(client) => {
-            let path = args
-                .save
-                .then(openlogi_core::paths::config_path)
-                .transpose();
-            match path {
-                Ok(path) => execute(&client, args.command, path.as_deref()).await,
-                Err(error) => Err(ApiError::new("config_error", error.to_string())),
+    let result = if let Err(error) = args.validate() {
+        Err(error)
+    } else {
+        match agent::connect().await {
+            Ok(client) => {
+                let path = args
+                    .save
+                    .then(openlogi_core::paths::config_path)
+                    .transpose();
+                match path {
+                    Ok(path) => execute(&client, args.command, path.as_deref()).await,
+                    Err(error) => Err(ApiError::new("config_error", error.to_string())),
+                }
             }
+            Err(error) => Err(ApiError::from(error)),
         }
-        Err(error) => Err(ApiError::from(error)),
     };
     let success = result.is_ok();
     let mut stdout = io::stdout().lock();
@@ -188,6 +209,7 @@ async fn execute(
     // agent::snapshot helper intentionally turns them into prose.
     let snapshot = agent::call(client.snapshot(context::current())).await?;
     let mut save = path
+        .filter(|_| !matches!(command, ApiCommand::Lighting(_)))
         .map(|path| Save::prepare(path, &snapshot, &command))
         .transpose()?;
     let mut result = match command {
@@ -205,6 +227,7 @@ async fn execute(
             "inventory": inventory_health(snapshot.status.inventory),
             "devices": devices(&snapshot),
         })),
+        ApiCommand::Lighting(args) => lighting::run(client, &snapshot, &args, path).await,
         ApiCommand::Dpi { device, set } => {
             dpi(client, select_device(&snapshot, &device)?, set).await
         }

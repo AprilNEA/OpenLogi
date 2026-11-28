@@ -63,7 +63,7 @@ mod lighting;
 mod os_layout;
 mod pointer_speed;
 mod profile_scope;
-mod reload;
+pub(crate) mod reload;
 mod report_rate;
 mod sidetone;
 mod smartshift;

@@ -153,6 +153,16 @@ impl Agent for TestAgent {
         unreachable!("profile capture must never write lighting")
     }
 
+    async fn set_saved_lighting(
+        self,
+        _: TarpcContext,
+        _: DeviceRoute,
+        _: Lighting,
+        _: openlogi_core::config::ConfigRevision,
+    ) -> Result<(), WriteError> {
+        unreachable!("profile capture must never write lighting")
+    }
+
     async fn set_smartshift(
         self,
         _: TarpcContext,

@@ -1,0 +1,14 @@
+# Owner: api::persistence::Save::for_device resolves physical identity and
+# creates revision-tracked device edits for CLI automation.
+id: cli-device-config-owner
+language: rust
+severity: error
+message: Reuse api::persistence::Save::for_device for CLI device configuration; do not duplicate identity resolution and edit creation.
+files:
+  - crates/openlogi-cli/src/cmd/api/**/*.rs
+ignores:
+  - crates/openlogi-cli/src/cmd/api/persistence.rs
+  - "**/tests.rs"
+  - "**/tests/**"
+rule:
+  pattern: DeviceEdit::load($$$)

@@ -434,6 +434,17 @@ impl AppState {
         }
         let events = events.and(self.disable_keys_config_events());
         let previous_language = self.config.app_settings.language.clone();
+        let previous_lighting: Vec<_> = self
+            .devices
+            .records
+            .iter()
+            .map(|record| {
+                (
+                    record.device_key(),
+                    self.lighting_for(&record.config_key, &record.route_key),
+                )
+            })
+            .collect();
         if let Err(error) = self.config.refresh_feature() {
             warn!(%error, "could not reconcile externally edited configuration");
             return Err(events.and(StateEvent::SettingsChanged));
@@ -441,6 +452,16 @@ impl AppState {
         self.disable_keys_reads.external_config_refreshed();
         let language_changed = self.config.app_settings.language != previous_language;
         self.restore_config_projections();
+        let events = self.devices.records.iter().zip(previous_lighting).fold(
+            events,
+            |events, (record, (key, before))| {
+                if self.lighting_for(&record.config_key, &record.route_key) == before {
+                    events
+                } else {
+                    events.and(StateEvent::LightingChanged(key))
+                }
+            },
+        );
         let events = events
             .and(StateEvent::SettingsChanged)
             .and(self.for_current_device(StateEvent::BindingsChanged))

@@ -54,7 +54,7 @@ impl FromStr for Rgb {
     type Err = RgbParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let packed = (s.len() == 6)
+        let packed = (s.len() == 6 && s.bytes().all(|byte| byte.is_ascii_hexdigit()))
             .then(|| u32::from_str_radix(s, 16).ok())
             .flatten()
             .ok_or_else(|| RgbParseError { input: s.into() })?;
@@ -106,7 +106,7 @@ mod tests {
 
     #[test]
     fn rejects_wrong_length_prefix_and_non_hex() {
-        for bad in ["fff", "ff00aa0", "#ff00aa", "red", ""] {
+        for bad in ["fff", "ff00aa0", "#ff00aa", "+00000", "red", ""] {
             assert!(bad.parse::<Rgb>().is_err(), "{bad:?} should not parse");
         }
     }

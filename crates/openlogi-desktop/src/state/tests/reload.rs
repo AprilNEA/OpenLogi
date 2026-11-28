@@ -446,7 +446,7 @@ fn an_update_channel_pick_adds_only_its_line_to_a_user_file() {
 
 /// What the agent reports once it loaded `config.toml` at `revision`. It is
 /// still scanning, so nothing else in the snapshot changes the state.
-fn agent_loaded(revision: ConfigRevision) -> AgentSnapshot {
+pub(crate) fn agent_loaded(revision: ConfigRevision) -> AgentSnapshot {
     AgentSnapshot {
         status: AgentStatus {
             accessibility_granted: true,

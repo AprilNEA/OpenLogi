@@ -1515,3 +1515,22 @@ fn disable_keys_requests_are_appended() {
         "2d000846303044434146450101",
     );
 }
+
+#[test]
+fn saved_lighting_request_is_appended() {
+    assert_wire(
+        &AgentRequest::SetSavedLighting {
+            route: DeviceRoute::Direct {
+                vendor_id: 0x046d,
+                product_id: 0xc33c,
+            },
+            lighting: Lighting {
+                enabled: false,
+                color: openlogi_core::color::Rgb::WHITE,
+                brightness: 60,
+            },
+            revision: ConfigRevision::of(""),
+        },
+        "3a02fb6d04fb3cc300066666666666663ce3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    );
+}
