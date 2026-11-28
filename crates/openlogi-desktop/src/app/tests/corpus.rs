@@ -127,11 +127,21 @@ fn reviewed_detail_tabs(id: &str) -> Vec<DetailTab> {
         "mx-mechanical-mini-mac-001" | "mx-keys-s-001" | "mx-creative-keypad-001" => {
             vec![DetailTab::Keys, DetailTab::ActionsRing, DetailTab::Device]
         }
-        // The G915 and G512 are the same kind of keyboard. The G915's RGB
-        // effect engine (0x8071) and per-key lighting (0x8081) add the
-        // Lighting tab; the G512 reaches it through the older 0x8070 and
-        // 0x8080 pair.
-        "g512-001" | "g915-001" => vec![
+        // The G305 has no ReprogControls, so it is a gaming mouse with the
+        // standard buttons: the OS hook remaps them, and it gets no Actions
+        // Ring. Its DPI (0x2201) adds Pointer and its DPI LED (0x8070) adds
+        // Lighting.
+        "g305-001" => vec![
+            DetailTab::Buttons,
+            DetailTab::Pointer,
+            DetailTab::Lighting,
+            DetailTab::Device,
+        ],
+        // The G915, G915 TKL and G512 are the same kind of keyboard. The
+        // RGB effect engine (0x8071) and per-key lighting (0x8081) of the
+        // G915 and G915 TKL add the Lighting tab; the G512 reaches it
+        // through the older 0x8070 and 0x8080 pair.
+        "g512-001" | "g915-001" | "g915-tkl-001" => vec![
             DetailTab::Keys,
             DetailTab::ActionsRing,
             DetailTab::Lighting,

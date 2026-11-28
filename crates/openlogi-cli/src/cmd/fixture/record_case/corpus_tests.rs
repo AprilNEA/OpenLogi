@@ -12,7 +12,10 @@ struct Diagnostics {
     cases: Vec<String>,
     // Feature ID, version, type bits; control ID, task ID, capability bits.
     features: Vec<(u16, u8, u8)>,
-    controls: Vec<(u16, u16, u16)>,
+    // The reviewed control table, or `null` for a device without
+    // ReprogControls (0x1b04), such as a G-series mouse, whose only
+    // observation is that the feature is absent.
+    controls: Option<Vec<(u16, u16, u16)>>,
     // The reviewed battery diagnostic, or `null` for a battery-free device
     // whose only observation is that the battery feature is absent — the
     // same unsupported/absent split the profile settings already model.
@@ -64,15 +67,21 @@ async fn contributed_corpus_replays_every_declared_operation() {
                     expected.features,
                     "{specimen}/{case}"
                 ),
-                SemanticObservation::ReprogrammableControls(result) => assert_eq!(
-                    result
-                        .expect("control table")
-                        .iter()
-                        .map(|entry| (entry.cid, entry.task_id, entry.flags.bits()))
-                        .collect::<Vec<_>>(),
-                    expected.controls,
-                    "{specimen}/{case}"
-                ),
+                SemanticObservation::ReprogrammableControls(result) => match &expected.controls {
+                    Some(expected) => assert_eq!(
+                        result
+                            .expect("control table")
+                            .iter()
+                            .map(|entry| (entry.cid, entry.task_id, entry.flags.bits()))
+                            .collect::<Vec<_>>(),
+                        *expected,
+                        "{specimen}/{case}"
+                    ),
+                    None => assert!(
+                        matches!(result, Err(WriteError::FeatureUnsupported { .. })),
+                        "{specimen}/{case}: expected an absent control table, got {result:?}"
+                    ),
+                },
                 SemanticObservation::RawBattery(result) => match expected.raw_battery.as_deref() {
                     Some(expected) => assert_eq!(
                         result.expect("battery diagnostic"),
