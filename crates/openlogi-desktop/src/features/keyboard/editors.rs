@@ -25,7 +25,7 @@ use crate::ui::components::{MenuRow, control_input};
 use crate::ui::theme::{self, Palette, Typography as _};
 use gpui::{
     App, Entity, FontWeight, IntoElement, ParentElement, RenderOnce,
-    StatefulInteractiveElement as _, Styled, Window, div, px, svg,
+    StatefulInteractiveElement as _, Styled, Window, div, prelude::FluentBuilder as _, px, svg,
 };
 use gpui_kit::component::{
     Icon, IconName, Sizable as _,
@@ -47,6 +47,22 @@ pub enum PowerUserKind {
 }
 
 impl PowerUserKind {
+    /// Whether this host can run the action this editor builds; the payload
+    /// does not affect availability, so an empty one stands in for it.
+    pub(crate) fn is_available(self) -> bool {
+        let action = match self {
+            // Opens through `opener` on every host.
+            Self::OpenApplication => return true,
+            Self::TypeText => Action::TypeText(String::new()),
+            Self::RunAppleScript => Action::RunAppleScript(String::new()),
+            Self::RunShellCommand => Action::RunShellCommand(String::new()),
+            // The workflow editor can only add the step `addable_workflow_step`
+            // returns; with none, it could build nothing that runs.
+            Self::Workflow => return addable_workflow_step().is_some(),
+        };
+        crate::ui::action::is_available(&action)
+    }
+
     pub(crate) fn heading_key(self) -> &'static str {
         match self {
             Self::OpenApplication => "action_ring.open_application_or_folder",
@@ -250,6 +266,15 @@ fn editor_action_row(
         )
 }
 
+/// The step "Add step" appends: an empty text step, where this host can type
+/// text. `None` elsewhere, so the editor does not seed a step that is skipped
+/// when the workflow runs.
+pub(crate) fn addable_workflow_step() -> Option<WorkflowStep> {
+    let step = WorkflowStep::TypeText(String::new());
+    step.is_available_on(crate::ui::action::host())
+        .then_some(step)
+}
+
 /// The Workflow editor: a list of steps with add/remove.
 fn workflow_editor_card(
     target: KeyTarget,
@@ -281,23 +306,22 @@ fn workflow_editor_card(
                 .p_2()
                 .gap_2()
                 .justify_between()
-                .child(
-                    Button::new("wf-add-step")
-                        .ghost()
-                        .small()
-                        .label(tr!("actions.add_workflow_step"))
-                        .on_click({
-                            let v = view.clone();
-                            move |_e, _w, cx| {
-                                v.update(cx, |v, vcx| {
-                                    v.push_workflow_step(
-                                        WorkflowStep::TypeText(String::new()),
-                                        vcx,
-                                    );
-                                });
-                            }
-                        }),
-                )
+                .when_some(addable_workflow_step(), |row, step| {
+                    row.child(
+                        Button::new("wf-add-step")
+                            .ghost()
+                            .small()
+                            .label(tr!("actions.add_workflow_step"))
+                            .on_click({
+                                let v = view.clone();
+                                move |_e, _w, cx| {
+                                    v.update(cx, |v, vcx| {
+                                        v.push_workflow_step(step.clone(), vcx);
+                                    });
+                                }
+                            }),
+                    )
+                })
                 .child(
                     Button::new("wf-save")
                         .primary()
@@ -348,6 +372,12 @@ impl RenderOnce for WorkflowStepRow {
                 tr!("actions.workflow_step_shell"),
                 "action-icons/terminal.svg",
             ),
+        };
+        // A step this host skips says so, like an unavailable binding does.
+        let type_label = if self.step.is_available_on(crate::ui::action::host()) {
+            type_label
+        } else {
+            tr!("actions.unavailable_here", action => type_label)
         };
         let pal = theme::palette(cx);
         let view_remove = self.view;
@@ -444,6 +474,19 @@ mod tests {
                 PowerUserKind::RunAppleScript,
             ),
             ""
+        );
+    }
+
+    #[test]
+    fn workflow_editor_adds_only_steps_this_host_runs() {
+        if let Some(step) = addable_workflow_step() {
+            assert!(step.is_available_on(crate::ui::action::host()), "{step:?}");
+        }
+        // Offering the editor with nothing it can add would build a workflow
+        // whose every step is skipped.
+        assert_eq!(
+            PowerUserKind::Workflow.is_available(),
+            addable_workflow_step().is_some()
         );
     }
 

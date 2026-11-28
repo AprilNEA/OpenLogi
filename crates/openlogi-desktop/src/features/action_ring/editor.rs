@@ -10,15 +10,15 @@ use gpui_kit::component::{
     scroll::ScrollableElement as _, v_flex,
 };
 use openlogi_core::binding::{
-    Action, ActionRingEntry, ActionRingIcon, ActionRingSlot, ApplicationTarget, Category, KeyCombo,
-    RingAction,
+    Action, ActionRingEntry, ActionRingIcon, ActionRingSlot, ApplicationTarget, Category, Host,
+    KeyCombo, RingAction,
 };
 
 use super::action_icons::action_icon_path;
 use crate::features::binding_editor::editor_section;
 use crate::features::keyboard::editors::PowerUserKind;
 use crate::state::AppState;
-use crate::ui::action::localized_action_label;
+use crate::ui::action::{host, localized_action_label};
 use crate::ui::components::{MenuRow, control_input};
 use crate::ui::theme::{self, Palette, Typography as _};
 
@@ -99,17 +99,19 @@ pub(super) fn action_library(
                     ))
                 })
                 .child(path_editor(slot, application_input, pal))
-                .child(text_action_editor(
-                    slot,
-                    PowerUserKind::TypeText,
-                    &power_user.type_text,
-                    pal,
-                ))
-                // RunAppleScript has no execution path outside macOS
-                // (`openlogi-inject`'s Linux/Windows backends only log a
-                // warning and do nothing) — hide the editor there instead of
-                // letting a binding be saved that silently never fires.
-                .when(cfg!(target_os = "macos"), |library| {
+                // TypeText and RunAppleScript have no backend on some hosts
+                // (`openlogi-inject` only logs a warning there) — hide their
+                // editors instead of letting a binding be saved that silently
+                // never fires.
+                .when(PowerUserKind::TypeText.is_available(), |library| {
+                    library.child(text_action_editor(
+                        slot,
+                        PowerUserKind::TypeText,
+                        &power_user.type_text,
+                        pal,
+                    ))
+                })
+                .when(PowerUserKind::RunAppleScript.is_available(), |library| {
                     library.child(text_action_editor(
                         slot,
                         PowerUserKind::RunAppleScript,
@@ -364,53 +366,60 @@ fn action_sections(
     pal: Palette,
 ) -> impl Iterator<Item = impl IntoElement> {
     let mut index = 0usize;
-    ring_catalog().into_iter().map(move |(category, actions)| {
-        v_flex()
-            .child(editor_section(
-                rust_i18n::t!(category.translation_key()),
-                pal,
-            ))
-            .children(actions.into_iter().map(|action| {
-                let selected = current == Some(&action);
-                let action_to_commit = action.clone();
-                let label = localized_action_label(&action);
-                let icon_path = action_icon_path(&action);
-                let row_index = index;
-                index += 1;
-                MenuRow::new(("ring-action", row_index))
-                    .role(Role::MenuItem)
-                    .aria_label(label.clone())
-                    .selected(selected)
-                    .child(
-                        h_flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                svg()
-                                    .path(icon_path)
-                                    .size_4()
-                                    .flex_none()
-                                    .text_color(pal.text_muted),
-                            )
-                            .child(label),
-                    )
-                    .when(selected, |row| {
-                        row.child(
-                            Icon::new(IconName::Check)
-                                .size_3()
-                                .text_color(rgb(theme::ACCENT_BLUE)),
+    ring_catalog(host())
+        .into_iter()
+        .map(move |(category, actions)| {
+            v_flex()
+                .child(editor_section(
+                    rust_i18n::t!(category.translation_key()),
+                    pal,
+                ))
+                .children(actions.into_iter().map(|action| {
+                    let selected = current == Some(&action);
+                    let action_to_commit = action.clone();
+                    let label = localized_action_label(&action);
+                    let icon_path = action_icon_path(&action);
+                    let row_index = index;
+                    index += 1;
+                    MenuRow::new(("ring-action", row_index))
+                        .role(Role::MenuItem)
+                        .aria_label(label.clone())
+                        .selected(selected)
+                        .child(
+                            h_flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    svg()
+                                        .path(icon_path)
+                                        .size_4()
+                                        .flex_none()
+                                        .text_color(pal.text_muted),
+                                )
+                                .child(label),
                         )
-                    })
-                    .on_click(move |_, _, cx| {
-                        commit_action(slot, action_to_commit.clone(), cx);
-                    })
-            }))
-    })
+                        .when(selected, |row| {
+                            row.child(
+                                Icon::new(IconName::Check)
+                                    .size_3()
+                                    .text_color(rgb(theme::ACCENT_BLUE)),
+                            )
+                        })
+                        .on_click(move |_, _, cx| {
+                            commit_action(slot, action_to_commit.clone(), cx);
+                        })
+                }))
+        })
 }
 
-fn ring_catalog() -> Vec<(Category, Vec<Action>)> {
+/// The ring-valid catalog actions `host` can perform, grouped by category.
+/// Takes the host rather than reading this process's, so tests can pin one.
+fn ring_catalog(host: Host) -> Vec<(Category, Vec<Action>)> {
     let mut sections: Vec<(Category, Vec<Action>)> = Vec::new();
-    for action in Action::catalog() {
+    for action in Action::catalog()
+        .into_iter()
+        .filter(|action| action.is_available_on(host))
+    {
         if RingAction::new(action.clone()).is_err() {
             continue;
         }
@@ -448,6 +457,8 @@ mod tests {
         AppContext as _, Context, Render, ScrollDelta, ScrollEvent, ScrollHandle, TestAppContext,
         Window, point, px,
     };
+
+    use openlogi_core::binding::LinuxDesktop;
 
     use super::*;
 
@@ -626,7 +637,7 @@ mod tests {
 
     #[test]
     fn ring_catalog_is_categorized_and_excludes_invalid_actions() {
-        let sections = ring_catalog();
+        let sections = ring_catalog(Host::MacOs);
         assert!(
             sections
                 .iter()
@@ -639,6 +650,31 @@ mod tests {
         assert!(actions.contains(&Action::MissionControl));
         assert!(!actions.contains(&Action::None));
         assert!(!actions.contains(&Action::ShowActionsRing));
+    }
+
+    #[test]
+    fn ring_catalog_offers_exactly_what_each_linux_desktop_runs() {
+        for desktop in [
+            LinuxDesktop::Gnome,
+            LinuxDesktop::Kde,
+            LinuxDesktop::Hyprland,
+            LinuxDesktop::Other,
+        ] {
+            let host = Host::Linux(desktop);
+            let offered = ring_catalog(host)
+                .into_iter()
+                .flat_map(|(_, actions)| actions)
+                .collect::<Vec<_>>();
+            for action in Action::catalog() {
+                let expected =
+                    action.is_available_on(host) && RingAction::new(action.clone()).is_ok();
+                assert_eq!(
+                    offered.contains(&action),
+                    expected,
+                    "{action:?} on {desktop:?}"
+                );
+            }
+        }
     }
 
     #[test]
