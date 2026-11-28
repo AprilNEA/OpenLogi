@@ -388,7 +388,8 @@ pub fn plan_for_device(
                 }
                 let action = binding.click_action();
                 // Gesture sources have no host-visible firmware action, so any
-                // single binding needs the divert. `None` leaves them native.
+                // single binding needs the divert. `None` leaves them native;
+                // `Disable` diverts the control and dispatches no output.
                 if GESTURE_SOURCE_BUTTONS.iter().any(|(_, source)| source == button) {
                     action != Action::None
                 } else {
@@ -1134,6 +1135,37 @@ mod tests {
                 .iter()
                 .any(|&(cid, _)| cid == GESTURE_BUTTON_CID),
             "an explicitly unbound gesture button must not be captured"
+        );
+    }
+
+    #[test]
+    fn disabled_gesture_button_uses_plain_diversion_without_raw_xy() {
+        let mut cfg = Config::default();
+        cfg.set_binding(
+            "2b042",
+            ButtonId::GestureButton,
+            Binding::Single(Action::Disable),
+        );
+
+        let plan = plan_for_device(&cfg, "2b042", route(), None, 0, true);
+        for cid in [GESTURE_BUTTON_CID, MULTIPLATFORM_GESTURE_BUTTON_CID] {
+            assert!(
+                plan.target
+                    .spec
+                    .divert_buttons
+                    .contains(&(cid, ButtonId::GestureButton))
+            );
+            assert!(!plan.target.spec.divert_gesture_sources.contains(&cid));
+        }
+        assert!(
+            !plan
+                .dispatch
+                .gesture_bindings
+                .contains_key(&ButtonId::GestureButton)
+        );
+        assert_eq!(
+            plan.dispatch.bindings.get(&ButtonId::GestureButton),
+            Some(&Binding::Single(Action::Disable))
         );
     }
 

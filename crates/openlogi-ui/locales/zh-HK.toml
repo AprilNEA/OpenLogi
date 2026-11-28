@@ -248,6 +248,7 @@ select_device_button_description = "選擇裝置上的按鍵以更改其功能�
 remove_profile_description = "這會刪除此設定檔的自訂按鍵指派，不會影響預設指派。"
 
 [pointer]
+disable = "Disable"
 mouse_button_profiles = "滑鼠按鍵設定檔"
 mouse_profile_pointer = "滑鼠指標"
 mouse_profile_focused = "焦點應用程式"

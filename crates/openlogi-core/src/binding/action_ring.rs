@@ -170,7 +170,7 @@ impl RingAction {
 
 fn validate_ring_action(action: &Action) -> Result<(), RingActionError> {
     match action {
-        Action::None => Err(RingActionError::EmptyAction),
+        Action::None | Action::Disable => Err(RingActionError::EmptyAction),
         Action::ShowActionsRing => Err(RingActionError::RecursiveTrigger),
         _ => Ok(()),
     }

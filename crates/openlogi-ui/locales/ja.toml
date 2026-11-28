@@ -248,6 +248,7 @@ select_device_button_description = "動作を変更するボタンをデバイ�
 remove_profile_description = "このプロファイルのカスタムボタン割り当てを削除します。デフォルトの割り当てには影響しません。"
 
 [pointer]
+disable = "Disable"
 mouse_button_profiles = "マウスボタンのプロファイル"
 mouse_profile_pointer = "マウスポインター"
 mouse_profile_focused = "フォーカス中のアプリ"

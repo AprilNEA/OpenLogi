@@ -248,6 +248,7 @@ select_device_button_description = "Виберіть кнопку на прис�
 remove_profile_description = "Власні прив'язки кнопок у цьому профілі буде видалено. Типові прив'язки не зміняться."
 
 [pointer]
+disable = "Disable"
 mouse_button_profiles = "Профілі кнопок миші"
 mouse_profile_pointer = "Вказівник миші"
 mouse_profile_focused = "Застосунок у фокусі"

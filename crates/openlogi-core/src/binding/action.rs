@@ -264,6 +264,8 @@ pub enum Action {
     EasySwitchChannel2,
     /// Move the device to its third Easy-Switch channel.
     EasySwitchChannel3,
+    /// Capture the input and suppress its native action.
+    Disable,
 }
 
 /// Which of a held chord's keys stay down for the lifetime of the press.
@@ -358,6 +360,7 @@ macro_rules! for_each_unit_action {
             LaunchpadShow "Launchpad" "actions.launchpad" Navigation Applications,
             // System
             None "Do Nothing" "pointer.do_nothing" System Ban,
+            Disable "Disable" "pointer.disable" System Ban not_pickable,
             LockScreen "Lock Screen" "actions.lock_screen" System Lock,
             Screenshot "Screenshot" "actions.screenshot" System Camera,
             CaptureRegion "Capture Region" "actions.capture_region" System Camera,
