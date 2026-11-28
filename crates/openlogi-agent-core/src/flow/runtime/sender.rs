@@ -14,11 +14,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
+use futures_concurrency::future::Join as _;
 use openlogi_flow::frame::{FrameKind, InboundRole};
 use openlogi_flow::generated as proto;
 use openlogi_flow::transport::{FlowConnection, TransportError, message_envelope};
 use openlogi_hid::{
-    ChannelPool, DeviceIoGate, HostSwitchError, PreparedHostSwitch, prepare_host_switch,
+    ChannelPool, ChannelRegistry, DeviceIoGate, HostSwitchError, PreparedHostSwitch,
+    prepare_host_switch, prepare_host_switch_on,
 };
 use tokio::sync::{oneshot, watch};
 use tokio::time::Instant;
@@ -47,6 +49,7 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(1);
 /// The agent's device access a sender needs.
 #[derive(Clone)]
 pub(crate) struct FlowHardware {
+    pub(crate) registry: ChannelRegistry,
     /// Opens the device channels.
     pub(crate) channel_pool: ChannelPool,
     /// Orders device I/O with the other receiver users.
@@ -109,15 +112,28 @@ pub(super) async fn acquire_and_prepare(
     ),
     SendReport,
 > {
+    let started = Instant::now();
     let lease = acquire(&hardware.receiver_access)
         .await
         .ok_or(SendReport::NotStarted("the receivers stayed busy"))?;
     if !hardware.device_io.allows_io() {
         return Err(SendReport::NotStarted("device I/O is suspended"));
     }
+    debug!(
+        elapsed_ms = started.elapsed().as_millis(),
+        "Flow receiver lease acquired"
+    );
     let switches = prepare_all(devices, |device| async move {
-        let switch =
-            prepare_host_switch(&hardware.channel_pool, &device.route, device.slot.get()).await?;
+        let started = Instant::now();
+        let switch = if let Some(shared) = hardware.registry.lookup(&device.route) {
+            prepare_host_switch_on(&shared, device.slot.get()).await?
+        } else {
+            prepare_host_switch(&hardware.channel_pool, &device.route, device.slot.get()).await?
+        };
+        debug!(
+            elapsed_ms = started.elapsed().as_millis(),
+            "Flow device switch prepared"
+        );
         Ok(switch.is_required().then_some(switch))
     })
     .await?;
@@ -138,9 +154,16 @@ where
     Prepare: Fn(&'a OutgoingDevice) -> Prepared,
     Prepared: Future<Output = Result<Option<S>, HostSwitchError>>,
 {
+    // Device-addressed reads can overlap across receiver slots. The channel
+    // serializes identical headers; writes still wait for every check and
+    // follow the configured pointing-device-first handoff order.
+    let reads: Vec<_> = devices
+        .iter()
+        .map(|device| tokio::time::timeout(PREPARE_TIMEOUT, prepare(device)))
+        .collect();
     let mut switches = Vec::with_capacity(devices.len());
-    for device in devices {
-        match tokio::time::timeout(PREPARE_TIMEOUT, prepare(device)).await {
+    for (device, result) in devices.iter().zip(reads.join().await) {
+        match result {
             Ok(Ok(Some(switch))) => switches.push((device.identity.clone(), switch)),
             Ok(Ok(None)) => debug!(route = %device.route, "device already on the peer's slot"),
             Ok(Err(error)) => {
@@ -212,6 +235,10 @@ pub(super) async fn negotiate<S: Switch>(
         return await_result(result, accepted_at + NETWORK_SLACK, stop).await;
     }
 
+    debug!(
+        elapsed_ms = requested_at.elapsed().as_millis(),
+        "Flow peer accepted transfer"
+    );
     let schedule = SwitchSchedule::new(requested_at, accepted_at, &accept);
     let mut outcomes = Vec::with_capacity(switches.len());
     let mut stopping = false;
@@ -238,6 +265,10 @@ pub(super) async fn negotiate<S: Switch>(
             },
         );
     }
+    debug!(
+        elapsed_ms = accepted_at.elapsed().as_millis(),
+        "Flow switch writes finished"
+    );
     drop(lease);
 
     match after_switch(&outcomes, stopping) {

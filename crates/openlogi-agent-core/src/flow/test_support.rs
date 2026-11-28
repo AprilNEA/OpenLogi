@@ -99,6 +99,7 @@ pub(super) fn no_hardware() -> (DeviceIoSignal, FlowHardware) {
     let backend = ReplayBackend::new(topology, Vec::new()).expect("an empty topology is valid");
     let (signal, device_io) = device_io_channel();
     let hardware = FlowHardware {
+        registry: openlogi_hid::ChannelRegistry::default(),
         channel_pool: ChannelPool::with_backend(Arc::new(backend)),
         receiver_access: ReceiverAccess::default(),
         device_io,

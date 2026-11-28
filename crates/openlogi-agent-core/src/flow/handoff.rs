@@ -221,6 +221,20 @@ impl IncomingLedger {
 
     /// Record the devices that are online in a new inventory view.
     pub(crate) fn observe(&mut self, devices: &LocalDevices, now: Instant) -> Observation {
+        self.observe_presence(now, |key| {
+            devices
+                .iter()
+                .find(|device| device.key() == key && device.is_online())
+                .map(super::devices::LocalDevice::is_pointing)
+        })
+    }
+
+    /// Apply a live unit-ID confirmation to the same ledger as full inventory.
+    pub(crate) fn observe_presence(
+        &mut self,
+        now: Instant,
+        mut present: impl FnMut(&PhysicalDeviceKey) -> Option<bool>,
+    ) -> Observation {
         let Some(pending) = self.pending.as_mut() else {
             return Observation::default();
         };
@@ -229,16 +243,13 @@ impl IncomingLedger {
             if expected.arrived_after.is_some() {
                 continue;
             }
-            let Some(arrived) = devices
-                .iter()
-                .find(|device| *device.key() == expected.key && device.is_online())
-            else {
+            let Some(pointing) = present(&expected.key) else {
                 continue;
             };
             expected.arrived_after = Some(now.saturating_duration_since(pending.accepted_at));
             // The kind of a device armed before the inventory listed it is
             // known only now.
-            if arrived.is_pointing() && !pending.entry_placed {
+            if pointing && !pending.entry_placed {
                 pending.entry_placed = true;
                 entry = Some(pending.entry.clone());
             }

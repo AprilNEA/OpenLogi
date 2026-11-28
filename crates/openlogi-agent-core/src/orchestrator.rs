@@ -886,9 +886,11 @@ impl Orchestrator {
         let (watched_lights_tx, watched_lights) = watch::channel(Arc::new(Vec::new()));
         openlogi_inject::set_desktop_switch(desktop_switch(&config.app_settings));
         let receiver_access = ReceiverAccess::default();
+        let channel_registry = ChannelRegistry::default();
         let flow = FlowController::new(
             &config.flow,
             Arc::clone(&observable),
+            channel_registry.clone(),
             hardware.channel_pool(),
             receiver_access.clone(),
             hardware.device_io(),
@@ -906,7 +908,7 @@ impl Orchestrator {
             dpi_cycle: Arc::new(RwLock::new(DpiCycles::default())),
             capture_plans,
             capture_channel: Arc::new(RwLock::new(None)),
-            channel_registry: ChannelRegistry::default(),
+            channel_registry,
             keyboard_specs,
             keyboard_channel: Arc::new(RwLock::new(None)),
             key_display_specs,
@@ -1603,6 +1605,24 @@ impl Orchestrator {
         self.publish_capture_plans();
     }
 
+    /// Publish a confirmed Flow radio transition and reapply settings through
+    /// the normal inventory lifecycle without waiting for other slot probes.
+    pub fn apply_confirmed_links(&mut self) {
+        let InventoryState::Ready {
+            inventories,
+            standalone,
+            hid_open_failures,
+        } = &self.inventory
+        else {
+            return;
+        };
+        self.refresh_inventory(
+            &inventories.clone(),
+            &standalone.clone(),
+            *hid_open_failures,
+        );
+    }
+
     /// Apply a fresh inventory snapshot. Always refreshes the snapshot the IPC
     /// `inventory()` poll serves (battery / online state changes without
     /// altering the device *set*), but only re-picks the selection and rebuilds
@@ -1640,16 +1660,30 @@ impl Orchestrator {
         hid_open_failures: bool,
         confirm_reapply: bool,
     ) {
+        // A finished scan may have queued its snapshot just before a radio
+        // transition. Read the newest confirmed state before rebuilding maps.
+        let mut merged = inventories.to_vec();
+        let returned = self.shared.channel_registry.reconcile_links(&mut merged);
+        // The physical link went down and came back, even when coalesced
+        // inventory events left the previous published row online. Supply
+        // that fact to the normal reconnect planner and capture rearming.
+        for previous in &mut self.devices {
+            if returned.iter().any(|(route, unit)| {
+                previous.route.as_ref() == Some(route) && previous.unit_id == *unit
+            }) {
+                previous.online = false;
+            }
+        }
+        let devices = build_devices(&self.config, &merged, standalone);
         // Even an empty snapshot is a *completed* enumeration — the watcher
         // skips failed ticks — so the device set is now known either way (and
         // a recovered backend upgrades `Unavailable` back to live data).
         self.inventory = InventoryState::Ready {
-            inventories: inventories.to_vec(),
+            inventories: merged,
             standalone: standalone.to_vec(),
             hid_open_failures,
         };
         self.publish_inventory();
-        let devices = build_devices(&self.config, inventories, standalone);
         // Retire departing routes before forgetting them. Offline routes that
         // remain in inventory still observe config changes without doing I/O.
         for old in &self.devices {

@@ -70,6 +70,25 @@ fn outcome(done: &CompletedTransfer) -> proto::HandoffOutcome {
 }
 
 #[test]
+fn a_verified_mouse_places_before_the_inventory_scan_finishes() {
+    let mut ledger = IncomingLedger::default();
+    let now = Instant::now();
+    arm(&mut ledger, 7, now);
+    let observation =
+        ledger.observe_presence(now + ms(40), |key| (key.as_str() == MOUSE).then_some(true));
+    assert!(observation.entry.is_some());
+    assert!(observation.completed.is_none());
+    let later = ledger.observe(&devices(true, true), now + ms(1800));
+    assert!(
+        later.entry.is_none(),
+        "a later inventory must not warp twice"
+    );
+    let done = later.completed.unwrap();
+    assert_eq!(outcome(&done), proto::HandoffOutcome::Arrived);
+    assert_eq!(done.result.arrivals[0].elapsed_ms, 40);
+}
+
+#[test]
 fn transfer_places_the_cursor_on_the_first_pointing_arrival_and_completes_on_the_last() {
     let mut ledger = IncomingLedger::default();
     let t0 = Instant::now();

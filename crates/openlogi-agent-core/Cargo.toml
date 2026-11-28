@@ -21,6 +21,7 @@ openlogi-ipc = { path = "../openlogi-ipc" }
 # The embedded action icons only — not the GPUI asset source.
 openlogi-ui = { path = "../openlogi-ui", default-features = false }
 futures-lite = { workspace = true }
+futures-concurrency = "7"
 # The keypad LCD watcher's doubling retry delay.
 backon = { workspace = true }
 # Keypad LCD tiles: rasterize an action icon's SVG and encode it as the JPEG

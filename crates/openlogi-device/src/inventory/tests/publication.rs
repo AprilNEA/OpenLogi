@@ -7,7 +7,7 @@ fn offline_slots_remain_in_inventory_without_a_live_route() {
     let mut receiver = inventory(&[1, 4]);
     receiver[0].paired[0].online = false;
     assert_eq!(
-        routes_for_inventories(&receiver),
+        routes_for_inventories(&receiver, true),
         vec![DeviceRoute::Unifying {
             receiver_uid: "receiver-1".into(),
             slot: 4,
@@ -15,7 +15,7 @@ fn offline_slots_remain_in_inventory_without_a_live_route() {
         "an inactive device route must not survive merely because its USB receiver remains connected"
     );
     receiver[0].paired[1].online = false;
-    assert!(routes_for_inventories(&receiver).is_empty());
+    assert!(routes_for_inventories(&receiver, true).is_empty());
     assert_eq!(
         receiver[0].paired.len(),
         2,
@@ -26,7 +26,7 @@ fn offline_slots_remain_in_inventory_without_a_live_route() {
 #[test]
 fn settled_inventories_publish_exact_receiver_routes() {
     assert_eq!(
-        routes_for_inventories(&inventory(&[1, 4])),
+        routes_for_inventories(&inventory(&[1, 4]), true),
         vec![
             DeviceRoute::Unifying {
                 receiver_uid: "receiver-1".into(),
@@ -40,7 +40,7 @@ fn settled_inventories_publish_exact_receiver_routes() {
     );
 
     assert_eq!(
-        routes_for_inventories(&inventory(&[4])),
+        routes_for_inventories(&inventory(&[4]), true),
         vec![DeviceRoute::Unifying {
             receiver_uid: "receiver-1".into(),
             slot: 4,
@@ -73,7 +73,7 @@ fn settled_direct_inventory_publishes_one_direct_route() {
     }];
 
     assert_eq!(
-        routes_for_inventories(&direct),
+        routes_for_inventories(&direct, true),
         vec![DeviceRoute::Direct {
             vendor_id: 0x046d,
             product_id: 0xb35b,
@@ -316,4 +316,63 @@ async fn a_non_hidpp_node_leaves_the_tick_healthy() {
         "a node that is not HID++ is not a failure to retry"
     );
     assert!(complete, "nothing was left unchecked");
+}
+
+#[tokio::test]
+async fn an_in_flight_scan_cannot_undo_a_confirmed_bolt_departure() {
+    use crate::channel::scripted::{ScriptedRawHidChannel, scripted_channel};
+    let unit = [0x11, 0x22, 0x33, 0x44];
+    let mut original = crate::channel::scripted::bolt_inventory(unit, true);
+    let route = DeviceRoute::for_slot(&original, 1).unwrap();
+    let (raw, _) = ScriptedRawHidChannel::with_responder(|_| None);
+    let incoming = raw.incoming_sender();
+    let channel = scripted_channel(raw.presenting_as(0xc548)).await;
+    let registry = crate::ChannelRegistry::default();
+    let node = crate::backend::NodeId::from("receiver".to_owned());
+    let started = std::time::Instant::now();
+    registry.publish_scan(node.clone(), &mut original, channel.clone(), started, true);
+    let (_signal, gate) = crate::device_io_channel();
+    let changes = registry.subscribe_links();
+    let departure = registry.watch_bolt_link(&route, unit, false, gate).unwrap();
+    incoming.send(vec![0x10, 1, 0x41, 0, 0x42, 0, 0]).unwrap();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(1), departure)
+            .await
+            .unwrap()
+    );
+    assert!(
+        changes
+            .has_changed()
+            .expect("registry keeps its link subscription open"),
+        "a confirmed departure must publish a link change before returning"
+    );
+
+    let mut stale = original.clone();
+    assert!(
+        registry
+            .reconcile_links(std::slice::from_mut(&mut stale))
+            .is_empty()
+    );
+    assert!(!stale.paired[0].online);
+    let mut replacement = original.clone();
+    replacement.paired[0].model_info.as_mut().unwrap().unit_id = [8; 4];
+    assert!(
+        registry
+            .reconcile_links(std::slice::from_mut(&mut replacement))
+            .is_empty()
+    );
+    assert!(replacement.paired[0].online);
+    let mut scan = original.clone();
+    registry.publish_scan(node.clone(), &mut scan, channel.clone(), started, true);
+    assert!(!scan.paired[0].online);
+    assert!(registry.lookup(&route).is_none());
+    registry.publish_scan(
+        node,
+        &mut original,
+        channel,
+        std::time::Instant::now(),
+        true,
+    );
+    assert!(original.paired[0].online, "later authoritative scan wins");
+    assert!(registry.lookup(&route).is_some());
 }
