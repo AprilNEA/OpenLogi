@@ -764,6 +764,7 @@ impl Render for RingView {
             });
         let click_pointer = self.pointer.clone();
         let filled: Vec<_> = self.invocation.slots.keys().copied().collect();
+        let cancel_commands = self.commands.clone();
 
         div()
             .id("ring-root")
@@ -810,6 +811,16 @@ impl Render for RingView {
                     None => OverlayCommand::Cancel { session_id },
                 };
                 let _ = root_commands.send(command);
+                session::dismiss_from_window(cx, window, session_id);
+            })
+            // A right click anywhere on the ring closes it without an action,
+            // whichever slot it is aimed at: the way out a hand on the mouse
+            // reaches without moving to the centre.
+            .on_aux_click(move |event: &ClickEvent, window, cx| {
+                if !event.is_right_click() {
+                    return;
+                }
+                let _ = cancel_commands.send(OverlayCommand::Cancel { session_id });
                 session::dismiss_from_window(cx, window, session_id);
             })
     }
@@ -890,7 +901,9 @@ mod tests {
     use std::cell::Cell;
     use std::rc::Rc;
 
-    use gpui::{AppContext as _, Modifiers, TestAppContext, VisualTestContext, WindowHandle};
+    use gpui::{
+        AppContext as _, Modifiers, MouseButton, TestAppContext, VisualTestContext, WindowHandle,
+    };
     use openlogi_core::binding::ActionRingIcon;
     use openlogi_ipc::ActionRingPresentation;
 
@@ -1204,6 +1217,37 @@ mod tests {
                 "{size:?}"
             );
         }
+    }
+
+    /// A right click closes the ring without running the slot it is aimed at.
+    #[gpui::test]
+    fn a_right_click_cancels_the_ring_over_any_slot(cx: &mut TestAppContext) {
+        let live = Arc::new(ClickAwaySession::new());
+        let (commands, mut sent) = mpsc::unbounded_channel();
+        let pointer = cx.new(|_| RingPointer::default());
+        let ring = cx.add_window(move |window, cx| {
+            RingView::new(
+                invocation(),
+                commands,
+                &live,
+                Placement::Window,
+                pointer,
+                window,
+                cx,
+            )
+        });
+        let mut ring_cx = VisualTestContext::from_window(ring.into(), cx);
+        let centre = MEDIUM.window / 2.0;
+        let top = point(px(centre), px(centre - MEDIUM.radius));
+        ring_cx.simulate_mouse_move(top, None, Modifiers::default());
+        ring_cx.simulate_mouse_down(top, MouseButton::Right, Modifiers::default());
+        ring_cx.simulate_mouse_up(top, MouseButton::Right, Modifiers::default());
+
+        let mut last = None;
+        while let Ok(command) = sent.try_recv() {
+            last = Some(command);
+        }
+        assert_eq!(last, Some(OverlayCommand::Cancel { session_id: 7 }));
     }
 
     /// At every ring size, a hovered slot's label, at its longest and tallest,
