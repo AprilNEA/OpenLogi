@@ -1104,6 +1104,24 @@ mod controls {
             "a headset is not managed, so sidetone is all it offers"
         );
 
+        // The settings app's slider sets any percent. A level between the
+        // steps still shows, checked in its place, so the menu never hides
+        // what the headset holds; picking it again would change nothing, so
+        // it is greyed out.
+        memory.reading.sidetone = Read::Value(SidetoneLevel::clamped(40));
+        let entries = row.entries(&memory);
+        assert_eq!(
+            choices(&entries),
+            [
+                ("Off".to_owned(), false, level(0)),
+                ("25%".to_owned(), false, level(25)),
+                ("40%".to_owned(), true, None),
+                ("50%".to_owned(), false, level(50)),
+                ("75%".to_owned(), false, level(75)),
+                ("100%".to_owned(), false, level(100)),
+            ]
+        );
+
         memory.reading.sidetone = Read::Failed;
         let entries = row.entries(&memory);
         assert_eq!(notes(&entries), ["Couldn't read the device."]);
