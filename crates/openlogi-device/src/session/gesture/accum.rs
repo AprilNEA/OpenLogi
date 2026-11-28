@@ -4,7 +4,7 @@
 
 use std::num::NonZeroU8;
 
-use openlogi_core::binding::{ButtonId, GestureDirection, SwipeAccumulator};
+use openlogi_core::binding::{ButtonId, SwipeAccumulator};
 use tokio::sync::mpsc;
 use tracing::{debug, trace};
 
@@ -155,16 +155,14 @@ impl CaptureAccum {
                         skip_first_raw_xy,
                     },
                     previous => {
-                        // No holder, or the holder released: a released hold that
-                        // never committed a direction is a plain click...
+                        // Release resolves any swipe too fast to commit mid-motion.
                         if let HoldState::Holding {
                             button, mut swipe, ..
                         } = previous
-                            && swipe.end()
+                            && let Some(direction) = swipe.end()
                         {
-                            debug!(%button, "gesture click");
-                            let _ =
-                                sink.send(CapturedInput::Gesture(button, GestureDirection::Click));
+                            debug!(%button, ?direction, "gesture released");
+                            let _ = sink.send(CapturedInput::Gesture(button, direction));
                         }
                         // ...and the first still-held source begins (or takes
                         // over) the hold. A source not down in the previous event
