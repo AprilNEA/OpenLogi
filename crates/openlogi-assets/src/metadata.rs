@@ -25,8 +25,7 @@
 //!       "origin": { "width": 687, "height": 1024 },
 //!       "assignments": [
 //!         { "slotId": "...", "slotName": "SLOT_NAME_MIDDLE_BUTTON",
-//!           "marker": { "x": 73, "y": 18 },
-//!           "label":  { "x": 1,  "y": 0  } }
+//!           "marker": { "x": 73, "y": 18 } }
 //!       ]
 //!     }
 //!   ]
@@ -34,9 +33,9 @@
 //! ```
 //!
 //! `marker.{x,y}` is a percentage 0..100 of the device image's origin
-//! dimensions. `label.{x,y}` is a direction code (-1 = left, 0 = centre,
-//! +1 = right; same for y) hinting where the annotation card should sit
-//! relative to the marker.
+//! dimensions (G-series depots: pixels). Assignments also carry a `label`,
+//! which is not read: Options+ depots put a −1/0/+1 direction code there,
+//! G HUB depots a pixel position that can be fractional.
 
 use std::path::Path;
 
@@ -81,8 +80,6 @@ pub struct Assignment {
     /// missing marker defaults to the origin rather than failing the file.
     #[serde(default)]
     pub marker: Point,
-    #[serde(default)]
-    pub label: Direction,
 }
 
 impl Assignment {
@@ -123,12 +120,6 @@ impl Assignment {
 pub struct Point {
     pub x: f32,
     pub y: f32,
-}
-
-#[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Direction {
-    pub x: i32,
-    pub y: i32,
 }
 
 impl Metadata {
@@ -176,7 +167,6 @@ mod tests {
             slot_id: id.into(),
             slot_name: String::new(),
             marker: super::Point::default(),
-            label: super::Direction::default(),
         };
         assert_eq!(slot("g502wireless_g7_m1").g_number(), Some(7));
         assert_eq!(slot("g502wireless_g11_m1").g_number(), Some(11));
@@ -259,6 +249,30 @@ mod tests {
         let origin = meta.origin().expect("origin survives");
         assert_eq!((origin.width, origin.height), (3598, 1315));
         assert_eq!(meta.images[0].assignments[0].slot_name, "");
+    }
+
+    /// G HUB depots put a pixel position in `label`, not a direction code,
+    /// and the G203 LIGHTSYNC's is fractional. A field nothing reads must not
+    /// fail the whole file and drop every marker with it.
+    #[test]
+    fn fractional_label_positions_parse() {
+        let json = r#"{
+          "images": [
+            {
+              "key": "device_image",
+              "origin": { "width": 1440, "height": 2791 },
+              "assignments": [
+                { "slotId": "g102g203_g1_m1",
+                  "marker": { "x": 374, "y": 816.5 },
+                  "label":  { "x": -1400, "y": 816.5 } }
+              ]
+            }
+          ]
+        }"#;
+        let meta: Metadata = serde_json::from_str(json).expect("G HUB label positions must parse");
+        let slot = &meta.images[0].assignments[0];
+        assert_eq!(slot.g_number(), Some(1));
+        assert_eq!(slot.marker, super::Point { x: 374.0, y: 816.5 });
     }
 
     /// Camera depots (StreamCam) list settings-slot assignments with no

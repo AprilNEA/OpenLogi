@@ -2,7 +2,7 @@ use super::callout_layout::{CalloutLayout, CardRect, callout_layout};
 use super::key_points::{KeyPoint, key_slots, photo_key_shape};
 use super::*;
 use crate::ui::callouts::routes_cross;
-use openlogi_assets::{Assignment, Direction, ImageEntry, Metadata, Origin, Point};
+use openlogi_assets::{Assignment, ImageEntry, Metadata, Origin, Point};
 use openlogi_core::binding::{ButtonId, Cid, GridKey};
 use openlogi_core::config::FunctionKey;
 use openlogi_core::device::DeviceKind;
@@ -628,7 +628,6 @@ fn legacy_asset(
             slot_id: String::new(),
             slot_name: String::new(),
             marker: Point { x: *x, y: marker_y },
-            label: Direction { x: -1, y: -1 },
         })
         .collect();
     ResolvedAsset {
@@ -659,7 +658,6 @@ fn control_assignment(cid: u16, x: f32, y: f32) -> Assignment {
         slot_id: format!("test-2b369_c{cid}"),
         slot_name: String::new(),
         marker: Point { x, y },
-        label: Direction { x: -1, y: -1 },
     }
 }
 
@@ -712,7 +710,6 @@ fn keypad_marker_asset() -> ResolvedAsset {
         slot_id: format!("mx-creative-keypad-c354_g{index}"),
         slot_name: String::new(),
         marker: Point { x, y },
-        label: Direction { x: 0, y: 0 },
     })
     .collect();
     assignments.push(control_assignment(0x01a1, 25.20, 82.05));

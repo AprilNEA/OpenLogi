@@ -610,7 +610,8 @@ fn resolve_metadata(
 ///    `extended_model_id` (registry: `"2b042"`, device reports
 ///    `ext=01 + b042`). Safe in practice because Logitech reserves PID
 ///    ranges per product family.
-/// 4. Firmware `codename` ↔ registry `displayName` (exact, case-insensitive).
+/// 4. Firmware `codename` ↔ registry `displayName` (case-insensitive): exact
+///    first, then the codename's model words ([`find_by_model_words`]).
 ///    Last resort for devices whose live PID is absent from the registry
 ///    under every transport — e.g. an MX Master 3S over BTLE reports model
 ///    id `b034`, but the registry keys the 3S as `2b043`; only the name
@@ -642,7 +643,9 @@ pub(crate) fn resolve_in_index<'a>(
 
     // Last resort: bridge by firmware codename ↔ registry displayName.
     let name = codename?;
-    let hit = index.find_by_display_name(name)?;
+    let hit = index
+        .find_by_display_name(name)
+        .or_else(|| find_by_model_words(index, name))?;
     debug!(
         depot = hit.0,
         codename = name,
@@ -651,8 +654,32 @@ pub(crate) fn resolve_in_index<'a>(
     Some(hit)
 }
 
-/// Firmware type words ignored when matching model names, wherever they occur.
-const GENERIC_CODENAME_WORDS: [&str; 3] = ["mouse", "keyboard", "trackball"];
+/// The one depot whose `displayName` is exactly the firmware name's model
+/// words ([`codename_model_words`]), compared word by word ignoring ASCII
+/// case: a wired G203 LIGHTSYNC calls itself `G203 LIGHTSYNC Gaming Mouse`
+/// where the catalog says `G203 Lightsync`. Several depots can share a
+/// `displayName` (`PRO` is a mouse, a keyboard and a headset), so a name more
+/// than one depot answers to matches none rather than whichever the map
+/// yields first.
+fn find_by_model_words<'a>(index: &'a Index, codename: &str) -> Option<(&'a str, &'a DeviceEntry)> {
+    let model: Vec<&str> = codename_model_words(codename).collect();
+    if model.is_empty() {
+        return None;
+    }
+    let mut hits = index.devices.iter().filter(|(_, entry)| {
+        let mut catalog = entry.display_name.split_whitespace();
+        model
+            .iter()
+            .all(|word| catalog.next().is_some_and(|c| c.eq_ignore_ascii_case(word)))
+            && catalog.next().is_none()
+    });
+    let (depot, entry) = hits.next()?;
+    hits.next().is_none().then_some((depot.as_str(), entry))
+}
+
+/// Firmware words that describe the product class rather than name the
+/// model, ignored when matching model names, wherever they occur.
+const GENERIC_CODENAME_WORDS: [&str; 4] = ["gaming", "mouse", "keyboard", "trackball"];
 
 /// Size/hand qualifiers, not model-generation words such as `3S` or `X`.
 const VARIANT_QUALIFIER_SUFFIXES: [&str; 2] = ["l", "left"];
