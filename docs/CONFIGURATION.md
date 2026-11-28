@@ -142,6 +142,10 @@ optional physical device key.
   action returns when the last frame is posted, about 315 ms later. With the
   setting off, the agent posts two frames and the Dock changes Space at once.
   A change applies from the next switch. Windows and Linux ignore the setting.
+- `extended_backlight_durations` (default `false`): the keyboard backlight
+  page offers the longer timer steps instead of the short ones. The GUI saves
+  the switch, so it survives a restart. It only changes which timers the page
+  offers; nothing is written to the keyboard until a timer is chosen.
 
 `[devices."<physical-key>"]` contains per-device state. Receiver keys look like
 `receiver:<receiver-id>:slot:<number>`; direct, raw-HID, and camera devices use
