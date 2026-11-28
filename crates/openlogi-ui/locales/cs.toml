@@ -1060,3 +1060,9 @@ change_not_reloaded = "Uloženo, ale OpenLogi změnu zatím nepoužilo."
 camera_in_use = "Používá se"
 camera_idle = "Nepoužívá se"
 open_camera_preview = "Otevřít náhled…"
+
+[overlay]
+actions_ring_window_title = "OpenLogi Kruh akcí"
+backlight_window_title = "OpenLogi Podsvícení"
+lock_keys_window_title = "OpenLogi Zámkové klávesy"
+notice_window_title = "OpenLogi Upozornění"

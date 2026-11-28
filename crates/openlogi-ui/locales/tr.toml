@@ -1060,3 +1060,9 @@ change_not_reloaded = "Kaydedildi ancak OpenLogi henüz uygulamadı."
 camera_in_use = "Kullanımda"
 camera_idle = "Kullanımda Değil"
 open_camera_preview = "Önizlemeyi Aç…"
+
+[overlay]
+actions_ring_window_title = "OpenLogi Eylem Halkası"
+backlight_window_title = "OpenLogi Arka aydınlatma"
+lock_keys_window_title = "OpenLogi Kilit tuşları"
+notice_window_title = "OpenLogi Bildirim"

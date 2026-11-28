@@ -1060,3 +1060,9 @@ change_not_reloaded = "Saved, but OpenLogi hasn't applied it yet."
 camera_in_use = "In Use"
 camera_idle = "Not in Use"
 open_camera_preview = "Open Preview…"
+
+[overlay]
+actions_ring_window_title = "OpenLogi Actions Ring"
+backlight_window_title = "OpenLogi Backlight"
+lock_keys_window_title = "OpenLogi Lock Keys"
+notice_window_title = "OpenLogi Notice"

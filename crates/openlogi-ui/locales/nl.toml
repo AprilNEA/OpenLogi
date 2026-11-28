@@ -1060,3 +1060,9 @@ change_not_reloaded = "Opgeslagen, maar OpenLogi heeft het nog niet toegepast."
 camera_in_use = "In gebruik"
 camera_idle = "Niet in gebruik"
 open_camera_preview = "Voorbeeld openen…"
+
+[overlay]
+actions_ring_window_title = "OpenLogi Actiering"
+backlight_window_title = "OpenLogi Achtergrondverlichting"
+lock_keys_window_title = "OpenLogi Vergrendeltoetsen"
+notice_window_title = "OpenLogi Melding"

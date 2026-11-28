@@ -1060,3 +1060,9 @@ change_not_reloaded = "Захавана, але яшчэ не ўжыта ў Open
 camera_in_use = "Выкарыстоўваецца"
 camera_idle = "Не выкарыстоўваецца"
 open_camera_preview = "Адкрыць папярэдні прагляд…"
+
+[overlay]
+actions_ring_window_title = "OpenLogi Кола дзеянняў"
+backlight_window_title = "OpenLogi Падсвятленне"
+lock_keys_window_title = "OpenLogi Клавішы блакіроўкі"
+notice_window_title = "OpenLogi Апавяшчэнне"

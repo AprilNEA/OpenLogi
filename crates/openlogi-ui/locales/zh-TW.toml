@@ -1060,3 +1060,9 @@ change_not_reloaded = "已儲存，但 OpenLogi 尚未套用。"
 camera_in_use = "使用中"
 camera_idle = "未使用"
 open_camera_preview = "打開預覽…"
+
+[overlay]
+actions_ring_window_title = "OpenLogi 動作環"
+backlight_window_title = "OpenLogi 背光"
+lock_keys_window_title = "OpenLogi 鎖定鍵"
+notice_window_title = "OpenLogi 提示"

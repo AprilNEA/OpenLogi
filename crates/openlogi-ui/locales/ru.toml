@@ -1060,3 +1060,9 @@ change_not_reloaded = "Сохранено, но ещё не применено �
 camera_in_use = "Используется"
 camera_idle = "Не используется"
 open_camera_preview = "Открыть предпросмотр…"
+
+[overlay]
+actions_ring_window_title = "OpenLogi Кольцо действий"
+backlight_window_title = "OpenLogi Подсветка"
+lock_keys_window_title = "OpenLogi Клавиши блокировки"
+notice_window_title = "OpenLogi Уведомление"

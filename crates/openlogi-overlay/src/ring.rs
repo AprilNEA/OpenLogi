@@ -7,11 +7,12 @@
 //! the same panel is drawn at the pointer, in the one window that heard it last.
 
 use gpui::{
-    Bounds, BoxShadow, ClickEvent, Context, Div, Entity, Hsla, InteractiveElement, IntoElement,
-    MouseMoveEvent, ParentElement, PathBuilder, Pixels, Point, Render, SharedString, Size,
-    StatefulInteractiveElement as _, Styled, Subscription, Window, WindowAppearance,
-    WindowBackgroundAppearance, WindowId, WindowKind, WindowOptions, canvas, div,
-    linear_color_stop, linear_gradient, point, prelude::FluentBuilder as _, px, svg,
+    App, AppContext as _, Bounds, BoxShadow, ClickEvent, Context, Div, Entity, Hsla,
+    InteractiveElement, IntoElement, MouseMoveEvent, ParentElement, PathBuilder, Pixels, Point,
+    Render, SharedString, Size, StatefulInteractiveElement as _, Styled, Subscription, Window,
+    WindowAppearance, WindowBackgroundAppearance, WindowHandle, WindowId, WindowKind,
+    WindowOptions, canvas, div, linear_color_stop, linear_gradient, point,
+    prelude::FluentBuilder as _, px, svg,
 };
 use openlogi_core::binding::{Action, ActionRingSize, ActionRingSlot};
 use openlogi_ipc::ActionRingInvocation;
@@ -849,6 +850,46 @@ pub(crate) fn ring_window_options() -> WindowOptions {
     }
 }
 
+/// Localized OS window title for Actions Ring overlay windows.
+pub(crate) fn window_title() -> String {
+    rust_i18n::t!("overlay.actions_ring_window_title").into_owned()
+}
+
+/// Open the Actions Ring windows from the first alternative set that succeeds,
+/// naming each window inside `open_window` so multi-display Wayland openings
+/// never leave secondary windows untitled.
+pub(crate) fn open_windows(
+    cx: &mut App,
+    openings: Vec<Vec<(WindowOptions, Placement)>>,
+    invocation: &ActionRingInvocation,
+    commands: &mpsc::UnboundedSender<OverlayCommand>,
+    live_session: &Arc<ClickAwaySession>,
+) -> Option<WindowHandle<RingView>> {
+    let pointer = cx.new(|_| RingPointer::default());
+    let title = window_title();
+    crate::platform::open_first(openings, |(options, panel)| {
+        let invocation = invocation.clone();
+        let commands = commands.clone();
+        let pointer = pointer.clone();
+        let live_session = Arc::clone(live_session);
+        let title = title.clone();
+        cx.open_window(options, move |window, cx| {
+            window.set_window_title(&title);
+            cx.new(|cx| {
+                RingView::new(
+                    invocation,
+                    commands,
+                    &live_session,
+                    panel,
+                    pointer,
+                    window,
+                    cx,
+                )
+            })
+        })
+    })
+}
+
 /// Top-left of the ring panel within its window, or nothing while this window
 /// does not draw it.
 ///
@@ -890,7 +931,7 @@ mod tests {
     use std::cell::Cell;
     use std::rc::Rc;
 
-    use gpui::{AppContext as _, Modifiers, TestAppContext, VisualTestContext, WindowHandle};
+    use gpui::{Modifiers, TestAppContext, VisualTestContext, WindowHandle};
     use openlogi_core::binding::ActionRingIcon;
     use openlogi_ipc::ActionRingPresentation;
 

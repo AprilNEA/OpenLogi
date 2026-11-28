@@ -165,6 +165,9 @@ fn the_stack_stays_inside_an_area_too_small_for_it() {
 
 #[test]
 fn a_low_battery_card_names_the_device_and_its_charge() {
+    let _locale = crate::tests::LOCALE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let notice = low_battery(1, Some("MX Master 3S"), Some(15));
     assert_eq!(
         notice_text(&notice.kind),
@@ -180,6 +183,9 @@ fn a_low_battery_card_names_the_device_and_its_charge() {
 /// place inside the card.
 #[gpui::test]
 fn a_name_wider_than_the_card_gives_way_to_the_charge(cx: &mut TestAppContext) {
+    let _locale = crate::tests::LOCALE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let [card, short_name, charge] = drawn_card(cx, "MX Master 3S");
     let [_, long_name, crowded_charge] = drawn_card(cx, &"MX Master 3S ".repeat(20));
     assert!(
@@ -206,6 +212,9 @@ fn a_name_wider_than_the_card_gives_way_to_the_charge(cx: &mut TestAppContext) {
 
 #[test]
 fn a_nameless_device_is_named_by_its_kind_and_a_level_only_reading_shows_no_percentage() {
+    let _locale = crate::tests::LOCALE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let notice = low_battery(1, None, None);
     let text = notice_text(&notice.kind);
     assert_eq!(text.device, SharedString::from("Mouse"));
