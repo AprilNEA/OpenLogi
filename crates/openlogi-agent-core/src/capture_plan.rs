@@ -621,6 +621,53 @@ mod tests {
         assert_eq!(action(ButtonId::G9), Some(Action::Copy));
     }
 
+    /// Rebinding one right-side button of a PRO Wireless captures the DPI
+    /// button and both right-side buttons, keeps the left side native, and
+    /// leaves the untouched ones on their stock functions.
+    #[test]
+    fn pro_wireless_captures_its_right_side_in_host_mode() {
+        let layout = &openlogi_core::binding::PRO_WIRELESS;
+        let mut cfg = Config::default();
+        cfg.set_binding("pro", ButtonId::G7, Binding::Single(Action::Copy));
+        let plan = super::plan_for_device(
+            &cfg,
+            super::PlanDevice {
+                physical_key: PhysicalDeviceKey::parse("receiver:cafe:slot:1")
+                    .expect("fixture should be a physical key"),
+                config_key: "pro",
+                route: route(),
+                layout: Some(layout),
+            },
+            None,
+            0,
+            true,
+        )
+        .with_onboard(&cfg, Some(layout));
+
+        assert_eq!(
+            host_slots(&plan).expect("rebinding G7 enters host mode"),
+            [
+                (ButtonId::LeftClick, SlotRoute::Native),
+                (ButtonId::RightClick, SlotRoute::Native),
+                (ButtonId::MiddleClick, SlotRoute::Native),
+                (ButtonId::Back, SlotRoute::Native),
+                (ButtonId::Forward, SlotRoute::Native),
+                (ButtonId::G6, SlotRoute::Captured),
+                (ButtonId::G7, SlotRoute::Captured),
+                (ButtonId::G8, SlotRoute::Captured),
+            ]
+        );
+        let action = |button| {
+            plan.dispatch
+                .bindings
+                .get(&button)
+                .map(Binding::click_action)
+        };
+        assert_eq!(action(ButtonId::G6), Some(Action::CycleDpiPresets));
+        assert_eq!(action(ButtonId::G7), Some(Action::Copy));
+        assert_eq!(action(ButtonId::G8), Some(Action::MouseForward));
+    }
+
     #[test]
     fn gshift_captures_every_remappable_button() {
         let mut cfg = Config::default();

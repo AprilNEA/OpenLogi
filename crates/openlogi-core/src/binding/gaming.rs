@@ -111,6 +111,30 @@ pub const G903_LIGHTSPEED: GamingLayout = GamingLayout {
     stock_dpi_presets: &[400, 800, 1600, 3200, 6400],
 };
 
+/// PRO Wireless (wpid `0x4079`), dumped on extended model id 0 (black).
+/// Ambidextrous: the left side pair is Back and Forward, the DPI button
+/// underneath is G6, and the right side pair is G7 (rear) and G8 (front).
+/// Unlike the G903, the DPI button comes before the right side pair. G HUB's
+/// `pro_wireless_mouse` depot binds G6 to the DPI cycle and gives the right
+/// pair mouse buttons 4 and 5, with the same factory DPI levels. The depot
+/// gives the Shroud (`15`) and League of Legends (`16`) editions the same
+/// hotspot metadata; no unit of either has been dumped.
+pub const PRO_WIRELESS: GamingLayout = GamingLayout {
+    model_keys: &["04079", "f4079", "104079"],
+    slots: &[
+        Slot::native(ButtonId::LeftClick),
+        Slot::native(ButtonId::RightClick),
+        Slot::native(ButtonId::MiddleClick),
+        Slot::native(ButtonId::Back),
+        Slot::native(ButtonId::Forward),
+        Slot::stock(ButtonId::G6, Action::CycleDpiPresets),
+        // The right side pair mirrors the left one.
+        Slot::stock(ButtonId::G7, Action::MouseBack),
+        Slot::stock(ButtonId::G8, Action::MouseForward),
+    ],
+    stock_dpi_presets: &[400, 800, 1600, 3200, 6400],
+};
+
 /// A gaming mouse whose layout nobody has dumped. Its first five slots are
 /// the standard HID buttons, which the OS input hook remaps without host
 /// mode. G6 and up differ per model and are not guessed.
@@ -129,7 +153,7 @@ pub const STANDARD_BUTTONS: GamingLayout = GamingLayout {
     stock_dpi_presets: &[],
 };
 
-const LAYOUTS: &[&GamingLayout] = &[&G502_LIGHTSPEED, &G903_LIGHTSPEED];
+const LAYOUTS: &[&GamingLayout] = &[&G502_LIGHTSPEED, &G903_LIGHTSPEED, &PRO_WIRELESS];
 
 /// Whether a device is a G-series mouse, and which buttons it offers. The
 /// agent, the tabs and the Buttons panel all ask this one verdict.
@@ -328,6 +352,66 @@ mod tests {
             Some(Action::NextDpiPreset)
         );
         assert_eq!(layout.stock_action(ButtonId::WheelTiltLeft), None);
+    }
+
+    #[test]
+    fn pro_wireless_slots_match_the_hardware_dump() {
+        let layout = GamingLayout::for_model_key("04079").unwrap();
+        assert_eq!(layout, &PRO_WIRELESS);
+        assert_eq!(layout.button_for_g_number(4), Some(ButtonId::Back));
+        assert_eq!(layout.button_for_g_number(5), Some(ButtonId::Forward));
+        assert_eq!(layout.button_for_g_number(6), Some(ButtonId::G6));
+        assert_eq!(layout.button_for_g_number(7), Some(ButtonId::G7));
+        assert_eq!(layout.button_for_g_number(8), Some(ButtonId::G8));
+        assert_eq!(layout.button_for_g_number(9), None);
+        assert!(layout.needs_host_mode(ButtonId::G7));
+        assert!(!layout.needs_host_mode(ButtonId::Forward));
+    }
+
+    #[test]
+    fn every_pro_wireless_edition_takes_its_layout() {
+        use crate::device::{DeviceModelInfo, DeviceTransports};
+        let gaming = Capabilities::from_feature_ids(&[0x2201, 0x8060, 0x8100, 0x8110]);
+        for extended_model_id in [0, 15, 16] {
+            let model = DeviceModelInfo {
+                entity_count: 3,
+                serial_number: None,
+                unit_id: [0; 4],
+                transports: DeviceTransports {
+                    usb: true,
+                    equad: true,
+                    btle: false,
+                    bluetooth: false,
+                },
+                model_ids: [0x4079, 0xc088, 0x0000],
+                extended_model_id,
+            };
+            assert_eq!(
+                GamingButtons::for_device(&model.model_key(), Some(&gaming)),
+                Some(GamingButtons::Dumped(&PRO_WIRELESS)),
+                "extended model id {extended_model_id}"
+            );
+        }
+        assert_eq!(
+            GamingButtons::for_device("14079", Some(&gaming)),
+            Some(GamingButtons::Standard),
+            "an unknown edition stays generic"
+        );
+    }
+
+    #[test]
+    fn pro_wireless_keeps_its_stock_functions() {
+        let layout = &PRO_WIRELESS;
+        assert_eq!(
+            layout.stock_action(ButtonId::G6),
+            Some(Action::CycleDpiPresets)
+        );
+        assert_eq!(layout.stock_action(ButtonId::G7), Some(Action::MouseBack));
+        assert_eq!(
+            layout.stock_action(ButtonId::G8),
+            Some(Action::MouseForward)
+        );
+        assert_eq!(layout.stock_action(ButtonId::Back), None);
     }
 
     #[test]
