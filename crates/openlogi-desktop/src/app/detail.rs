@@ -420,6 +420,13 @@ fn pointer_tab(
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
     let pal = theme::palette(cx);
+    let touchpad_scroll_only = AppState::try_read(cx).is_some_and(|state| {
+        state.current_record().is_some_and(|record| {
+            record.capabilities.is_some_and(|caps| {
+                caps.scroll_inversion && !caps.hires_wheel && !caps.pointer && !caps.pointer_scaling
+            })
+        })
+    });
     tab_body(
         DetailTab::Pointer,
         ContentWidth::Large,
@@ -428,32 +435,32 @@ fn pointer_tab(
             .items_stretch()
             .gap_4()
             .flex_wrap()
-            .child(pointer_grid_card(
+            .children((!touchpad_scroll_only).then(|| pointer_grid_card(
                 PanelCard::new(
                     tr!("device.pointer_tuning"),
                     Icon::empty().path("action-icons/gauge.svg"),
                     dpi_panel.clone().into_any_element(),
                 )
                 .fill(),
-            ))
-            .child(pointer_grid_card(
+            ).debug_selector(|| "pointer-tuning-card".into())))
+            .children((!touchpad_scroll_only).then(|| pointer_grid_card(
                 PanelCard::new(
                     tr!("pointer.smartshift"),
                     Icon::empty().path("action-icons/refresh-cw.svg"),
                     smartshift_panel.clone().into_any_element(),
                 )
                 .fill(),
-            ))
+            ).debug_selector(|| "smartshift-card".into())))
             .child(
                 div()
                     .min_w(POINTER_CARD_MIN_W)
                     .flex_1()
-                    .child(scrolling_card(pal, cx)),
+                    .child(scrolling_card(pal, touchpad_scroll_only, cx)),
             )
             .children(onboard_card(pal, cx).map(pointer_grid_card))
             // Full width, so it always starts its own row at the bottom.
-            .child(
-                div().w_full().child(
+            .children((!touchpad_scroll_only).then(||
+                div().w_full().debug_selector(|| "momentum-card".into()).child(
                     PanelCard::new(
                         tr!("pointer.momentum_title"),
                         Icon::empty().path("action-icons/mouse.svg"),
@@ -465,7 +472,7 @@ fn pointer_tab(
                             .child(tr!("pointer.momentum_macos_only")),
                     ),
                 ),
-            ),
+            )),
     )
 }
 
@@ -575,7 +582,7 @@ fn onboard_memory_control(
         })
 }
 
-fn pointer_grid_card(card: impl IntoElement) -> impl IntoElement {
+fn pointer_grid_card(card: impl IntoElement) -> gpui::Div {
     // At 100%, two cards plus one 16 px gap fit exactly inside the 720 px
     // window minimum after this tab's 20 px side insets, while still leaving a
     // usable slider: 332·2 + 16 + 20·2 = 720. In rems, the whole relationship
@@ -634,7 +641,15 @@ fn inversion_description(supported: bool, is_software: bool) -> gpui::SharedStri
 /// Scrolling card: per-device inversion, wheel-resolution and smooth-wheel controls.
 /// Pure config — no hardware read — so it is a plain settings block rather than
 /// an `Entity` panel like DPI / SmartShift.
-fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
+#[expect(
+    clippy::too_many_lines,
+    reason = "the card keeps its related controls together"
+)]
+fn scrolling_card(
+    pal: Palette,
+    touchpad_scroll_only: bool,
+    cx: &mut Context<AppView>,
+) -> impl IntoElement {
     let ScrollingFacts {
         inverted,
         inversion_supported,
@@ -655,8 +670,11 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
         },
     });
     let smooth_wheel = AppState::try_read(cx).is_some_and(AppState::current_smooth_wheel);
-    let inversion_description = inversion_description(inversion_supported, inversion_is_software);
+    let inversion_description =
+        (!inversion_supported || inversion_is_software || matches!(hires, HiresWheel::Here))
+            .then(|| inversion_description(inversion_supported, inversion_is_software));
     let inversion_row = h_flex()
+        .debug_selector(|| "scroll-inversion-row".into())
         .justify_between()
         .items_center()
         .gap_4()
@@ -670,12 +688,12 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
                         .text_color(pal.text_primary)
                         .child(tr!("pointer.invert_scroll_direction")),
                 )
-                .child(
+                .children(inversion_description.map(|description| {
                     div()
                         .text_caption()
                         .text_color(pal.text_muted)
-                        .child(inversion_description),
-                ),
+                        .child(description)
+                })),
         )
         .child(
             Toggle::new("invert-scroll-toggle")
@@ -701,6 +719,7 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
         HiresWheel::Nowhere => tr!("pointer.wheel_resolution_unsupported"),
     };
     let resolution_row = v_flex()
+        .debug_selector(|| "wheel-resolution-row".into())
         .gap_2()
         .child(
             v_flex()
@@ -728,8 +747,11 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
         v_flex()
             .gap_4()
             .child(inversion_row)
-            .child(resolution_row)
-            .child(smooth_wheel_row(pal, smooth_wheel, hires)),
+            .children((!touchpad_scroll_only).then_some(resolution_row))
+            .children(
+                (!touchpad_scroll_only || smooth_wheel)
+                    .then(|| smooth_wheel_row(pal, smooth_wheel, hires)),
+            ),
     )
 }
 

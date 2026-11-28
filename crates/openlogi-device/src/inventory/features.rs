@@ -754,6 +754,18 @@ async fn probe_extra_capabilities(
     {
         caps.thumbwheel = feature.has_thumbwheel().await.unwrap_or(false);
     }
+    let mut native_scroll_read = Ok(());
+    if !caps.hires_wheel
+        && let Some(feature) = device.get_feature::<Gestures2Feature>()
+    {
+        match feature.natural_scroll().await {
+            Ok(state) => caps.scroll_inversion = state.is_some(),
+            Err(error) => {
+                debug!(?error, "Gestures2 natural-scroll capability read failed");
+                native_scroll_read = Err(());
+            }
+        }
+    }
     // Logi Options+ writes a keyboard's platform only when `0x4531` lets
     // software set it, so a keyboard that does not is offered no setting.
     if caps.os_layout
@@ -802,7 +814,7 @@ async fn probe_extra_capabilities(
         caps.dpi_gestures = dpi_gestures;
         caps.virtual_thumbwheel = virtual_thumbwheel;
     }
-    force_sensing_read
+    force_sensing_read.and(native_scroll_read)
 }
 
 /// Whether the device lets software change the [`panel_button`]'s press

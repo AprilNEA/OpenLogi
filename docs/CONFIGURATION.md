@@ -156,6 +156,9 @@ Common device fields are:
 
 - `custom_name`, `enabled`, `dpi`, `dpi_presets`, thumb-wheel sensitivity,
   scroll inversion, and scroll resolution
+- On a Logitech K400 Plus, select the device and open **Pointer → Scrolling →
+  Invert scroll direction**. This changes the touchpad's native two-finger
+  scroll direction. The K400 Plus does not offer a **Wheel resolution** control.
 - `smooth_wheel` for mice with a HID++ `0x2121` wheel: `true` smooths that
   mouse's main wheel in software, as Logi Options+ "Smooth scrolling" does,
   whatever `smooth_scroll` says. The agent switches the wheel to diverted

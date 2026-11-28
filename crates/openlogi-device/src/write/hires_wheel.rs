@@ -1,4 +1,4 @@
-//! HID++ `0x2121 HiResWheel` mode reads and writes.
+//! HID++ wheel mode and native scroll inversion writes.
 
 use std::sync::Arc;
 
@@ -6,6 +6,7 @@ use hidpp::{
     channel::HidppChannel,
     device::Device,
     feature::CreatableFeature,
+    feature::gestures2::Gestures2Feature,
     feature::hires_wheel::{
         HiResWheelFeature, WheelEventTarget, WheelMode as HidppWheelMode,
         WheelResolution as HidppWheelResolution,
@@ -110,13 +111,11 @@ pub async fn set_scroll_wheel_mode_on(
     .await
 }
 
-/// Write the device's native vertical-scroll inversion flag while preserving
-/// its current resolution. Enabling inversion selects native HID reporting;
-/// disabling it preserves the current reporting target so an unrelated
-/// host-side consumer does not lose diverted wheel events.
+/// Set the device's native scroll direction. With `0x2121`, preserve the
+/// wheel's resolution and select native HID reporting when enabling inversion.
+/// Touchpads without that feature use the `0x6501` natural-scrolling gesture.
 ///
-/// Returns [`WriteError::FeatureUnsupported`] when the device lacks `0x2121` or
-/// reports that native inversion is not supported.
+/// Returns [`WriteError::FeatureUnsupported`] when the device cannot invert.
 pub async fn set_scroll_inversion(
     backend: &dyn HidBackend,
     route: &DeviceRoute,
@@ -124,9 +123,7 @@ pub async fn set_scroll_inversion(
 ) -> Result<(), WriteError> {
     let index = route.device_index();
     with_route(backend, route, move |channel| async move {
-        change_wheel_mode_on_channel(&channel, index, None, Some(inverted), true)
-            .await
-            .map(|_| ())
+        set_scroll_inversion_on_channel(&channel, index, inverted).await
     })
     .await
 }
@@ -137,15 +134,41 @@ pub async fn set_scroll_inversion_on(
     shared: &SharedChannel,
     inverted: bool,
 ) -> Result<(), WriteError> {
-    change_wheel_mode_on_channel(
-        shared.channel(),
-        shared.device_index(),
-        None,
-        Some(inverted),
-        true,
-    )
-    .await
-    .map(|_| ())
+    set_scroll_inversion_on_channel(shared.channel(), shared.device_index(), inverted).await
+}
+
+async fn set_scroll_inversion_on_channel(
+    channel: &Arc<HidppChannel>,
+    index: u8,
+    inverted: bool,
+) -> Result<(), WriteError> {
+    match change_wheel_mode_on_channel(channel, index, None, Some(inverted), true).await {
+        Ok(_) => Ok(()),
+        Err(WriteError::FeatureUnsupported { feature_hex })
+            if feature_hex == HiResWheelFeature::ID =>
+        {
+            let mut device = open_device(channel, index).await?;
+            let feature = open_feature::<Gestures2Feature>(&mut device).await?;
+            let supported = feature
+                .set_natural_scroll(inverted)
+                .await
+                .map_err(|error| {
+                    classify_hidpp_error(
+                        error,
+                        HidppOperation::WriteWheelMode,
+                        Gestures2Feature::ID,
+                    )
+                })?;
+            if supported {
+                Ok(())
+            } else {
+                Err(WriteError::FeatureUnsupported {
+                    feature_hex: Gestures2Feature::ID,
+                })
+            }
+        }
+        Err(error) => Err(error),
+    }
 }
 
 async fn change_wheel_mode_on_channel(
@@ -374,6 +397,79 @@ mod tests {
         set_scroll_inversion_on(&shared, true).await?;
 
         assert_eq!(mode_writes(&handle), vec![[0b1110, 0x02, 0x09]]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn touchpad_inversion_preserves_neighbor_bits_and_verifies_readback()
+    -> Result<(), WriteError> {
+        const GESTURES_INDEX: u8 = 0x06;
+        const NEIGHBOR_BITS: u8 = 0b101;
+
+        let enabled = Arc::new(Mutex::new(NEIGHBOR_BITS));
+        let refuse_write = Arc::new(Mutex::new(false));
+        let gesture_state = Arc::clone(&enabled);
+        let refuse = Arc::clone(&refuse_write);
+        let (raw, handle) = ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+            let mut response = request[..4].to_vec();
+            response.resize(request.len(), 0);
+            match (request[2], request[3] >> 4) {
+                (0x00, 0x01) => response[4] = 4,
+                (0x00, 0x00) => {
+                    // Advertise Gestures2 but no HiResWheel feature.
+                    if request[4..6] == Gestures2Feature::ID.to_be_bytes() {
+                        response[4] = GESTURES_INDEX;
+                    }
+                }
+                (GESTURES_INDEX, 0x00) => {
+                    // A default-enabled gesture, writable natural scroll (45), and a neighbor.
+                    response.resize(20, 0);
+                    response[0] = 0x11;
+                    response[4..12].copy_from_slice(&[0xa0, 1, 0x81, 45, 0x81, 2, 0x01, 0]);
+                }
+                (GESTURES_INDEX, 0x01) => response[4] = *gesture_state.lock().unwrap(),
+                (GESTURES_INDEX, 0x02) => {
+                    assert_eq!(request[0], 0x11, "the enable write needs a long report");
+                    if !*refuse.lock().unwrap() {
+                        let mut bits = gesture_state.lock().unwrap();
+                        let mask = request[6];
+                        *bits = (*bits & !mask) | (request[7] & mask);
+                    }
+                }
+                _ => return None,
+            }
+            Some(response)
+        });
+        let shared = SharedChannel::new(
+            scripted_channel(raw).await,
+            DeviceRoute::Direct {
+                vendor_id: 0x046d,
+                product_id: 0xb035,
+            },
+        );
+
+        set_scroll_inversion_on(&shared, true).await?;
+        assert_eq!(*enabled.lock().unwrap(), 0b111);
+        set_scroll_inversion_on(&shared, true).await?;
+        set_scroll_inversion_on(&shared, false).await?;
+        assert_eq!(*enabled.lock().unwrap(), NEIGHBOR_BITS);
+
+        *refuse_write.lock().unwrap() = true;
+        assert!(matches!(
+            set_scroll_inversion_on(&shared, true).await,
+            Err(WriteError::UnsupportedResponse {
+                operation: HidppOperation::WriteWheelMode,
+                feature_hex: Gestures2Feature::ID,
+            })
+        ));
+        assert_eq!(*enabled.lock().unwrap(), NEIGHBOR_BITS);
+        let writes: Vec<_> = handle
+            .written_reports()
+            .into_iter()
+            .filter(|report| report[2] == GESTURES_INDEX && report[3] >> 4 == 0x02)
+            .map(|report| [report[4], report[5], report[6], report[7]])
+            .collect();
+        assert_eq!(writes, [[0, 1, 2, 2], [0, 1, 2, 0], [0, 1, 2, 2]]);
         Ok(())
     }
 

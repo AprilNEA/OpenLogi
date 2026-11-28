@@ -282,6 +282,59 @@ fn the_pointer_tab_offers_the_smooth_wheel(cx: &mut gpui::TestAppContext) {
     );
 }
 
+#[gpui::test]
+fn pointer_layout_uses_the_same_scroll_only_controls_for_keyboard_and_touchpad(
+    cx: &mut gpui::TestAppContext,
+) {
+    use gpui::{px, size};
+
+    use crate::services::i18n::LOCALE_LOCK;
+    use crate::state::AppState;
+    use crate::state::tests::direct_inventory;
+
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    for kind in [DeviceKind::Keyboard, DeviceKind::Touchpad] {
+        let mut inventory = direct_inventory([0xa3, 0x93, 0xca, 0xe0]);
+        inventory.paired[0].kind = kind;
+        inventory.paired[0].capabilities = Some(Capabilities {
+            scroll_inversion: true,
+            ..Capabilities::default()
+        });
+        let (app_view, visual) =
+            open_device_detail(cx, inventory, openlogi_core::config::Config::ephemeral());
+        visual.simulate_resize(size(px(1280.), px(900.)));
+        visual.update(|window, cx| {
+            assert_eq!(
+                AppState::try_read(cx)
+                    .unwrap()
+                    .current_record()
+                    .unwrap()
+                    .kind,
+                kind
+            );
+            app_view.update(cx, |view, cx| {
+                view.active_tab = DetailTab::Pointer;
+                cx.notify();
+            });
+            window.draw(cx).clear(cx);
+        });
+
+        assert!(visual.debug_bounds("scroll-inversion-row").is_some());
+        for unavailable in [
+            "pointer-tuning-card",
+            "smartshift-card",
+            "momentum-card",
+            "wheel-resolution-row",
+            "smooth-wheel-row-control",
+        ] {
+            assert!(
+                visual.debug_bounds(unavailable).is_none(),
+                "{kind:?} shows {unavailable}"
+            );
+        }
+    }
+}
+
 /// Each detail tab opens at its top. One call site builds every tab's
 /// scrolling body, so with a shared scroll position the Actions Ring opened
 /// as far down as the Pointer tab had been scrolled, its title hidden under
