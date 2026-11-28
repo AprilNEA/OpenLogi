@@ -117,8 +117,8 @@ impl MultiRollerFeature {
     /// ([`RollerReportingMode::Diverted`]) for its rotation to arrive as
     /// [`MultiRollerEvent::Rotation`].
     ///
-    /// The response echoes `[roller, mode]` and is not decoded; read the mode
-    /// back with [`get_mode`](Self::get_mode) when it is needed.
+    /// Acknowledges the write only if the reply echoes the requested roller
+    /// and mode. A late reply to a previous write can have the same header.
     ///
     /// The write finishes on the wire before the call returns, as the G-key
     /// row's ownership writes do: a hand-back can then never overtake a
@@ -129,9 +129,11 @@ impl MultiRollerFeature {
         roller: RollerId,
         mode: RollerReportingMode,
     ) -> Result<(), Hidpp20Error> {
-        self.endpoint
-            .call_write_through(3, [roller.0, mode.into(), 0])
-            .await?;
+        let request = [roller.0, mode.into(), 0];
+        let reply = self.endpoint.call_write_through(3, request).await?;
+        if reply.extend_payload()[..2] != request[..2] {
+            return Err(Hidpp20Error::UnsupportedResponse);
+        }
         Ok(())
     }
 }

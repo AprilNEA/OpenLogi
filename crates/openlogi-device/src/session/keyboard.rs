@@ -292,11 +292,11 @@ impl ArmedRollers {
         let hand_back: Vec<Rotary> = self.diverted.difference(wanted).copied().collect();
         for rotary in hand_back {
             if let Some(&(id, _)) = self.rollers.get(&rotary) {
-                self.dispatch().remove(&id);
                 self.feature
                     .set_mode(id, RollerReportingMode::Native)
                     .await
                     .map_err(CaptureError::from)?;
+                self.dispatch().remove(&id);
             }
             // Forgotten only once the firmware has it back.
             self.diverted.remove(&rotary);
