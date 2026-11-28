@@ -44,10 +44,20 @@ pub(super) fn reconcile(enabled: bool) {
     if let Err(e) = apply(enabled) {
         warn!(error = %e, enabled, "agent systemd unit reconcile failed");
     }
+    if let Err(e) = reconcile_xdg_autostart(enabled) {
+        warn!(
+            error = %e,
+            enabled,
+            "agent XDG autostart entry reconcile failed",
+        );
+    }
 }
 
 /// Name of the systemd user unit file.
 const UNIT_NAME: &str = "openlogi-agent.service";
+
+/// Name of the XDG autostart desktop entry.
+const AUTOSTART_ENTRY_NAME: &str = "openlogi-agent.desktop";
 
 /// Unit directories to fall back on when systemd cannot be asked for the real
 /// load path, highest precedence first.
@@ -560,6 +570,90 @@ impl fmt::Display for SystemctlArgsDisplay<'_, '_> {
         }
         Ok(())
     }
+}
+
+/// Path to the XDG autostart entry:
+/// `$XDG_CONFIG_HOME/autostart/openlogi-agent.desktop`
+/// (default `~/.config/autostart/openlogi-agent.desktop`).
+///
+/// Desktop environments that do not activate systemd's
+/// `graphical-session.target` (such as Cinnamon, XFCE, MATE, LXQt, and i3)
+/// never pull in `WantedBy=graphical-session.target` units on login. This
+/// entry asks systemd to start the user unit once the graphical session is up,
+/// which is a no-op on sessions that already started it via the target.
+fn xdg_autostart_path() -> io::Result<PathBuf> {
+    let config_home = openlogi_core::paths::xdg_config_home().map_err(io::Error::other)?;
+    Ok(config_home.join("autostart").join(AUTOSTART_ENTRY_NAME))
+}
+
+/// Render the XDG autostart desktop entry that starts the systemd user unit.
+///
+/// Delegating to `systemctl --user start` keeps the agent supervised by
+/// systemd (`Restart=on-failure`, journal logging, clean `exit(0)` stop) and
+/// makes the entry a no-op when `graphical-session.target` already started it.
+fn render_xdg_autostart() -> String {
+    format!(
+        "[Desktop Entry]\n\
+        Type=Application\n\
+        Name=OpenLogi Agent\n\
+        Comment=Start OpenLogi background agent via systemd user service\n\
+        Exec=systemctl --user start {UNIT_NAME}\n\
+        X-GNOME-Autostart-enabled=true\n\
+        NoDisplay=true\n"
+    )
+}
+
+/// Whether `contents` is an XDG autostart entry this app rendered.
+fn is_generated_xdg_autostart(contents: &str) -> bool {
+    contents == render_xdg_autostart()
+}
+
+/// Reconcile the XDG autostart desktop entry with `enabled`.
+fn reconcile_xdg_autostart(enabled: bool) -> io::Result<()> {
+    let path = xdg_autostart_path()?;
+    reconcile_xdg_autostart_at(&path, enabled)
+}
+
+/// [`reconcile_xdg_autostart`] over an injectable path so every state
+/// transition can be unit-tested without touching the user's home directory.
+fn reconcile_xdg_autostart_at(path: &Path, enabled: bool) -> io::Result<()> {
+    let current = std::fs::read_to_string(path).ok();
+
+    if current
+        .as_deref()
+        .is_some_and(|have| !is_generated_xdg_autostart(have))
+    {
+        warn!(
+            path = %path.display(),
+            "leaving an XDG autostart entry this app did not write in place",
+        );
+        return Ok(());
+    }
+
+    let desired = enabled.then(render_xdg_autostart);
+    match (desired.as_deref(), current.as_deref()) {
+        (Some(want), Some(have)) if want == have => {
+            debug!(path = %path.display(), "XDG autostart entry already current");
+        }
+        (Some(want), _) => {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(path, want)?;
+            info!(path = %path.display(), "XDG autostart entry written");
+        }
+        (None, Some(_)) => {
+            std::fs::remove_file(path)?;
+            info!(
+                path = %path.display(),
+                "removed the generated XDG autostart entry",
+            );
+        }
+        (None, None) => {
+            debug!("XDG autostart entry already absent");
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
