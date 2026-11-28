@@ -2,7 +2,7 @@
 
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Arc, Weak};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use openlogi_agent_core::dpi_notifications::{DpiNotice, DpiNotifications};
 use openlogi_agent_core::orchestrator::Orchestrator;
@@ -16,7 +16,7 @@ use windows::Data::Xml::Dom::XmlDocument;
 use windows::Foundation::{DateTime, IReference, PropertyValue};
 use windows::UI::Notifications::{ToastNotification, ToastNotificationManager, ToastNotifier};
 use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize};
-use windows::core::{HSTRING, Interface as _, Result};
+use windows::core::{HSTRING, Interface as _, Result as WinResult};
 
 const TOAST_LIFETIME: Duration = Duration::from_secs(8);
 const WINDOWS_EPOCH_TICKS: i64 = 116_444_736_000_000_000;
@@ -60,10 +60,7 @@ fn run_worker(
     notifications: &Weak<DpiNotifications>,
     orchestrator: &Weak<Mutex<Orchestrator>>,
 ) {
-    // windows-rs caches activation factories. Keep the apartment alive across
-    // notifications, and drop the notifier before uninitializing the apartment.
-    let mut apartment = None;
-    let mut notifier = None;
+    let mut state = ToastState::Uninitialized;
     let remaining = std::iter::from_fn(|| {
         loop {
             match pending.blocking_recv() {
@@ -96,38 +93,87 @@ fn run_worker(
         let Some(name) = name else {
             continue;
         };
-        if apartment.is_none() {
-            match Apartment::initialize() {
-                Ok(initialized) => apartment = Some(initialized),
-                Err(error) => {
-                    warn!(%error, "could not initialize Windows DPI notifications");
-                    continue;
-                }
+        let (next, result) = state.deliver(
+            Apartment::initialize,
+            |_| ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(APP_ID)),
+            |notifier| show(notifier, &notifications, &change, &name),
+        );
+        state = next;
+        if let Err(error) = result {
+            if matches!(state, ToastState::Uninitialized) {
+                warn!(%error, "could not initialize Windows DPI notifications");
+            } else {
+                debug!(%error, "could not show Windows DPI notification");
             }
         }
-        if let Err(error) = show(&mut notifier, &notifications, &change, &name) {
-            notifier = None;
-            debug!(%error, "could not show Windows DPI notification");
+    }
+}
+
+enum ToastState<A, N> {
+    Uninitialized,
+    Initialized(A),
+    Ready(ReadyToast<A, N>),
+}
+
+// Keep the apartment alive for cached WinRT factories. Field order releases
+// the notifier before uninitializing the apartment, including on unwind.
+struct ReadyToast<A, N> {
+    notifier: N,
+    apartment: A,
+}
+
+impl<A, N> ToastState<A, N> {
+    fn deliver<E>(
+        self,
+        initialize: impl FnOnce() -> Result<A, E>,
+        create: impl FnOnce(&A) -> Result<N, E>,
+        send: impl FnOnce(&N) -> Result<(), E>,
+    ) -> (Self, Result<(), E>) {
+        let (notifier, apartment) = match self {
+            Self::Ready(ReadyToast {
+                notifier,
+                apartment,
+            }) => (Some(notifier), apartment),
+            Self::Initialized(apartment) => (None, apartment),
+            Self::Uninitialized => match initialize() {
+                Ok(apartment) => (None, apartment),
+                Err(error) => return (Self::Uninitialized, Err(error)),
+            },
+        };
+        let notifier = match notifier {
+            Some(notifier) => notifier,
+            None => match create(&apartment) {
+                Ok(notifier) => notifier,
+                Err(error) => return (Self::Initialized(apartment), Err(error)),
+            },
+        };
+        let ready = ReadyToast {
+            notifier,
+            apartment,
+        };
+        if let Err(error) = send(&ready.notifier) {
+            let ReadyToast {
+                notifier,
+                apartment,
+            } = ready;
+            drop(notifier);
+            (Self::Initialized(apartment), Err(error))
+        } else {
+            (Self::Ready(ready), Ok(()))
         }
     }
 }
 
 fn should_show(notifications: &DpiNotifications, change: &DpiNotice) -> bool {
-    notifications.enabled() && change.is_current()
+    notifications.enabled() && change.is_current(Instant::now())
 }
 
 fn show(
-    notifier: &mut Option<ToastNotifier>,
+    notifier: &ToastNotifier,
     notifications: &DpiNotifications,
     change: &DpiNotice,
     name: &str,
-) -> Result<()> {
-    let notifier = match notifier {
-        Some(notifier) => notifier,
-        None => notifier.insert(ToastNotificationManager::CreateToastNotifierWithId(
-            &HSTRING::from(APP_ID),
-        )?),
-    };
+) -> WinResult<()> {
     let toast = build_toast(&change.route, name, change.dpi)?;
     if should_show(notifications, change) {
         // Setting() can return ERROR_NOT_FOUND before the first Show().
@@ -137,7 +183,7 @@ fn show(
     Ok(())
 }
 
-fn build_toast(route: &DeviceRoute, name: &str, dpi: Dpi) -> Result<ToastNotification> {
+fn build_toast(route: &DeviceRoute, name: &str, dpi: Dpi) -> WinResult<ToastNotification> {
     let xml = XmlDocument::new()?;
     xml.LoadXml(&HSTRING::from(
         r#"<toast><visual><binding template="ToastGeneric"><text/><text/></binding></visual><audio silent="true"/></toast>"#
@@ -170,7 +216,7 @@ struct Apartment(std::marker::PhantomData<std::rc::Rc<()>>);
 
 impl Apartment {
     #[expect(unsafe_code, reason = "initialize WinRT on the current thread")]
-    fn initialize() -> Result<Self> {
+    fn initialize() -> WinResult<Self> {
         // SAFETY: the notification worker uses the MTA and balances each
         // successful initialization (including S_FALSE) on the same thread.
         unsafe { RoInitialize(RO_INIT_MULTITHREADED) }?;
@@ -188,10 +234,64 @@ impl Drop for Apartment {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+
     use super::*;
 
     #[test]
-    fn windows_dpi_toast_contains_safe_text_and_reuses_the_mouse_tag() -> Result<()> {
+    fn dpi_notifier_requires_a_successful_apartment_initialization() {
+        let state: ToastState<(), ()> = ToastState::Uninitialized;
+        let (state, result) = state.deliver(
+            || Err("initialization failed"),
+            |()| panic!("cannot create a notifier before initializing the apartment"),
+            |()| panic!("cannot send without a notifier"),
+        );
+        assert_eq!(result, Err("initialization failed"));
+        assert!(matches!(state, ToastState::Uninitialized));
+        let (state, result) = state.deliver(
+            || Ok(()),
+            |()| Err("creation failed"),
+            |()| panic!("cannot send without a notifier"),
+        );
+        assert_eq!(result, Err("creation failed"));
+        assert!(matches!(state, ToastState::Initialized(())));
+    }
+
+    #[test]
+    fn dpi_notifier_retry_and_shutdown_keep_the_apartment_alive() {
+        struct OnDrop<'a>(&'a RefCell<Vec<&'static str>>, &'static str);
+
+        impl Drop for OnDrop<'_> {
+            fn drop(&mut self) {
+                self.0.borrow_mut().push(self.1);
+            }
+        }
+
+        let events = RefCell::new(Vec::new());
+        let initialize_again = || panic!("must reuse the initialized apartment");
+        let create = |_: &OnDrop<'_>| Ok(OnDrop(&events, "notifier dropped"));
+        let state = ToastState::Initialized(OnDrop(&events, "apartment dropped"));
+        let (state, result) = state.deliver(initialize_again, create, |_| Err("send failed"));
+        assert_eq!(result, Err("send failed"));
+        assert_eq!(*events.borrow(), ["notifier dropped"]);
+
+        let (state, result) = state.deliver(initialize_again, create, |_| Ok::<_, &str>(()));
+        result.unwrap();
+        let (state, result) = state.deliver(
+            initialize_again,
+            |_| panic!("must reuse the ready notifier"),
+            |_| Ok::<_, &str>(()),
+        );
+        result.unwrap();
+        drop(state);
+        assert_eq!(
+            *events.borrow(),
+            ["notifier dropped", "notifier dropped", "apartment dropped"]
+        );
+    }
+
+    #[test]
+    fn windows_dpi_toast_contains_safe_text_and_reuses_the_mouse_tag() -> WinResult<()> {
         let _apartment = Apartment::initialize()?;
         let route = DeviceRoute::Bolt {
             receiver_uid: "test".into(),

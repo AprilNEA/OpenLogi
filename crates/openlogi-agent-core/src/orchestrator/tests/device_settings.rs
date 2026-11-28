@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use openlogi_core::device_order::PhysicalDeviceKey;
 use openlogi_core::hid::{HidppOperation, WriteError};
@@ -767,11 +768,12 @@ async fn dpi_panel_notifications_follow_the_reloaded_preference() {
     let notice = notices.try_recv().unwrap();
     assert_eq!(notice.route, route);
     assert_eq!(notice.dpi, Dpi::new(800));
-    assert!(notice.is_current());
+    let observed_at = Instant::now();
+    assert!(notice.is_current(observed_at));
     orch.shared.set_dpi(&route, Dpi::new(800)).await.unwrap();
     assert!(notices.try_recv().is_err());
     assert!(
-        !notice.is_current(),
+        !notice.is_current(observed_at),
         "a queued banner must not outlive a newer write"
     );
 
@@ -860,7 +862,7 @@ fn dpi_notification_labels_use_user_names_and_distinguish_unnamed_slots() {
 #[tokio::test]
 async fn dpi_notification_probe_keeps_the_normal_write_budget() {
     let run = async |enabled, drop_previous: bool, drop_verification: bool| {
-        let barrier_timeout = std::time::Duration::from_secs(3);
+        let barrier_timeout = Duration::from_secs(3);
         let mouse = dev("mouse", 1, true);
         let route = mouse.route.unwrap();
         let mut config = Config::default();
@@ -908,7 +910,10 @@ async fn dpi_notification_probe_keeps_the_normal_write_budget() {
             Ok(())
         };
         assert_eq!(
-            write.await.unwrap(),
+            tokio::time::timeout(Duration::from_secs(7), write)
+                .await
+                .expect("the DPI write task finished before the test deadline")
+                .unwrap(),
             expected,
             "notifications set to {enabled}, verification lost: {drop_verification}"
         );

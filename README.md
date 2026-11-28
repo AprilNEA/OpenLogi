@@ -169,6 +169,7 @@ Feature coverage depends on what each device reports; the app shows only the con
 | Window-manager actions (desktops, Mission Control, …) | Native | Native equivalents | GNOME, KDE (KWin), Hyprland; some macOS-only actions do nothing |
 | Menu-bar / tray icon | ✓ | ✓ | — |
 | Device controls in the menu-bar / tray menu | ✓ | — | — |
+| DPI change notifications | — | [MSI Start menu shortcut](docs/DEVELOPMENT.md#windows-dpi-notifications) | — |
 | In-app updates | Sparkle | Built-in | Built-in |
 
 ## Install

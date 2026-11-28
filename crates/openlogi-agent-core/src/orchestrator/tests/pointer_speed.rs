@@ -87,7 +87,11 @@ async fn a_dpi_notification_probe_keeps_the_precision_led_budget() {
         // it if the optional read and the stale-reply grace count against it.
         tokio::time::sleep(Duration::from_millis(3200)).await;
         write_ack.release();
-        write.await.unwrap().unwrap();
+        tokio::time::timeout(barrier_timeout, write)
+            .await
+            .expect("the DPI write and LED update finished before the test deadline")
+            .unwrap()
+            .unwrap();
 
         fixture.written_reports().iter().any(|report| {
             report[2] == DPI_MOUSE_LED_INDEX && report[3] >> 4 == 5 && report[4..7] == [0, 0, 1]

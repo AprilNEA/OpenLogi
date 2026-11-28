@@ -26,8 +26,8 @@ impl DpiNotice {
     /// A notification should never appear long after the change, or after
     /// a newer write has been requested for this mouse.
     #[must_use]
-    pub fn is_current(&self) -> bool {
-        self.created.elapsed() < Duration::from_secs(2)
+    pub fn is_current(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.created) < Duration::from_secs(2)
             && self.ticket.is_current()
             && self
                 .connection
@@ -91,5 +91,34 @@ impl DpiNotifications {
                 created: Instant::now(),
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hardware::WriteOrder;
+    use crate::test_support::publish_dpi_mouse;
+
+    #[tokio::test]
+    async fn dpi_notice_expiry_boundary() {
+        let registry = ChannelRegistry::default();
+        let route = DeviceRoute::Bolt {
+            receiver_uid: "test".into(),
+            slot: 1,
+        };
+        publish_dpi_mouse(&registry, route.clone(), || true).await;
+        let channel = registry.lookup(&route).unwrap();
+        let ticket = WriteOrder::default().request(&route);
+        let notifications = DpiNotifications::default();
+        notifications.set_enabled(true);
+        let mut notices = notifications.subscribe();
+        notifications.publish(&channel, &registry, Dpi::new(1600), &ticket);
+
+        let notice = notices.try_recv().unwrap();
+        let deadline = notice.created + Duration::from_secs(2);
+        let just_before = deadline.checked_sub(Duration::from_nanos(1)).unwrap();
+        assert!(notice.is_current(just_before));
+        assert!(!notice.is_current(deadline));
     }
 }

@@ -384,7 +384,7 @@ async fn a_supported_dpi_the_device_applies_is_written_once() -> Result<(), Writ
 }
 
 #[tokio::test]
-async fn dpi_change_tracking_confirms_a_changed_value_only() -> Result<(), WriteError> {
+async fn dpi_change_tracking_returns_the_complete_outcome() -> Result<(), WriteError> {
     let sensor = AdjustableSensor {
         version: 1,
         current: 800,
@@ -399,14 +399,26 @@ async fn dpi_change_tracking_confirms_a_changed_value_only() -> Result<(), Write
         DpiChangeSource::Probe(&DpiProbeTime::default()),
     )
     .await?;
-    assert_eq!(changed.changed, Some(Dpi::new(1600)));
+    assert_eq!(
+        changed,
+        DpiWriteOutcome {
+            written: Some(Dpi::new(1600)),
+            changed: Some(Dpi::new(1600)),
+        }
+    );
     let unchanged = set_dpi_target_tracking_change_on(
         &harness.shared,
         target,
         DpiChangeSource::Probe(&DpiProbeTime::default()),
     )
     .await?;
-    assert_eq!(unchanged.changed, None);
+    assert_eq!(
+        unchanged,
+        DpiWriteOutcome {
+            written: Some(Dpi::new(1600)),
+            changed: None,
+        }
+    );
     assert_eq!(harness.requests_to(ADJUSTABLE_INDEX, GET_DPI).len(), 4);
 
     let quiet = Harness::new(sensor).await;
@@ -418,7 +430,13 @@ async fn dpi_change_tracking_confirms_a_changed_value_only() -> Result<(), Write
     let outcome =
         set_dpi_target_tracking_change_on(&known.shared, target, DpiChangeSource::Known(reading))
             .await?;
-    assert_eq!(outcome.changed, Some(Dpi::new(1600)));
+    assert_eq!(
+        outcome,
+        DpiWriteOutcome {
+            written: Some(Dpi::new(1600)),
+            changed: Some(Dpi::new(1600)),
+        }
+    );
     assert_eq!(known.requests_to(ADJUSTABLE_INDEX, GET_DPI).len(), 2);
     Ok(())
 }
@@ -434,7 +452,13 @@ async fn dpi_change_tracking_reuses_the_extended_sensors_parameter_read() -> Res
         DpiChangeSource::Probe(&DpiProbeTime::default()),
     )
     .await?;
-    assert_eq!(changed.changed, Some(Dpi::new(1200)));
+    assert_eq!(
+        changed,
+        DpiWriteOutcome {
+            written: Some(Dpi::new(1200)),
+            changed: Some(Dpi::new(1200)),
+        }
+    );
     assert_eq!(harness.requests_to(EXTENDED_INDEX, GET_PARAMETERS).len(), 2);
     Ok(())
 }
