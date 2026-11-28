@@ -253,6 +253,20 @@ impl AssetResolver {
         }
     }
 
+    /// A resolver with no loaded index or cache roots, modelling the window
+    /// before the asset catalog answers regardless of what is cached on disk.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn empty() -> Self {
+        Self {
+            read_roots: Vec::new(),
+            write_root: PathBuf::new(),
+            has_bundle: false,
+            index: None,
+            resolved: RefCell::default(),
+        }
+    }
+
     /// The per-user cache root, where [`sync`] writes.
     pub fn cache_root(&self) -> &Path {
         &self.write_root

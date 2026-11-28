@@ -250,15 +250,130 @@ impl super::AppState {
     }
 }
 
-/// The name a receiver-paired device is shown under: its asset's name, else
-/// its prettified codename, else its receiver slot number.
-fn paired_display_name(asset: Option<&ResolvedAsset>, paired: &PairedDevice) -> String {
+/// Persisted non-empty product name for a device, checking `config_key`
+/// first and falling back to `canonical_key` while route adoption is pending.
+pub(super) fn persisted_display_name(
+    config: &Config,
+    config_key: &str,
+    canonical_key: Option<&str>,
+) -> Option<String> {
+    let lookup = |key| {
+        config
+            .device_identity(key)
+            .map(|identity| identity.display_name.trim())
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+    };
+    lookup(config_key).or_else(|| canonical_key.and_then(lookup))
+}
+
+/// Resolve the name a receiver-paired device should show.
+///
+/// The asset catalog can lag the first inventory refresh. Until it answers,
+/// prefer the product name a previous pass persisted over the firmware
+/// codename, so the gallery never downgrades a known device.
+fn paired_display_name(
+    asset: Option<&ResolvedAsset>,
+    config: &Config,
+    config_key: &str,
+    canonical_key: Option<&str>,
+    paired: &PairedDevice,
+) -> String {
     asset
         .map(|a| a.display_name.clone())
+        .or_else(|| persisted_display_name(config, config_key, canonical_key))
         .or_else(|| paired.codename.as_deref().map(prettify_codename))
         .unwrap_or_else(|| {
             tr!("device.receiver_slot_number", number => paired.slot.to_string()).to_string()
         })
+}
+
+/// Build a [`DeviceRecord`] for one receiver-paired slot.
+fn paired_record(
+    inv: &DeviceInventory,
+    paired: &PairedDevice,
+    resolver: &AssetResolver,
+    config: &Config,
+) -> DeviceRecord {
+    let route = DeviceRoute::for_slot(inv, paired.slot);
+    let receiver_brand =
+        find_receiver(inv.receiver.vendor_id, inv.receiver.product_id).map(|r| r.brand);
+    let (model_key, asset, model_info, codename, serial_number, unit_id) =
+        if let Some(model) = paired.model_info.as_ref() {
+            let asset = resolver.resolve(model, paired.codename.as_deref());
+            (
+                model.model_key(),
+                asset,
+                Some(model.clone()),
+                paired.codename.clone(),
+                model.serial_number.clone(),
+                model.unit_id,
+            )
+        } else {
+            // No HID++ 2.0 model info — HID++ 1.0 device or feature walk
+            // timed out. Surface the device anyway using the wpid (or slot
+            // as a last-resort model key) so it appears in the gallery
+            // with a stable display fallback.
+            let key = paired.wpid.map_or_else(
+                || format!("slot{}", paired.slot),
+                |w| format!("wpid{w:04x}"),
+            );
+            (key, None, None, paired.codename.clone(), None, [0u8; 4])
+        };
+    let stable_id = DeviceStableId::from_parts(
+        route.as_ref(),
+        paired.slot,
+        serial_number.as_deref(),
+        unit_id,
+    );
+    let identity = RouteIdentity::from_parts(serial_number.as_deref(), unit_id);
+    let (config_key, persistent) = config
+        .resolve_device_key(&stable_id, paired.online.then_some(&identity))
+        .map_or_else(
+            || (stable_id.runtime_key(), false),
+            |key| (key.into_string(), true),
+        );
+    let canonical_key = canonical_device_key(&stable_id, paired.online.then_some(&identity))
+        .map(PhysicalDeviceKey::into_string);
+    let route_key = stable_id.route_key();
+
+    let display_name = paired_display_name(
+        asset.as_ref(),
+        config,
+        &config_key,
+        canonical_key.as_deref(),
+        paired,
+    );
+    let kind = effective_kind(paired.kind, asset.as_ref().and_then(|a| a.kind));
+    DeviceRecord {
+        config_key,
+        canonical_key,
+        persistent,
+        route_key,
+        model_key,
+        model_name: display_name.clone(),
+        display_name,
+        asset,
+        model_info,
+        codename,
+        wpid: paired.wpid,
+        serial_number,
+        unit_id,
+        driver_id: None,
+        registry_model_id: None,
+        route,
+        receiver_brand,
+        capture_id: None,
+        kind,
+        capabilities: paired.capabilities,
+        hidpp10: paired.hidpp10,
+        light_capabilities: None,
+        slot: paired.slot,
+        presence: Presence::listed(paired.online),
+        battery: paired.battery.clone(),
+        settings_revision: paired.settings_revision,
+        stale_pairings: Vec::new(),
+    }
 }
 
 /// Build the gallery's device list as the **union** of the live inventory and
@@ -285,80 +400,7 @@ pub(super) fn build_device_list(
     let mut list = Vec::new();
     for inv in inventories {
         for paired in &inv.paired {
-            let route = DeviceRoute::for_slot(inv, paired.slot);
-            let receiver_brand = find_receiver(inv.receiver.vendor_id, inv.receiver.product_id)
-                .map(|receiver| receiver.brand);
-            let (model_key, asset, model_info, codename, serial_number, unit_id) =
-                if let Some(model) = paired.model_info.as_ref() {
-                    let asset = resolver.resolve(model, paired.codename.as_deref());
-                    (
-                        model.model_key(),
-                        asset,
-                        Some(model.clone()),
-                        paired.codename.clone(),
-                        model.serial_number.clone(),
-                        model.unit_id,
-                    )
-                } else {
-                    // No HID++ 2.0 model info — HID++ 1.0 device or feature walk
-                    // timed out. Surface the device anyway using the wpid (or slot
-                    // as a last-resort model key) so it appears in the gallery
-                    // with a stable display fallback.
-                    let key = paired.wpid.map_or_else(
-                        || format!("slot{}", paired.slot),
-                        |w| format!("wpid{w:04x}"),
-                    );
-                    (key, None, None, paired.codename.clone(), None, [0u8; 4])
-                };
-            let stable_id = DeviceStableId::from_parts(
-                route.as_ref(),
-                paired.slot,
-                serial_number.as_deref(),
-                unit_id,
-            );
-            let identity = RouteIdentity::from_parts(serial_number.as_deref(), unit_id);
-            let (config_key, persistent) = config
-                .resolve_device_key(&stable_id, paired.online.then_some(&identity))
-                .map_or_else(
-                    || (stable_id.runtime_key(), false),
-                    |key| (key.into_string(), true),
-                );
-            let canonical_key =
-                canonical_device_key(&stable_id, paired.online.then_some(&identity))
-                    .map(PhysicalDeviceKey::into_string);
-            let route_key = stable_id.route_key();
-
-            let display_name = paired_display_name(asset.as_ref(), paired);
-            let kind = effective_kind(paired.kind, asset.as_ref().and_then(|a| a.kind));
-            list.push(DeviceRecord {
-                config_key,
-                canonical_key,
-                persistent,
-                route_key,
-                model_key,
-                model_name: display_name.clone(),
-                display_name,
-                asset,
-                model_info,
-                codename,
-                wpid: paired.wpid,
-                serial_number,
-                unit_id,
-                driver_id: None,
-                registry_model_id: None,
-                route,
-                receiver_brand,
-                capture_id: None,
-                kind,
-                capabilities: paired.capabilities,
-                hidpp10: paired.hidpp10,
-                light_capabilities: None,
-                slot: paired.slot,
-                presence: Presence::listed(paired.online),
-                battery: paired.battery.clone(),
-                settings_revision: paired.settings_revision,
-                stale_pairings: Vec::new(),
-            });
+            list.push(paired_record(inv, paired, resolver, config));
         }
     }
     let folded_keys = collapse_duplicate_pairings(&mut list, config);

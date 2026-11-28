@@ -13,7 +13,7 @@ use crate::services::assets::sync::{AssetTarget, model_key};
 use crate::services::ipc::{UnpairDevice, UnpairFailure, UnpairIntent};
 use crate::state::devices::{
     DeviceRecord, adopt_transient_record, build_device_list, direct_key_prefix,
-    fold_by_inventory_key, record_wire_pid, sort_device_list,
+    fold_by_inventory_key, persisted_display_name, record_wire_pid, sort_device_list,
 };
 
 use super::device_key::DeviceKey;
@@ -649,8 +649,20 @@ pub(super) fn persist_identities(config: &mut Config, list: &[DeviceRecord]) -> 
         if record.light_capabilities.is_none() && record.capabilities.is_none() {
             continue;
         }
+        // This runs before the asset resolver has necessarily filled
+        // `record.asset`; `model_name` is then the firmware codename, not the
+        // product name. Keep the name a previous pass persisted so a slow or
+        // offline asset catalog cannot downgrade the device (and the card or
+        // tray that read the same config) back to that codename.
+        let persisted_name =
+            persisted_display_name(config, config_key, record.canonical_key.as_deref());
+        let display_name = if record.asset.is_some() && !record.model_name.trim().is_empty() {
+            record.model_name.clone()
+        } else {
+            persisted_name.unwrap_or_else(|| record.model_name.clone())
+        };
         let identity = DeviceIdentity {
-            display_name: record.model_name.clone(),
+            display_name,
             kind: record.kind,
             capabilities,
             light_capabilities: record.light_capabilities,
