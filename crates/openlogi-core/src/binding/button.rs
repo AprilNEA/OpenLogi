@@ -100,8 +100,7 @@ pub enum ButtonId {
     /// over HID++ while bound (the OS hook never sees these keys); left on its
     /// native firmware function otherwise.
     ///
-    /// Declared last so the derived ordering keeps every mouse button ahead of
-    /// the keys; among keys the order is by control ID, so a GUI that wants
+    /// The derived ordering of these keys is by control ID. A GUI that wants
     /// physical F-row order sorts by catalog position instead.
     Control(Cid),
     /// A key of a G-series keyboard's G-key column (HID++ `0x8010`), on one
@@ -117,6 +116,12 @@ pub enum ButtonId {
     /// (HID++ `0x8020`) or MR (`0x8030`). OpenLogi only listens to them; their
     /// bindings run when the cluster is set to nine independent keys.
     ModeKey(ModeKey),
+    /// G-series button G4 when it is a dedicated control.
+    G4,
+    /// A dedicated DPI-down button.
+    DpiDown,
+    /// A dedicated DPI-up button.
+    DpiUp,
 }
 
 impl ButtonId {
@@ -141,7 +146,7 @@ impl ButtonId {
     ];
 
     /// G-series buttons, kept out of [`Self::ALL`].
-    pub const G_BUTTONS: [ButtonId; 4] = [ButtonId::G6, ButtonId::G7, ButtonId::G8, ButtonId::G9];
+    pub const G_BUTTONS: [ButtonId; 5] = [Self::G4, Self::G6, Self::G7, Self::G8, Self::G9];
 
     /// The keyboard key bound to `0x1b04` control `cid`.
     #[must_use]
@@ -258,7 +263,7 @@ impl ButtonId {
     /// string form read this one table; `unit_name` is a match without a
     /// wildcard over the unit variants, so a new variant that is missing here
     /// fails to compile rather than failing to parse.
-    const UNIT_NAMES: [(ButtonId, &'static str); 17] = [
+    const UNIT_NAMES: [(ButtonId, &'static str); 20] = [
         (ButtonId::LeftClick, "LeftClick"),
         (ButtonId::RightClick, "RightClick"),
         (ButtonId::MiddleClick, "MiddleClick"),
@@ -276,6 +281,9 @@ impl ButtonId {
         (ButtonId::G7, "G7"),
         (ButtonId::G8, "G8"),
         (ButtonId::G9, "G9"),
+        (ButtonId::G4, "G4"),
+        (ButtonId::DpiDown, "DpiDown"),
+        (ButtonId::DpiUp, "DpiUp"),
     ];
 
     /// The name a mouse button is persisted under. Keyboard controls have no
@@ -299,6 +307,9 @@ impl ButtonId {
             ButtonId::G7 => Self::UNIT_NAMES[14].1,
             ButtonId::G8 => Self::UNIT_NAMES[15].1,
             ButtonId::G9 => Self::UNIT_NAMES[16].1,
+            ButtonId::G4 => Self::UNIT_NAMES[17].1,
+            ButtonId::DpiDown => Self::UNIT_NAMES[18].1,
+            ButtonId::DpiUp => Self::UNIT_NAMES[19].1,
             // Grid keys, keyboard controls and gaming keys have no fixed name
             // in this table; see [`GridKey::config_name`],
             // [`Cid::config_name`], [`GKeySlot::config_name`] and
@@ -342,6 +353,9 @@ impl ButtonId {
             ButtonId::G7 => "G7",
             ButtonId::G8 => "G8",
             ButtonId::G9 => "G9",
+            ButtonId::G4 => "G4",
+            ButtonId::DpiDown => "DPI Down",
+            ButtonId::DpiUp => "DPI Up",
             ButtonId::Grid(slot) => return slot.label(),
             ButtonId::Control(cid) => return cid.label(),
             ButtonId::GKey(slot) => return slot.label(),
@@ -370,6 +384,9 @@ impl ButtonId {
             ButtonId::G7 => "actions.g7",
             ButtonId::G8 => "actions.g8",
             ButtonId::G9 => "actions.g9",
+            ButtonId::G4 => "actions.g4",
+            ButtonId::DpiDown => "actions.dpi_down",
+            ButtonId::DpiUp => "actions.dpi_up",
             // The page is context the caller shows beside the key, not part
             // of the key's name.
             ButtonId::Grid(slot) => slot.key.translation_key(),

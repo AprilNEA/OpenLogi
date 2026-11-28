@@ -1,5 +1,6 @@
 use openlogi_core::binding::{
-    Action, ActionRingIcon, ButtonId, GestureDirection, GridKey, KNOWN_CONTROLS, KeyCombo,
+    Action, ActionRingIcon, ButtonId, G604_LIGHTSPEED, GestureDirection, GridKey, KNOWN_CONTROLS,
+    KeyCombo,
 };
 
 use crate::features::mouse::thumbwheel::ThumbwheelPreset;
@@ -18,6 +19,8 @@ fn typed_translation_keys_resolve() {
 
     for b in ButtonId::ALL
         .into_iter()
+        .chain(ButtonId::G_BUTTONS)
+        .chain(G604_LIGHTSPEED.buttons())
         .chain(KNOWN_CONTROLS.iter().map(|control| ButtonId::Control(control.id)))
         // A control with no catalog row resolves to the one generic key.
         .chain([ButtonId::control(0xffff)])

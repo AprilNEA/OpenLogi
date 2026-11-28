@@ -56,6 +56,7 @@ pub fn button_bindings_for(
         .iter()
         .chain(&ButtonId::G_BUTTONS)
         .copied()
+        .chain(layout.into_iter().flat_map(GamingLayout::buttons))
         .map(|button| (button, Binding::Single(default_binding_on(layout, button))))
         .collect();
     if config_key.is_some_and(|key| config.keypad_pages(key) > KeypadPage::FIRST) {
@@ -245,6 +246,23 @@ mod tests {
         assert_eq!(g502.get(&ButtonId::G8), Some(&Action::NextDpiPreset));
         let unknown = bindings_for(&cfg, Some("0407f"), None, None);
         assert_eq!(unknown.get(&ButtonId::G6), Some(&Action::None));
+    }
+
+    #[test]
+    fn a_layout_seeds_its_dedicated_dpi_buttons() {
+        use crate::binding::G604_LIGHTSPEED;
+
+        let g604 = bindings_for(
+            &Config::default(),
+            Some("0b024"),
+            None,
+            Some(&G604_LIGHTSPEED),
+        );
+        assert_eq!(
+            g604.get(&ButtonId::DpiDown),
+            Some(&Action::PreviousDpiPreset)
+        );
+        assert_eq!(g604.get(&ButtonId::DpiUp), Some(&Action::NextDpiPreset));
     }
 
     #[test]

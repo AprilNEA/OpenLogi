@@ -193,6 +193,12 @@ impl<'de> Deserialize<'de> for KeyCombo {
 }
 
 impl KeyCombo {
+    /// A single key with no modifiers.
+    #[must_use]
+    pub(super) const fn unmodified(key: KeyboardUsage) -> Self {
+        Self { modifiers: 0, key }
+    }
+
     /// USB HID keyboard usage for the ordinary key.
     #[must_use]
     pub const fn key(&self) -> KeyboardUsage {
