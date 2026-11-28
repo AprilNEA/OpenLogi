@@ -11,6 +11,7 @@ pub(crate) mod probe;
 mod secure_input;
 mod sender;
 mod translate;
+mod universal_control;
 mod watchdog;
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -40,6 +41,7 @@ pub(crate) use foreground::{frontmost_safari_pid, watch_frontmost_application_ac
 use grant::{ProbeCue, can_filter_events};
 pub(crate) use secure_input::{secure_input_app, secure_input_enabled};
 use translate::{VERTICAL, translate, translate_key};
+pub(crate) use universal_control::pointer_on_other_device;
 use watchdog::{
     CALLBACK_POLL_INTERVAL, CallbackActivity, CallbackWatchdog, LIFECYCLE_POLL_INTERVAL,
     LifecycleDecision, LifecycleExitReason, LifecycleObservation, LifecycleWatchdog, PowerEpoch,

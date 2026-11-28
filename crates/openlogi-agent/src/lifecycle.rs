@@ -473,6 +473,12 @@ impl Running {
             WatcherEvent::Accessibility(granted) => self.apply_accessibility(granted).await,
             WatcherEvent::InputMonitoring(state) => self.apply_input_monitoring(state).await,
             WatcherEvent::SecureInput(state) => self.observable.set_secure_input(state),
+            WatcherEvent::PointerElsewhere(elsewhere) => {
+                self.orchestrator
+                    .lock()
+                    .await
+                    .set_pointer_elsewhere(elsewhere);
+            }
             WatcherEvent::Light(LightEvent::Read { route, state }) => {
                 self.orchestrator.lock().await.light_read(&route, state);
             }
@@ -496,6 +502,14 @@ impl Running {
                 warn!("secure-input watcher channel closed — reporting Secure Event Input as off");
                 self.observable
                     .set_secure_input(openlogi_ipc::SecureInput::Off);
+            }
+            // A dead watcher must not leave the mouse native for good.
+            WatcherEvent::Lost(Watcher::UniversalControl) => {
+                #[cfg(target_os = "macos")]
+                warn!(
+                    "Universal Control watcher channel closed — capturing the mouse as if the pointer were here"
+                );
+                self.orchestrator.lock().await.set_pointer_elsewhere(false);
             }
             WatcherEvent::Lost(Watcher::Pointer) if openlogi_hook::pointer_context_supported() => {
                 warn!("pointer watcher channel closed — using an unidentified pointer context");

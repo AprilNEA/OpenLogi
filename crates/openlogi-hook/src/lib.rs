@@ -711,6 +711,23 @@ pub fn secure_input_app() -> Option<ForegroundApp> {
     }
 }
 
+/// Whether Universal Control has moved the pointer to another Mac or iPad.
+///
+/// While it has, this Mac's HID reports go to that device, but events this
+/// crate's callers post stay here. `None` when the state cannot be read, and
+/// always off macOS, where Universal Control does not exist.
+#[must_use]
+pub fn pointer_on_other_device() -> Option<bool> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::pointer_on_other_device()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
 /// Failure to install or operate a native foreground-application observer.
 #[derive(Debug, Error)]
 #[non_exhaustive]

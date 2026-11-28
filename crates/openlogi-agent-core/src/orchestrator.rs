@@ -744,6 +744,10 @@ pub struct Orchestrator {
     /// broader mouse-remapping path is available so losing the hook leaves the
     /// side buttons native.
     os_mouse_hook_available: bool,
+    /// Whether Universal Control has the pointer on another device. Mice
+    /// publish no capture plan meanwhile, so their controls stay native and
+    /// Universal Control forwards them.
+    pointer_elsewhere: bool,
     /// Private producer halves for the read-only runtime projections in
     /// `shared`, keeping the orchestrator's single-writer contract structural.
     capture_plans_tx: watch::Sender<Arc<CapturePublication>>,
@@ -957,6 +961,7 @@ impl Orchestrator {
             follower_cookies: Arc::default(),
             keypad_pages: BTreeMap::new(),
             os_mouse_hook_available: false,
+            pointer_elsewhere: false,
             capture_plans_tx,
             keyboard_specs_tx,
             key_display_specs_tx,
@@ -1522,8 +1527,9 @@ impl Orchestrator {
     /// member), each reading the other's diverted state back as "original".
     ///
     /// Disabled devices are omitted from the plans so capture leaves them
-    /// native. Their route is still published: a restore owed from an earlier
-    /// handoff has to follow the mouse after capture stops.
+    /// native, and so are mice while Universal Control has the pointer on
+    /// another device. Their route is still published: a restore owed from an
+    /// earlier handoff has to follow the mouse after capture stops.
     fn capture_publication(&self) -> CapturePublication {
         let keyboards = self.keyboard_specs_for();
         let mut plans = Vec::new();
@@ -1536,6 +1542,11 @@ impl Orchestrator {
                 .entry(physical_key.clone())
                 .or_insert_with(|| route.clone());
             if !self.config.device_enabled(&dev.config_key) {
+                continue;
+            }
+            // Universal Control forwards the mouse's own HID reports to the
+            // device the pointer is on, never what the agent posts.
+            if self.pointer_elsewhere && !dev.kind.is_keyboard_family() {
                 continue;
             }
             let rearm_generation = self
@@ -1600,6 +1611,19 @@ impl Orchestrator {
             return;
         }
         self.os_mouse_hook_available = available;
+        self.publish_capture_plans();
+    }
+
+    /// Publish whether Universal Control has the pointer on another device.
+    ///
+    /// While it has, mice leave capture, so their wheel and buttons report
+    /// natively and reach the device the pointer is on. Capture arms them
+    /// again when the pointer comes back.
+    pub fn set_pointer_elsewhere(&mut self, elsewhere: bool) {
+        if self.pointer_elsewhere == elsewhere {
+            return;
+        }
+        self.pointer_elsewhere = elsewhere;
         self.publish_capture_plans();
     }
 

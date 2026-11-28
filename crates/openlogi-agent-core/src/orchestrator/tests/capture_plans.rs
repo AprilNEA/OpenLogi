@@ -203,6 +203,33 @@ fn published_plans_divert_the_main_wheel_only_while_the_hook_runs() {
     assert_eq!(main_wheel(&orch), None);
 }
 
+/// While Universal Control has the pointer on another device, a mouse
+/// publishes no capture plan, so capture hands its controls back to macOS and
+/// Universal Control forwards them. A keyboard keeps its plan, and the
+/// mouse's plan returns with the pointer.
+#[test]
+fn published_plans_leave_mice_native_while_the_pointer_is_elsewhere() {
+    let mut orch = orchestrator(Config::default());
+    let mut keyboard = dev("keyboard", 2, true);
+    keyboard.kind = DeviceKind::Keyboard;
+    orch.devices = vec![dev("mouse", 1, true), keyboard];
+    orch.rebuild();
+    let planned = |orch: &Orchestrator| -> Vec<String> {
+        orch.shared
+            .capture_plans
+            .borrow()
+            .plans()
+            .iter()
+            .map(|plan| plan.dispatch.config_key.clone())
+            .collect()
+    };
+    assert_eq!(planned(&orch), ["mouse", "keyboard"]);
+    orch.set_pointer_elsewhere(true);
+    assert_eq!(planned(&orch), ["keyboard"]);
+    orch.set_pointer_elsewhere(false);
+    assert_eq!(planned(&orch), ["mouse", "keyboard"]);
+}
+
 #[test]
 fn app_switch_republishes_capture_plans() {
     // HID++ dispatch reads `plan.dispatch.bindings` at event time, so a
