@@ -958,8 +958,34 @@ jobs:
           STAMP_VERSION: ${{ inputs.stamp_version }}
         run: cargo run -q -p xtask -- release stamp-version --version "$STAMP_VERSION"
 
+      # The Linux package update path (`platform::updater::linux`) verifies a
+      # downloaded package against the update public key the build embeds,
+      # and offers no in-app install without one. The key is public:
+      # `install.sh` carries it, and `release.yml` checks that copy against
+      # the release Environment's, so this job needs no secret. Release builds
+      # only — a CI, fork or distribution build stays key-less and leaves
+      # updates to the package manager.
+      - name: Embed the update public key
+        if: ${{ inputs.sign }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          key=$(sed -n 's/^MINISIGN_PUBLIC_KEY=//p' packaging/linux/install.sh)
+          : "${key:?packaging/linux/install.sh has no MINISIGN_PUBLIC_KEY}"
+          echo "OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY=$key" >> "$GITHUB_ENV"
+
       - name: Build and package
         run: cargo run -p xtask -- linux package
+
+      - name: Verify the embedded update public key
+        if: ${{ inputs.sign }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! grep -qF -- "$OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY" target/release/openlogi-desktop; then
+            echo "openlogi-desktop does not embed the update public key" >&2
+            exit 1
+          fi
 
       - name: Verify GLIBC baseline
         env:

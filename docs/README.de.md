@@ -165,7 +165,7 @@ Der Funktionsumfang hängt davon ab, was das jeweilige Gerät meldet; die App ze
 | Medientasten | Nativ | Nativ | D-Bus MPRIS |
 | Fenstermanager-Aktionen (Schreibtische, Mission Control, …) | Nativ | Native Entsprechungen | GNOME, KDE (KWin), Hyprland; einige reine macOS-Aktionen bewirken nichts |
 | Symbol in Menüleiste / Infobereich | ✓ | ✓ | — |
-| Updates in der App | Sparkle | Integriert | Integriert |
+| Updates in der App | Sparkle | Integriert | Release-Pakete, über den Paketmanager |
 
 ## Installation
 

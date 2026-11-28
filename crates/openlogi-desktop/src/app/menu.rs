@@ -162,11 +162,15 @@ pub fn rebuild(cx: &mut App) {
 }
 
 /// Run a manual update check and show its progress: Sparkle in its own window,
-/// the built-in engine on Settings → Updates. Shared by the app menu, agent
-/// tray IPC commands and deep links.
+/// the built-in engine and the Linux package path on Settings → Updates.
+/// Shared by the app menu, agent tray IPC commands and deep links.
 pub fn check_for_updates(cx: &mut App) {
     let updater = crate::platform::updater::shared(cx);
-    if let Some(updater) = &updater {
+    if crate::platform::updater::linux::is_active(cx) {
+        // Linux packages update on their own path; the engine has no Linux
+        // asset to find (see `platform::updater`).
+        crate::platform::updater::linux::check(cx);
+    } else if let Some(updater) = &updater {
         updater.update(cx, gpui_updater::Updater::check);
     }
     if !updater.is_some_and(|updater| updater.read(cx).is_driver_backed()) {

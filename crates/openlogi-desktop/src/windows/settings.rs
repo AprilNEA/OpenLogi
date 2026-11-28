@@ -38,6 +38,7 @@ pub(super) use openlogi_core::config::{
 };
 
 use crate::features::pointer::momentum::{MomentumPanel, MomentumScope};
+use crate::platform::updater::linux::LinuxUpdate;
 pub(super) use crate::services::assets::sync::{AssetCommand, AssetControl};
 pub(super) use crate::state::{AppState, StateEvent};
 use crate::ui::commit_slider::{CommitSlider, SliderRange};
@@ -117,6 +118,8 @@ pub struct SettingsView {
     _state_obs: Subscription,
     /// Refreshes installation metadata when the startup probe completes.
     _installation_obs: Subscription,
+    /// Redraws the Updates page when a Linux release check or install settles.
+    _linux_update_obs: Subscription,
     /// Which themes the Appearance grid shows (All / Light / Dark).
     theme_filter: ThemeFilter,
     /// Free-text filter for the Appearance theme grid (search 50+ themes by name).
@@ -175,8 +178,6 @@ impl SettingsView {
         let updater = crate::platform::updater::shared(cx)
             .unwrap_or_else(|| crate::platform::updater::new_entity(cx));
         let updater_obs = cx.observe(&updater, |_, _, cx| cx.notify());
-        let installation_obs =
-            cx.observe_global::<crate::platform::installation::Installation>(|_, cx| cx.notify());
         let state_obs = cx.subscribe(&AppState::global(cx), |this, _, event: &StateEvent, cx| {
             if matches!(event, StateEvent::LanguageChanged) {
                 // The cache-size line is localized text cached in view state
@@ -266,7 +267,9 @@ impl SettingsView {
             appearance_obs: None,
             _activation_obs: activation_obs,
             _state_obs: state_obs,
-            _installation_obs: installation_obs,
+            _installation_obs: cx
+                .observe_global::<crate::platform::installation::Installation>(|_, cx| cx.notify()),
+            _linux_update_obs: cx.observe_global::<LinuxUpdate>(|_, cx| cx.notify()),
             theme_filter: ThemeFilter::All,
             theme_search,
             initial_page,

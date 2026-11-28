@@ -68,6 +68,26 @@ The installer enables and starts `openlogi-agent.service` for the current user
 when systemd is available; failure to reach the user service manager does not
 roll back an otherwise successful package installation.
 
+### Updating
+
+A package installed from a GitHub release (by this script or by hand) can
+update from **Settings → Updates**. The check asks GitHub Releases for the
+newest version on the chosen channel; it runs once per launch when **Check for
+updates** is on, and whenever you select **Check for Updates**. When a newer
+version publishes a package for your system, **Download & Install** downloads
+it, verifies its minisign signature and `SHA256SUMS` entry as this script
+does, and installs it with the package manager the script would use (apt-get,
+dnf, yum, zypper, rpm or pacman). The system asks for administrator approval
+through polkit (`pkexec`) every time, so updates never install unattended, and
+**Automatically download and install** does not apply to Linux packages.
+Select **Restart to Update** afterwards; the background agent restarts on its
+own once its binary is replaced.
+
+Running the one-line installer again also updates to the latest release.
+Packages from the AUR, Nix, Flatpak or a source build update the way they
+were installed: the app shows when a new version exists but offers no install
+button.
+
 ## Arch Linux (AUR)
 
 The [`openlogi`](https://aur.archlinux.org/packages/openlogi) AUR package

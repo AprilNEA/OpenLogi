@@ -164,7 +164,7 @@ Las funciones disponibles dependen de lo que informe cada dispositivo; la aplica
 | Teclas multimedia | Nativo | Nativo | D-Bus MPRIS |
 | Acciones del gestor de ventanas (escritorios, Mission Control, …) | Nativo | Equivalentes nativos | GNOME, KDE (KWin), Hyprland; algunas acciones exclusivas de macOS no hacen nada |
 | Icono en la barra de menús / área de notificación | ✓ | ✓ | — |
-| Actualizaciones desde la aplicación | Sparkle | Integradas | Integradas |
+| Actualizaciones desde la aplicación | Sparkle | Integradas | Paquetes de las versiones, con el gestor de paquetes |
 
 ## Instalación
 
