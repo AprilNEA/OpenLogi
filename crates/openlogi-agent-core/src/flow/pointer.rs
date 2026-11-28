@@ -63,6 +63,10 @@ pub(crate) trait Pointer {
     fn state(&mut self) -> Option<PointerState>;
     /// Read the active displays.
     fn displays(&mut self) -> Vec<DisplayBounds>;
+    /// A compositor session can change while its display bounds stay identical.
+    fn layout_generation(&self) -> Option<&str> {
+        None
+    }
     /// Move the cursor.
     fn warp(&mut self, to: HookPoint) -> Result<(), WarpError>;
 }
@@ -74,6 +78,10 @@ impl Pointer for PointerProbe {
 
     fn displays(&mut self) -> Vec<DisplayBounds> {
         Self::displays(self)
+    }
+
+    fn layout_generation(&self) -> Option<&str> {
+        Self::layout_generation(self)
     }
 
     fn warp(&mut self, to: HookPoint) -> Result<(), WarpError> {
@@ -257,6 +265,7 @@ struct PointerLoop<P> {
     params: EdgeDetectorParams,
     settings: PointerSettings,
     edges: ExposedEdges,
+    generation: Option<String>,
     detector: EdgeDetector,
     gate_open: bool,
     next_refresh: Duration,
@@ -268,6 +277,7 @@ impl<P: Pointer> PointerLoop<P> {
         let params = EdgeDetectorParams::default();
         Self {
             detector: EdgeDetector::new(edges.clone(), ArmedSides::NONE, params),
+            generation: pointer.layout_generation().map(str::to_owned),
             pointer,
             params,
             settings: PointerSettings::default(),
@@ -299,14 +309,26 @@ impl<P: Pointer> PointerLoop<P> {
             return;
         }
         self.next_refresh = now + GEOMETRY_REFRESH;
+        self.refresh_layout();
+    }
+
+    fn refresh_layout(&mut self) {
         let edges = exposed_edges(&self.pointer.displays());
-        // No displays means the window system did not answer; keep the last
-        // layout rather than stop detection.
-        if edges.segments().is_empty() || edges == self.edges {
+        let generation = self.pointer.layout_generation();
+        // Native probes keep the last geometry across a transient read error.
+        // A GNOME layout is valid only for its extension/session generation.
+        if generation == self.generation.as_deref()
+            && (edges == self.edges || (generation.is_none() && edges.segments().is_empty()))
+        {
             return;
         }
         self.edges = edges;
-        self.detector.set_edges(self.edges.clone());
+        if self.generation.as_deref() == generation {
+            self.detector.set_edges(self.edges.clone());
+        } else {
+            self.generation = generation.map(str::to_owned);
+            self.detector = EdgeDetector::new(self.edges.clone(), self.settings.sides, self.params);
+        }
     }
 
     /// Read the pointer once and feed the detector.
@@ -341,6 +363,9 @@ impl<P: Pointer> PointerLoop<P> {
 
     /// Move the cursor to a handoff's entry point.
     fn place(&mut self, entry: &proto::EntryPoint) {
+        if self.pointer.layout_generation().is_some() {
+            self.refresh_layout();
+        }
         let Some(target) = entry_position(&self.edges, entry) else {
             warn!("no exposed display edge for the Flow entry point; the cursor stays");
             return;

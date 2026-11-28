@@ -371,5 +371,6 @@ use the keyboard fallbacks above.
 
 | Limitation | Status |
 |---|---|
+| GNOME Wayland: bidirectional Flow | Install and enable version 4 or later of the [OpenLogi Shell extension](../crates/openlogi-hook/gnome-shell-extension/README.md) for outgoing edge detection and incoming cursor placement on the unlocked desktop |
 | Wayland: per-application profile switching | Native on wlroots compositors (sway, Hyprland, …); GNOME needs the [companion extension](../crates/openlogi-hook/gnome-shell-extension/README.md); KDE falls back to XWayland. wlroots reports the xdg-shell `app_id` while X11 and GNOME report `WM_CLASS`, so a profile keyed under one does not match under the other |
 | Button capture: middle / mode-shift / thumbwheel | Side buttons only today |
