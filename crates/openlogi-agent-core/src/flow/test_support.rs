@@ -78,6 +78,7 @@ pub(super) fn record(device: &str, kind: DeviceKind, unit: u8, online: bool) -> 
         unit_id: [0, 0, 0, unit],
         kind,
         online,
+        switches_hosts: true,
     }
 }
 

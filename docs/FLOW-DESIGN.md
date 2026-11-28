@@ -463,7 +463,10 @@ An outgoing transfer (`flow/runtime/sender.rs`) has two phases:
 1. **Hardware.** Take the exclusive receiver lease (2 s), check that device
    I/O is allowed, and prepare each device's switch (1 s each). If any device
    cannot switch, no device moves, so a keyboard never stays behind its
-   mouse. The peer hears nothing until this phase succeeds.
+   mouse. The peer hears nothing until this phase succeeds. A device with
+   no `0x1814` at all, such as a HID++ 1.0 device or a gaming mouse on its
+   own receiver, is never prepared: it stays here, like a device with no
+   channel for the peer.
 2. **Negotiation.** Send the request (2 s). After an accept, start a write
    only while the first half of the peer's arm window is open, counted from
    when the request was sent, because the peer may open its window as soon

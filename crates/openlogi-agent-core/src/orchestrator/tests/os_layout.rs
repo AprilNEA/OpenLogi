@@ -7,7 +7,7 @@ use super::*;
 fn layout_keyboard(key: &str, slot: u8) -> AgentDevice {
     let mut device = dev(key, slot, true);
     device.kind = DeviceKind::Keyboard;
-    device.capabilities = Some(Capabilities {
+    device.probe = ProbeState::Hidpp20(Capabilities {
         os_layout: true,
         ..Capabilities::default()
     });
@@ -20,9 +20,9 @@ fn keeps_the_layout_of_a_settable_keyboard_by_default() {
     assert!(keeps_os_layout(&config, &layout_keyboard("kbd", 1)));
     // Not without the capability, or with unknown capabilities.
     let mut no_capability = layout_keyboard("kbd", 1);
-    no_capability.capabilities = Some(Capabilities::default());
+    no_capability.probe = ProbeState::Hidpp20(Capabilities::default());
     assert!(!keeps_os_layout(&config, &no_capability));
-    no_capability.capabilities = None;
+    no_capability.probe = ProbeState::Unprobed;
     assert!(!keeps_os_layout(&config, &no_capability));
 }
 
@@ -101,7 +101,7 @@ fn build_devices_carries_the_settings_revision() {
 /// `kbd(slot, true, 0)` with `capabilities`.
 fn kbd_with(slot: u8, online: bool, capabilities: Option<Capabilities>) -> AgentDevice {
     AgentDevice {
-        capabilities,
+        probe: ProbeState::from_paired(capabilities, false),
         ..kbd(slot, online, 0)
     }
 }

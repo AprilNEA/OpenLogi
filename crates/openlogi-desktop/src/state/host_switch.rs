@@ -311,4 +311,50 @@ mod tests {
         );
         assert!(matches!(receiver.try_recv(), Ok(Command::ReloadConfig(_))));
     }
+
+    /// An identity saved before `0x1814` was measured has no `change_host`.
+    /// It loads as unmeasured, so the asleep mouse is not offered.
+    #[test]
+    fn old_identity_does_not_enable_linked_switch() {
+        let identity = serde_json::from_value(serde_json::json!({
+            "display_name": "Old Mouse",
+            "kind": "mouse",
+            "capabilities": {
+                "buttons": true,
+                "pointer": true,
+                "lighting": false,
+                "scroll_inversion": false,
+            },
+        }))
+        .expect("an identity without change_host loads");
+        let mut config = Config::ephemeral();
+        config.set_selected_device(Some("unit:01020304".to_string()));
+        config.set_device_identity("unit:21222324", identity);
+        let inventories = [inventory(
+            "MX Keys",
+            DeviceKind::Keyboard,
+            [1, 2, 3, 4],
+            &[CHANGE_HOST, HOSTS_INFO],
+        )];
+        let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let state = AppState::new(Sources {
+            config,
+            inventories: &inventories,
+            standalone: &[],
+            resolver: &AssetResolver::new(),
+            cameras: &[],
+            persistence: ConfigPersistence::MemoryOnly,
+            ipc_commands: commands,
+        });
+
+        assert!(
+            state
+                .devices
+                .records
+                .iter()
+                .any(|record| record.config_key == "unit:21222324"),
+            "the asleep mouse is listed"
+        );
+        assert_eq!(state.current_host_switch_targets(), []);
+    }
 }

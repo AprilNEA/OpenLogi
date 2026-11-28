@@ -97,7 +97,7 @@ struct AgentDevice {
     slot: u8,
     serial: Option<String>,
     unit_id: [u8; 4],
-    capabilities: Option<Capabilities>,
+    probe: ProbeState,
     /// HID++-reported device kind — identity only (capability decisions come
     /// from the feature table). Used to find the keyboard the key-capture
     /// watcher should target.
@@ -115,6 +115,41 @@ struct AgentDevice {
     codename: Option<String>,
     /// The device's latest battery reading, `None` when it has none.
     battery: Option<BatteryInfo>,
+}
+
+/// What the device's probe established. A HID++ 1.0 device has no feature
+/// table, so it can never carry measured [`Capabilities`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProbeState {
+    /// Not probed yet, or the feature walk failed.
+    Unprobed,
+    /// [`PairedDevice::hidpp10`](openlogi_core::device::PairedDevice::hidpp10).
+    Hidpp10,
+    /// The feature table the device reported.
+    Hidpp20(Capabilities),
+}
+
+impl ProbeState {
+    /// From the inventory's pair. `hidpp10` wins: a HID++ 1.0 answer means
+    /// there is no feature table to have measured.
+    fn from_paired(capabilities: Option<Capabilities>, hidpp10: bool) -> Self {
+        match (hidpp10, capabilities) {
+            (true, _) => Self::Hidpp10,
+            (false, Some(capabilities)) => Self::Hidpp20(capabilities),
+            (false, None) => Self::Unprobed,
+        }
+    }
+
+    fn capabilities(&self) -> Option<&Capabilities> {
+        match self {
+            Self::Hidpp20(capabilities) => Some(capabilities),
+            Self::Unprobed | Self::Hidpp10 => None,
+        }
+    }
+
+    fn switch_hosts(&self) -> bool {
+        Capabilities::switch_hosts(self.capabilities(), matches!(self, Self::Hidpp10))
+    }
 }
 
 impl AgentDevice {
@@ -1089,7 +1124,7 @@ impl Orchestrator {
             .iter()
             .find(|dev| dev.config_key == key)
             .is_some_and(|dev| {
-                GamingButtons::for_device(&dev.model_key, dev.capabilities.as_ref()).is_some()
+                GamingButtons::for_device(&dev.model_key, dev.probe.capabilities()).is_some()
             })
     }
 
@@ -1331,7 +1366,8 @@ impl Orchestrator {
                     .find(|device| device.config_key == key)
                     .is_some_and(|device| {
                         device
-                            .capabilities
+                            .probe
+                            .capabilities()
                             .is_some_and(|capabilities| !capabilities.scroll_inversion)
                     })
         });
@@ -1424,6 +1460,7 @@ impl Orchestrator {
             unit_id: dev.unit_id,
             kind: dev.kind,
             online: dev.online,
+            switches_hosts: dev.probe.switch_hosts(),
         })
     }
 
@@ -1731,7 +1768,7 @@ impl Orchestrator {
             || devices.iter().zip(&self.devices).any(|(a, b)| {
                 a.config_key != b.config_key
                     || a.route != b.route
-                    || a.capabilities != b.capabilities
+                    || a.probe != b.probe
                     || a.light_capabilities != b.light_capabilities
             });
         if !changed {
@@ -2187,7 +2224,8 @@ impl Orchestrator {
         let haptic_route = (device.online
             && ring.haptics
             && device
-                .capabilities
+                .probe
+                .capabilities()
                 .is_some_and(|capabilities| capabilities.haptic_feedback))
         .then(|| device.route.clone())
         .flatten();
@@ -2708,7 +2746,7 @@ fn keyboard_divert_set(bindings: &BTreeMap<ButtonId, Binding>) -> KeyboardDivert
 /// [`GamingKeyMode::NineButtons`]. Bound or not, every G-key is then
 /// OpenLogi's, so the takeover is an explicit per-device choice.
 fn gaming_wanted(config: &Config, dev: &AgentDevice) -> GamingWanted {
-    let Some(capabilities) = dev.capabilities.as_ref().filter(|c| c.g_keys) else {
+    let Some(capabilities) = dev.probe.capabilities().filter(|c| c.g_keys) else {
         return GamingWanted::default();
     };
     if config.g_key_owner(&dev.config_key) != GKeyOwner::OpenLogi {

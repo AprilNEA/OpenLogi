@@ -23,7 +23,7 @@ fn held_wheel_inversion_follows_the_main_wheel_on_its_link() {
         !wheel_inverted(&config, &device),
         "unknown capabilities invert nothing"
     );
-    device.capabilities = Some(Capabilities {
+    device.probe = ProbeState::Hidpp20(Capabilities {
         scroll_inversion: true,
         ..Capabilities::default()
     });
@@ -40,7 +40,7 @@ fn held_wheel_inversion_follows_the_main_wheel_on_its_link() {
         !wheel_inverted(&config, &device),
         "the link's override is what the firmware is written"
     );
-    device.capabilities = Some(Capabilities {
+    device.probe = ProbeState::Hidpp20(Capabilities {
         scroll_inversion: false,
         ..Capabilities::default()
     });
@@ -81,7 +81,7 @@ fn configured_wheel_mode_gates_resolution_and_inversion_independently() {
     config.set_invert_scroll("a", true);
     let mut device = dev("a", 1, true);
 
-    device.capabilities = Some(Capabilities {
+    device.probe = ProbeState::Hidpp20(Capabilities {
         hires_wheel: true,
         scroll_inversion: false,
         ..Capabilities::default()
@@ -91,7 +91,7 @@ fn configured_wheel_mode_gates_resolution_and_inversion_independently() {
         Some(WheelModeChange::Resolution(ScrollResolution::Low))
     );
 
-    device.capabilities = Some(Capabilities {
+    device.probe = ProbeState::Hidpp20(Capabilities {
         hires_wheel: false,
         scroll_inversion: true,
         ..Capabilities::default()
@@ -101,7 +101,7 @@ fn configured_wheel_mode_gates_resolution_and_inversion_independently() {
         Some(WheelModeChange::Inversion(true))
     );
 
-    device.capabilities = None;
+    device.probe = ProbeState::Unprobed;
     assert_eq!(configured_wheel_mode(&config, &device, true), None);
 }
 
@@ -113,7 +113,7 @@ fn momentum_scrolling_diverts_the_wheel_in_high_resolution() {
     let mut config = Config::default();
     config.set_smooth_wheel("a", true);
     let mut device = dev("a", 1, true);
-    device.capabilities = Some(Capabilities {
+    device.probe = ProbeState::Hidpp20(Capabilities {
         hires_wheel: true,
         ..Capabilities::default()
     });
@@ -149,7 +149,7 @@ fn the_main_wheel_is_diverted_only_with_every_gate_open() {
         ..Capabilities::default()
     };
     let mut device = dev("a", 1, true);
-    device.capabilities = Some(wheel);
+    device.probe = ProbeState::Hidpp20(wheel);
     assert_eq!(
         main_wheel_divert(&config, &device, true),
         Some(MainWheelDivert {
@@ -187,14 +187,14 @@ fn the_main_wheel_is_diverted_only_with_every_gate_open() {
     assert_eq!(main_wheel_divert(&config, &device, true), None, "disabled");
     config.set_device_enabled("a", true);
 
-    device.capabilities = Some(Capabilities {
+    device.probe = ProbeState::Hidpp20(Capabilities {
         hires_wheel: false,
         ..wheel
     });
     assert_eq!(main_wheel_divert(&config, &device, true), None, "no 0x2121");
-    device.capabilities = None;
+    device.probe = ProbeState::Unprobed;
     assert_eq!(main_wheel_divert(&config, &device, true), None, "unknown");
-    device.capabilities = Some(wheel);
+    device.probe = ProbeState::Hidpp20(wheel);
 
     config.set_smooth_wheel("a", false);
     assert_eq!(main_wheel_divert(&config, &device, true), None, "opted out");
@@ -209,7 +209,7 @@ fn the_agent_writes_no_wheel_mode_under_a_diverting_session() {
     config.set_scroll_resolution("a", Some(ScrollResolution::High));
     config.set_smooth_wheel("a", true);
     let mut device = dev("a", 1, true);
-    device.capabilities = Some(Capabilities {
+    device.probe = ProbeState::Hidpp20(Capabilities {
         hires_wheel: true,
         ..Capabilities::default()
     });
@@ -227,7 +227,7 @@ fn the_agent_writes_no_wheel_mode_under_a_diverting_session() {
 fn configured_wheel_mode_leaves_unset_resolution_unmanaged() {
     let config = Config::default();
     let mut device = dev("a", 1, true);
-    device.capabilities = Some(Capabilities {
+    device.probe = ProbeState::Hidpp20(Capabilities {
         hires_wheel: true,
         scroll_inversion: false,
         ..Capabilities::default()
@@ -240,7 +240,7 @@ fn configured_wheel_mode_leaves_unset_resolution_unmanaged() {
 fn configured_report_rate_needs_the_feature_and_a_saved_rate() {
     let mut config = Config::default();
     let mut device = dev("a", 1, true);
-    device.capabilities = Some(Capabilities {
+    device.probe = ProbeState::Hidpp20(Capabilities {
         report_rate: true,
         backlight: false,
         easy_switch: false,
@@ -254,9 +254,9 @@ fn configured_report_rate_needs_the_feature_and_a_saved_rate() {
         Some(ReportRate::new(2000))
     );
     // A device without either report-rate feature is never written.
-    device.capabilities = Some(Capabilities::default());
+    device.probe = ProbeState::Hidpp20(Capabilities::default());
     assert_eq!(configured_report_rate(&config, &device), None);
-    device.capabilities = None;
+    device.probe = ProbeState::Unprobed;
     assert_eq!(configured_report_rate(&config, &device), None);
 }
 
@@ -264,7 +264,7 @@ fn configured_report_rate_needs_the_feature_and_a_saved_rate() {
 fn configured_force_sensing_needs_the_capability_and_a_saved_force() {
     let mut config = Config::default();
     let mut device = dev("a", 1, true);
-    device.capabilities = Some(Capabilities {
+    device.probe = ProbeState::Hidpp20(Capabilities {
         force_sensing: true,
         ..Capabilities::default()
     });
@@ -273,9 +273,9 @@ fn configured_force_sensing_needs_the_capability_and_a_saved_force() {
     config.set_force_sensing("a", 4500);
     assert_eq!(configured_force_sensing(&config, &device), Some(4500));
     // A device whose force software may not change is never written.
-    device.capabilities = Some(Capabilities::default());
+    device.probe = ProbeState::Hidpp20(Capabilities::default());
     assert_eq!(configured_force_sensing(&config, &device), None);
-    device.capabilities = None;
+    device.probe = ProbeState::Unprobed;
     assert_eq!(configured_force_sensing(&config, &device), None);
 }
 
@@ -283,7 +283,7 @@ fn configured_force_sensing_needs_the_capability_and_a_saved_force() {
 fn a_reload_writes_a_changed_force_only_to_an_online_enabled_device() {
     let sensing = |key: &str, slot: u8, online: bool| {
         let mut device = dev(key, slot, online);
-        device.capabilities = Some(Capabilities {
+        device.probe = ProbeState::Hidpp20(Capabilities {
             force_sensing: true,
             ..Capabilities::default()
         });
@@ -882,7 +882,7 @@ fn a_reconnect_resets_the_dpi_a_shift_returns_to() {
         config.set_dpi("mouse", Dpi::new(1600));
         config.set_dpi_presets("mouse", vec![Dpi::new(800), Dpi::new(1600)]);
         let mouse = || AgentDevice {
-            capabilities,
+            probe: ProbeState::from_paired(capabilities, false),
             ..dev("mouse", 1, true)
         };
         let mut orch = orchestrator(config);
@@ -1024,7 +1024,7 @@ fn a_taken_over_g_key_row_captures_without_bindings() {
 
     let g915 = || {
         let mut device = keyboard("g915", 1, true);
-        device.capabilities = Some(Capabilities {
+        device.probe = ProbeState::Hidpp20(Capabilities {
             g_keys: true,
             m_keys: true,
             macro_record: true,

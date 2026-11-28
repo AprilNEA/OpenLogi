@@ -140,7 +140,7 @@ fn published_plans_carry_the_held_wheel_inversion_of_the_link() {
     let mut config = Config::default();
     config.set_invert_scroll("a", false);
     let mut device = dev("a", 1, true);
-    device.capabilities = Some(Capabilities {
+    device.probe = ProbeState::Hidpp20(Capabilities {
         scroll_inversion: true,
         ..Capabilities::default()
     });
@@ -171,7 +171,7 @@ fn published_plans_divert_the_main_wheel_only_while_the_hook_runs() {
     let mut config = Config::default();
     config.set_smooth_wheel("a", true);
     let mut device = dev("a", 1, true);
-    device.capabilities = Some(Capabilities {
+    device.probe = ProbeState::Hidpp20(Capabilities {
         hires_wheel: true,
         ..Capabilities::default()
     });

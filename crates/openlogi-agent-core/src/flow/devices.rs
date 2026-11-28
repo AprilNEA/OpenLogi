@@ -28,6 +28,11 @@ pub(crate) struct InventoryDevice {
     pub(crate) kind: DeviceKind,
     /// Whether the device is present and awake on this host.
     pub(crate) online: bool,
+    /// Whether the device can switch computers at all, as
+    /// [`Capabilities::switch_hosts`] decides.
+    ///
+    /// [`Capabilities::switch_hosts`]: openlogi_core::device::Capabilities::switch_hosts
+    pub(crate) switches_hosts: bool,
 }
 
 /// One configured Flow device joined with its inventory record.
@@ -38,6 +43,7 @@ pub(crate) struct LocalDevice {
     route: Option<DeviceRoute>,
     kind: DeviceKind,
     online: bool,
+    switches_hosts: bool,
 }
 
 impl LocalDevice {
@@ -114,6 +120,7 @@ impl LocalDevices {
                     route: record.route.clone(),
                     kind: record.kind,
                     online: record.online,
+                    switches_hosts: record.switches_hosts,
                 });
             }
         }
@@ -130,11 +137,14 @@ impl LocalDevices {
         self.listed.iter()
     }
 
-    /// The online devices that can be sent to `peer`, in handoff order.
+    /// The online devices that can be sent to `peer`, in handoff order. A
+    /// device that cannot switch computers stays here, like one with no
+    /// channel for `peer`: preparing its switch could only fail, and that
+    /// would keep every other device here too.
     pub(crate) fn outgoing(&self, peer: &FlowPeerName) -> Vec<OutgoingDevice> {
         self.listed
             .iter()
-            .filter(|device| device.online)
+            .filter(|device| device.online && device.switches_hosts)
             .filter_map(|device| {
                 Some(OutgoingDevice {
                     route: device.route.clone()?,
