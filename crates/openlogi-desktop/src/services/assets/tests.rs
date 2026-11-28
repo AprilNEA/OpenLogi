@@ -1,3 +1,4 @@
+use super::images::{contain_fit_bounds, scaled_render_image};
 use super::*;
 use openlogi_assets::DeviceEntry;
 use openlogi_core::device::DeviceTransports;
@@ -1298,4 +1299,367 @@ fn a_webp_colour_variant_gets_both_views_at_their_own_size() {
     assert_eq!((side.png_width, side.png_height), (1157, 2800));
     assert_eq!(asset.image_path, dir.join(G502X_PLUS_EXT2_FRONT));
     assert_eq!((asset.png_width, asset.png_height), (1662, 2800));
+}
+
+#[test]
+fn scaled_render_image_preserves_aspect_ratio_and_never_poisons_missing_files() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let png_path = dir.path().join("late_arrival.png");
+
+    // 1. Before the file exists on disk, scaled_render_image returns None without
+    // poisoning the cache.
+    assert!(scaled_render_image(&png_path, 240, 136).is_none());
+
+    // 2. Build a 400x200 RGBA PNG with:
+    // - A transparent border (x < 40) carrying poison green RGB [0, 255, 0, 0] so any
+    //   non-premultiplied resize bleeds bright green into the silhouette edge.
+    // - An opaque red-orange body [240, 20, 40, 255] so BGRA byte-order swapping is
+    //   verifiable on every opaque pixel (B=40, G=20, R=240, A=255).
+    // - A fine 2px interior legend stroke at x in 200..202 ([180, 20, 40, 255]) so
+    //   Lanczos-3 resampling + interior micro-contrast sharpening are verified.
+    let mut img = image::RgbaImage::from_pixel(400, 200, image::Rgba([240, 20, 40, 255]));
+    for y in 0..200 {
+        for x in 0..40 {
+            img.put_pixel(x, y, image::Rgba([0, 255, 0, 0]));
+        }
+        for x in 200..202 {
+            img.put_pixel(x, y, image::Rgba([180, 20, 40, 255]));
+        }
+    }
+    img.save(&png_path).expect("save test png");
+
+    // Fits 400x200 (2:1) inside 240x136 -> 240x120 (>= 200x120 so interior sharpening runs).
+    let (first_arc, dst_w, dst_h) =
+        scaled_render_image(&png_path, 240, 136).expect("scaled image built");
+    assert_eq!((dst_w, dst_h), (240, 120));
+
+    let bgra = first_arc.as_bytes(0).expect("frame 0 BGRA bytes");
+    let px_at = |x: u32, y: u32| -> [u8; 4] {
+        let idx = ((y * dst_w + x) * 4) as usize;
+        [bgra[idx], bgra[idx + 1], bgra[idx + 2], bgra[idx + 3]]
+    };
+
+    // Counter-proof A (BGRA swap): Opaque body pixel at (100, 60) must be [B=40, G=20, R=240, A=255].
+    // Reverting `p.0.swap(0, 2)` yields [240, 20, 40, 255] and fails this assertion.
+    assert_eq!(px_at(100, 60), [40, 20, 240, 255]);
+
+    // Counter-proof B (Premultiplied-alpha Lanczos-3): Across the transparent/opaque
+    // silhouette transition (x = 20..28, y = 60), no pixel with alpha > 0 may bleed
+    // the poison green channel (G=255) from the transparent exterior.
+    // Reverting the premultiply pass before `imageops::resize` bleeds G > 80 into x = 23..25.
+    for x in 0..dst_w {
+        let [_b, g, _r, a] = px_at(x, 60);
+        if a > 0 {
+            assert!(
+                g <= 25,
+                "transparent exterior bled green channel G={g} at x={x} (a={a})"
+            );
+        }
+    }
+
+    // Counter-proof C (Lanczos-3 + sharpen_opaque_interior on fine key legends):
+    // At the downscaled legend stroke (x = 120, y = 60), Lanczos-3 + interior micro-contrast
+    // lowers R below 205 while boosting adjacent shoulder contrast above 240.
+    // Replacing FilterType::Lanczos3 with FilterType::Triangle or removing
+    // `sharpen_opaque_interior` fails these bounds.
+    let [_, _, legend_r, _] = px_at(120, 60);
+    let [_, _, shoulder_r, _] = px_at(119, 60);
+    assert!(
+        legend_r <= 198,
+        "expected crisp legend stroke R <= 198, got {legend_r}"
+    );
+    assert!(
+        shoulder_r >= 241,
+        "expected micro-contrast shoulder R >= 241, got {shoulder_r}"
+    );
+
+    // 3. Subsequent call on an isolated cache returns the cached Arc<RenderImage> pointer.
+    let isolated_cache = super::images::ScaledImageCache::new();
+    let (cached_first, _, _) = isolated_cache
+        .get_or_build(&png_path, 240, 136)
+        .expect("isolated first lookup");
+    let (cached_second, cached_w, cached_h) = isolated_cache
+        .get_or_build(&png_path, 240, 136)
+        .expect("isolated second lookup");
+    assert_eq!((cached_w, cached_h), (240, 120));
+    assert!(Arc::ptr_eq(&cached_first, &cached_second));
+
+    // 4. Clearing the isolated cache evicts the entry so the next lookup rebuilds a fresh Arc.
+    isolated_cache.clear();
+    let (cached_third, _, _) = isolated_cache
+        .get_or_build(&png_path, 240, 136)
+        .expect("rebuilt after cache clear");
+    assert!(!Arc::ptr_eq(&cached_first, &cached_third));
+}
+
+#[test]
+fn scaled_image_cache_survives_resolver_creation_and_reuses_decoded_source_across_resizes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let png_path = dir.path().join("resize_reuse.png");
+    let img = image::RgbaImage::from_pixel(400, 200, image::Rgba([200, 100, 50, 255]));
+    img.save(&png_path).expect("save resize test png");
+
+    // 1. Creating a new AssetResolver between lookups must not evict cached entries
+    // in the process-wide cache.
+    let (first_global, _, _) =
+        scaled_render_image(&png_path, 240, 136).expect("first global lookup");
+    let _concurrent_resolver = AssetResolver::new();
+    let (second_global, _, _) =
+        scaled_render_image(&png_path, 240, 136).expect("second global lookup after resolver");
+    assert!(
+        Arc::ptr_eq(&first_global, &second_global),
+        "AssetResolver::new() must not evict process-wide scaled image cache entries"
+    );
+
+    // 2. Resizing the same image to multiple target dimensions (e.g. dragging the
+    // Keys view window height) must decode the source image file only once and reuse
+    // the cached premultiplied RGBA source for every subsequent size.
+    let cache = super::images::ScaledImageCache::new();
+    let (_, w1, h1) = cache.get_or_build(&png_path, 200, 120).expect("size 1");
+    let (_, w2, h2) = cache.get_or_build(&png_path, 300, 180).expect("size 2");
+    let (_, w3, h3) = cache.get_or_build(&png_path, 360, 200).expect("size 3");
+    assert_eq!((w1, h1), (200, 100));
+    assert_eq!((w2, h2), (300, 150));
+    assert_eq!((w3, h3), (360, 180));
+    assert_eq!(
+        cache.decode_count(&png_path),
+        1,
+        "changing target size must reuse the cached decoded source instead of decoding again"
+    );
+}
+
+#[test]
+fn clear_rejects_old_worker() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let png_path = dir.path().join("worker_race.png");
+    let img_v1 = image::RgbaImage::from_pixel(200, 100, image::Rgba([240, 20, 40, 255]));
+    img_v1.save(&png_path).expect("save v1 png");
+
+    let cache = super::images::ScaledImageCache::new();
+
+    // 1. Start old worker before cache clear and hold its ticket paused.
+    let super::images::RequestStep::Spawn {
+        ticket: old_ticket,
+        display: initial_display,
+    } = cache.begin_request(&png_path, 100, 50)
+    else {
+        panic!("expected Spawn for cold cache");
+    };
+    assert!(initial_display.is_none());
+    assert!(cache.is_building_with_ticket(&png_path, 100, 50, old_ticket));
+
+    // 2. Clear the cache (Settings -> Assets -> Clear) and start a replacement request.
+    cache.clear();
+    let super::images::RequestStep::Spawn {
+        ticket: replacement_ticket,
+        ..
+    } = cache.begin_request(&png_path, 100, 50)
+    else {
+        panic!("expected Spawn for replacement after clear");
+    };
+    assert_ne!(old_ticket, replacement_ticket);
+
+    // 3. The paused old worker now finishes: it must be rejected, neither publishing
+    // its image nor finishing/removing the replacement's Building state.
+    assert!(
+        cache.run_ticket(&png_path, 100, 50, old_ticket).is_none(),
+        "old worker from previous cache generation must be rejected"
+    );
+    assert!(
+        cache.is_building_with_ticket(&png_path, 100, 50, replacement_ticket),
+        "old worker must not finish or overwrite the active replacement request"
+    );
+    assert!(matches!(
+        cache.begin_request(&png_path, 100, 50),
+        super::images::RequestStep::InFlight { .. }
+    ));
+
+    // 4. The replacement worker completes and publishes cleanly.
+    let (published_arc, w, h) = cache
+        .run_ticket(&png_path, 100, 50, replacement_ticket)
+        .expect("replacement worker publishes");
+    assert_eq!((w, h), (100, 50));
+    let super::images::RequestStep::Ready((ready_arc, _, _)) =
+        cache.begin_request(&png_path, 100, 50)
+    else {
+        panic!("expected Ready after replacement finishes");
+    };
+    assert!(Arc::ptr_eq(&published_arc, &ready_arc));
+}
+
+#[test]
+fn refresh_replaces_same_path_artwork() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let png_path = dir.path().join("same_path_refresh.png");
+
+    // 1. Write red artwork [R=240, G=20, B=40, A=255] -> BGRA [40, 20, 240, 255].
+    let red_img = image::RgbaImage::from_pixel(200, 100, image::Rgba([240, 20, 40, 255]));
+    red_img.save(&png_path).expect("save red png");
+
+    let cache = super::images::ScaledImageCache::new();
+    let super::images::RequestStep::Spawn { ticket: t1, .. } =
+        cache.begin_request(&png_path, 100, 50)
+    else {
+        panic!("expected initial Spawn");
+    };
+    let (red_arc, _, _) = cache
+        .run_ticket(&png_path, 100, 50, t1)
+        .expect("build red image");
+    let red_bgra = red_arc.as_bytes(0).expect("red bytes");
+    assert_eq!(&red_bgra[0..4], &[40, 20, 240, 255]);
+
+    // Confirm request path returns Ready while file is unchanged.
+    assert!(matches!(
+        cache.begin_request(&png_path, 100, 50),
+        super::images::RequestStep::Ready(_)
+    ));
+
+    // 2. Settings -> Assets -> Refresh downloads new blue artwork [R=40, G=20, B=240, A=255]
+    // to the exact same path -> BGRA [240, 20, 40, 255] and notifies the cache on sync completion.
+    let blue_img = image::RgbaImage::from_pixel(200, 100, image::Rgba([40, 20, 240, 255]));
+    blue_img.save(&png_path).expect("overwrite with blue png");
+    cache.mark_for_refresh();
+
+    // 3. Requesting the already-cached (100, 50) size through the request path returns
+    // the old texture as non-blocking fallback and spawns a background refresh ticket.
+    let super::images::RequestStep::Spawn {
+        ticket: t2,
+        display: fallback,
+    } = cache.begin_request(&png_path, 100, 50)
+    else {
+        panic!("expected Spawn when same-path artwork changes on disk");
+    };
+    let (fb_arc, _, _) = fallback.expect("previous texture provided as non-blocking fallback");
+    assert!(Arc::ptr_eq(&fb_arc, &red_arc));
+
+    let (blue_arc, _, _) = cache
+        .run_ticket(&png_path, 100, 50, t2)
+        .expect("build refreshed blue image");
+    assert!(!Arc::ptr_eq(&red_arc, &blue_arc));
+
+    let super::images::RequestStep::Ready((ready_blue, _, _)) =
+        cache.begin_request(&png_path, 100, 50)
+    else {
+        panic!("expected Ready after refresh ticket completes");
+    };
+    let blue_bgra = ready_blue.as_bytes(0).expect("blue bytes");
+    assert_eq!(&blue_bgra[0..4], &[240, 20, 40, 255]);
+}
+
+#[test]
+fn fallback_cache_respects_capacity() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cache = super::images::ScaledImageCache::new();
+    let total = super::images::MAX_FALLBACK_ENTRIES + 6;
+    let mut paths = Vec::with_capacity(total);
+
+    for idx in 0..total {
+        let p = dir.path().join(format!("dev_{idx}.png"));
+        let color = u8::try_from(idx % 250).unwrap_or(0);
+        let img = image::RgbaImage::from_pixel(64, 64, image::Rgba([color, 100, 200, 255]));
+        img.save(&p).expect("save fallback test png");
+        let _ = cache.get_or_build(&p, 32, 32).expect("build entry");
+        paths.push(p);
+    }
+
+    assert_eq!(cache.fallback_count(), super::images::MAX_FALLBACK_ENTRIES);
+    for evicted in &paths[..6] {
+        assert!(
+            !cache.has_fallback_for(evicted),
+            "expected oldest fallback entry {} to be evicted",
+            evicted.display()
+        );
+    }
+    for retained in &paths[6..] {
+        assert!(
+            cache.has_fallback_for(retained),
+            "expected recent fallback entry {} to be retained",
+            retained.display()
+        );
+    }
+}
+
+#[test]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "test stage dimensions fit cleanly in f32"
+)]
+fn wide_card_stage_fits_keyboard_image_and_glow_to_identical_bounds() {
+    // At GALLERY_CARD_MAX_W (25.3125 rem = 405 px) minus 32 px horizontal padding,
+    // the card photo stage is 373 x 196 px. A wide keyboard (1376x613) must fill the
+    // full 373 px stage width so `ScaledImage::fill_stage` and `glow_canvas` share
+    // identical bounds instead of clamping the image at 240 px.
+    let stage = gpui::Bounds {
+        origin: gpui::point(gpui::px(16.0), gpui::px(16.0)),
+        size: gpui::size(gpui::px(373.0), gpui::px(crate::ui::theme::GALLERY_PHOTO_H)),
+    };
+    let keyboard_aspect = 1376.0_f32 / 613.0_f32;
+    let glow_fit = contain_fit_bounds(stage, keyboard_aspect);
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let kbd_path = dir.path().join("wide_kbd.png");
+    let img = image::RgbaImage::from_pixel(1376, 613, image::Rgba([220, 220, 220, 255]));
+    img.save(&kbd_path).expect("save wide keyboard png");
+
+    let (_, dst_w, dst_h) = scaled_render_image(&kbd_path, 373, 196).expect("scaled wide kbd");
+    let image_aspect = (dst_w as f32) / (dst_h as f32);
+    let image_fit = contain_fit_bounds(stage, image_aspect);
+
+    assert_eq!(f32::from(image_fit.size.width), 373.0);
+    assert!(
+        f32::from(image_fit.size.width) > 240.0,
+        "wide card keyboard image must not be clamped to 240px"
+    );
+    assert!((f32::from(image_fit.origin.x) - f32::from(glow_fit.origin.x)).abs() < 0.5);
+    assert!((f32::from(image_fit.origin.y) - f32::from(glow_fit.origin.y)).abs() < 0.5);
+    assert!((f32::from(image_fit.size.width) - f32::from(glow_fit.size.width)).abs() < 1.0);
+    assert!((f32::from(image_fit.size.height) - f32::from(glow_fit.size.height)).abs() < 1.0);
+}
+
+#[test]
+fn ready_image_requests_do_not_read_source() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let png_path = dir.path().join("no_ui_read.png");
+    let img = image::RgbaImage::from_pixel(200, 100, image::Rgba([80, 160, 240, 255]));
+    img.save(&png_path).expect("save test png");
+
+    let cache = super::images::ScaledImageCache::new();
+    assert_eq!(cache.source_read_count(), 0);
+
+    // 1. Cold `begin_request` on the UI thread must not read the source file;
+    // only the background `run_ticket` worker reads and hashes the file.
+    let super::images::RequestStep::Spawn { ticket, .. } = cache.begin_request(&png_path, 100, 50)
+    else {
+        panic!("expected Spawn on cold cache");
+    };
+    assert_eq!(
+        cache.source_read_count(),
+        0,
+        "UI-thread begin_request must not read the source file"
+    );
+
+    let (built_arc, _, _) = cache
+        .run_ticket(&png_path, 100, 50, ticket)
+        .expect("background worker builds texture");
+    assert_eq!(cache.source_read_count(), 1);
+    assert_eq!(cache.decode_count(&png_path), 1);
+
+    // 2. Even if the source file is removed on disk, repeated `Ready` cache hits
+    // serve the cached texture directly from memory with zero file reads.
+    std::fs::remove_file(&png_path).expect("remove source file after texture is cached");
+    for _ in 0..8 {
+        let super::images::RequestStep::Ready((hit_arc, w, h)) =
+            cache.begin_request(&png_path, 100, 50)
+        else {
+            panic!("expected Ready cache hit without touching disk");
+        };
+        assert_eq!((w, h), (100, 50));
+        assert!(Arc::ptr_eq(&built_arc, &hit_arc));
+    }
+    assert_eq!(
+        cache.source_read_count(),
+        1,
+        "repeated Ready requests must not re-read or hash the source file"
+    );
+    assert_eq!(cache.decode_count(&png_path), 1);
 }

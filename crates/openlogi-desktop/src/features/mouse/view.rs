@@ -6,7 +6,7 @@ use std::sync::Arc;
 use gpui::{
     AnyElement, App, AppContext as _, Context, ElementId, Entity, FocusHandle, Focusable, Hsla,
     InteractiveElement, IntoElement, ParentElement, Pixels, Render, RenderOnce, SharedString, Size,
-    StatefulInteractiveElement as _, Styled, Subscription, Window, canvas, div, hsla, img,
+    StatefulInteractiveElement as _, Styled, Subscription, Window, canvas, div, hsla,
     prelude::FluentBuilder as _, px, rgb, size,
 };
 use gpui_kit::base::{Button as BaseButton, ElementExt as _};
@@ -885,15 +885,20 @@ fn breathing_art(
     let device_art: AnyElement = match asset {
         Some(a) => {
             let side_w = side_view_width(a, mouse_h);
+            let main_w = (mouse_w - side_w).max(1.);
             h_flex()
                 .when_some(a.side_view.as_ref(), |this, side| {
-                    this.child(img(side.image_path.clone()).w(px(side_w)).h(px(mouse_h)))
+                    this.child(crate::services::assets::ScaledImage::exact(
+                        side.image_path.clone(),
+                        side_w,
+                        mouse_h,
+                    ))
                 })
-                .child(
-                    img(a.image_path.clone())
-                        .w(px(mouse_w - side_w))
-                        .h(px(mouse_h)),
-                )
+                .child(crate::services::assets::ScaledImage::exact(
+                    a.image_path.clone(),
+                    main_w,
+                    mouse_h,
+                ))
                 .into_any_element()
         }
         None => Silhouette {

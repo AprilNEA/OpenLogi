@@ -41,9 +41,10 @@ use openlogi_core::device::{DeviceKind, DeviceModelInfo};
 use tracing::{debug, warn};
 use walkdir::WalkDir;
 
+pub(crate) use self::images::{ScaledImage, contain_fit_bounds, refresh_scaled_image_cache};
 use self::images::{
-    buttons_image_for, find_variant_in_manifest, is_drawable_image, load_manifest, metadata_for,
-    read_image_dimensions, side_image_for, variant_image_for,
+    buttons_image_for, clear_scaled_image_cache, find_variant_in_manifest, is_drawable_image,
+    load_manifest, metadata_for, read_image_dimensions, side_image_for, variant_image_for,
 };
 pub(crate) use self::paths::user_cache_root;
 use self::paths::{bundle_assets_root, load_index};
@@ -65,6 +66,7 @@ pub fn cache_size_bytes() -> u64 {
 /// connected devices need; on a release build the bundled art keeps serving
 /// in the meantime. A missing cache is treated as already clear.
 pub fn clear_cache() -> std::io::Result<()> {
+    clear_scaled_image_cache();
     match std::fs::remove_dir_all(user_cache_root()) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         other => other,
