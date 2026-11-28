@@ -10,9 +10,11 @@ use crate::ui::slider_row::SliderRow;
 use crate::ui::theme::FocusRingStyle as _;
 use crate::ui::theme::PressableStyle as _;
 use crate::ui::theme::Typography as _;
+use gpui::div;
 use gpui_kit::base::Button as BaseButton;
 use gpui_kit::component::Sizable as _;
 use gpui_kit::component::radio::{Radio, RadioGroup};
+use gpui_kit::component::switch::Switch;
 use openlogi_core::config::MouseProfileTarget;
 
 use crate::features::pointer::momentum::MomentumPanel;
@@ -55,6 +57,13 @@ pub(super) fn general_page(
     // `cfg!` keeps the item and its setter compiled, and used, everywhere.
     let group = if cfg!(target_os = "macos") {
         group.item(animate_desktop_switch_item())
+    } else {
+        group
+    };
+    // Only the Windows agent finds UI elements under the pointer, so only
+    // Windows shows the switch; `cfg!` keeps it compiled everywhere.
+    let group = if cfg!(target_os = "windows") {
+        group.item(ui_hover_haptics_item())
     } else {
         group
     };
@@ -103,7 +112,11 @@ pub(super) fn general_page(
     let momentum_group = SettingGroup::new()
         .title(tr!("pointer.momentum_title"))
         .description(tr!("pointer.momentum_general_description"))
-        .item(SettingItem::render(move |_, _, _| momentum.clone()));
+        .item(SettingItem::render(move |_, _, _| {
+            div()
+                .debug_selector(|| "general-momentum".into())
+                .child(momentum.clone())
+        }));
     SettingPage::new(tr!("app.general"))
         .icon(IconName::Settings)
         .resettable(false)
@@ -175,6 +188,26 @@ fn animate_desktop_switch_item() -> SettingItem {
         ),
     )
     .description(tr!("app.animate_desktop_switch_description"))
+}
+
+/// The switch for the haptic tick on hovering an interactive UI element.
+fn ui_hover_haptics_item() -> SettingItem {
+    SettingItem::new(
+        tr!("app.ui_hover_haptics"),
+        SettingField::render(|_, _, cx| {
+            let enabled = AppState::try_read(cx).is_some_and(|s| s.app_settings().ui_hover_haptics);
+            div().debug_selector(|| "ui-hover-haptics".into()).child(
+                Switch::new("ui-hover-haptics")
+                    .checked(enabled)
+                    .accessibility_label(tr!("app.ui_hover_haptics"))
+                    .on_click(|enabled, _, cx| {
+                        let enabled = *enabled;
+                        AppState::apply(cx, |state| state.commit_ui_hover_haptics(enabled));
+                    }),
+            )
+        }),
+    )
+    .description(tr!("app.ui_hover_haptics_description"))
 }
 
 /// The switch for the overlay's low-battery notices.
@@ -364,5 +397,85 @@ mod tests {
             });
         }
         rust_i18n::set_locale("en");
+    }
+
+    /// Scroll the Settings window down until `selector` lies wholly inside
+    /// `viewport`, and return its bounds there. A control further down the
+    /// page may not render until it is scrolled near.
+    #[cfg(target_os = "windows")]
+    fn scroll_into_view(
+        visual: &mut VisualTestContext,
+        viewport: Bounds<gpui::Pixels>,
+        selector: &'static str,
+    ) -> Bounds<gpui::Pixels> {
+        use gpui::{ScrollDelta, ScrollEvent};
+
+        let inside = |bounds: &Bounds<gpui::Pixels>| {
+            viewport.contains(&bounds.origin) && viewport.contains(&bounds.bottom_right())
+        };
+        let mut bounds = visual.debug_bounds(selector);
+        for _ in 0..40 {
+            if bounds.as_ref().is_some_and(inside) {
+                break;
+            }
+            visual.simulate_event(ScrollEvent {
+                position: viewport.center(),
+                delta: ScrollDelta::Pixels(point(px(0.), px(-120.))),
+                ..Default::default()
+            });
+            visual.update(|window, cx| window.draw(cx).clear(cx));
+            bounds = visual.debug_bounds(selector);
+        }
+        let bounds = bounds.unwrap_or_else(|| panic!("{selector} never renders"));
+        assert!(
+            inside(&bounds),
+            "{selector} at {bounds:?} must scroll into {viewport:?}"
+        );
+        bounds
+    }
+
+    /// At 125% in the Settings window's minimum size, the Windows-only hover
+    /// switch scrolls into view and toggles the setting, and scrolling on
+    /// reaches the General page's last control.
+    #[cfg(target_os = "windows")]
+    #[gpui::test]
+    fn ui_hover_haptics_switch_is_reachable_at_125_percent(cx: &mut TestAppContext) {
+        let _locale = LOCALE_LOCK.lock().unwrap();
+        rust_i18n::set_locale("en");
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            theme::register_builtin_themes(cx);
+        });
+        let handle = cx.update(|cx| {
+            let mut config = Config::ephemeral();
+            config.app_settings.ui_scale = UiScale::Large;
+            let (commands, _) = tokio::sync::mpsc::unbounded_channel();
+            let resolver = AssetResolver::new();
+            let sources = Sources::in_memory(config, &resolver, commands);
+            AppState::set_global(cx.new(|_| AppState::new(sources)), cx);
+            settings::open(cx);
+            cx.global::<WindowRegistry>().settings.unwrap()
+        });
+        let mut visual = VisualTestContext::from_window(handle.into(), cx);
+        // The Settings window's authored size, which is also its minimum.
+        let window = size(px(920.), px(640.));
+        visual.simulate_resize(window);
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        let viewport = Bounds::new(point(px(0.), px(0.)), window);
+
+        let switch = scroll_into_view(&mut visual, viewport, "ui-hover-haptics");
+        visual.simulate_click(switch.center(), Modifiers::default());
+        visual.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            assert!(
+                AppState::try_read(cx)
+                    .unwrap()
+                    .app_settings()
+                    .ui_hover_haptics
+            );
+        });
+
+        scroll_into_view(&mut visual, viewport, "general-momentum");
+        visual.update(|window, _| window.remove_window());
     }
 }

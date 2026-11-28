@@ -406,6 +406,57 @@ pub async fn play_haptic_on(
     })
 }
 
+/// [`play_haptic_on`] for high-rate feedback such as pointer hover: one
+/// attempt whose acknowledgement is awaited for at most `reply_timeout`.
+///
+/// Only the play is bounded by `reply_timeout`. Locating the feature on a
+/// channel's first play keeps its own per-request limits, so a slow link
+/// still caches the location instead of starting over on every tick. A play
+/// left unanswered is an ordinary abandoned request: the channel keeps its
+/// header reserved until the late reply lands or
+/// [`STALE_REPLY_GRACE`](hidpp::channel::STALE_REPLY_GRACE) passes, so that
+/// reply can never answer a later play with the same header, such as an
+/// Actions Ring confirmation. An unanswered play reports success: the report
+/// was handed to the channel, and a lost tick is simply not felt.
+///
+/// `fresh_status` re-reads the haptic status first (read-only: the engine is
+/// not armed). A caller that has no ring session to refresh the cached status
+/// passes it after a [`WriteError::HapticsUnavailable`] refusal, so feedback
+/// resumes once the device reports ready again.
+pub async fn play_hover_haptic_on(
+    shared: &SharedChannel,
+    waveform: HapticWaveform,
+    fresh_status: bool,
+    reply_timeout: Duration,
+) -> Result<(), WriteError> {
+    let channel = shared.channel();
+    let index = shared.device_index();
+    let cached = if fresh_status {
+        None
+    } else {
+        cached_feature(channel, index)
+    };
+    let haptics = if let Some(haptics) = cached {
+        haptics
+    } else {
+        let haptics = open_haptics(channel, index).await?;
+        store_cached_location(channel, index, &haptics);
+        haptics
+    };
+    haptics.check(waveform)?;
+    match tokio::time::timeout(reply_timeout, haptics.feature.play(waveform)).await {
+        Ok(Ok(())) | Err(_) => Ok(()),
+        Ok(Err(error)) => {
+            clear_cached_location();
+            Err(classify_hidpp_error(
+                error,
+                HidppOperation::PlayHaptic,
+                HapticFeedbackFeature::ID,
+            ))
+        }
+    }
+}
+
 /// Play a waveform immediately by route. A waveform the device does not
 /// advertise fails with [`WriteError::HapticWaveformUnsupported`], and a play
 /// while the device reports a non-zero haptic status with
@@ -472,6 +523,8 @@ mod tests {
         Error,
         /// Never answers.
         Silent,
+        /// Reports whatever status byte the cell holds at the time of the read.
+        Live(&'static std::sync::atomic::AtomicU8),
     }
 
     /// [`stateful_haptics`] whose `getHapticInfo` answers as `status` says.
@@ -535,6 +588,7 @@ mod tests {
                         return Some(vec![0x10, request[1], 0xff, request[2], request[3], 7, 0]);
                     }
                     StatusReply::Silent => return None,
+                    StatusReply::Live(cell) => cell.load(std::sync::atomic::Ordering::SeqCst),
                 };
                 let mut response = request[..4].to_vec();
                 response.extend_from_slice(&[raw, 0, 0]);
@@ -1007,6 +1061,153 @@ mod tests {
             Err(WriteError::HapticsUnavailable { status: 2 })
         );
         assert_eq!(handle.written_reports().len(), sent);
+        clear_cached_location();
+    }
+
+    /// How long the hover tests let a play's acknowledgement take.
+    const HOVER_REPLY: Duration = Duration::from_millis(250);
+
+    /// How long the hover tests wait for a held request to be written before
+    /// failing instead of hanging.
+    const REQUEST_WAIT: Duration = Duration::from_secs(2);
+
+    /// A hover play's short request as the scripted device sees it, software
+    /// id cleared.
+    fn hover_play_request(waveform: HapticWaveform) -> [u8; 7] {
+        [0x10, 0xff, HAPTIC_INDEX, 0x40, u8::from(waveform), 0, 0]
+    }
+
+    #[tokio::test]
+    async fn hover_cold_open_fits_play_budget() {
+        let _slot = CACHE_SLOT.lock().await;
+        clear_cached_location();
+        let (raw, handle) = stateful_haptics([0x03, 40, 0x34], |_| {}, RING_WAVEFORMS);
+        let shared = shared_channel(raw).await;
+        let reply = Duration::from_millis(50);
+        // The capability read of the first play answers well after the play's
+        // own reply budget.
+        let slow = handle.hold_next_response(
+            openlogi_fixture::RequestMatch::Hidpp20,
+            &[0x10, 0xff, HAPTIC_INDEX, 0x00, 0, 0, 0],
+        );
+        let play = tokio::spawn({
+            let shared = shared.clone();
+            async move {
+                play_hover_haptic_on(&shared, HapticWaveform::SubtleCollision, false, reply).await
+            }
+        });
+        tokio::time::timeout(REQUEST_WAIT, slow.request_written())
+            .await
+            .expect("the cold open sends the capability read within 2 s");
+        tokio::time::sleep(reply * 4).await;
+        slow.release();
+
+        tokio::time::timeout(REQUEST_WAIT, play)
+            .await
+            .expect("the slow discovery finishes within 2 s of its reply")
+            .expect("the play task joins")
+            .expect("a slow discovery still plays");
+        assert!(
+            cached_feature(shared.channel(), shared.device_index()).is_some(),
+            "the location found slowly is cached, so later ticks do not start over"
+        );
+        assert_eq!(
+            plays(&handle),
+            vec![u8::from(HapticWaveform::SubtleCollision)]
+        );
+        clear_cached_location();
+    }
+
+    #[tokio::test]
+    async fn late_hover_reply_does_not_complete_ring_play() {
+        let _slot = CACHE_SLOT.lock().await;
+        clear_cached_location();
+        let (raw, handle) = stateful_haptics([0x03, 40, 0x34], |_| {}, RING_WAVEFORMS);
+        let shared = shared_channel(raw).await;
+        let hover = HapticWaveform::SubtleCollision;
+        let ring = HapticWaveform::DampStateChange;
+        play_hover_haptic_on(&shared, hover, false, HOVER_REPLY)
+            .await
+            .expect("the first hover tick locates the feature and plays");
+
+        // The next tick's reply is late: the tick gives up waiting for it.
+        let late = handle.hold_next_response(
+            openlogi_fixture::RequestMatch::Hidpp20,
+            &hover_play_request(hover),
+        );
+        play_hover_haptic_on(&shared, hover, false, Duration::from_millis(20))
+            .await
+            .expect("an unanswered tick still counts as sent");
+        tokio::time::timeout(REQUEST_WAIT, late.request_written())
+            .await
+            .expect("the late tick's play request is written within 2 s");
+
+        let ring_play = tokio::spawn({
+            let shared = shared.clone();
+            async move { play_haptic_on(&shared, ring).await }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !ring_play.is_finished(),
+            "the ring play waits while the hover reply is still owed"
+        );
+        assert_eq!(
+            plays(&handle),
+            vec![u8::from(hover); 2],
+            "nor is it sent yet"
+        );
+
+        late.release();
+        tokio::time::timeout(REQUEST_WAIT, ring_play)
+            .await
+            .expect("the ring play finishes within 2 s of the late reply")
+            .expect("the ring task joins")
+            .expect("the ring play gets its own reply");
+        assert_eq!(
+            plays(&handle),
+            vec![u8::from(hover), u8::from(hover), u8::from(ring)]
+        );
+        clear_cached_location();
+    }
+
+    #[tokio::test]
+    async fn hover_status_recovers_without_ring() {
+        static STATUS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(2);
+        let _slot = CACHE_SLOT.lock().await;
+        clear_cached_location();
+        STATUS.store(2, std::sync::atomic::Ordering::SeqCst);
+        let (raw, handle) = haptics_reporting(
+            [0x03, 40, 0x34],
+            |_| {},
+            RING_WAVEFORMS,
+            StatusReply::Live(&STATUS),
+        );
+        let shared = shared_channel(raw).await;
+        let hover = HapticWaveform::SubtleCollision;
+
+        assert_matches!(
+            play_hover_haptic_on(&shared, hover, false, HOVER_REPLY).await,
+            Err(WriteError::HapticsUnavailable { status: 2 })
+        );
+        STATUS.store(0, std::sync::atomic::Ordering::SeqCst);
+        // The cached refusal still holds without a fresh read.
+        assert_matches!(
+            play_hover_haptic_on(&shared, hover, false, HOVER_REPLY).await,
+            Err(WriteError::HapticsUnavailable { status: 2 })
+        );
+        assert_eq!(plays(&handle), Vec::<u8>::new());
+
+        // A fresh read sees the device ready again and plays, arming nothing.
+        play_hover_haptic_on(&shared, hover, true, HOVER_REPLY)
+            .await
+            .expect("a ready device plays");
+        assert_eq!(plays(&handle), vec![u8::from(hover)]);
+        assert_eq!(config_writes(&handle), Vec::<[u8; 3]>::new());
+        // Later ticks reuse the refreshed cache.
+        play_hover_haptic_on(&shared, hover, false, HOVER_REPLY)
+            .await
+            .expect("the refreshed status is cached");
+        assert_eq!(status_reads(&handle), 2);
         clear_cached_location();
     }
 

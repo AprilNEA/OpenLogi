@@ -2200,6 +2200,26 @@ impl Orchestrator {
         })
     }
 
+    /// Route of the selected device entry for UI hover haptics: `Some` only
+    /// while the app-wide preference is on and that entry is managed, online
+    /// and has HID++ haptics. The selected entry, not the first one under its
+    /// key, so a device remembered on an offline link still ticks over the
+    /// link it is online on.
+    #[must_use]
+    pub fn ui_hover_haptic_route(&self) -> Option<DeviceRoute> {
+        if !self.config.app_settings.ui_hover_haptics {
+            return None;
+        }
+        let device = self.current_device()?;
+        (self.config.device_enabled(&device.config_key)
+            && device.online
+            && device
+                .capabilities
+                .is_some_and(|capabilities| capabilities.haptic_feedback))
+        .then(|| device.route.clone())
+        .flatten()
+    }
+
     /// Where enumeration stands, for the IPC `status` poll.
     #[must_use]
     pub fn inventory_health(&self) -> InventoryHealth {

@@ -328,6 +328,11 @@ impl Armed {
         running.shared.flow.arm();
         let (mut watchers, inventory_refresh) = startup::spawn_state_watchers(&running.shared);
         let mut ring = running.inputs.ring.subscribe();
+        #[cfg(target_os = "windows")]
+        let _ui_hover = crate::ui_hover_windows::spawn(
+            Arc::clone(&running.orchestrator),
+            running.shared.clone(),
+        );
 
         info!("openlogi-agent started");
         loop {
