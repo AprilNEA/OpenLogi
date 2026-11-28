@@ -18,3 +18,7 @@ cannot be identified yet, OpenLogi automatically retries the identity read and
 enables its row when identification succeeds. Reconnect it if the problem persists.
 
 Bluetooth pairing is managed by the operating system, outside this receiver flow.
+
+The Lightspeed receiver of the PRO X3 SUPERSTRIKE (`046d:c54f`) is not offered
+in Add Device. OpenLogi lists the mouse it is already paired with, but cannot
+pair or unpair on this receiver.
