@@ -791,6 +791,8 @@ bottom_slot = "Bottom slot"
 bottom_left_slot = "Bottom-left slot"
 left_slot = "Left slot"
 top_left_slot = "Top-left slot"
+microphone = "マイク"
+microphone_off = "マイクオフ"
 
 [keyboard]
 disabled_keys = "無効化したキー"

@@ -791,6 +791,8 @@ bottom_slot = "Bottom slot"
 bottom_left_slot = "Bottom-left slot"
 left_slot = "Left slot"
 top_left_slot = "Top-left slot"
+microphone = "Mikrofoni"
+microphone_off = "Mikrofoni pois"
 
 [keyboard]
 disabled_keys = "Käytöstä poistetut näppäimet"

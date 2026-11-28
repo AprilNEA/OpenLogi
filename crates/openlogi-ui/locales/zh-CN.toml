@@ -791,6 +791,8 @@ bottom_slot = "Bottom slot"
 bottom_left_slot = "Bottom-left slot"
 left_slot = "Left slot"
 top_left_slot = "Top-left slot"
+microphone = "麦克风"
+microphone_off = "麦克风关闭"
 
 [keyboard]
 disabled_keys = "禁用按键"
