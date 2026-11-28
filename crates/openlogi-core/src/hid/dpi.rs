@@ -59,6 +59,12 @@ impl From<Dpi> for f32 {
     }
 }
 
+/// The span a settings slider offers: 200 to 8000 DPI on a 50-DPI grid, the
+/// list an office mouse such as the MX Master 4 reports. See
+/// [`DpiCapabilities::slider_stops`].
+const SLIDER_SPAN: std::ops::RangeInclusive<u16> = 200..=8000;
+const SLIDER_GRID: u16 = 50;
+
 /// Supported DPI values reported by a device's HID++ AdjustableDpi feature.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DpiCapabilities {
@@ -116,6 +122,30 @@ impl DpiCapabilities {
             }
         }
         nearest
+    }
+
+    /// The values a settings slider stops at: the supported ones on the
+    /// 50-DPI grid between 200 and 8000. A gaming sensor reports hundreds of
+    /// values up to 48000 in steps down to 1, which no slider can be dragged
+    /// across; an office mouse reports exactly this grid and keeps its list.
+    /// Values outside it stay reachable by typing them. A list with fewer
+    /// than two values on the grid is offered whole.
+    #[must_use]
+    pub fn slider_stops(&self) -> Self {
+        let values: Vec<Dpi> = self
+            .values
+            .iter()
+            .copied()
+            .filter(|dpi| {
+                let raw = dpi.into_inner();
+                SLIDER_SPAN.contains(&raw) && raw % SLIDER_GRID == 0
+            })
+            .collect();
+        if values.len() < 2 {
+            self.clone()
+        } else {
+            Self { values }
+        }
     }
 
     /// Best-effort step size for UI widgets that need a single increment.
@@ -205,6 +235,41 @@ mod tests {
         assert_eq!(caps.nearest(Dpi::new(390)), Dpi::new(400));
         assert_eq!(caps.nearest(Dpi::new(1000)), Dpi::new(800));
         assert_eq!(caps.nearest(Dpi::new(2000)), Dpi::new(1600));
+        Ok(())
+    }
+
+    #[test]
+    fn slider_stops_keep_the_supported_50_dpi_grid_up_to_8000() -> Result<(), WriteError> {
+        // A gaming sensor: 100–48000 in steps that widen with the value.
+        let mut gaming: Vec<u16> = (100..200).collect();
+        gaming.extend((200..2000).step_by(2));
+        gaming.extend((2000..5000).step_by(20));
+        gaming.extend((5000..=48000).step_by(50));
+        let stops = DpiCapabilities::new(gaming)?.slider_stops();
+
+        assert_eq!(stops.min(), Dpi::new(200));
+        assert_eq!(stops.max(), Dpi::new(8000));
+        assert_eq!(stops.step_hint(), Dpi::new(50));
+        assert!(stops.contains(Dpi::new(1950)));
+        // 2050 is not a value the sensor takes; the slider steps past it.
+        assert!(!stops.contains(Dpi::new(2050)));
+        assert!(stops.contains(Dpi::new(2100)));
+        Ok(())
+    }
+
+    #[test]
+    fn slider_stops_leave_an_office_mouse_list_as_it_is() -> Result<(), WriteError> {
+        let office = DpiCapabilities::new((200..=8000).step_by(50).collect())?;
+
+        assert_eq!(office.slider_stops(), office);
+        Ok(())
+    }
+
+    #[test]
+    fn slider_stops_offer_a_list_off_the_grid_whole() -> Result<(), WriteError> {
+        let coarse = DpiCapabilities::new(vec![125, 8000, 12000])?;
+
+        assert_eq!(coarse.slider_stops(), coarse);
         Ok(())
     }
 
