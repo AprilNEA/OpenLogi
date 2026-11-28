@@ -156,6 +156,11 @@ Per-application profiles switch with the focused app. An `[apps]` alias lets one
 
 Feature coverage depends on what each device reports; the app shows only the controls a device supports.
 
+### Languages
+
+- The app, the menu-bar / tray menu, and the Actions Ring follow the system language, or the one you pick in Settings ([`language`](docs/CONFIGURATION.md#shape))
+- Hebrew reads right to left, but the layout itself is not mirrored yet; see [the limits](docs/DECISIONS.md#2026-11-hebrew-catalog-values-carry-a-right-to-left-embedding)
+
 ### Platform support
 
 | Feature | macOS | Windows | Linux |

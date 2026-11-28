@@ -4,6 +4,48 @@ Durable "why we did it this way" records that are not obvious from the code.
 Add a dated entry when a non-obvious architectural or dependency decision is
 made or revisited.
 
+## 2026-11: Hebrew catalog values carry a right-to-left embedding
+
+Hebrew is the first right-to-left catalog. Each `he.toml` value that holds
+Hebrew starts with U+202B (RIGHT-TO-LEFT EMBEDDING) and ends with U+202C (POP
+DIRECTIONAL FORMATTING). Values that are only Latin, such as `OpenLogi` or a
+placeholder pair, stay bare.
+
+- **The catalog, not the renderer, sets the direction.** GPUI hands each line
+  to the platform text engine without a paragraph direction. DirectWrite then
+  lays it out left to right, so a trailing period or a leading Latin word
+  (`OpenLogi`, `Wayland`) lands on the wrong side. The embedding makes the
+  direction part of the string, so every engine and the native Windows title
+  bar read it the same way. CoreText and cosmic-text already pick right to
+  left from the first strong character and are unchanged by it.
+- **The marks are written as `\u` escapes.** Invisible characters in a TOML
+  value are easy to drop or double in an edit; escapes keep them visible in a
+  diff.
+- **Translators keep the pair.** The marks are part of the string, so an edit
+  must keep both. A value that loses its closing mark still renders, but
+  anything drawn after it on the same line inherits the right-to-left
+  direction.
+
+Known limits:
+
+- **The layout is not mirrored.** Text reads right to left, but rows stay
+  left-aligned and the sidebar stays on the left. Mirroring needs layout
+  direction support in GPUI.
+- **Windows needs a GPUI fix.** The DirectWrite renderer in GPUI 0.3.10 places
+  the glyphs of a right-to-left run left to right, so Hebrew words appear
+  reversed (zed-industries/zed#7465, fixed by the open zed-industries/zed#57237).
+  Separately, GPUI's line wrapping assumes glyph positions grow in reading
+  order, which breaks wrapped right-to-left paragraphs on every platform
+  (zed-industries/zed#31102). Both belong in Zed, not in a vendored copy;
+  OpenLogi picks them up with the first `gpui-pre` snapshot that carries them.
+- **gpui-component's own strings stay English**, as for every locale the
+  framework doesn't bundle (see `openlogi_core::locale::SUPPORTED`).
+
+Verified with the catalog parity test, locale negotiation tests, and a desktop
+test that resolves Hebrew strings through the real backend. On Windows 11, the
+main window and Settings were checked with both GPUI fixes applied locally.
+Not checked on macOS or Linux.
+
 ## 2026-11: The agent saves a paired Flow computer in `config.toml`
 
 Until now the agent only read `config.toml`; the GUI and `openlogi api` wrote
