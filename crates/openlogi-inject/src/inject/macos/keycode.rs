@@ -28,7 +28,7 @@ const F13: u8 = 0x68;
 ///
 /// Besides the keys a [`KeyboardUsage`] can name, it carries the rest of the keys a synthesized edge presses: the
 /// ISO and JIS typing keys a keyboard layout can place a shortcut's character
-/// on, and the left modifiers a held chord holds.
+/// on, and the modifiers a held chord holds.
 const KEYS: &[(u8, u16)] = &[
     (0x04, 0x00), // A
     (0x05, 0x0b), // B
@@ -118,6 +118,7 @@ const KEYS: &[(u8, u16)] = &[
     (0xe1, 0x38), // Left Shift
     (0xe2, 0x3a), // Left Option
     (0xe3, 0x37), // Left Command
+    (0xe4, 0x3e), // Right Control
 ];
 
 fn keys() -> impl Iterator<Item = (u8, u16)> {
@@ -269,8 +270,10 @@ mod tests {
     }
 
     #[test]
-    fn modifier_keycodes_map_to_the_left_modifier_usages() {
+    fn modifier_keycodes_preserve_their_side() {
         assert_eq!(macos_to_hid_usage(0x3b), Some(0xe0));
+        assert_eq!(macos_to_hid_usage(0x3e), Some(0xe4));
+        assert_eq!(hid_usage_to_macos(0xe4), Some(0x3e));
         assert_eq!(macos_to_hid_usage(0x38), Some(0xe1));
         assert_eq!(macos_to_hid_usage(0x3a), Some(0xe2));
         assert_eq!(macos_to_hid_usage(0x37), Some(0xe3));

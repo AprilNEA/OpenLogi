@@ -186,14 +186,15 @@ pub use succession::Identity;
 ///      key. `ButtonId::{GKey, ModeKey}` appended — the G1–G5 slot of an M
 ///      profile and M1–M3/MR. `Capabilities::change_host` appended after
 ///      them — `0x1814` ChangeHost without `0x1815` HostsInfo.
-///      `Action::HoldModifier` appended for bare-modifier holds.
+///      `Action::HoldModifier` appended for bare-modifier holds, including
+///      bit 5 for Right Control.
 ///      `AgentSnapshot::config_revision` appended — the revision of
 ///      `config.toml` the agent last loaded, so the settings app learns of
 ///      a save another writer made.
 ///      `Action::{EasySwitchChannel1, EasySwitchChannel2, EasySwitchChannel3}`
 ///      and `ActionRingIcon::{Channel1, Channel2, Channel3}` appended after
 ///      them — a device's move to another Easy-Switch channel, bound to a
-///      button or an Actions Ring slot.
+///      button or an Actions Ring slot. `Action::TapModifier` appended.
 pub const PROTOCOL_VERSION: u32 = 46;
 
 /// Environment variable through which the agent hands a supervised helper the

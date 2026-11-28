@@ -45,6 +45,8 @@ const VK_RIGHT: u16 = 0x27;
 const VK_DOWN: u16 = 0x28;
 const VK_SHIFT: u16 = 0x10;
 const VK_CONTROL: u16 = 0x11;
+const VK_LCONTROL: u16 = 0xA2;
+const VK_RCONTROL: u16 = 0xA3;
 const VK_MENU: u16 = 0x12;
 const VK_LWIN: u16 = 0x5B;
 const VK_RWIN: u16 = 0x5C;
@@ -171,6 +173,7 @@ fn is_extended_key(vk: u16) -> bool {
             | VK_DELETE
             | VK_LWIN
             | VK_DIVIDE
+            | VK_RCONTROL
     )
 }
 
@@ -217,6 +220,7 @@ pub(super) fn execute(action: &Action) {
         Effect::Click(button) => post_click(button),
         Effect::Shortcut(shortcut) => press_shortcut(shortcut),
         Effect::Key(combo) | Effect::HeldKey(combo) => press_combo(combo),
+        Effect::TapModifier(modifiers) => super::tap_modifier(modifiers),
         Effect::Scroll { dx, dy } => dispatch_scroll(dx, dy),
         Effect::Media(key) => dispatch_media(key),
         Effect::Native(native) => dispatch_native(native),
@@ -416,10 +420,17 @@ impl ModifiersDown {
     /// leave its modifier out of the chord and up on the system.
     fn current(_held: &HeldOutput) -> Self {
         Self(
-            [VK_CONTROL, VK_SHIFT, VK_MENU, VK_LWIN]
-                .into_iter()
-                .filter(|&vk| modifier_down(vk))
-                .collect(),
+            [
+                VK_CONTROL,
+                VK_LCONTROL,
+                VK_RCONTROL,
+                VK_SHIFT,
+                VK_MENU,
+                VK_LWIN,
+            ]
+            .into_iter()
+            .filter(|&vk| modifier_down(vk))
+            .collect(),
         )
     }
 
@@ -431,12 +442,16 @@ impl ModifiersDown {
     fn held_keys(&self) -> Vec<HeldKey> {
         [
             HeldKey::Control,
+            HeldKey::RightControl,
             HeldKey::Shift,
             HeldKey::Alt,
             HeldKey::Super,
         ]
         .into_iter()
-        .filter(|&key| modifier_vk(key).is_some_and(|vk| self.contains(vk)))
+        .filter(|&key| match key {
+            HeldKey::Control => self.contains(VK_LCONTROL),
+            _ => modifier_vk(key).is_some_and(|vk| self.contains(vk)),
+        })
         .collect()
     }
 }
@@ -590,6 +605,7 @@ fn held_key(key: HeldKey, layout: ForegroundLayout) -> Option<Key> {
 fn modifier_vk(key: HeldKey) -> Option<u16> {
     match key {
         HeldKey::Control => Some(VK_CONTROL),
+        HeldKey::RightControl => Some(VK_RCONTROL),
         HeldKey::Shift => Some(VK_SHIFT),
         HeldKey::Alt => Some(VK_MENU),
         HeldKey::Super => Some(VK_LWIN),
@@ -679,9 +695,9 @@ mod tests {
         KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, Key, ModifiersDown, VK_BROWSER_BACK,
         VK_BROWSER_FORWARD, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_HOME, VK_INSERT, VK_LEFT,
         VK_LWIN, VK_MEDIA_NEXT_TRACK, VK_MEDIA_PLAY_PAUSE, VK_MEDIA_PREV_TRACK, VK_MENU, VK_NEXT,
-        VK_PRIOR, VK_RIGHT, VK_SHIFT, VK_SNAPSHOT, VK_UP, VK_VOLUME_DOWN, VK_VOLUME_MUTE,
-        VK_VOLUME_UP, chord_inputs, combo, combo_inputs, held_key, is_extended_key, key_input,
-        send_inputs, shell_command,
+        VK_PRIOR, VK_RCONTROL, VK_RIGHT, VK_SHIFT, VK_SNAPSHOT, VK_UP, VK_VOLUME_DOWN,
+        VK_VOLUME_MUTE, VK_VOLUME_UP, chord_inputs, combo, combo_inputs, held_key, is_extended_key,
+        key_input, send_inputs, shell_command,
     };
 
     fn usage(label: &str) -> KeyboardUsage {
@@ -973,7 +989,7 @@ mod tests {
     #[test]
     fn modifiers_down_name_the_keys_a_hold_owns() {
         assert_eq!(
-            ModifiersDown(vec![VK_CONTROL, VK_LWIN]).held_keys(),
+            ModifiersDown(vec![super::VK_LCONTROL, VK_LWIN]).held_keys(),
             [HeldKey::Control, HeldKey::Super]
         );
         assert_eq!(
@@ -1115,6 +1131,7 @@ mod tests {
         (VK_INSERT, 0x52),
         (VK_DELETE, 0x53),
         (VK_LWIN, 0x5B),
+        (VK_RCONTROL, 0x1D),
     ];
 
     /// Every extended key has to be flagged and to carry the scan code of the
@@ -1177,6 +1194,22 @@ mod tests {
         );
         assert_ne!(up_ki.dwFlags & KEYEVENTF_KEYUP, 0);
         assert_eq!(up_ki.wScan, down_ki.wScan);
+    }
+
+    #[test]
+    fn held_right_control_carries_its_scan_code_and_flags_on_both_edges() {
+        let key = held_key(HeldKey::RightControl, ForegroundLayout::current())
+            .expect("right Control is a Windows key");
+        for (up, flags) in [
+            (false, KEYEVENTF_EXTENDEDKEY),
+            (true, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP),
+        ] {
+            // SAFETY: key_input initializes the keyboard arm of the union.
+            let input = unsafe { key_input(key, up).Anonymous.ki };
+            assert_eq!(input.wVk, VK_RCONTROL);
+            assert_eq!(input.wScan, 0x1D);
+            assert_eq!(input.dwFlags, flags);
+        }
     }
 
     /// The navigation keys a shortcut can name, with the virtual key each one

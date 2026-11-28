@@ -532,6 +532,15 @@ fn hold_modifier_round_trips_and_labels_and_categorises() {
     assert!(action.held_chord().is_none());
     assert!(action.is_held());
 
+    let mods = "RightCtrl".parse().expect("valid modifier");
+    let tap = Action::TapModifier(mods);
+    assert_eq!(tap.label(), "Tap RightCtrl");
+    assert_eq!(tap.effect(), Effect::TapModifier(mods));
+    assert!(!tap.is_held());
+    let wrapper = Wrapper { binding: tap };
+    let encoded = toml::to_string(&wrapper).expect("tap serializes");
+    assert_eq!(toml::from_str::<Wrapper>(&encoded), Ok(wrapper));
+
     let chord = Action::HoldShortcut("Ctrl+A".parse().expect("valid shortcut"));
     assert!(chord.held_modifier().is_none());
     assert!(chord.is_held());

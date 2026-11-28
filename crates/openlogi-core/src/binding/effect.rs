@@ -20,6 +20,7 @@
 
 use super::action::{Action, WorkflowStep};
 use super::key_combo::KeyCombo;
+use super::modifiers::BareModifiers;
 
 /// What firing an [`Action`] should do, independent of platform.
 ///
@@ -38,6 +39,8 @@ pub enum Effect<'a> {
     /// Press an already-resolved keyboard chord: a user-recorded
     /// [`Action::CustomShortcut`], or a workflow's `PressKey` step.
     Key(&'a KeyCombo),
+    /// Tap only the supplied modifier keys.
+    TapModifier(BareModifiers),
     /// A user-recorded chord whose output is held by a lifecycle-aware
     /// runtime. A one-shot executor treats this as [`Effect::Key`] so direct
     /// dispatch remains balanced when no matching release can arrive.
@@ -296,6 +299,7 @@ impl Action {
             Action::HorizontalScrollRight => Effect::Scroll { dx: 1, dy: 0 },
 
             Action::CustomShortcut(combo) => Effect::Key(combo),
+            Action::TapModifier(modifiers) => Effect::TapModifier(*modifiers),
             Action::HoldShortcut(combo) | Action::TapKeyHoldingModifiers(combo) => {
                 Effect::HeldKey(combo)
             }

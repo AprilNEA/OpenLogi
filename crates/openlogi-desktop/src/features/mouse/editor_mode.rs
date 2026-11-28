@@ -31,6 +31,7 @@ pub(super) enum EditorMode {
         drafts: PickerDrafts,
         /// Held for its drop, which stops the recording.
         _recorder: ShortcutRecorder,
+        preview: String,
     },
 }
 
@@ -84,6 +85,7 @@ impl EditorMode {
                 selection,
                 drafts,
                 _recorder: start(),
+                preview: String::new(),
             },
             mode @ Self::Recording { .. } => mode.stop_recording(),
             mode @ (Self::Idle | Self::Selected(_)) => mode,
@@ -139,6 +141,13 @@ impl EditorMode {
 
     pub(super) fn is_recording(&self) -> bool {
         matches!(self, Self::Recording { .. })
+    }
+
+    pub(super) fn recording_preview(&self) -> Option<&str> {
+        match self {
+            Self::Recording { preview, .. } => Some(preview),
+            _ => None,
+        }
     }
 
     /// The press-force slider, while the haptic panel is selected and its

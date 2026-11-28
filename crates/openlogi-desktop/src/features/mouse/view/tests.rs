@@ -422,6 +422,90 @@ fn recording_forward(
     (view, closed, cx)
 }
 
+#[gpui::test]
+fn a_bare_control_respects_the_selected_tap_or_hold_mode(cx: &mut TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    let (view, _, cx) = recording_forward(cx);
+
+    cx.simulate_modifiers_change(Modifiers {
+        control: true,
+        ..Modifiers::default()
+    });
+    cx.simulate_modifiers_change(Modifiers::default());
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    view.read_with(cx, |view, cx| {
+        assert_eq!(view.custom_shortcut_input.read(cx).value(), "Ctrl");
+        assert_eq!(picker_drafts(view).shortcut_mode, ShortcutMode::Tap);
+    });
+    click_picker_control(cx, "inspector-action-custom-shortcut-add");
+    assert_forward_binding(cx, &Action::TapModifier("Ctrl".parse().unwrap()));
+
+    click_picker_control(cx, "inspector-current-action");
+    click_picker_control(cx, "inspector-action-shortcut-hold");
+    click_picker_control(cx, "inspector-action-custom-shortcut-input");
+    cx.simulate_input("RightCtrl");
+    click_picker_control(cx, "inspector-action-custom-shortcut-add");
+    assert_forward_binding(cx, &Action::HoldModifier("RightCtrl".parse().unwrap()));
+
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn recording_previews_modifiers_and_stop_leaves_the_draft_untouched(cx: &mut TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    let (view, _, cx) = recording_forward(cx);
+
+    cx.simulate_keystrokes("f8");
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    click_picker_control(cx, "inspector-action-custom-shortcut-record");
+
+    let held = Modifiers {
+        platform: true,
+        ..Modifiers::default()
+    };
+    cx.simulate_modifiers_change(held);
+    let platform = if cfg!(target_os = "macos") {
+        "Cmd"
+    } else {
+        "Super"
+    };
+    view.read_with(cx, |view, _| {
+        assert_eq!(view.mode.recording_preview(), Some(platform));
+    });
+
+    let held = Modifiers {
+        shift: true,
+        ..held
+    };
+    cx.simulate_modifiers_change(held);
+    let preview = format!("{platform}+Shift");
+    view.read_with(cx, |view, cx| {
+        assert_eq!(view.mode.recording_preview(), Some(preview.as_str()));
+        assert_eq!(view.custom_shortcut_input.read(cx).value(), "F8");
+    });
+    click_picker_control(cx, "inspector-action-custom-shortcut-record");
+    cx.simulate_modifiers_change(Modifiers::default());
+    view.read_with(cx, |view, cx| {
+        assert_eq!(view.mode.recording_preview(), None);
+        assert_eq!(view.custom_shortcut_input.read(cx).value(), "F8");
+    });
+
+    click_picker_control(cx, "inspector-action-custom-shortcut-record");
+    cx.simulate_modifiers_change(held);
+    cx.simulate_keystrokes("cmd-shift-a");
+    view.read_with(cx, |view, cx| {
+        assert_eq!(view.mode.recording_preview(), None);
+        assert_eq!(
+            view.custom_shortcut_input.read(cx).value().as_str(),
+            format!("{preview}+A")
+        );
+    });
+}
+
 /// Switching devices ends the editor's mode, a recording included. The
 /// other mouse has a Forward button too, so a recording that survived would
 /// keep its Record area, and the focus in it, and swallow the next Cmd+W.
@@ -579,7 +663,7 @@ fn a_selected_gesture_can_render_in_the_binding_inspector(cx: &mut TestAppContex
                 application_input: &view.custom_application_input,
                 command_input: &view.custom_command_input,
                 shortcut_mode: ShortcutMode::Tap,
-                shortcut_recording: false,
+                shortcut_preview: None,
                 shortcut_record_focus: &view.shortcut_record_focus,
                 invalid: InvalidDrafts::default(),
                 view: &entity,

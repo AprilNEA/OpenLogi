@@ -46,6 +46,7 @@ pub(super) fn execute(action: &Action) {
         Effect::Click(button) => click(mouse_button_code(button)),
         Effect::Shortcut(shortcut) => press_combo(&combo(shortcut)),
         Effect::Key(combo) | Effect::HeldKey(combo) => press_combo(combo),
+        Effect::TapModifier(modifiers) => super::tap_modifier(modifiers),
         Effect::Scroll { dx, dy } => dispatch_scroll(dx, dy),
         Effect::Media(key) => dispatch_media(key),
         Effect::Native(native) => dispatch_native(action, native),
@@ -563,7 +564,8 @@ const KEY_CAPABILITIES: &[KeyCode] = &[
     KeyCode::KEY_KPSLASH, KeyCode::KEY_KPASTERISK, KeyCode::KEY_KPMINUS, KeyCode::KEY_KPPLUS,
     KeyCode::KEY_KPENTER, KeyCode::KEY_KPDOT,      KeyCode::KEY_KPEQUAL,
     // Modifiers (KEY_LEFTMETA used by LockScreen Super+L and Hyprland Super+Ctrl+L)
-    KeyCode::KEY_LEFTCTRL, KeyCode::KEY_LEFTSHIFT, KeyCode::KEY_LEFTALT, KeyCode::KEY_LEFTMETA,
+    KeyCode::KEY_LEFTCTRL, KeyCode::KEY_RIGHTCTRL,
+    KeyCode::KEY_LEFTSHIFT, KeyCode::KEY_LEFTALT, KeyCode::KEY_LEFTMETA,
     // Function keys
     KeyCode::KEY_F1,  KeyCode::KEY_F2,  KeyCode::KEY_F3,  KeyCode::KEY_F4,
     KeyCode::KEY_F5,  KeyCode::KEY_F6,  KeyCode::KEY_F7,  KeyCode::KEY_F8,
@@ -802,6 +804,7 @@ fn modifiers_to_keycodes(combo: &openlogi_core::binding::KeyCombo) -> Vec<KeyCod
 fn held_keycode(key: HeldKey) -> Option<KeyCode> {
     match key {
         HeldKey::Control => Some(KeyCode::KEY_LEFTCTRL),
+        HeldKey::RightControl => Some(KeyCode::KEY_RIGHTCTRL),
         HeldKey::Shift => Some(KeyCode::KEY_LEFTSHIFT),
         HeldKey::Alt => Some(KeyCode::KEY_LEFTALT),
         HeldKey::Super => Some(KeyCode::KEY_LEFTMETA),

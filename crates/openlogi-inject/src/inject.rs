@@ -62,6 +62,7 @@ enum HeldKey {
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     Super,
     Control,
+    RightControl,
     Shift,
     Alt,
     Key(KeyboardUsage),
@@ -152,6 +153,7 @@ impl HeldModifiers {
             HeldKey::Control => Some(1 << 1),
             HeldKey::Shift => Some(1 << 2),
             HeldKey::Alt => Some(1 << 3),
+            HeldKey::RightControl => Some(1 << 4),
             HeldKey::Key(_) => None,
         }
     }
@@ -263,6 +265,12 @@ impl HeldOutput {
         }
     }
 
+    fn modifiers_to_tap(&self, modifiers: BareModifiers, already_down: &[HeldKey]) -> Vec<HeldKey> {
+        let mut keys = held_keys_for_modifiers(modifiers.modifiers());
+        keys.retain(|key| !self.owners.contains_key(key) && !already_down.contains(key));
+        keys
+    }
+
     /// Whether a held chord keeps `key` down.
     #[cfg(target_os = "linux")]
     fn owns(&self, key: HeldKey) -> bool {
@@ -275,6 +283,7 @@ impl HeldOutput {
         for key in [
             HeldKey::Command,
             HeldKey::Control,
+            HeldKey::RightControl,
             HeldKey::Shift,
             HeldKey::Alt,
         ] {
@@ -317,6 +326,9 @@ fn held_keys_for_modifiers(mods: Modifiers) -> Vec<HeldKey> {
     #[cfg(target_os = "macos")]
     if mods.contains(Modifiers::CONTROL) {
         keys.push(HeldKey::Control);
+    }
+    if mods.contains(Modifiers::RIGHT_CONTROL) {
+        keys.push(HeldKey::RightControl);
     }
     if mods.contains(Modifiers::SHIFT) {
         keys.push(HeldKey::Shift);
@@ -592,6 +604,31 @@ pub fn press_hold_modifier(mods: BareModifiers) -> HeldChord {
     held
 }
 
+/// Tap under the held-output lock. Existing owners keep their keys down.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+fn tap_modifier(modifiers: BareModifiers) {
+    with_held_output(|output| {
+        let already_down = cfg_select! {
+            target_os = "windows" => windows::held_modifiers_down(output),
+            _ => Vec::new(),
+        };
+        let keys = output.modifiers_to_tap(modifiers, &already_down);
+        cfg_select! {
+            target_os = "macos" => {
+                macos::tap_modifiers(&keys, output.modifiers());
+            }
+            target_os = "linux" => {
+                linux::hold_keys(&keys, KeyPhase::Down);
+                linux::hold_keys(&keys, KeyPhase::Up);
+            }
+            target_os = "windows" => {
+                windows::hold_keys(&keys, KeyPhase::Down);
+                windows::hold_keys(&keys, KeyPhase::Up);
+            }
+        }
+    });
+}
+
 fn hold_transition(released: Option<&HeldChordKind>, pressed: Option<&HeldChordKind>) {
     cfg_select! {
         target_os = "macos" => {
@@ -662,7 +699,7 @@ fn with_held_modifiers<R>(post: impl FnOnce(HeldModifiers) -> R) -> R {
 ///
 /// A one-shot keystroke posted through this sees exactly which keys held
 /// chords own and never interleaves with a held transition.
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn with_held_output<R>(post: impl FnOnce(&HeldOutput) -> R) -> R {
     let output = HELD_OUTPUT.lock().unwrap_or_else(PoisonError::into_inner);
     post(&output)
@@ -1565,6 +1602,18 @@ mod tests {
         let started = std::time::Instant::now();
         assert!(super::finish(&mut command).unwrap().success());
         assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn bare_tap_excludes_existing_owners_and_physical_modifiers() {
+        let mut output = HeldOutput::default();
+        output.transition(None, Some(&bare("Ctrl")));
+        let both = "Ctrl+RightCtrl+Shift".parse().unwrap();
+        assert_eq!(
+            output.modifiers_to_tap(both, &[HeldKey::Shift]),
+            [HeldKey::RightControl]
+        );
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]

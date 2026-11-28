@@ -264,6 +264,9 @@ pub enum Action {
     EasySwitchChannel2,
     /// Move the device to its third Easy-Switch channel.
     EasySwitchChannel3,
+    /// Press and immediately release one or more modifier keys on their own.
+    /// Appended because action variants cross IPC by index.
+    TapModifier(BareModifiers),
 }
 
 /// Which of a held chord's keys stay down for the lifetime of the press.
@@ -423,6 +426,7 @@ macro_rules! derive_action_core {
                         None => format!("Tap {}", combo.rendered_key()),
                     },
                     Action::HoldModifier(mods) => format!("Hold {}", mods.rendered_label()),
+                    Action::TapModifier(mods) => format!("Tap {}", mods.rendered_label()),
                 }
             }
 
@@ -444,7 +448,8 @@ macro_rules! derive_action_core {
                     | Action::OpenApplication(_)
                     | Action::HoldShortcut(_)
                     | Action::TapKeyHoldingModifiers(_)
-                    | Action::HoldModifier(_) => None,
+                    | Action::HoldModifier(_)
+                    | Action::TapModifier(_) => None,
                 }
             }
 
@@ -475,7 +480,8 @@ macro_rules! derive_action_core {
                     | Action::Workflow(_)
                     | Action::HoldShortcut(_)
                     | Action::TapKeyHoldingModifiers(_)
-                    | Action::HoldModifier(_) => Category::Editing,
+                    | Action::HoldModifier(_)
+                    | Action::TapModifier(_) => Category::Editing,
                     Action::SetDpiPreset(_) => Category::Dpi,
                     Action::OpenApplication(_) => Category::System,
                 }

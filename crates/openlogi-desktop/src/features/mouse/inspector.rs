@@ -5,13 +5,17 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use gpui::{
-    Context, Entity, FocusHandle, InteractiveElement, IntoElement, ParentElement, Role,
+    App, Context, Entity, FocusHandle, Hsla, InteractiveElement, IntoElement, ParentElement, Role,
     StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, rgb, svg,
 };
 use gpui_kit::base::Button as BaseButton;
 use gpui_kit::component::{
-    Disableable as _, Icon, IconName, Selectable as _, Sizable as _, button::Button, h_flex,
-    input::InputState, scroll::ScrollableElement as _, v_flex,
+    Colorize as _, Disableable as _, Icon, IconName, Selectable as _, Sizable as _,
+    button::{Button, ButtonCustomVariant, ButtonVariants},
+    h_flex,
+    input::InputState,
+    scroll::ScrollableElement as _,
+    v_flex,
 };
 use openlogi_core::binding::{
     Action, ButtonId, GamingLayout, GestureDirection, default_binding, default_binding_on,
@@ -67,8 +71,8 @@ pub(super) struct ActionPickerContext<'a> {
     pub application_input: &'a Entity<InputState>,
     pub command_input: &'a Entity<InputState>,
     pub shortcut_mode: ShortcutMode,
-    /// Whether Record is waiting for the next key press.
-    pub shortcut_recording: bool,
+    /// Pressed modifiers shown while the recorder is active.
+    pub shortcut_preview: Option<&'a str>,
     /// The Record button's area, which holds focus while recording.
     pub shortcut_record_focus: &'a FocusHandle,
     pub invalid: InvalidDrafts,
@@ -106,11 +110,17 @@ pub(super) enum ShortcutMode {
 }
 
 impl ShortcutMode {
-    fn action(self, combo: openlogi_core::binding::KeyCombo) -> Action {
-        match self {
-            Self::Tap => Action::CustomShortcut(combo),
-            Self::Hold => Action::HoldShortcut(combo),
+    fn action(self, text: &str) -> Option<Action> {
+        if let Ok(chord) = text.parse() {
+            return Some(match self {
+                Self::Tap => Action::CustomShortcut(chord),
+                Self::Hold => Action::HoldShortcut(chord),
+            });
         }
+        text.parse().ok().map(|modifiers| match self {
+            Self::Tap => Action::TapModifier(modifiers),
+            Self::Hold => Action::HoldModifier(modifiers),
+        })
     }
 }
 
@@ -841,7 +851,7 @@ fn action_library(
     v_flex()
         .gap_2()
         .pt_1()
-        .child(custom_shortcut_editor(id_prefix, &picker, on_pick, pal))
+        .child(custom_shortcut_editor(id_prefix, &picker, on_pick, pal, cx))
         .child(application_editor(
             id_prefix,
             picker.application_input,
@@ -901,14 +911,14 @@ fn custom_shortcut_editor(
     picker: &ActionPickerContext<'_>,
     on_pick: &PickFn,
     pal: Palette,
+    cx: &App,
 ) -> impl IntoElement {
     let input = picker.shortcut_input;
     let mode = picker.shortcut_mode;
-    let recording = picker.shortcut_recording;
+    let recording = picker.shortcut_preview.is_some();
     let view = picker.view;
     let submit_input = input.clone();
     let on_pick = on_pick.clone();
-    let record_view = view.clone();
     let view = view.clone();
     v_flex()
         .gap_1()
@@ -937,36 +947,27 @@ fn custom_shortcut_editor(
                         .flex_1()
                         .min_w_0()
                         .debug_selector(move || format!("{id_prefix}-custom-shortcut-input"))
-                        .child(control_input(input).cleanable(true)),
+                        .when_some(picker.shortcut_preview, |field, preview| {
+                            field.child(recording_field(preview, pal))
+                        })
+                        .when(!recording, |field| {
+                            field.child(control_input(input).cleanable(true))
+                        }),
                 )
-                .child(
-                    div().track_focus(picker.shortcut_record_focus).child(
-                        Button::new(format!("{id_prefix}-custom-shortcut-record"))
-                            .debug_selector(move || format!("{id_prefix}-custom-shortcut-record"))
-                            .compact()
-                            .selected(recording)
-                            .label(if recording {
-                                tr!("common.cancel")
-                            } else {
-                                tr!("actions.record_shortcut")
-                            })
-                            .on_click(move |_, window, cx| {
-                                record_view.update(cx, |view, cx| {
-                                    view.toggle_shortcut_recording(window, cx);
-                                });
-                            }),
-                    ),
-                )
+                .child(shortcut_record_button(
+                    id_prefix, picker, recording, pal, cx,
+                ))
                 .child(
                     Button::new(format!("{id_prefix}-custom-shortcut-add"))
                         .debug_selector(move || format!("{id_prefix}-custom-shortcut-add"))
                         .compact()
                         .label(tr!("common.add"))
+                        .disabled(recording)
                         .on_click(move |_, window, cx| {
-                            let shortcut = submit_input.read(cx).value().to_string();
-                            match shortcut.parse::<openlogi_core::binding::KeyCombo>() {
-                                Ok(combo) => (on_pick)(mode.action(combo), window, cx),
-                                Err(_) => view.update(cx, |view, cx| {
+                            let shortcut = submit_input.read(cx).value();
+                            match mode.action(&shortcut) {
+                                Some(action) => (on_pick)(action, window, cx),
+                                None => view.update(cx, |view, cx| {
                                     view.edit_picker_drafts(|drafts| {
                                         drafts.invalid.shortcut = Some(ShortcutError::Unrecognized);
                                     });
@@ -981,7 +982,7 @@ fn custom_shortcut_editor(
                 div()
                     .debug_selector(move || format!("{id_prefix}-custom-shortcut-recording"))
                     .text_caption()
-                    .text_color(pal.text_muted)
+                    .text_color(pal.text_danger)
                     .child(tr!("actions.press_the_shortcut_to_record")),
             )
         })
@@ -999,6 +1000,75 @@ fn custom_shortcut_editor(
                     }),
             )
         })
+}
+
+fn shortcut_record_button(
+    id_prefix: &'static str,
+    picker: &ActionPickerContext<'_>,
+    recording: bool,
+    pal: Palette,
+    cx: &App,
+) -> gpui::Div {
+    let record_view = picker.view.clone();
+    let preview_view = picker.view.clone();
+    div()
+        .track_focus(picker.shortcut_record_focus)
+        .on_modifiers_changed(move |event, _, cx| {
+            preview_view.update(cx, |view, cx| {
+                view.preview_shortcut_modifiers(event.modifiers, cx);
+            });
+        })
+        .child(
+            Button::new(format!("{id_prefix}-custom-shortcut-record"))
+                .debug_selector(move || format!("{id_prefix}-custom-shortcut-record"))
+                .compact()
+                .when(recording, |button| style_recording_button(button, pal, cx))
+                .label(if recording {
+                    tr!("actions.stop_recording")
+                } else {
+                    tr!("actions.record_shortcut")
+                })
+                .on_click(move |_, window, cx| {
+                    record_view.update(cx, |view, cx| view.toggle_shortcut_recording(window, cx));
+                }),
+        )
+}
+
+fn style_recording_button(button: Button, pal: Palette, cx: &App) -> Button {
+    let fill = pal.text_danger;
+    let white = Hsla::white();
+    let black = Hsla::black();
+    let (label, emphasis) =
+        if theme::contrast_ratio(white, fill) >= theme::contrast_ratio(black, fill) {
+            (white, black)
+        } else {
+            (black, white)
+        };
+    button
+        .custom(
+            ButtonCustomVariant::new(cx)
+                .color(fill)
+                .foreground(label)
+                .hover(fill.mix_oklab(emphasis, 0.94))
+                .active(fill.mix_oklab(emphasis, 0.88)),
+        )
+        .bg(fill)
+        .text_color(label)
+}
+
+fn recording_field(preview: &str, pal: Palette) -> gpui::Div {
+    h_flex()
+        .h(px(theme::CONTROL_H))
+        .min_w_0()
+        .overflow_hidden()
+        .rounded_md()
+        .border_1()
+        .border_color(pal.text_danger)
+        .bg(pal.text_danger.opacity(0.08))
+        .px_2()
+        .text_caption()
+        .text_color(pal.text_danger)
+        .child(if preview.is_empty() { "…" } else { preview }.to_owned())
 }
 
 /// One Tap / Hold segment of the custom shortcut editor; the current mode

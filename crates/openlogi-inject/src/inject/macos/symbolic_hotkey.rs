@@ -164,11 +164,14 @@ fn keystroke(virtual_key: u16, flags: CGEventFlags, held: HeldModifiers) -> Opti
         .filter(|&&(flag, key)| flags.contains(flag) && !held.contains(key))
         .map(|&(_, key)| key)
         .collect();
-    let released: Vec<HeldKey> = MODIFIER_KEYS
+    let mut released: Vec<HeldKey> = MODIFIER_KEYS
         .iter()
         .filter(|&&(flag, key)| !flags.contains(flag) && held.contains(key))
         .map(|&(_, key)| key)
         .collect();
+    if !flags.contains(CGEventFlags::CGEventFlagControl) && held.contains(HeldKey::RightControl) {
+        released.push(HeldKey::RightControl);
+    }
     let mut key_flags = MODIFIER_KEYS
         .iter()
         .fold(flags, |rest, &(flag, _)| rest.difference(flag));
@@ -345,6 +348,8 @@ mod tests {
     const NONE: CGEventFlags = CGEventFlags::CGEventFlagNull;
     const COMMAND: CGEventFlags = CGEventFlags::CGEventFlagCommand;
     const CONTROL: CGEventFlags = CGEventFlags::CGEventFlagControl;
+    use super::super::{LEFT_CONTROL_FLAGS, RIGHT_CONTROL_FLAGS};
+
     const SHIFT: CGEventFlags = CGEventFlags::CGEventFlagShift;
     const OPTION: CGEventFlags = CGEventFlags::CGEventFlagAlternate;
     const FN: CGEventFlags = CGEventFlags::CGEventFlagSecondaryFn;
@@ -379,7 +384,8 @@ mod tests {
                         0x37 => COMMAND,
                         0x38 => SHIFT,
                         0x3a => OPTION,
-                        0x3b => CONTROL,
+                        0x3b => LEFT_CONTROL_FLAGS,
+                        0x3e => RIGHT_CONTROL_FLAGS,
                         other => panic!("unexpected modifier key {other:#x}"),
                     }),
                     other => panic!("unexpected event type {other:?}"),
@@ -404,9 +410,9 @@ mod tests {
         assert_eq!(
             edges(&events),
             [
-                (0x3b, Flags, CONTROL),
-                (0x7c, Down, CONTROL | FN | PAD),
-                (0x7c, Up, CONTROL | FN | PAD),
+                (0x3b, Flags, LEFT_CONTROL_FLAGS),
+                (0x7c, Down, LEFT_CONTROL_FLAGS | FN | PAD),
+                (0x7c, Up, LEFT_CONTROL_FLAGS | FN | PAD),
                 (0x3b, Flags, NONE),
             ]
         );
@@ -420,9 +426,9 @@ mod tests {
         assert_eq!(
             edges(&events),
             [
-                (0x3b, Flags, CONTROL),
-                (0x7b, Down, CONTROL | FN | PAD),
-                (0x7b, Up, CONTROL | FN | PAD),
+                (0x3b, Flags, LEFT_CONTROL_FLAGS),
+                (0x7b, Down, LEFT_CONTROL_FLAGS | FN | PAD),
+                (0x7b, Up, LEFT_CONTROL_FLAGS | FN | PAD),
                 (0x3b, Flags, NONE),
             ]
         );
@@ -467,11 +473,11 @@ mod tests {
         assert_eq!(
             edges(&events),
             [
-                (0x3b, Flags, CONTROL),
-                (0x38, Flags, CONTROL | SHIFT),
-                (0x30, Down, CONTROL | SHIFT),
-                (0x30, Up, CONTROL | SHIFT),
-                (0x38, Flags, CONTROL),
+                (0x3b, Flags, LEFT_CONTROL_FLAGS),
+                (0x38, Flags, LEFT_CONTROL_FLAGS | SHIFT),
+                (0x30, Down, LEFT_CONTROL_FLAGS | SHIFT),
+                (0x30, Up, LEFT_CONTROL_FLAGS | SHIFT),
+                (0x38, Flags, LEFT_CONTROL_FLAGS),
                 (0x3b, Flags, NONE),
             ]
         );
@@ -487,8 +493,8 @@ mod tests {
         assert_eq!(
             edges(&events),
             [
-                (0x7c, Down, CONTROL | FN | PAD),
-                (0x7c, Up, CONTROL | FN | PAD),
+                (0x7c, Down, LEFT_CONTROL_FLAGS | FN | PAD),
+                (0x7c, Up, LEFT_CONTROL_FLAGS | FN | PAD),
             ]
         );
     }
@@ -504,10 +510,10 @@ mod tests {
         assert_eq!(
             edges(&events),
             [
-                (0x38, Flags, CONTROL),
-                (0x7c, Down, CONTROL | FN | PAD),
-                (0x7c, Up, CONTROL | FN | PAD),
-                (0x38, Flags, CONTROL | SHIFT),
+                (0x38, Flags, LEFT_CONTROL_FLAGS),
+                (0x7c, Down, LEFT_CONTROL_FLAGS | FN | PAD),
+                (0x7c, Up, LEFT_CONTROL_FLAGS | FN | PAD),
+                (0x38, Flags, LEFT_CONTROL_FLAGS | SHIFT),
             ]
         );
 
@@ -518,11 +524,27 @@ mod tests {
             edges(&events),
             [
                 (0x38, Flags, NONE),
-                (0x3b, Flags, CONTROL),
-                (0x7c, Down, CONTROL | FN | PAD),
-                (0x7c, Up, CONTROL | FN | PAD),
+                (0x3b, Flags, LEFT_CONTROL_FLAGS),
+                (0x7c, Down, LEFT_CONTROL_FLAGS | FN | PAD),
+                (0x7c, Up, LEFT_CONTROL_FLAGS | FN | PAD),
                 (0x3b, Flags, NONE),
                 (0x38, Flags, SHIFT),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_chord_without_control_restores_a_held_right_control_afterward() {
+        let mut held = HeldModifiers::default();
+        held.set(HeldKey::RightControl, true);
+        let events = keystroke(0x30, NONE, held).unwrap();
+        assert_eq!(
+            edges(&events),
+            [
+                (0x3e, Flags, NONE),
+                (0x30, Down, NONE),
+                (0x30, Up, NONE),
+                (0x3e, Flags, RIGHT_CONTROL_FLAGS),
             ]
         );
     }

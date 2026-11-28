@@ -118,6 +118,7 @@ pub(super) fn execute(action: &Action) {
         }
         Effect::Shortcut(shortcut) => press_combo(&combo(shortcut)),
         Effect::Key(combo) | Effect::HeldKey(combo) => press_combo(combo),
+        Effect::TapModifier(modifiers) => super::tap_modifier(modifiers),
         Effect::Scroll { dx, dy } => dispatch_scroll(dx, dy),
         // Media/volume controls are NX system-defined keys, not ordinary
         // keyboard virtual-key events. Posting kVK_Volume* through
@@ -486,6 +487,44 @@ fn key_for(usage: KeyboardUsage, command: bool) -> Option<u16> {
         .or_else(|| hid_usage_to_macos(usage.code()))
 }
 
+/// Tap modifier keys while their existing owners stay down.
+pub(super) fn tap_modifiers(keys: &[HeldKey], held: HeldModifiers) {
+    post_modifier_tap(keys, held, key_event, |vk, phase, event| {
+        if !virtual_keyboard::edge(vk, phase) {
+            event.post(CGEventTapLocation::HID);
+        }
+    });
+}
+
+fn post_modifier_tap<E>(
+    keys: &[HeldKey],
+    held: HeldModifiers,
+    mut build: impl FnMut(u16, CGEventFlags, KeyPhase) -> Option<E>,
+    mut post: impl FnMut(u16, KeyPhase, E),
+) {
+    let edges = keys
+        .iter()
+        .map(|&key| (key, KeyPhase::Down))
+        .chain(keys.iter().rev().map(|&key| (key, KeyPhase::Up)));
+    // Prepare the fallback for every edge before offering any to HID. The
+    // virtual keyboard can disappear between edges, and a missing fallback
+    // release after a posted press would leave a modifier down.
+    let mut modifiers = held;
+    let Some(events) = edges
+        .map(|(key, phase)| {
+            let (vk, flags) = held_key_event(key, phase, &mut modifiers)?;
+            Some((vk, phase, build(vk, flags, phase)?))
+        })
+        .collect::<Option<Vec<_>>>()
+    else {
+        return;
+    };
+    debug_assert_eq!(modifiers, held);
+    for (vk, phase, event) in events {
+        post(vk, phase, event);
+    }
+}
+
 /// Emit the physical-key edges whose shared ownership changed, preserving the
 /// aggregate synthetic modifier state on every event.
 pub(super) fn hold_keys(
@@ -537,6 +576,7 @@ fn held_key_event(
         HeldKey::Shift => 0x38,
         HeldKey::Alt => 0x3a,
         HeldKey::Control => 0x3b,
+        HeldKey::RightControl => 0x3e,
         HeldKey::Key(usage) => held_key(usage, phase, *modifiers)?,
     };
     Some((vk, held_modifier_flags(*modifiers)))
@@ -568,6 +608,12 @@ fn held_key_down(vk: u16) -> bool {
         .any(|&held| held == vk)
 }
 
+// IOLLEvent.h's device-dependent flags accompany the aggregate Control flag.
+const LEFT_CONTROL_FLAGS: CGEventFlags =
+    CGEventFlags::from_bits_retain(CGEventFlags::CGEventFlagControl.bits() | 0x0001);
+const RIGHT_CONTROL_FLAGS: CGEventFlags =
+    CGEventFlags::from_bits_retain(CGEventFlags::CGEventFlagControl.bits() | 0x2000);
+
 fn held_modifier_flags(modifiers: HeldModifiers) -> CGEventFlags {
     let mut flags = CGEventFlags::CGEventFlagNull;
     if modifiers.contains(HeldKey::Command) {
@@ -577,7 +623,10 @@ fn held_modifier_flags(modifiers: HeldModifiers) -> CGEventFlags {
         flags |= CGEventFlags::CGEventFlagShift;
     }
     if modifiers.contains(HeldKey::Control) {
-        flags |= CGEventFlags::CGEventFlagControl;
+        flags |= LEFT_CONTROL_FLAGS;
+    }
+    if modifiers.contains(HeldKey::RightControl) {
+        flags |= RIGHT_CONTROL_FLAGS;
     }
     if modifiers.contains(HeldKey::Alt) {
         flags |= CGEventFlags::CGEventFlagAlternate;

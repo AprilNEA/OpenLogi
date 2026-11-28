@@ -318,6 +318,18 @@ impl MouseModelView {
         cx.notify();
     }
 
+    /// Show held modifiers without replacing the editable shortcut draft.
+    pub(super) fn preview_shortcut_modifiers(
+        &mut self,
+        modifiers: gpui::Modifiers,
+        cx: &mut Context<Self>,
+    ) {
+        if let EditorMode::Recording { preview, .. } = &mut self.mode {
+            *preview = ShortcutRecorder::preview(modifiers);
+            cx.notify();
+        }
+    }
+
     /// Change the open picker's drafts; nothing while it is closed. Callers
     /// must `cx.notify()`.
     pub(super) fn edit_picker_drafts(&mut self, edit: impl FnOnce(&mut PickerDrafts)) {
@@ -345,7 +357,7 @@ impl MouseModelView {
             application_input: &self.custom_application_input,
             command_input: &self.custom_command_input,
             shortcut_mode,
-            shortcut_recording: self.mode.is_recording(),
+            shortcut_preview: self.mode.recording_preview(),
             shortcut_record_focus: &self.shortcut_record_focus,
             invalid,
             view,
@@ -473,31 +485,36 @@ impl MouseModelView {
 }
 
 impl RecordsShortcut for MouseModelView {
-    /// A recorded chord fills the shortcut field, and Add commits it in the
-    /// chosen mode. A key the recorder cannot turn into a chord shows the
-    /// field's error and leaves the field as it was.
+    /// A recording fills the shortcut field and keeps the selected mode.
     fn shortcut_recorded(
         &mut self,
         recording: Recording,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.mode.is_recording() {
+            return;
+        }
         self.mode = mem::take(&mut self.mode).stop_recording();
         if let Some(drafts) = self.mode.drafts_mut() {
-            match recording {
-                Recording::Chord(combo) => {
-                    self.custom_shortcut_input.update(cx, |input, cx| {
-                        input.set_value(combo.rendered_label(), window, cx);
-                    });
-                    drafts.invalid.shortcut = None;
-                }
-                Recording::Cancelled => {}
+            let label = match recording {
+                Recording::Chord(combo) => Some(combo.rendered_label()),
+                Recording::Modifier(modifiers) => Some(modifiers.rendered_label()),
+                Recording::Cancelled => None,
                 Recording::Unsupported => {
                     drafts.invalid.shortcut = Some(ShortcutError::Unrecognized);
+                    None
                 }
                 Recording::ShiftedSymbol => {
                     drafts.invalid.shortcut = Some(ShortcutError::ShiftedSymbol);
+                    None
                 }
+            };
+            if let Some(label) = label {
+                self.custom_shortcut_input.update(cx, |input, cx| {
+                    input.set_value(label, window, cx);
+                });
+                drafts.invalid.shortcut = None;
             }
         }
         cx.notify();

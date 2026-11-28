@@ -508,6 +508,9 @@ fn hold_modifier_bits() {
     use openlogi_core::binding::Action;
     let ctrl_shift = "Ctrl+Shift".parse().expect("valid modifier set");
     assert_wire(&Action::HoldModifier(ctrl_shift), "3d06");
+    let right_ctrl = "RightCtrl".parse().expect("valid right control");
+    assert_wire(&Action::HoldModifier(right_ctrl), "3d20");
+    assert_wire(&Action::TapModifier(right_ctrl), "4120");
 }
 
 /// The Easy-Switch channel actions are unit variants appended after

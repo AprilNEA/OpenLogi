@@ -341,8 +341,29 @@ fn a_failure_during_a_hold_strands_the_keys_other_chords_hold() {
 }
 
 #[test]
+fn control_sides_use_distinct_hid_report_bits() {
+    let recorder = Recorder::default();
+    let mut keyboard = Keyboard::new(recorder.clone());
+    let left = super::macos_to_hid_usage(0x3b).unwrap();
+    let right = super::macos_to_hid_usage(0x3e).unwrap();
+
+    assert_eq!(keyboard.edge(left, KeyPhase::Down), Routed::Sent);
+    assert_eq!(keyboard.edge(right, KeyPhase::Down), Routed::Sent);
+    assert_eq!(keyboard.edge(left, KeyPhase::Up), Routed::Sent);
+    assert_eq!(keyboard.edge(right, KeyPhase::Up), Routed::Sent);
+
+    let modifier_bytes: Vec<_> = recorder
+        .sent
+        .borrow()
+        .iter()
+        .map(|report| report.0[0])
+        .collect();
+    assert_eq!(modifier_bytes, [0x01, 0x11, 0x10, 0x00]);
+}
+
+#[test]
 fn stranded_keys_go_down_modifiers_first_with_the_flags_so_far() {
-    let control = CGEventFlags::CGEventFlagControl;
+    let control = super::super::LEFT_CONTROL_FLAGS;
     let both = control | CGEventFlags::CGEventFlagCommand;
     assert_eq!(
         repress_edges(pressed(LEFT_COMMAND | LEFT_CONTROL, &[LEFT_ARROW, KEY_C])),
