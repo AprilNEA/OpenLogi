@@ -51,6 +51,7 @@ pub use flow::{
 pub use function_key::FunctionKey;
 pub use identity::canonical_device_key;
 pub use key_trigger::{KeyModifiers, KeyTrigger, KeyboardConfig, ParseTriggerError};
+pub use per_app::{ThumbwheelProfile, WheelScrollOverrides, WheelScrollProfile};
 pub use revision::ConfigRevision;
 pub use settings::LightSettings;
 pub use settings::{
@@ -68,6 +69,17 @@ use crate::binding::{Binding, ButtonId, GestureDirection};
 /// The schema version the current build produces. Bumped whenever the
 /// persisted shape or enum vocabulary changes; readers inspect this value
 /// before consuming the rest of the file.
+///
+/// v14 adds per-app thumb-wheel sensitivity. Earlier files retain their
+/// device overrides and global default without value migration.
+///
+/// v13 adds independent vertical sensitivity overrides for the ordinary main
+/// wheel. With no such override the app inherits the global distance, including
+/// apps with a v12 smoothing profile. Existing files require no value migration.
+///
+/// v12 adds per-application software main-wheel smoothing. Older files
+/// inherit their existing global `smooth_scroll` value without migration.
+/// The bump keeps older builds from reading and losing the new profiles.
 ///
 /// v11 adds the `[flow]` section for cross-machine device handoff. Nothing
 /// older needs migrating, and a file without it loads as disabled Flow. The
@@ -132,7 +144,7 @@ use crate::binding::{Binding, ButtonId, GestureDirection};
 /// next save; [`Config::load_from_path`] accepts supported versions `1` through
 /// [`SCHEMA_VERSION`] so an invalid or forward file fails loudly instead of
 /// silently losing bindings.
-pub const SCHEMA_VERSION: u32 = 11;
+pub const SCHEMA_VERSION: u32 = 14;
 
 /// Top-level config document.
 #[derive(Debug, Clone, Serialize, Deserialize)]

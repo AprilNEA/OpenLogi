@@ -3,6 +3,7 @@
 mod catalog;
 mod picker;
 mod shell;
+mod wheel;
 
 use std::collections::{BTreeMap, HashSet};
 use std::rc::Rc;
@@ -15,6 +16,7 @@ use openlogi_core::app::{AppAliases, profile_key_for};
 
 pub(crate) use self::catalog::{AppCatalogPicker, ProfileIconCache};
 use self::shell::ProfileScopeShell;
+pub(crate) use self::wheel::WheelProfileEditor;
 use crate::state::{AppState, DeviceKey};
 use crate::ui::theme::{self, Typography as _};
 
@@ -61,6 +63,12 @@ impl ProfileCoverage {
         }
     }
 
+    /// An inherited alias or executable profile can coexist with more specific
+    /// wheel settings for just one application.
+    fn has_exact_profile(&self, app: &str) -> bool {
+        self.profiles.contains_key(app)
+    }
+
     fn covers(&self, app: &str) -> bool {
         profile_key_for(&self.profiles, &self.aliases, app).is_some()
     }
@@ -90,8 +98,13 @@ type ChangeProfile = dyn Fn(ProfileChoice, &mut Window, &mut App);
 #[derive(Clone)]
 pub(super) struct ProfileScopeActions {
     select: Rc<SelectProfile>,
-    reset: Rc<ChangeProfile>,
     remove: Rc<ChangeProfile>,
+    device: Option<DeviceProfileCommands>,
+}
+
+#[derive(Clone)]
+struct DeviceProfileCommands {
+    reset: Rc<ChangeProfile>,
     remove_all: Rc<ChangeProfile>,
 }
 
@@ -104,9 +117,22 @@ impl ProfileScopeActions {
     ) -> Self {
         Self {
             select: Rc::new(select),
-            reset: Rc::new(reset),
             remove: Rc::new(remove),
-            remove_all: Rc::new(remove_all),
+            device: Some(DeviceProfileCommands {
+                reset: Rc::new(reset),
+                remove_all: Rc::new(remove_all),
+            }),
+        }
+    }
+
+    fn wheel_profiles(
+        select: impl Fn(Option<String>, &mut App) + 'static,
+        remove: impl Fn(ProfileChoice, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        Self {
+            select: Rc::new(select),
+            remove: Rc::new(remove),
+            device: None,
         }
     }
 
@@ -114,17 +140,85 @@ impl ProfileScopeActions {
         (self.select)(app, cx);
     }
 
-    pub(super) fn reset(&self, profile: ProfileChoice, window: &mut Window, cx: &mut App) {
-        (self.reset)(profile, window, cx);
-    }
-
     pub(super) fn remove(&self, profile: ProfileChoice, window: &mut Window, cx: &mut App) {
         (self.remove)(profile, window, cx);
     }
+}
 
-    pub(super) fn remove_all(&self, profile: ProfileChoice, window: &mut Window, cx: &mut App) {
-        (self.remove_all)(profile, window, cx);
-    }
+/// Build Settings' independent software scrolling profile selector.
+fn scroll_profile_scope_bar(
+    icons: &ProfileIconCache,
+    catalog: &Entity<AppCatalogPicker>,
+    cx: &mut App,
+) -> Option<ProfileScopeShell> {
+    let state = AppState::try_read(cx)?;
+    let editing_app = state.editing_scroll_app().map(str::to_string);
+    let (profiles, coverage) = wheel_profile_choices(state);
+    let recent_apps = state
+        .recent_apps()
+        .map(|(app, name)| (app.to_string(), name.to_string()))
+        .collect::<Vec<_>>();
+    let model = profile_scope_model(
+        editing_app,
+        profiles,
+        |app| coverage.has_exact_profile(app),
+        &recent_apps,
+        catalog,
+        cx,
+    );
+    let actions = ProfileScopeActions::wheel_profiles(
+        |app, cx| {
+            AppState::apply(cx, |state| state.set_editing_scroll_app(app));
+        },
+        |profile, _, cx| {
+            AppState::apply(cx, |state| state.remove_scroll_profile(&profile.app));
+        },
+    );
+    Some(ProfileScopeShell::new(
+        "scroll-profile",
+        model,
+        catalog.clone(),
+        icons.clone(),
+        actions,
+    ))
+}
+
+/// A wheel profile sample for the debug component gallery, independent
+/// of application configuration and device state.
+#[cfg(debug_assertions)]
+pub(crate) fn wheel_profile_scope_preview(
+    icons: &ProfileIconCache,
+    catalog: &Entity<AppCatalogPicker>,
+    editing_app: Option<String>,
+    select: impl Fn(Option<String>, &mut App) + 'static,
+    cx: &mut App,
+) -> ProfileScopeShell {
+    const EDITOR: &str = "example.editor";
+    catalog.update(cx, |picker, cx| picker.ensure_icon(EDITOR, cx));
+    let select = Rc::new(select);
+    let select_tab = select.clone();
+    ProfileScopeShell::new(
+        "gallery-setting-profile",
+        ProfileScopeModel {
+            editing_app,
+            profiles: vec![ProfileChoice {
+                app: EDITOR.into(),
+                name: "Editor".into(),
+                icon: EDITOR.into(),
+                persisted: true,
+            }],
+            choices: AddAppChoices {
+                recent: Vec::new(),
+                catalog: CatalogPresentation::Ready(Vec::new()),
+            },
+        },
+        catalog.clone(),
+        icons.clone(),
+        ProfileScopeActions::wheel_profiles(
+            move |app, cx| select_tab(app, cx),
+            move |_, _, cx| select(None, cx),
+        ),
+    )
 }
 
 /// Build the Buttons workspace's profile selector.
@@ -147,7 +241,14 @@ pub(crate) fn button_profile_scope_bar(
         .recent_apps()
         .map(|(app, name)| (app.to_string(), name.to_string()))
         .collect();
-    let model = profile_scope_model(editing_app, profiles, &coverage, &recent_apps, catalog, cx);
+    let model = profile_scope_model(
+        editing_app,
+        profiles,
+        |app| coverage.covers(app),
+        &recent_apps,
+        catalog,
+        cx,
+    );
     let actions = ProfileScopeActions::new(
         |app, cx| {
             AppState::apply(cx, |state| state.set_editing_app(app));
@@ -193,7 +294,14 @@ pub(crate) fn action_ring_profile_scope_bar(
         .recent_apps()
         .map(|(app, name)| (app.to_string(), name.to_string()))
         .collect();
-    let model = profile_scope_model(editing_app, profiles, &coverage, &recent_apps, catalog, cx);
+    let model = profile_scope_model(
+        editing_app,
+        profiles,
+        |app| coverage.covers(app),
+        &recent_apps,
+        catalog,
+        cx,
+    );
     let actions = ProfileScopeActions::new(
         |app, cx| {
             AppState::apply(cx, |state| state.set_editing_action_ring_app(app));
@@ -238,6 +346,27 @@ fn scope_profiles(
     (profiles, coverage)
 }
 
+/// The wheel editor can offer an exact profile beside an alias or executable
+/// that already covers the app. Qualify colliding tab names with their keys
+/// so selection and the remove menu identify the same saved profile or draft.
+fn wheel_profile_choices(state: &AppState) -> (Vec<ProfileChoice>, ProfileCoverage) {
+    let saved: Vec<_> = state.scroll_profile_keys().collect();
+    let (mut profiles, coverage) = scope_profiles(state, &saved, state.editing_scroll_app());
+    let mut by_name = BTreeMap::<_, Vec<_>>::new();
+    for profile in &mut profiles {
+        by_name
+            .entry(profile.name.to_lowercase())
+            .or_default()
+            .push(profile);
+    }
+    for same_name in by_name.into_values().filter(|choices| choices.len() > 1) {
+        for profile in same_name {
+            profile.name = format!("{} ({})", profile.name, profile.app);
+        }
+    }
+    (profiles, coverage)
+}
+
 /// The tab for the profile keyed `key`, named and illustrated the way the user
 /// knows the application.
 fn profile_choice(state: &AppState, key: &str, persisted: bool) -> ProfileChoice {
@@ -271,7 +400,7 @@ pub(crate) fn profile_name(state: &AppState, key: &str) -> String {
 fn profile_scope_model(
     editing_app: Option<String>,
     mut profiles: Vec<ProfileChoice>,
-    coverage: &ProfileCoverage,
+    covered: impl Fn(&str) -> bool,
     recent_apps: &[(String, String)],
     catalog: &Entity<AppCatalogPicker>,
     cx: &mut App,
@@ -286,7 +415,7 @@ fn profile_scope_model(
     let observed_ids: HashSet<String> = recent_apps.iter().map(|(app, _)| app.clone()).collect();
     let available_recent: Vec<ProfileChoice> = recent_apps
         .iter()
-        .filter(|(app, _)| !coverage.covers(app) && editing_app.as_deref() != Some(app.as_str()))
+        .filter(|(app, _)| !covered(app) && editing_app.as_deref() != Some(app.as_str()))
         .map(|(app, name)| ProfileChoice::application(app.clone(), name.clone()))
         .collect();
     let mut unavailable = persisted_ids;
@@ -298,7 +427,7 @@ fn profile_scope_model(
         }
     });
     let catalog_presentation = catalog.read(cx).available_profiles(&observed_ids, |app| {
-        unavailable.contains(app) || coverage.covers(app)
+        unavailable.contains(app) || covered(app)
     });
     let choices = AddAppChoices {
         recent: available_recent,
@@ -528,7 +657,7 @@ mod tests {
         use openlogi_core::config::Config;
         use openlogi_ipc::ForegroundApps;
 
-        use super::super::{profile_name, scope_profiles};
+        use super::super::{profile_name, scope_profiles, wheel_profile_choices};
         use crate::services::assets::AssetResolver;
         use crate::state::tests::{KNOWN_MOUSE_KEY, direct_inventory};
         use crate::state::{AppState, Sources};
@@ -607,6 +736,30 @@ mod tests {
         }
 
         #[test]
+        fn duplicate_wheel_profile_names_identify_saved_keys_and_drafts() {
+            let mut state = state_with(NAMED_EDITOR, &[], &[("editor-id", "EDITOR")]);
+            for app in ["app:editor", "exe:editor.exe", "example.Terminal"] {
+                let _ = state.set_editing_scroll_app(Some(app.into()));
+                let _ = state.commit_editing_smooth_scroll(true);
+            }
+            let _ = state.set_editing_scroll_app(Some("editor-id".into()));
+            let (profiles, _) = wheel_profile_choices(&state);
+            let choices: std::collections::BTreeMap<_, _> = profiles
+                .iter()
+                .map(|profile| {
+                    (
+                        profile.app.as_str(),
+                        (profile.name.as_str(), profile.persisted),
+                    )
+                })
+                .collect();
+            assert_eq!(choices["app:editor"], ("Editor (app:editor)", true));
+            assert_eq!(choices["exe:editor.exe"], ("editor (exe:editor.exe)", true));
+            assert_eq!(choices["editor-id"], ("EDITOR (editor-id)", false));
+            assert_eq!(choices["example.Terminal"], ("Terminal", true));
+        }
+
+        #[test]
         fn a_profile_takes_the_name_of_an_application_it_matches_by_executable() {
             // Windows reports the full path; the profile names only the
             // executable, directly or through an alias.
@@ -650,6 +803,12 @@ mod tests {
                 coverage.covers(r"c:\tools\tool.exe"),
                 "so is the executable profile for a path"
             );
+            assert!(
+                !coverage.has_exact_profile("editor-id")
+                    && !coverage.has_exact_profile(r"c:\tools\tool.exe"),
+                "the wheel picker still offers either app for its own exact override"
+            );
+            assert!(coverage.has_exact_profile("app:editor"));
             assert!(
                 !coverage.covers("other-id"),
                 "an unsaved draft covers nothing yet"

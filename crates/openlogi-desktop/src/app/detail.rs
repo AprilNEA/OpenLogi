@@ -46,6 +46,7 @@ use crate::ui::theme::{
     self, ContentWidth, DETAIL_RAIL_W, HEADER_H, Palette, PressableStyle as _, SCREEN_PAD,
     SelectableStyle as _, Typography as _,
 };
+use crate::windows::settings::{self, SettingsPage};
 
 mod backlight;
 mod easy_switch;
@@ -139,13 +140,7 @@ pub(super) fn detail_content(
         DetailTab::Keys => {
             keys_tab(panels.keyboard_model, profile_icons, app_catalog, cx).into_any_element()
         }
-        DetailTab::Pointer => pointer_tab(
-            panels.dpi_panel,
-            panels.smartshift_panel,
-            panels.momentum_panel,
-            cx,
-        )
-        .into_any_element(),
+        DetailTab::Pointer => pointer_tab(panels, cx).into_any_element(),
         DetailTab::Lighting => lighting_tab(panels.lighting_panel).into_any_element(),
         DetailTab::Camera => {
             camera_tab(panels.camera_preview, panels.camera_controls).into_any_element()
@@ -408,65 +403,53 @@ fn action_ring_tab(
         ))
 }
 
-/// Pointer tab: the DPI panel, the SmartShift wheel controls, and the
-/// scroll-wheel preferences, each in a titled card, then momentum scrolling
-/// across the bottom. Use a responsive two-column grid that still fits the
-/// window's 720 px minimum width, so these short controls don't force a
-/// vertical scroll.
-fn pointer_tab(
-    dpi_panel: &gpui::Entity<DpiPanel>,
-    smartshift_panel: &gpui::Entity<SmartShiftPanel>,
-    momentum_panel: &gpui::Entity<MomentumPanel>,
-    cx: &mut Context<AppView>,
-) -> impl IntoElement {
+/// The selected device's Pointer controls. App-wide wheel profiles open in General.
+fn pointer_tab(panels: &DetailPanels<'_>, cx: &mut Context<AppView>) -> impl IntoElement {
     let pal = theme::palette(cx);
-    tab_body(
-        DetailTab::Pointer,
-        ContentWidth::Large,
-        h_flex()
-            .w_full()
-            .items_stretch()
-            .gap_4()
-            .flex_wrap()
-            .child(pointer_grid_card(
-                PanelCard::new(
-                    tr!("device.pointer_tuning"),
-                    Icon::empty().path("action-icons/gauge.svg"),
-                    dpi_panel.clone().into_any_element(),
-                )
-                .fill(),
-            ))
-            .child(pointer_grid_card(
-                PanelCard::new(
-                    tr!("pointer.smartshift"),
-                    Icon::empty().path("action-icons/refresh-cw.svg"),
-                    smartshift_panel.clone().into_any_element(),
-                )
-                .fill(),
-            ))
-            .child(
-                div()
-                    .min_w(POINTER_CARD_MIN_W)
-                    .flex_1()
-                    .child(scrolling_card(pal, cx)),
+    let device_controls = h_flex()
+        .w_full()
+        .items_stretch()
+        .gap_4()
+        .flex_wrap()
+        .child(pointer_grid_card(
+            PanelCard::new(
+                tr!("device.pointer_tuning"),
+                Icon::empty().path("action-icons/gauge.svg"),
+                panels.dpi_panel.clone().into_any_element(),
             )
-            .children(onboard_card(pal, cx).map(pointer_grid_card))
-            // Full width, so it always starts its own row at the bottom.
-            .child(
-                div().w_full().child(
-                    PanelCard::new(
-                        tr!("pointer.momentum_title"),
-                        Icon::empty().path("action-icons/mouse.svg"),
-                        momentum_panel.clone().into_any_element(),
-                    )
-                    .title_suffix(
-                        Tag::secondary()
-                            .small()
-                            .child(tr!("pointer.momentum_macos_only")),
-                    ),
+            .fill(),
+        ))
+        .child(pointer_grid_card(
+            PanelCard::new(
+                tr!("pointer.smartshift"),
+                Icon::empty().path("action-icons/refresh-cw.svg"),
+                panels.smartshift_panel.clone().into_any_element(),
+            )
+            .fill(),
+        ))
+        .child(
+            div()
+                .min_w(POINTER_CARD_MIN_W)
+                .flex_1()
+                .child(scrolling_card(pal, cx)),
+        )
+        .children(onboard_card(pal, cx).map(pointer_grid_card))
+        // Full width, so it always starts its own row at the bottom.
+        .child(
+            div().w_full().child(
+                PanelCard::new(
+                    tr!("pointer.momentum_title"),
+                    Icon::empty().path("action-icons/mouse.svg"),
+                    panels.momentum_panel.clone().into_any_element(),
+                )
+                .title_suffix(
+                    Tag::secondary()
+                        .small()
+                        .child(tr!("pointer.momentum_macos_only")),
                 ),
             ),
-    )
+        );
+    tab_body(DetailTab::Pointer, ContentWidth::Large, device_controls)
 }
 
 fn onboard_card(pal: Palette, cx: &mut Context<AppView>) -> Option<impl IntoElement> {
@@ -580,11 +563,9 @@ fn pointer_grid_card(card: impl IntoElement) -> impl IntoElement {
     // window minimum after this tab's 20 px side insets, while still leaving a
     // usable slider: 332·2 + 16 + 20·2 = 720. In rems, the whole relationship
     // scales together.
-    div()
-        .min_w(POINTER_CARD_MIN_W)
-        .flex_1()
-        .h_full()
-        .child(card)
+    // The wrapping flex row stretches its own children. A percentage height
+    // here would resolve against the whole grid and overflow the scroll area.
+    div().min_w(POINTER_CARD_MIN_W).flex_1().child(card)
 }
 
 /// What the scrolling card shows for the selected device — `Default` is the
@@ -727,9 +708,20 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
         Icon::empty().path("action-icons/mouse.svg"),
         v_flex()
             .gap_4()
+            .child(wheel_profiles_link())
             .child(inversion_row)
             .child(resolution_row)
             .child(smooth_wheel_row(pal, smooth_wheel, hires)),
+    )
+}
+
+fn wheel_profiles_link() -> impl IntoElement {
+    h_flex().child(
+        Button::new("pointer-edit-app-wheel-profiles")
+            .small()
+            .label(tr!("pointer.edit_app_wheel_profiles"))
+            .debug_selector(|| "pointer-edit-app-wheel-profiles".into())
+            .on_click(|_, _, cx| settings::open_at(SettingsPage::WheelProfiles, cx)),
     )
 }
 

@@ -20,10 +20,14 @@ mod glide;
 mod reverse_lock;
 mod worker;
 
-pub use worker::{ScrollInputHandle, ScrollPreferences, ScrollRuntime};
+pub(crate) use worker::WheelProfileEpoch;
+pub use worker::{ScrollInputHandle, ScrollPreferences, ScrollRuntime, ScrollSettings};
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, ThreadId};
 use std::time::{Duration, Instant};
 
@@ -216,9 +220,19 @@ impl ScrollFrame {
     }
 
     fn post(self) {
+        self.dispatch(
+            openlogi_inject::post_smooth_scroll,
+            openlogi_inject::post_phased_scroll,
+        );
+    }
+
+    fn dispatch<T>(
+        self,
+        smooth: impl FnOnce(ScrollDelta, SmoothScrollPhase) -> T,
+        phased: impl FnOnce(ScrollDelta, SmoothScrollPhase) -> T,
+    ) -> T {
         if self.kind == FrameKind::Phased {
-            openlogi_inject::post_phased_scroll(self.delta.into(), self.phase);
-            return;
+            return phased(self.delta.into(), self.phase);
         }
         let delta = match self.unit {
             FrameUnit::Ticks => self.delta.into(),
@@ -227,7 +241,7 @@ impl ScrollFrame {
             #[cfg(not(target_os = "macos"))]
             FrameUnit::Pixels { .. } => self.wheel_delta().into(),
         };
-        openlogi_inject::post_smooth_scroll(delta, self.phase);
+        smooth(delta, self.phase)
     }
 }
 
@@ -239,22 +253,83 @@ impl ScrollFrame {
 /// the thumb wheel's motion. Cancelling a session cancels both.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum ScrollSource {
-    OsHook(ThreadId),
+    OsHook(ThreadId, SoftwareWheel),
     Hidpp(HidppSessionId, HidppWheel),
 }
 
-/// Which wheel of a HID++ capture session a motion belongs to.
+/// Software scrolling axes whose sensitivity edits can expire independently.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum SoftwareWheel {
+    Primary,
+    Horizontal,
+}
+
+impl SoftwareWheel {
+    /// Keep a mixed-axis event intact under the primary-wheel policy when it
+    /// carries vertical distance; only that axis has a vertical multiplier.
+    fn for_impulse(impulse: WheelDelta) -> Self {
+        if impulse.y == 0.0 {
+            Self::Horizontal
+        } else {
+            Self::Primary
+        }
+    }
+}
+
+/// One capture session's current thumb-wheel dispatch configuration. Retiring
+/// it makes queued input ineligible even if the bounded command queue is full.
+/// Identity keeps a delayed cancellation from ending its replacement's motion.
+#[derive(Clone, Debug, Default)]
+struct ThumbDispatch(Arc<AtomicBool>);
+
+impl ThumbDispatch {
+    fn retire(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    fn retired(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
+impl PartialEq for ThumbDispatch {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for ThumbDispatch {}
+
+impl Hash for ThumbDispatch {
+    fn hash<H: Hasher>(&self, hasher: &mut H) {
+        Arc::as_ptr(&self.0).hash(hasher);
+    }
+}
+
+/// Which wheel of a HID++ capture session a motion belongs to.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum HidppWheel {
     /// The main wheel, diverted by its Smooth wheel switch.
     Main,
     /// The horizontal thumb wheel.
-    Thumb,
+    Thumb(ThumbDispatch),
+    /// The main wheel under a wheel-hold button's horizontal-scroll binding.
+    Held,
 }
 
 impl ScrollSource {
-    fn current_hook() -> Self {
-        Self::OsHook(thread::current().id())
+    fn current_hook(wheel: SoftwareWheel) -> Self {
+        Self::OsHook(thread::current().id(), wheel)
+    }
+
+    /// Wheel governed by the General scrolling profile. A wheel-hold binding
+    /// and the device-level Smooth Wheel keep their independent settings.
+    fn software_wheel(&self) -> Option<SoftwareWheel> {
+        match self {
+            Self::OsHook(_, wheel) => Some(*wheel),
+            Self::Hidpp(_, HidppWheel::Thumb(_)) => Some(SoftwareWheel::Horizontal),
+            Self::Hidpp(_, HidppWheel::Main | HidppWheel::Held) => None,
+        }
     }
 
     /// Whether this is one of `session`'s wheels.
@@ -396,10 +471,8 @@ impl MotionUpdate {
     }
 }
 
-/// The one phase stream visible to the foreground application. Source-local
-/// motions may overlap, but Core Graphics has no source identity with which to
-/// pair multiple synthetic gestures; all distances therefore share this single
-/// balanced lifecycle.
+/// Sources sharing an output stream have one balanced lifecycle. Core Graphics
+/// cannot pair multiple simultaneous synthetic gestures by source identity.
 ///
 /// Whoever opens the stream decides whether it is a phased gesture (`phased`
 /// on the opening frame), and every frame up to its end keeps that choice, so
@@ -458,17 +531,40 @@ impl OutputStream {
     }
 }
 
+/// A profile can enable easing while a legacy source needs a swipe, or vice
+/// versa. Neither stream can lend its opening frame's kind to the other.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WheelStream {
+    Profile,
+    Legacy,
+    /// All phased gestures share one lifecycle at the current app destination.
+    DestinationSwipe,
+}
+
+impl WheelStream {
+    const ALL: [Self; 3] = [Self::Profile, Self::Legacy, Self::DestinationSwipe];
+
+    fn for_easing(source: &ScrollSource) -> Self {
+        if source.software_wheel().is_some() {
+            Self::Profile
+        } else {
+            Self::Legacy
+        }
+    }
+}
+
 /// Pure per-source state machine. Absence from the map represents idle, so an
-/// idle source cannot accidentally retain a target or scheduled deadline. All
-/// source-local distances feed one application-visible [`OutputStream`].
+/// idle source cannot accidentally retain a target or scheduled deadline.
 #[derive(Default)]
 struct ScrollEngine {
     active: HashMap<ScrollSource, ActiveMotion>,
     /// Sources inside an unsmoothed phased gesture, each with the instant its
     /// idle window closes. Disjoint from `active`: smoothing on or off decides
     /// which map a source can enter, and a preference change cancels both.
-    phased: HashMap<ScrollSource, Instant>,
-    output: OutputStream,
+    phased: HashMap<ScrollSource, (Instant, WheelStream)>,
+    profile_output: OutputStream,
+    legacy_output: OutputStream,
+    destination_swipe: OutputStream,
     /// Smoothed main wheels under momentum scrolling, each with its device's
     /// settings, its free-spin detector and, while it glides, its glide.
     wheels: HashMap<ScrollSource, WheelState>,
@@ -916,23 +1012,27 @@ impl ScrollEngine {
         self.drop_motion(source, emit);
     }
 
-    /// Drop `source`'s eased motion unfinished, cancelling the shared stream
-    /// if nothing on it is left moving.
+    /// Drop a diverted main wheel's eased motion when a glide or finger stop
+    /// takes over.
     fn drop_motion(&mut self, source: &ScrollSource, emit: &mut impl FnMut(ScrollFrame)) {
-        if self.active.remove(source).is_some() && self.stream_idle() {
-            self.output.cancel(emit);
+        if self.active.remove(source).is_some() && self.stream_idle(WheelStream::Legacy) {
+            self.legacy_output.cancel(emit);
         }
     }
 
-    /// Whether nothing on the shared output stream is moving: no phased
-    /// gesture, and no eased motion but momentum scrolling's smoothed
-    /// wheels, whose steps stay off the stream ([`ScrollFrame::step`]).
-    fn stream_idle(&self) -> bool {
-        self.phased.is_empty()
-            && self
-                .active
-                .keys()
-                .all(|source| self.pixels_for(source).is_some())
+    fn stream_idle(&self, stream: WheelStream) -> bool {
+        self.phased.values().all(|(_, owner)| *owner != stream)
+            && self.active.keys().all(|source| {
+                WheelStream::for_easing(source) != stream || self.pixels_for(source).is_some()
+            })
+    }
+
+    fn output(&mut self, stream: WheelStream) -> &mut OutputStream {
+        match stream {
+            WheelStream::Profile => &mut self.profile_output,
+            WheelStream::Legacy => &mut self.legacy_output,
+            WheelStream::DestinationSwipe => &mut self.destination_swipe,
+        }
     }
 
     /// Emit due glide frames, end the glides that ran their course or whose
@@ -1014,6 +1114,7 @@ impl ScrollEngine {
         at: Instant,
         emit: &mut impl FnMut(ScrollFrame),
     ) {
+        let stream = WheelStream::for_easing(&source);
         let pixels = self.pixels_for(&source);
         // Momentum scrolling's wheel steps crisply; every other wheel eases.
         let easing = if pixels.is_some() {
@@ -1028,7 +1129,7 @@ impl ScrollEngine {
             && let Some(mut completed) = self.active.remove(&source)
         {
             let update = completed.advance(at);
-            self.emit_update(update, pixels, emit);
+            self.emit_update(update, stream, pixels, emit);
         }
 
         let update = match self.active.entry(source) {
@@ -1045,22 +1146,23 @@ impl ScrollEngine {
             }
         };
         if let Some(update) = update {
-            self.emit_update(update, pixels, emit);
+            self.emit_update(update, stream, pixels, emit);
         }
     }
 
     /// Emit one tick immediately inside a phased gesture and push back the
     /// idle deadline that ends it. The first tick of a gesture is `Began`.
-    fn phased_impulse(
+    fn phased_impulse_on(
         &mut self,
         source: ScrollSource,
         impulse: WheelDelta,
         at: Instant,
+        stream: WheelStream,
         emit: &mut impl FnMut(ScrollFrame),
     ) {
         self.end_idle_phased(at, emit);
-        self.output.progress(impulse, true, emit);
-        self.phased.insert(source, at + PHASED_IDLE);
+        self.output(stream).progress(impulse, true, emit);
+        self.phased.insert(source, (at + PHASED_IDLE, stream));
     }
 
     fn advance_due(&mut self, at: Instant, emit: &mut impl FnMut(ScrollFrame)) {
@@ -1088,8 +1190,9 @@ impl ScrollEngine {
             if update.is_finished() {
                 self.active.remove(&source);
             }
+            let stream = WheelStream::for_easing(&source);
             let pixels = self.pixels_for(&source);
-            self.emit_update(update, pixels, emit);
+            self.emit_update(update, stream, pixels, emit);
         }
     }
 
@@ -1097,9 +1200,30 @@ impl ScrollEngine {
     /// deadline. Sources still inside their window keep the gesture open.
     fn end_idle_phased(&mut self, at: Instant, emit: &mut impl FnMut(ScrollFrame)) {
         let before = self.phased.len();
-        self.phased.retain(|_, deadline| *deadline > at);
-        if self.phased.len() != before && self.stream_idle() {
-            self.output.finish(WheelDelta::ZERO, true, emit);
+        self.phased.retain(|_, (deadline, _)| *deadline > at);
+        if self.phased.len() != before {
+            for stream in WheelStream::ALL {
+                if self.stream_idle(stream) {
+                    self.output(stream).finish(WheelDelta::ZERO, true, emit);
+                }
+            }
+        }
+    }
+
+    /// Withdraw an unfinished swipe before the next destination receives a
+    /// Began. Cancelling avoids committing a partial browser navigation.
+    fn cancel_destination_swipe(
+        &mut self,
+        stream: WheelStream,
+        emit: &mut impl FnMut(ScrollFrame),
+    ) {
+        self.phased.retain(|_, (_, owner)| *owner != stream);
+        // A legacy main wheel can finish first and leave a phaseless
+        // stream open solely on the thumb's idle deadline.
+        if self.stream_idle(stream)
+            || matches!(self.output(stream), OutputStream::Active { phased: true })
+        {
+            self.output(stream).cancel(emit);
         }
     }
 
@@ -1114,7 +1238,10 @@ impl ScrollEngine {
                     .filter_map(|state| state.glide.next_tick()),
             )
             .min();
-        frame.into_iter().chain(self.phased.values().copied()).min()
+        frame
+            .into_iter()
+            .chain(self.phased.values().map(|(deadline, _)| *deadline))
+            .min()
     }
 
     fn cancel_source(&mut self, source: &ScrollSource, emit: &mut impl FnMut(ScrollFrame)) {
@@ -1136,8 +1263,12 @@ impl ScrollEngine {
         self.active.retain(|source, _| !cancelled(source));
         self.phased.retain(|source, _| !cancelled(source));
         let removed = (self.active.len(), self.phased.len()) != before;
-        if removed && self.stream_idle() {
-            self.output.cancel(emit);
+        if removed {
+            for stream in WheelStream::ALL {
+                if self.stream_idle(stream) {
+                    self.output(stream).cancel(emit);
+                }
+            }
         }
     }
 
@@ -1145,12 +1276,15 @@ impl ScrollEngine {
         self.wheels.clear();
         self.active.clear();
         self.phased.clear();
-        self.output.cancel(emit);
+        self.profile_output.cancel(emit);
+        self.legacy_output.cancel(emit);
+        self.destination_swipe.cancel(emit);
     }
 
     fn emit_update(
         &mut self,
         update: MotionUpdate,
+        stream: WheelStream,
         pixels: Option<f64>,
         emit: &mut impl FnMut(ScrollFrame),
     ) {
@@ -1162,13 +1296,11 @@ impl ScrollEngine {
             return;
         }
         match update {
-            // A phased gesture still open (after a smoothing toggle) owns the
-            // stream's end, so a motion finishing under it only progresses it.
-            MotionUpdate::Finished(delta) if self.stream_idle() => {
-                self.output.finish(delta, false, emit);
+            MotionUpdate::Finished(delta) if self.stream_idle(stream) => {
+                self.output(stream).finish(delta, false, emit);
             }
             MotionUpdate::Active(delta) | MotionUpdate::Finished(delta) => {
-                self.output.progress(delta, false, emit);
+                self.output(stream).progress(delta, false, emit);
             }
         }
     }

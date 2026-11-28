@@ -46,6 +46,7 @@ pub(super) fn add_app_popover(
             control_button(format!("{id_base}:add-app-profile"))
                 .outline()
                 .icon(IconName::Plus)
+                .debug_selector(move || format!("{id_base}:add-app-profile"))
                 .label(tr!("profiles.add_app")),
         )
         .on_open_change(move |open, window, cx| {
@@ -61,9 +62,13 @@ pub(super) fn add_app_popover(
                 window,
                 cx,
             );
-            add_app_content(
-                id_base, &choices, &catalog, &icons, &actions, pal, cx,
-            )
+            // The popover's positioner keeps an 8 px gutter but cannot resize
+            // oversized content. Reserve that gutter and any client-side frame.
+            let inset = window.client_inset().unwrap_or_default() + px(8.);
+            let room = window.viewport_size().map(|edge| (edge - inset * 2.).max(px(0.)));
+            add_app_content(id_base, &choices, &catalog, &icons, &actions, pal, cx)
+                .max_w(room.width)
+                .max_h(room.height)
         })
 }
 
@@ -133,8 +138,13 @@ fn add_app_content(
                     .text_color(pal.text_muted)
                     .child(tr!("profiles.recent_applications")),
             )
+            .child(
+                v_flex()
+                    .min_h_0()
+                    .overflow_y_scrollbar()
+                    .children(recent_rows),
+            )
         })
-        .children(recent_rows)
         .child(div().pt_1().w_full().child(divider(pal)))
         .child(applications_toggle(
             id_base,
@@ -186,6 +196,7 @@ fn catalog_list(
     let count = rows.len();
     div()
         .relative()
+        .min_h_0()
         .h(px(application_list_height(count)))
         .w_full()
         .child(
@@ -282,10 +293,12 @@ fn application_row(
     popover: WeakEntity<PopoverState>,
 ) -> gpui::Div {
     let app = choice.app.clone();
+    let selector = format!("{id_base}:catalog-app:{}", choice.app);
     let aria_label = format!("{}: {}", choice.name, choice.app);
-    div().h(px(APP_ROW_H)).child(
+    div().flex_none().h(px(APP_ROW_H)).child(
         MenuRow::new(format!("{id_base}:catalog-app:{}", choice.app))
             .role(Role::MenuItem)
+            .debug_selector(move || selector.clone())
             .aria_label(aria_label)
             .child(
                 h_flex()
@@ -342,106 +355,106 @@ mod tests {
     use std::rc::Rc;
 
     use gpui::{
-        Context, InteractiveElement as _, IntoElement, Modifiers, ParentElement as _, Render,
-        ScrollDelta, ScrollEvent, Styled as _, TestAppContext, TouchPhase, Window, div, point, px,
-        uniform_list,
+        AppContext as _, Bounds, Context, Entity, IntoElement, ParentElement as _, Render,
+        ScrollDelta, Styled as _, Subscription, TestAppContext, Window, point, px, size,
     };
-    use gpui_kit::component::button::Button;
-    use gpui_kit::component::popover::Popover;
+    use gpui_kit::component::v_flex;
+    use gpui_kit::test::TestWindowExt as _;
 
-    use super::APP_ROW_H;
-    use crate::features::binding_editor::compact_panel;
-    use crate::ui::components::MenuRow;
+    use super::{
+        AddAppChoices, AppCatalogPicker, CatalogPresentation, ProfileChoice, ProfileIconCache,
+        ProfileScopeActions, add_app_popover,
+    };
     use crate::ui::theme;
 
-    /// The Add-app popover structure — unstyled popover, `compact_panel`
-    /// surface, `uniform_list` catalog — with rows that record activation
-    /// instead of touching `AppState`.
-    struct PickerScrollHarness {
-        clicked: Rc<RefCell<Option<usize>>>,
+    struct PickerFixture {
+        catalog: Entity<AppCatalogPicker>,
+        icons: ProfileIconCache,
+        selected: Rc<RefCell<Option<String>>>,
+        _catalog_obs: Subscription,
     }
 
-    impl Render for PickerScrollHarness {
+    impl Render for PickerFixture {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            let pal = theme::palette(cx);
-            let clicked = self.clicked.clone();
-            Popover::new("add-app-popover")
-                .appearance(false)
-                .trigger(Button::new("add-app-profile").label("Add app"))
-                .content(move |_state, _window, _cx| {
-                    let clicked = clicked.clone();
-                    compact_panel(pal).w(px(320.)).child(
-                        uniform_list(
-                            "application-catalog-list",
-                            30,
-                            move |range, _window, _cx| {
-                                range
-                                    .map(|index| {
-                                        let clicked = clicked.clone();
-                                        div()
-                                            .h(px(APP_ROW_H))
-                                            .debug_selector(move || format!("app-row-{index}"))
-                                            .child(
-                                                MenuRow::new(("catalog-app", index))
-                                                    .child(format!("App {index}"))
-                                                    .on_click(move |_, _, _| {
-                                                        clicked.replace(Some(index));
-                                                    }),
-                                            )
-                                    })
-                                    .collect::<Vec<_>>()
-                            },
-                        )
-                        .h(px(APP_ROW_H * 6.))
-                        .w_full(),
-                    )
-                })
+            let rows = |prefix: &str, count| {
+                (0..count)
+                    .map(|index| {
+                        let app = format!("{prefix}-{index:02}");
+                        ProfileChoice::application(app.clone(), app)
+                    })
+                    .collect()
+            };
+            let selected = self.selected.clone();
+            v_flex()
+                .w_full()
+                .pt(px(130.))
+                .items_end()
+                .child(add_app_popover(
+                    "picker",
+                    AddAppChoices {
+                        recent: rows("recent", 12),
+                        catalog: CatalogPresentation::Ready(rows("installed", 30)),
+                    },
+                    self.catalog.clone(),
+                    self.icons.clone(),
+                    ProfileScopeActions::wheel_profiles(
+                        move |app, _| {
+                            selected.replace(app);
+                        },
+                        |_, _, _| {},
+                    ),
+                    theme::palette(cx),
+                ))
         }
     }
 
     #[gpui::test]
-    fn catalog_list_scrolls_inside_the_picker_popover(cx: &mut TestAppContext) {
+    fn recent_and_installed_apps_stay_reachable_in_a_short_picker(cx: &mut TestAppContext) {
         let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
         cx.update(gpui_kit::init);
-        let clicked: Rc<RefCell<Option<usize>>> = Rc::default();
-        let (_, cx) = cx.add_window_view({
-            let clicked = clicked.clone();
-            move |_, _| PickerScrollHarness { clicked }
+        let selected: Rc<RefCell<Option<String>>> = Rc::default();
+        let (_, visual) = cx.add_window_view({
+            let selected = selected.clone();
+            move |window, cx| {
+                let icons = ProfileIconCache::default();
+                let catalog = cx.new(|cx| AppCatalogPicker::new(icons.clone(), window, cx));
+                let catalog_obs = cx.observe(&catalog, |_, _, cx| cx.notify());
+                PickerFixture {
+                    catalog,
+                    icons,
+                    selected,
+                    _catalog_obs: catalog_obs,
+                }
+            }
         });
-        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let viewport = Bounds::new(point(px(0.), px(0.)), size(px(300.), px(400.)));
+        visual.simulate_resize(viewport.size);
+        visual.update(|window, cx| {
+            window.render_frame(cx);
+            window.click("picker:add-app-profile", cx);
+            let toggle = window.find("picker:all-applications-toggle").bounds();
+            assert!(
+                viewport.contains(&toggle.origin) && viewport.contains(&toggle.bottom_right()),
+                "all applications must remain reachable with a full recent list: {toggle:?}"
+            );
+            let to_end = ScrollDelta::Pixels(point(px(0.), px(-4000.)));
+            window.scroll("picker:catalog-app:recent-00", to_end, cx);
+            window.click("picker:catalog-app:recent-11", cx);
+            assert_eq!(selected.borrow().as_deref(), Some("recent-11"));
 
-        // Open through the trigger, then let the deferred popup capture its
-        // anchor and paint the content on the following frame.
-        cx.simulate_click(point(px(20.), px(10.)), Modifiers::default());
-        cx.update(|window, cx| window.draw(cx).clear(cx));
-        cx.update(|window, cx| window.draw(cx).clear(cx));
+            window.click("picker:add-app-profile", cx);
+            window.click("picker:all-applications-toggle", cx);
+            window.scroll("picker:catalog-app:installed-00", to_end, cx);
+            window.click("picker:catalog-app:installed-29", cx);
+            assert_eq!(selected.borrow().as_deref(), Some("installed-29"));
 
-        let first_row = cx
-            .debug_bounds("app-row-0")
-            .expect("the catalog list renders in the popover");
-        let cursor = first_row.center();
-        cx.simulate_click(cursor, Modifiers::default());
-        assert_eq!(*clicked.borrow(), Some(0));
-
-        cx.simulate_event(ScrollEvent {
-            position: cursor,
-            delta: ScrollDelta::Lines(point(0., -5.)),
-            modifiers: Modifiers::default(),
-            touch_phase: TouchPhase::Moved,
-            source: gpui::ScrollSource::Pointer,
+            window.click("picker:add-app-profile", cx);
+            window.click("input-state", cx);
+            window.input("installed-14", cx);
+            assert!(window.try_find("picker:catalog-app:recent-00").is_none());
+            assert!(window.find("picker:catalog-app:installed-14").visible());
+            window.press("escape", cx);
+            assert!(window.try_find("picker:all-applications-toggle").is_none());
         });
-        cx.update(|window, cx| window.draw(cx).clear(cx));
-
-        assert_ne!(
-            cx.debug_bounds("app-row-0"),
-            Some(first_row),
-            "wheel over the catalog list must scroll it"
-        );
-        cx.simulate_click(cursor, Modifiers::default());
-        assert_ne!(
-            *clicked.borrow(),
-            Some(0),
-            "after scrolling a different row sits under the cursor"
-        );
     }
 }

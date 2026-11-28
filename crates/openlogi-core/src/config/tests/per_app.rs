@@ -312,6 +312,110 @@ fn a_profile_for_an_undefined_alias_fails_to_load() {
 }
 
 #[test]
+fn software_scrolling_uses_the_shared_profile_matcher() {
+    let mut config = load(&on_this_platform(
+        r#"schema_version = 14
+[app_settings.per_app_smooth_scroll]
+"app:editor" = true
+"exe:tool.exe" = true
+[app_settings.per_app_vertical_scroll_sensitivity]
+"app:editor" = 28
+"exe:tool.exe" = 7
+[app_settings.per_app_thumbwheel_sensitivity]
+"app:editor" = 35
+"exe:tool.exe" = 56
+[apps.editor]
+PLATFORM = ["com.example.editor", "com.example.editor-nightly"]
+"#,
+    ))
+    .expect("scrolling profiles load");
+    for app in ["com.example.editor", "com.example.editor-nightly"] {
+        let profile = config.wheel_scroll_profile_for(Some(app));
+        assert_eq!(profile.app, Some(app), "each matching app owns its motion");
+        assert!(profile.smooth_scroll);
+        assert_eq!(u8::from(profile.vertical_sensitivity), 28);
+        let thumb = config.thumbwheel_profile_for(None, Some(app));
+        assert_eq!(
+            thumb.app,
+            Some(app),
+            "an alias does not merge app lifetimes"
+        );
+        assert!(thumb.overridden);
+        assert_eq!(u8::from(thumb.sensitivity), 35);
+    }
+    let other = config.wheel_scroll_profile_for(Some("com.example.other"));
+    assert_eq!(other.app, Some("com.example.other"));
+    assert_eq!(other.overrides, WheelScrollOverrides::default());
+    assert!(!other.smooth_scroll);
+    assert_eq!(
+        other.vertical_sensitivity,
+        VerticalScrollSensitivity::DEFAULT
+    );
+    let executable = r"c:\tools\tool.exe";
+    let exe = config.wheel_scroll_profile_for(Some(executable));
+    assert!(exe.smooth_scroll);
+    assert_eq!(u8::from(exe.vertical_sensitivity), 7);
+
+    assert_eq!(
+        u8::from(
+            config
+                .thumbwheel_profile_for(None, Some(executable))
+                .sensitivity
+        ),
+        56
+    );
+
+    let app = "com.example.editor";
+    config.set_app_thumbwheel_sensitivity(app, ThumbwheelSensitivity::DEFAULT);
+    assert_eq!(
+        config.thumbwheel_profile_for(None, Some(app)).sensitivity,
+        ThumbwheelSensitivity::DEFAULT
+    );
+    assert!(config.remove_app_thumbwheel_sensitivity(app));
+    assert_eq!(
+        u8::from(config.thumbwheel_profile_for(None, Some(app)).sensitivity),
+        35
+    );
+    config.set_app_smooth_scroll(app, false);
+    assert!(!config.smooth_scroll_for(Some(app)));
+    assert_eq!(
+        u8::from(config.vertical_scroll_sensitivity_for(Some(app))),
+        28
+    );
+    config.set_app_vertical_scroll_sensitivity(app, VerticalScrollSensitivity::DEFAULT);
+    config.remove_app_smooth_scroll(app);
+    assert!(
+        config.smooth_scroll_for(Some(app)),
+        "smoothing now uses its alias"
+    );
+    assert_eq!(
+        config.vertical_scroll_sensitivity_for(Some(app)),
+        VerticalScrollSensitivity::DEFAULT
+    );
+    config.remove_app_vertical_scroll_sensitivity(app);
+    assert_eq!(
+        u8::from(config.vertical_scroll_sensitivity_for(Some(app))),
+        28
+    );
+}
+
+#[test]
+fn software_scrolling_rejects_undefined_aliases() {
+    for (setting, value) in [
+        ("per_app_smooth_scroll", "true"),
+        ("per_app_vertical_scroll_sensitivity", "14"),
+        ("per_app_thumbwheel_sensitivity", "14"),
+    ] {
+        assert_matches!(
+            load(&format!("schema_version = 14\n[app_settings.{setting}]\n\"app:editr\" = {value}\n"))
+                .expect_err("an undefined scrolling alias must not load"),
+            ConfigError::UndefinedAppAlias { device, key, .. }
+                if device == "app_settings" && key == "app:editr"
+        );
+    }
+}
+
+#[test]
 fn an_invalid_alias_table_fails_to_parse() {
     assert_matches!(
         load("schema_version = 9\n[apps.chrome]\nwindows = \"exe:Chrome.exe\"\n")

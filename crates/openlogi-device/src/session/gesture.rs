@@ -34,17 +34,17 @@ use std::sync::{Arc, Mutex, PoisonError};
 use hidpp::feature::hires_wheel::{self, HiResWheelEvent};
 use hidpp::protocol::v20;
 use openlogi_core::binding::{ButtonId, GestureDirection};
-use tokio::sync::mpsc;
+use tokio::sync::watch;
 use tracing::{debug, info};
 
 use crate::SharedChannel;
 use crate::channel::route::DeviceRoute;
 
-pub use super::capture::CaptureHost;
 use super::capture::{ArmedCapture, Liveness, ReportingChangeStream, run_capture};
+pub use super::capture::{CaptureHost, CaptureInputSink};
 use accum::CaptureAccum;
 pub(crate) use arm::enumerate_controls;
-use arm::{ArmedControls, ArmedThumb, ArmedThumbwheel, arm_controls};
+use arm::{ArmedControls, ArmedThumb, arm_controls};
 pub use main_wheel::MainWheelDivert;
 pub(crate) use spy::SpyRestore;
 use spy::{ArmedOnboard, SpyEdges};
@@ -232,21 +232,57 @@ pub struct CaptureSpec {
 pub async fn run_capture_session(
     route: DeviceRoute,
     spec: CaptureSpec,
-    host: CaptureHost<'_>,
+    host: CaptureHost<'_, impl CaptureInputSink>,
 ) -> Result<CaptureSessionOutcome, CaptureSessionFailure> {
+    start_capture_session(route, spec, None, host).await
+}
+
+/// Capture the selected controls while following changes to thumb-wheel capture.
+///
+/// The watch's latest value selects initial capture and subsequent thumb-only
+/// changes. Other controls and their report listener remain armed throughout a
+/// successful change. A failed hardware write ends the session through normal
+/// restoration, retaining any uncertain thumb-wheel restore obligation.
+pub async fn run_capture_session_with_thumbwheel(
+    route: DeviceRoute,
+    spec: CaptureSpec,
+    wanted: watch::Receiver<bool>,
+    host: CaptureHost<'_, impl CaptureInputSink>,
+) -> Result<CaptureSessionOutcome, CaptureSessionFailure> {
+    start_capture_session(route, spec, Some(wanted), host).await
+}
+
+async fn start_capture_session(
+    route: DeviceRoute,
+    mut spec: CaptureSpec,
+    mut wanted: Option<watch::Receiver<bool>>,
+    host: CaptureHost<'_, impl CaptureInputSink>,
+) -> Result<CaptureSessionOutcome, CaptureSessionFailure> {
+    if let Some(wanted) = &mut wanted {
+        spec.capture_thumbwheel = *wanted.borrow_and_update();
+    }
     let shared = host.channel_for(&route)?;
     let armed = arm_controls(&shared, &spec, host.registry).await?;
     for button in armed.diverted_buttons() {
-        let _ = host.sink.send(CapturedInput::ButtonDiverted(button));
+        host.sink.emit(CapturedInput::ButtonDiverted(button));
     }
     if armed
         .onboard
         .as_ref()
         .is_some_and(|onboard| onboard.spy().is_some())
     {
-        let _ = host.sink.send(CapturedInput::HostModeEntered);
+        host.sink.emit(CapturedInput::HostModeEntered);
     }
-    Ok(run_capture(shared, GestureCapture::new(armed), host).await)
+    let host = CaptureHost {
+        sink: Arc::new(host.sink) as Arc<dyn CaptureInputSink>,
+        shutdown: host.shutdown,
+        channel_slot: host.channel_slot,
+        registry: host.registry,
+        device_io: host.device_io,
+    };
+    let mut capture = GestureCapture::new(armed);
+    capture.thumb_target = wanted.map(|wanted| (shared.clone(), wanted));
+    Ok(run_capture(shared, capture, host).await)
 }
 
 /// Gesture capture as [`run_capture`] drives it: the armed controls, and the
@@ -256,9 +292,8 @@ struct GestureCapture {
     /// Behind a `Mutex` because the channel's read thread invokes the report
     /// handler by shared reference.
     accum: Arc<Mutex<CaptureAccum>>,
-    /// The status of the last thumb-wheel report, for [`thumbwheel_input`].
-    /// Behind a `Mutex` for the same reason as `accum`.
-    thumb_status: Arc<Mutex<RotationStatus>>,
+    /// Live thumb changes use the existing channel and keep all other controls.
+    thumb_target: Option<(SharedChannel, watch::Receiver<bool>)>,
     spy_edges: Arc<Mutex<SpyEdges>>,
 }
 
@@ -267,13 +302,15 @@ impl GestureCapture {
         Self {
             armed,
             accum: Arc::default(),
-            thumb_status: Arc::new(Mutex::new(RotationStatus::Inactive)),
+            thumb_target: None,
             spy_edges: Arc::default(),
         }
     }
 }
 
 impl ArmedCapture for GestureCapture {
+    type Sink = Arc<dyn CaptureInputSink>;
+
     const NAME: &'static str = "control";
     const LIVENESS: Liveness = Liveness::Watched;
 
@@ -301,19 +338,14 @@ impl ArmedCapture for GestureCapture {
     fn report_handler(
         &self,
         device_index: u8,
-        sink: mpsc::UnboundedSender<CapturedInput>,
+        sink: Self::Sink,
     ) -> impl Fn(&v20::Message) + Send + Sync + 'static {
         let armed = &self.armed;
         let accum = Arc::clone(&self.accum);
-        let thumb_status = Arc::clone(&self.thumb_status);
+        let thumb_reports = Arc::clone(&armed.thumb_reports);
         let reprog_index = armed.reprog.as_ref().map(ReprogControlsV4::feature_index);
         let gesture_cids = armed.gesture_cids.clone();
         let gesture_button_set = armed.gesture_button_cids.clone();
-        let thumbwheel = armed.thumb.as_ref().and_then(ArmedThumb::as_thumbwheel);
-        let thumb_index = thumbwheel.map(|thumb| thumb.wheel.feature_index());
-        let thumb_resolution =
-            thumbwheel.map_or(WheelResolution::UNKNOWN, ArmedThumbwheel::resolution);
-        let gesture_thumb_index = armed.thumb.as_ref().and_then(ArmedThumb::gesture46_index);
         let dpi_set = armed.dpi_cids.clone();
         // A wheel-hold button's press and release are ordinary button edges;
         // only the raw wheel it unlocks needs its own attribution.
@@ -342,7 +374,7 @@ impl ArmedCapture for GestureCapture {
                 spy_edges
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
-                    .on_mask(mask, captured, &sink);
+                    .on_mask(mask, captured, sink.as_ref());
                 return;
             }
             if let Some(idx) = reprog_index
@@ -357,7 +389,7 @@ impl ArmedCapture for GestureCapture {
                     &dpi_set,
                     &gesture_button_set,
                     &button_set,
-                    &sink,
+                    sink.as_ref(),
                 );
                 return;
             }
@@ -367,30 +399,15 @@ impl ArmedCapture for GestureCapture {
                 accum
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
-                    .on_raw_wheel(event, &wheel_set, hires_per_notch, &sink);
+                    .on_raw_wheel(event, &wheel_set, hires_per_notch, sink.as_ref());
                 return;
             }
-            if let Some(idx) = thumb_index
-                && let Some(event) = thumbwheel::decode_event(msg, device_index, idx)
+            if let Some(input) = thumb_reports
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .input(msg, device_index)
             {
-                let previous = std::mem::replace(
-                    &mut *thumb_status.lock().unwrap_or_else(PoisonError::into_inner),
-                    event.rotation_status,
-                );
-                if let Some(input) = thumbwheel_input(event, previous, thumb_resolution) {
-                    let _ = sink.send(input);
-                }
-                return;
-            }
-            if let Some(idx) = gesture_thumb_index
-                && let Some(step) = thumbwheel::decode_gesture46_step(msg, device_index, idx)
-            {
-                // Gesture 46 reports no resolution, so its steps pass through
-                // as increments; the sign already reads positive-is-up.
-                let _ = sink.send(CapturedInput::Scroll {
-                    increments: step,
-                    resolution: WheelResolution::UNKNOWN,
-                });
+                sink.emit(input);
                 return;
             }
             if let Some((idx, per_notch)) = main_wheel
@@ -402,7 +419,7 @@ impl ArmedCapture for GestureCapture {
                     // SmartShift.
                     debug!(index = device_index, ?state, "wheel ratchet switched");
                 } else if let Some(input) = main_wheel::movement_input(event, per_notch) {
-                    let _ = sink.send(input);
+                    sink.emit(input);
                 }
             }
         }
@@ -412,10 +429,11 @@ impl ArmedCapture for GestureCapture {
         *self.accum.lock().unwrap_or_else(PoisonError::into_inner) = CaptureAccum::default();
         // A power cycle ends any roll in progress; carrying it over would
         // swallow the first tap after the reconnect.
-        *self
-            .thumb_status
+        self.armed
+            .thumb_reports
             .lock()
-            .unwrap_or_else(PoisonError::into_inner) = RotationStatus::Inactive;
+            .unwrap_or_else(PoisonError::into_inner)
+            .reset();
         self.spy_edges
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -424,6 +442,24 @@ impl ArmedCapture for GestureCapture {
 
     async fn rearm(&self) -> bool {
         self.armed.rearm().await
+    }
+
+    async fn retarget_requested(&self) {
+        let Some((_, wanted)) = &self.thumb_target else {
+            return std::future::pending::<()>().await;
+        };
+        let mut wanted = wanted.clone();
+        if wanted.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+
+    async fn retarget(&mut self) -> Result<(), CaptureError> {
+        if let Some((shared, wanted)) = &mut self.thumb_target {
+            let wanted = *wanted.borrow_and_update();
+            self.armed.retarget_thumb(shared, wanted).await?;
+        }
+        Ok(())
     }
 
     fn armed_reporting(&self) -> Option<(&ReprogControlsV4, &[ArmedReporting])> {

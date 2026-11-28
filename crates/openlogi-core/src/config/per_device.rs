@@ -697,10 +697,8 @@ impl Config {
     /// override when set, else the app-wide default.
     #[must_use]
     pub fn thumbwheel_sensitivity(&self, device_key: &str) -> ThumbwheelSensitivity {
-        self.devices
-            .get(device_key)
-            .and_then(|d| d.thumbwheel_sensitivity)
-            .unwrap_or(self.app_settings.thumbwheel_sensitivity)
+        self.thumbwheel_profile_for(Some(device_key), None)
+            .sensitivity
     }
 
     /// Set (or clear, with `None`) `device_key`'s thumb-wheel sensitivity

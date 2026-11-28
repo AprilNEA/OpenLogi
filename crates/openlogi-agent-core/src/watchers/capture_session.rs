@@ -202,9 +202,21 @@ impl<Target, Dispatch, Stop> CaptureSession<Target, Dispatch, Stop> {
     }
 
     /// Hardware capture identity that decides whether rearming is required.
-    #[cfg(test)]
     pub(super) fn target(&self) -> &Target {
         &self.target
+    }
+
+    /// Adopt a target the caller has verified this active task can reconfigure
+    /// in place. Draining owners keep their original target until completion.
+    pub(super) fn retarget_in_place(&mut self, target: &Target) -> bool
+    where
+        Target: Clone,
+    {
+        if !self.is_active() {
+            return false;
+        }
+        self.target.clone_from(target);
+        true
     }
 
     /// Dispatch state owned by this epoch.
@@ -243,6 +255,14 @@ impl<Target, Dispatch, Stop> CaptureSession<Target, Dispatch, Stop> {
 }
 
 impl<Target: PartialEq, Dispatch: Clone + PartialEq, Stop> CaptureSession<Target, Dispatch, Stop> {
+    /// Update dispatch while preserving the active hardware owner.
+    pub(super) fn refresh_dispatch(&mut self, dispatch: &Dispatch) -> ReconcileAction {
+        if !self.is_active() || self.dispatch == *dispatch {
+            return ReconcileAction::None;
+        }
+        self.dispatch.clone_from(dispatch);
+        ReconcileAction::DispatchChanged
+    }
     /// Reconcile against the latest wanted target and dispatch state. A target
     /// change begins teardown exactly once; dispatch-only changes hot-refresh
     /// the plan while preserving the hardware epoch.
@@ -257,11 +277,7 @@ impl<Target: PartialEq, Dispatch: Clone + PartialEq, Stop> CaptureSession<Target
         if let Some((target, dispatch)) = wanted
             && self.target == *target
         {
-            if self.dispatch == *dispatch {
-                return ReconcileAction::None;
-            }
-            self.dispatch.clone_from(dispatch);
-            return ReconcileAction::DispatchChanged;
+            return self.refresh_dispatch(dispatch);
         }
         let stop_command = stop_for_change(&self.target, wanted.map(|(target, _)| target));
         let SessionPhase::Active(stop) = std::mem::replace(&mut self.phase, SessionPhase::Draining)
@@ -303,6 +319,21 @@ mod tests {
         );
         assert!(session.is_active());
         assert_eq!(session.dispatch(), &"new");
+    }
+
+    #[test]
+    fn an_in_place_target_can_change_only_while_active() {
+        let mut session = session();
+        assert!(session.retarget_in_place(&2));
+        assert_eq!(session.target(), &2);
+        assert_eq!(session.dispatch(), &"old");
+        assert!(session.is_active());
+        assert_eq!(
+            session.reconcile_with(None, |_, _| ()),
+            ReconcileAction::Retiring
+        );
+        assert!(!session.retarget_in_place(&3));
+        assert_eq!(session.target(), &2);
     }
 
     #[test]

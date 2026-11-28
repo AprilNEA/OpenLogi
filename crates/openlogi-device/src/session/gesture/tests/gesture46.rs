@@ -163,7 +163,7 @@ async fn a_wheel_without_0x2150_is_captured_through_gesture46() {
 
     let capture = GestureCapture::new(device.armed);
     let (sink, mut inputs) = mpsc::unbounded_channel();
-    let handler = capture.report_handler(0xff, sink);
+    let handler = capture.report_handler(0xff, Arc::new(sink));
     // The roll's start marker carries no step.
     handler(&gesture46_report([0x11, 0x00, 0x00, 0x00]));
     handler(&step_report(2));

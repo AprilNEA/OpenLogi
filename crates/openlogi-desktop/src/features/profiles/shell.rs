@@ -80,6 +80,7 @@ fn profile_scope_content(shell: ProfileScopeShell, pal: Palette) -> impl IntoEle
         .map(|profile| {
             let selected = shell.model.editing_app.as_deref() == Some(profile.app.as_str());
             let app = profile.app.clone();
+            let selector = format!("{}:app:{}", shell.id_base, profile.app);
             let actions = shell.actions.clone();
             profile_tab(
                 format!("{}:app:{}", shell.id_base, profile.app),
@@ -93,6 +94,7 @@ fn profile_scope_content(shell: ProfileScopeShell, pal: Palette) -> impl IntoEle
                 selected,
                 pal,
             )
+            .debug_selector(move || selector.clone())
             .on_click(move |_event, _window, cx| {
                 actions.select(Some(app.clone()), cx);
             })
@@ -136,6 +138,7 @@ fn profile_scope_content(shell: ProfileScopeShell, pal: Palette) -> impl IntoEle
                         default_selected,
                         pal,
                     )
+                    .debug_selector(move || format!("{id_base}:default"))
                     .on_click(move |_event, _window, cx| {
                         default_actions.select(None, cx);
                     }),
@@ -231,49 +234,51 @@ fn profile_options_menu(
     control_button(format!("{id_base}:profile-options"))
         .ghost()
         .label(tr!("profiles.profile_options"))
+        .debug_selector(move || format!("{id_base}:profile-options"))
         .icon(IconName::ChevronDown)
         .dropdown_menu_with_anchor(gpui::Anchor::TopRight, move |menu, _, _| {
-            let reset_profile = profile.clone();
-            let reset_actions = actions.clone();
-            let all_profile = profile.clone();
-            let all_actions = actions.clone();
-            let profile = profile.clone();
-            let actions = actions.clone();
+            let device_commands = actions.device.clone();
+            let confirm_remove = profile.persisted && device_commands.is_some();
+            let removing = profile.clone();
+            let removing_actions = actions.clone();
             menu.label(profile.name.clone())
+                .when_some(device_commands.clone(), |menu, commands| {
+                    let profile = profile.clone();
+                    menu.item(
+                        PopupMenuItem::new(tr!("profiles.reset_profile_dialog"))
+                            .disabled(!profile.persisted)
+                            .on_click(move |_, window, cx| {
+                                let profile = profile.clone();
+                                let reset = commands.reset.clone();
+                                // Open after the menu restores focus to its trigger.
+                                window.defer(cx, move |window, cx| reset(profile, window, cx));
+                            }),
+                    )
+                    .separator()
+                })
                 .item(
-                    PopupMenuItem::new(tr!("profiles.reset_profile_dialog"))
-                        .disabled(!profile.persisted)
-                        .on_click(move |_, window, cx| {
-                            let profile = reset_profile.clone();
-                            let actions = reset_actions.clone();
-                            // Open after the menu restores focus to its trigger.
-                            window.defer(cx, move |window, cx| actions.reset(profile, window, cx));
-                        }),
-                )
-                .separator()
-                .item(
-                    PopupMenuItem::new(if profile.persisted {
+                    PopupMenuItem::new(if confirm_remove {
                         tr!("profiles.remove_profile_dialog")
                     } else {
                         tr!("profiles.remove_profile")
                     })
-                    .on_click(move |_event, window, cx| {
-                        let profile = profile.clone();
-                        let actions = actions.clone();
+                    .on_click(move |_, window, cx| {
+                        let profile = removing.clone();
+                        let actions = removing_actions.clone();
                         window.defer(cx, move |window, cx| actions.remove(profile, window, cx));
                     }),
                 )
-                .separator()
-                .item(
-                    PopupMenuItem::new(tr!("profiles.remove_all_profiles_dialog")).on_click(
-                        move |_, window, cx| {
-                            let profile = all_profile.clone();
-                            let actions = all_actions.clone();
-                            window.defer(cx, move |window, cx| {
-                                actions.remove_all(profile, window, cx);
-                            });
-                        },
-                    ),
-                )
+                .when_some(device_commands, |menu, commands| {
+                    let profile = profile.clone();
+                    menu.separator().item(
+                        PopupMenuItem::new(tr!("profiles.remove_all_profiles_dialog")).on_click(
+                            move |_, window, cx| {
+                                let profile = profile.clone();
+                                let remove_all = commands.remove_all.clone();
+                                window.defer(cx, move |window, cx| remove_all(profile, window, cx));
+                            },
+                        ),
+                    )
+                })
         })
 }

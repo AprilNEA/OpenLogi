@@ -203,8 +203,7 @@ impl DetailTab {
             .unwrap_or(Self::Device)
     }
 
-    /// Whether this tab, on `state`'s selected device, edits per-application
-    /// profiles.
+    /// Whether this tab edits per-app bindings for the selected device.
     fn edits_app_profiles(self, state: &AppState) -> bool {
         match self {
             Self::Buttons | Self::ActionsRing => true,
@@ -800,4 +799,4 @@ impl AppView {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

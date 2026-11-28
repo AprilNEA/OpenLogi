@@ -56,7 +56,7 @@ use crate::observable::ObservableState;
 use crate::pointer_speed::{AppWrite, ReloadChange, SavedSpeed, SpeedMouse, SpeedWrite};
 use crate::receiver_access::ReceiverAccess;
 use crate::runtime::hook::{HookMaps, SharedHookMaps};
-use crate::runtime::scroll::ScrollPreferences;
+use crate::runtime::scroll::{ScrollPreferences, ScrollSettings};
 use crate::runtime::{PageTurn, PointerSelection};
 use crate::watchers::host_switch::{HostSwitchLink, HostSwitchLinks, LinkedHostSwitch};
 use crate::watchers::inventory::InventoryRefresh;
@@ -1308,9 +1308,28 @@ impl Orchestrator {
     /// Rewrite every shared map from the current config + selected device.
     fn rebuild(&self) {
         let key = self.current_key();
+        self.publish_scroll_preferences();
         self.publish_hook_maps(self.hook_maps_for(self.current_device()));
         self.publish_scroll_inversion(key);
         self.publish_device_runtime();
+    }
+
+    fn publish_scroll_preferences(&self) {
+        let app = self.mouse_context().0;
+        let profile = self.config.wheel_scroll_profile_for(app);
+        let thumb = self.config.thumbwheel_profile_for(None, app);
+        self.shared.scroll_preferences.publish(
+            profile.app,
+            profile.overrides,
+            thumb.overridden.then_some(thumb.sensitivity),
+            ScrollSettings {
+                has_profiles: self.config.has_wheel_scroll_profiles(),
+                smooth_scroll: self.config.app_settings.smooth_scroll,
+                main_wheel_smooth_scroll: profile.smooth_scroll,
+                main_wheel_vertical_sensitivity: profile.vertical_sensitivity,
+                vertical_sensitivity: self.config.app_settings.vertical_scroll_sensitivity,
+            },
+        );
     }
 
     /// Tell the capture layer whether to reverse the wheel for the selected
@@ -1552,6 +1571,7 @@ impl Orchestrator {
             let mut plan = plan_for_device(
                 &self.config,
                 PlanDevice {
+                    capabilities: dev.capabilities,
                     physical_key,
                     config_key: &dev.config_key,
                     route,
@@ -1563,6 +1583,8 @@ impl Orchestrator {
             );
             plan.dispatch.pointer =
                 self.pointer_selection(Some(&dev.config_key), app, pointer_target);
+            plan.dispatch.wheel_profile_epoch =
+                self.shared.scroll_preferences.wheel_profile_epoch();
             plan.dispatch.invert_wheel = wheel_inverted(&self.config, dev);
             plan.target.spec.divert_main_wheel =
                 main_wheel_divert(&self.config, dev, self.os_mouse_hook_available);
@@ -2290,6 +2312,7 @@ impl Orchestrator {
             return false;
         }
         let previous = std::mem::replace(&mut self.current_app, id);
+        self.publish_scroll_preferences();
         self.publish_hook_maps(self.hook_maps_for(self.current_device()));
         // Capture plans are app-scoped (per-app binding overlays); republish
         // them with the keyboard's effective bindings.
@@ -2320,6 +2343,7 @@ impl Orchestrator {
         if self.config.app_settings.mouse_profile_target == MouseProfileTarget::Focused {
             return false;
         }
+        self.publish_scroll_preferences();
         self.publish_hook_maps(self.hook_maps_for(self.current_device()));
         self.publish_capture_plans();
         previous != self.mouse_context().1
@@ -2380,10 +2404,6 @@ impl Orchestrator {
         self.forget_saved_light_changes(&previous, source);
         // Parameter-only edits must not erase a transient manual choice while
         // the light remains camera-linked. Changing the policy invalidates it.
-        self.shared.scroll_preferences.publish(
-            self.config.app_settings.smooth_scroll,
-            self.config.app_settings.vertical_scroll_sensitivity,
-        );
         openlogi_inject::set_desktop_switch(desktop_switch(&self.config.app_settings));
         self.observable
             .set_launch_at_login(self.config.app_settings.launch_at_login);

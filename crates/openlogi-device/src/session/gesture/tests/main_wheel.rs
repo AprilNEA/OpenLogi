@@ -362,7 +362,7 @@ async fn movement_reports_reach_the_dispatcher_as_main_wheel_input() {
     armed.result.unwrap();
     let capture = GestureCapture::new(armed.controls);
     let (sink, mut inputs) = mpsc::unbounded_channel();
-    let handler = capture.report_handler(0xff, sink);
+    let handler = capture.report_handler(0xff, Arc::new(sink));
     handler(&movement(true, 16, 0));
     handler(&movement(false, -1, 0));
     handler(&movement(true, 0, 3));

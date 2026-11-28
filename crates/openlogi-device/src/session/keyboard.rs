@@ -795,6 +795,8 @@ impl ArmedKeys {
 }
 
 impl ArmedCapture for ArmedKeys {
+    type Sink = mpsc::UnboundedSender<CapturedInput>;
+
     const NAME: &'static str = "keyboard key";
     const LIVENESS: Liveness = Liveness::Unwatched;
 

@@ -1,0 +1,25 @@
+# config/per_app.rs owns wheel profile presence and effective settings.
+id: core-app-smooth-scroll-owner
+language: rust
+severity: error
+message: Use Config::has_wheel_scroll_profiles for profile presence and Config::wheel_scroll_profile_for or Config::thumbwheel_profile_for for effective settings.
+files:
+  - crates/**/*.rs
+ignores:
+  - crates/openlogi-core/src/config/per_app.rs
+  - "**/tests.rs"
+  - "**/tests/**"
+rule:
+  any:
+    - pattern: $CONFIG.wheel_scroll_profile_keys().next().is_some()
+    - pattern: $CONFIG.wheel_scroll_profile_keys().next().is_none()
+    - pattern: $SETTINGS.$FIELD.get($$$)
+    - pattern: $SETTINGS.$FIELD[$APP]
+    - all:
+        - pattern: $MATCHER(&$SETTINGS.$FIELD, $$$)
+        - has:
+            field: function
+            regex: '(^|::)(overlay_for|profile_key_for)$'
+constraints:
+  FIELD:
+    regex: '^(per_app_smooth_scroll|per_app_vertical_scroll_sensitivity|per_app_thumbwheel_sensitivity)$'

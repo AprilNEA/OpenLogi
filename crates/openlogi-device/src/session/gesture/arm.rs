@@ -4,7 +4,7 @@
 
 use std::collections::BTreeSet;
 use std::num::NonZeroU8;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use hidpp::feature::{
     CreatableFeature as _, gestures2::Gestures2Feature, hires_wheel::HiResWheelFeature,
@@ -14,9 +14,9 @@ use hidpp::{channel::HidppChannel, device::Device};
 use openlogi_core::binding::ButtonId;
 use tracing::{debug, info, warn};
 
-use super::CaptureSpec;
 use super::main_wheel::{self, ArmedMainWheel, MainWheelDivert};
 use super::spy::{self, ArmedOnboard};
+use super::{CaptureSpec, CapturedInput, thumbwheel_input};
 use crate::reprog_controls::{self, ReprogControlsV4};
 use crate::session::capture::{ReportingChangeStream, open_device, subscribe_reporting_changes};
 use crate::session::capture_restore::{
@@ -25,9 +25,11 @@ use crate::session::capture_restore::{
 };
 use crate::session::restore::rollback_start;
 use crate::thumbwheel::{
-    self, ReportingMode, Thumbwheel, ThumbwheelInfo, WheelDirection, WheelResolution,
+    self, ReportingMode, RotationStatus, Thumbwheel, ThumbwheelInfo, WheelDirection,
+    WheelResolution,
 };
 use crate::{ChannelRegistry, SharedChannel};
+use hidpp::protocol::v20;
 
 /// The set of controls a session has diverted, kept so they can be handed back
 /// to the firmware on teardown.
@@ -65,6 +67,9 @@ pub(super) struct ArmedControls {
     reporting_changes: Option<ReportingChangeStream>,
     /// The thumb wheel, present when it is diverted.
     pub(super) thumb: Option<ArmedThumb>,
+    /// The report thread's derived view, published by the thumb owner before
+    /// diversion and removed only after restoration succeeds.
+    pub(super) thumb_reports: Arc<Mutex<ThumbReports>>,
     /// `0x2121` main wheel, present when its movement reports are diverted.
     pub(super) main_wheel: Option<ArmedMainWheel>,
     pub(super) onboard: Option<ArmedOnboard>,
@@ -82,23 +87,6 @@ pub(super) enum ArmedThumb {
 }
 
 impl ArmedThumb {
-    /// The `0x2150` wheel, when that is what the session diverted.
-    pub(super) fn as_thumbwheel(&self) -> Option<&ArmedThumbwheel> {
-        match self {
-            Self::Thumbwheel(thumb) => Some(thumb),
-            Self::Gesture46(_) => None,
-        }
-    }
-
-    /// The `0x6501` index gesture-46 reports arrive under, when the session
-    /// diverted gesture 46.
-    pub(super) fn gesture46_index(&self) -> Option<u8> {
-        match self {
-            Self::Thumbwheel(_) => None,
-            Self::Gesture46(gesture) => Some(gesture.feature_index),
-        }
-    }
-
     /// The reporting state teardown hands back.
     fn restore(&self) -> ThumbwheelRestore {
         match self {
@@ -128,10 +116,6 @@ pub(super) struct ArmedThumbwheel {
 }
 
 impl ArmedThumbwheel {
-    pub(super) fn resolution(&self) -> WheelResolution {
-        self.info.resolution
-    }
-
     fn direction(&self) -> WheelDirection {
         if self.info.positive_is_forward() {
             WheelDirection::Default
@@ -148,7 +132,98 @@ pub(super) struct ArmedGestureThumbwheel {
     feature_index: u8,
 }
 
+/// The thumb report decoder changes in place with its owner. Keeping its mode
+/// and last rotation together prevents a prior captured roll from becoming a
+/// tap (or swallowing one) after capture is enabled again.
+#[derive(Default)]
+pub(super) enum ThumbReports {
+    #[default]
+    Native,
+    Thumbwheel {
+        index: u8,
+        resolution: WheelResolution,
+        previous: RotationStatus,
+    },
+    Gesture46 {
+        index: u8,
+    },
+}
+
+impl ThumbReports {
+    pub(super) fn reset(&mut self) {
+        if let Self::Thumbwheel { previous, .. } = self {
+            *previous = RotationStatus::Inactive;
+        }
+    }
+
+    pub(super) fn input(&mut self, msg: &v20::Message, device_index: u8) -> Option<CapturedInput> {
+        match self {
+            Self::Native => None,
+            Self::Thumbwheel {
+                index,
+                resolution,
+                previous,
+            } => {
+                let event = thumbwheel::decode_event(msg, device_index, *index)?;
+                let previous = std::mem::replace(previous, event.rotation_status);
+                thumbwheel_input(event, previous, *resolution)
+            }
+            Self::Gesture46 { index } => {
+                let increments = thumbwheel::decode_gesture46_step(msg, device_index, *index)?;
+                Some(CapturedInput::Scroll {
+                    increments,
+                    resolution: WheelResolution::UNKNOWN,
+                })
+            }
+        }
+    }
+}
+
 impl ArmedControls {
+    /// Record restoration before a possibly-applied write, and publish the
+    /// decoder before firmware can send its first captured report.
+    fn own_thumb(&mut self, thumb: ArmedThumb) -> &ArmedThumb {
+        *self
+            .thumb_reports
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = match &thumb {
+            ArmedThumb::Thumbwheel(thumb) => ThumbReports::Thumbwheel {
+                index: thumb.wheel.feature_index(),
+                resolution: thumb.info.resolution,
+                previous: RotationStatus::Inactive,
+            },
+            ArmedThumb::Gesture46(thumb) => ThumbReports::Gesture46 {
+                index: thumb.feature_index,
+            },
+        };
+        self.thumb.insert(thumb)
+    }
+
+    pub(super) async fn retarget_thumb(
+        &mut self,
+        shared: &SharedChannel,
+        wanted: bool,
+    ) -> Result<(), CaptureError> {
+        if wanted == self.thumb.is_some() {
+            return Ok(());
+        }
+        if let Some(thumb) = &self.thumb {
+            thumb
+                .restore()
+                .restore_on(Arc::clone(shared.channel()), shared.device_index())
+                .await?;
+            self.thumb = None;
+            *self
+                .thumb_reports
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = ThumbReports::Native;
+        } else {
+            let device = open_device(shared).await?;
+            arm_requested_thumb(&device, shared.channel(), shared.device_index(), self).await?;
+        }
+        Ok(())
+    }
+
     /// Every button whose presses this session now reports, each once: the
     /// plain, wheel-hold, and raw-XY button diversions arming actually wrote.
     /// A requested control the device does not expose, or cannot divert, is
@@ -365,12 +440,8 @@ pub(super) async fn arm_controls_into(
         arm_wheel_hold_controls(device, chan, slot, &rc, &controls, spec, armed).await?;
     }
 
-    if spec.capture_thumbwheel
-        && let Some(info) = device.root().get_feature(thumbwheel::FEATURE_ID).await?
-    {
-        arm_thumbwheel(Thumbwheel::new(Arc::clone(chan), slot, info.index), armed).await?;
-    } else if spec.capture_thumbwheel {
-        arm_gesture_thumbwheel(device, chan, slot, armed).await?;
+    if spec.capture_thumbwheel {
+        arm_requested_thumb(device, chan, slot, armed).await?;
     }
 
     if let Some(requested) = spec.divert_main_wheel
@@ -382,6 +453,19 @@ pub(super) async fn arm_controls_into(
         spy::arm_onboard(device, chan, slot, target, &mut armed.onboard).await?;
     }
     Ok(())
+}
+
+async fn arm_requested_thumb(
+    device: &Device,
+    chan: &Arc<HidppChannel>,
+    slot: u8,
+    armed: &mut ArmedControls,
+) -> Result<(), CaptureError> {
+    if let Some(info) = device.root().get_feature(thumbwheel::FEATURE_ID).await? {
+        arm_thumbwheel(Thumbwheel::new(Arc::clone(chan), slot, info.index), armed).await
+    } else {
+        arm_gesture_thumbwheel(device, chan, slot, armed).await
+    }
 }
 
 /// Divert the Gestures2 thumb wheel (gesture 46) for capture on a device
@@ -411,12 +495,10 @@ async fn arm_gesture_thumbwheel(
     }
     // Store ownership before the write: a transport error cannot prove
     // whether firmware applied diversion, so rollback must cover it too.
-    let gesture = armed
-        .thumb
-        .insert(ArmedThumb::Gesture46(ArmedGestureThumbwheel {
-            feature,
-            feature_index: info.index,
-        }));
+    let gesture = armed.own_thumb(ArmedThumb::Gesture46(ArmedGestureThumbwheel {
+        feature,
+        feature_index: info.index,
+    }));
     gesture.divert().await?;
     Ok(())
 }
@@ -459,7 +541,7 @@ async fn arm_thumbwheel(tw: Thumbwheel, armed: &mut ArmedControls) -> Result<(),
     }
     // Store ownership before the write: a transport error cannot prove
     // whether firmware applied diversion, so rollback must cover it too.
-    let thumb = armed.thumb.insert(ArmedThumb::Thumbwheel(ArmedThumbwheel {
+    let thumb = armed.own_thumb(ArmedThumb::Thumbwheel(ArmedThumbwheel {
         restore: ThumbwheelRestore::new(tw.feature_index(), original),
         wheel: tw,
         info,

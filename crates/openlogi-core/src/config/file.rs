@@ -92,12 +92,12 @@ pub enum ConfigError {
     /// A per-app profile key names an alias that `[apps]` does not define, so
     /// the profile could never apply.
     #[error(
-        "config at {path}: device {device} has a per-app profile for {key}, but [apps] defines no such alias"
+        "config at {path}: {device} has a per-app profile for {key}, but [apps] defines no such alias"
     )]
     UndefinedAppAlias {
         /// The config file containing the profile.
         path: PathBuf,
-        /// The device whose profile it is.
+        /// The device key or app-wide settings scope whose profile it is.
         device: String,
         /// The `app:<alias>` profile key.
         key: String,

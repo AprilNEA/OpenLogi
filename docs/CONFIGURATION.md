@@ -54,10 +54,14 @@ v10 adds the per-device `disabled_keys` policy. Older readers reject a v10
 header before parsing its fields. A v9 file without the policy still loads.
 v11 adds the `[flow]` section. Older readers reject a v11 header before
 parsing its fields. A v10 file without the section loads with Flow disabled.
+v12 adds per-app software smooth scrolling, v13 adds per-app vertical scroll
+sensitivity, and v14 adds per-app thumb-wheel sensitivity. Older files keep
+their defaults, device settings, and existing app profiles. The next save
+writes the current schema.
 
 ## Shape
 
-`schema_version` is required and currently `11`. `selected_device` is an
+`schema_version` is required and currently `14`. `selected_device` is an
 optional physical device key.
 
 `[app_settings]` contains application-wide preferences:
@@ -66,14 +70,81 @@ optional physical device key.
 - `asset_source`: `automatic`, `openlogi`, `cloudflare`, or `fastly`
 - `language`, `appearance`, `device_view_mode` (`grid`, `list`, or `carousel`),
   optional theme names, and optional UI radius
-- `smooth_scroll` toggles finite animation for traditional mouse-wheel input. With it
-  off, a diverted horizontal thumb wheel still scrolls as a phased gesture (ended after
-  120 ms idle) so apps that reveal content on horizontal swipes, like Messages, react;
-  vertical wheel output stays a plain wheel. A mouse whose `smooth_wheel` is on
-  eases its main wheel either way
-- `vertical_scroll_sensitivity`, from `1` through `100` (`14` is 1×);
-  continuous trackpad input remains native
-- `thumbwheel_sensitivity`, from `1` through `100` (`14` is 1×)
+- **Settings → General → App wheel profiles** has three independent controls.
+  **Smooth scrolling** (`smooth_scroll`) is off by default. **Vertical scroll
+  sensitivity** (`vertical_scroll_sensitivity`) controls main-wheel distance.
+  **Horizontal scroll sensitivity** (`thumbwheel_sensitivity`) controls the
+  thumb wheel on supported mice. Both sensitivities range from `1` through
+  `100`, with `14` giving the original speed (1×).
+- Use **Default** for the global values. Select an application to override
+  any of the three settings or restore its inheritance. For smoothing only in
+  specific apps, leave the Default switch off and enable it in those profiles.
+  The **Edit App Wheel Profiles…** button in **Pointer → Scrolling** opens
+  the same General editor.
+- The three TOML tables match the app independently. Each tries the exact
+  app identifier, then `exe:<filename>`, then `app:<alias>`. With no match,
+  smoothing and vertical sensitivity use their global defaults. A supported
+  thumb wheel inherits its own mouse’s `thumbwheel_sensitivity` when set,
+  then the global value. An explicit app value, including `false` or `14`,
+  takes precedence over those defaults. Remove the entry to restore
+  inheritance. The active app follows `mouse_profile_target`.
+- For example, use smoothing and both sensitivities at `18` by default.
+  For a fictional game (`com.example.game`), turn smoothing off and set both axes to `14`.
+  With the mouse’s **Smooth wheel** off, ordinary vertical wheel events pass
+  through at their original speed. The game’s thumb wheel uses 1× even on a
+  mouse with a device-specific sensitivity of `20`. Safari has no app entries, so
+  it inherits smoothing on and vertical sensitivity `18`. Its thumb wheel
+  uses `20` on that mouse and `18` on a mouse without a device override.
+
+  ```toml
+  [app_settings]
+  smooth_scroll = true
+  vertical_scroll_sensitivity = 18
+  thumbwheel_sensitivity = 18
+
+  [app_settings.per_app_smooth_scroll]
+  "com.example.game" = false
+
+  [app_settings.per_app_vertical_scroll_sensitivity]
+  "com.example.game" = 14
+
+  [app_settings.per_app_thumbwheel_sensitivity]
+  "com.example.game" = 14
+  ```
+
+  Software smoothing applies to eligible ordinary OS wheel events on either
+  axis and to scrolling from a captured HID++ thumb wheel. Only the vertical
+  component of an ordinary wheel event uses vertical sensitivity. The
+  horizontal sensitivity setting applies to thumb-wheel reports that OpenLogi
+  can associate with a supported mouse. Ordinary OS horizontal wheel events
+  do not carry a reliable thumb-wheel identity and receive no thumb-wheel
+  sensitivity multiplier. Continuous trackpad input keeps its native path.
+  A macOS wheel event of unknown origin also passes through. With smoothing
+  off and vertical sensitivity at 1×, the wheel profile leaves ordinary
+  events on the native path. An independent device scroll-inversion setting
+  can still reverse the direction. At other vertical sensitivities, OpenLogi
+  scales the vertical distance.
+
+  Once an app wheel override exists, switching the target app ends the old
+  profile's scrolling and discards queued wheel input from that profile, even
+  if both apps inherit the same settings. With no app wheel overrides, the
+  original global behavior continues across apps.
+
+  A mouse with **Smooth wheel** enabled sends its main-wheel reports through
+  HID++. In every app that wheel uses smoothing and the **global** vertical
+  sensitivity. Turn off **Smooth wheel** on that mouse to use its ordinary
+  main-wheel app settings. The game’s `false/14/14` profile leaves button and
+  gesture bindings in effect. A configured thumb-wheel action can still capture
+  the wheel at 1×.
+
+  A supported HID++ thumb wheel can use its sensitivity to scale scrolling or
+  determine how far to turn before a custom wheel action fires. With smoothing
+  off, horizontal scrolling from a captured thumb wheel still uses a phased
+  gesture, ending after 120 ms idle so apps can respond to horizontal swipes. If
+  switching apps requires starting or stopping HID++ thumb-wheel capture
+  while another mouse button is held, the hardware switch waits for release.
+  Thumb-wheel reports already captured during that interval cannot be
+  returned to the OS as their original events.
 - `[app_settings.momentum_scrolling]` (off by default) is momentum scrolling
   for every mouse whose `smooth_wheel` is on; a device's own
   `momentum_scrolling` table overrides it. When SmartShift lets the wheel
@@ -98,8 +169,8 @@ optional physical device key.
     multiplies the glide by this much each time, up to 3× past
     `max_glide_speed`; `100` turns it off
 - `mouse_profile_target`: `pointer` (default, including existing configs that
-  omit this preference) or `focused`. Mouse button profiles follow the window
-  under the pointer; the desktop uses the global bindings. Keyboard profiles
+  omit this preference) or `focused`. Mouse button and wheel profiles
+  follow the window under the pointer. The desktop uses the global defaults. Keyboard profiles
   continue to follow the focused application. Pointer targeting is supported
   on macOS, Windows, and X11; unsupported sessions such as Wayland use the
   focused application, and so does a pointer over a surface OpenLogi cannot
@@ -160,7 +231,8 @@ Common device fields are:
   mouse's main wheel in software, as Logi Options+ "Smooth scrolling" does,
   whatever `smooth_scroll` says. The agent switches the wheel to diverted
   reporting and posts eased scrolling for each report, applying the mouse's
-  scroll inversion and `vertical_scroll_sensitivity`. While it is on,
+  scroll inversion and the global `vertical_scroll_sensitivity`. These main-wheel
+  settings take precedence over app profiles in every app. While it is on,
   `scroll_resolution` only sets how finely the wheel reports: each report is
   converted back to notches, so a notch scrolls the same distance at either
   resolution, and `vertical_scroll_sensitivity` is what makes it faster. It

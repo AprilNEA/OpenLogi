@@ -152,6 +152,9 @@ fn shifted_presses_use_the_gshift_layer_and_fall_back_to_normal() {
     let plan = crate::capture_plan::plan_for_device(
         &config,
         crate::capture_plan::PlanDevice {
+            capabilities: Some(openlogi_core::device::Capabilities::from_feature_ids(&[
+                0x2150,
+            ])),
             physical_key: openlogi_core::device_order::PhysicalDeviceKey::parse(
                 "receiver:cafe:slot:1",
             )

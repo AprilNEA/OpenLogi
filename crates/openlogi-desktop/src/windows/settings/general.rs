@@ -1,12 +1,9 @@
 //! General settings page.
 
 use super::{
-    App, AppState, Entity, FluentBuilder, IconName, InteractiveElement, ParentElement,
-    SettingField, SettingGroup, SettingItem, SettingPage, SharedString, Slider, SliderState,
-    Styled, ThumbwheelSensitivity, VerticalScrollSensitivity, theme,
+    App, AppState, Entity, IconName, InteractiveElement, ParentElement, SettingField, SettingGroup,
+    SettingItem, SettingPage, SharedString, Styled, theme,
 };
-use crate::ui::commit_slider::SliderUnit;
-use crate::ui::slider_row::SliderRow;
 use crate::ui::theme::FocusRingStyle as _;
 use crate::ui::theme::PressableStyle as _;
 use crate::ui::theme::Typography as _;
@@ -16,41 +13,20 @@ use gpui_kit::component::radio::{Radio, RadioGroup};
 use openlogi_core::config::MouseProfileTarget;
 
 use crate::features::pointer::momentum::MomentumPanel;
+use crate::features::profiles::WheelProfileEditor;
 use crate::platform::registration::ServiceStatus;
 
-/// The page's two sensitivity sliders, named so a call site cannot swap two
-/// same-typed `Entity<SliderState>`s without the compiler noticing.
-pub(super) struct SensitivitySliders {
-    pub(super) vertical_scroll: Entity<SliderState>,
-    pub(super) thumbwheel: Entity<SliderState>,
-}
-
 pub(super) fn general_page(
-    sliders: SensitivitySliders,
     momentum: Entity<MomentumPanel>,
+    wheel_profiles: Entity<WheelProfileEditor>,
     registration_status: ServiceStatus,
 ) -> SettingPage {
-    let SensitivitySliders {
-        vertical_scroll,
-        thumbwheel,
-    } = sliders;
-    let group = SettingGroup::new()
-        .item(mouse_profile_target_item())
-        .item(smooth_scrolling_item())
-        .item(sensitivity_item(
-            tr!("pointer.vertical_scroll_sensitivity"),
-            tr!("pointer.vertical_scroll_sensitivity_description"),
-            vertical_scroll,
-            VerticalScrollSensitivity::MAX,
-            VerticalScrollSensitivity::DEFAULT,
-        ))
-        .item(sensitivity_item(
-            tr!("pointer.thumb_wheel_sensitivity"),
-            tr!("pointer.thumbwheel_sensitivity_description"),
-            thumbwheel,
-            ThumbwheelSensitivity::MAX,
-            ThumbwheelSensitivity::DEFAULT,
-        ));
+    let profiles_title = tr!("pointer.app_wheel_profiles");
+    let profile_group = SettingGroup::new()
+        .title(profiles_title.clone())
+        .description(tr!("pointer.app_wheel_profiles_description"))
+        .item(wheel_profile_item(wheel_profiles, profiles_title));
+    let group = SettingGroup::new();
     // Only macOS animates a desktop switch, so only macOS shows the switch.
     // `cfg!` keeps the item and its setter compiled, and used, everywhere.
     let group = if cfg!(target_os = "macos") {
@@ -107,6 +83,8 @@ pub(super) fn general_page(
     SettingPage::new(tr!("app.general"))
         .icon(IconName::Settings)
         .resettable(false)
+        .group(profile_group)
+        .group(SettingGroup::new().item(mouse_profile_target_item()))
         .group(group)
         .group(momentum_group)
 }
@@ -149,18 +127,22 @@ fn mouse_profile_target_item() -> SettingItem {
     .description(tr!("pointer.mouse_profile_target_description"))
 }
 
-/// The smooth-scrolling switch.
-fn smooth_scrolling_item() -> SettingItem {
-    SettingItem::new(
+/// Keep the selector and all three wheel controls together, including in search results.
+fn wheel_profile_item(
+    editor: Entity<WheelProfileEditor>,
+    group_title: SharedString,
+) -> SettingItem {
+    SettingItem::render(move |_, _, _| editor.clone()).keywords([
+        group_title,
+        tr!("pointer.smooth_scrolling_by_app"),
         tr!("pointer.smooth_scrolling"),
-        SettingField::switch(
-            |cx| AppState::try_read(cx).is_some_and(|s| s.app_settings().smooth_scroll),
-            |enabled, cx| {
-                AppState::apply(cx, |state| state.commit_smooth_scroll(enabled));
-            },
-        ),
-    )
-    .description(tr!("pointer.smooth_scrolling_description"))
+        tr!("pointer.vertical_scroll_sensitivity"),
+        tr!("pointer.vertical_sensitivity_search_alias"),
+        tr!("pointer.horizontal_scroll_sensitivity"),
+        tr!("pointer.thumb_wheel_sensitivity"),
+        tr!("profiles.profile"),
+        tr!("profiles.profile", locale = "en"),
+    ])
 }
 
 /// The switch for the Previous/Next Desktop slide.
@@ -209,32 +191,6 @@ fn lock_key_notifications_item() -> SettingItem {
     } else {
         tr!("app.lock_key_notifications_description")
     })
-}
-
-/// A sensitivity slider laid out as the device pages lay theirs out — label
-/// and value on one line, the slider across the row — with "Default" beside
-/// the value while it rests there, in the kit items' type step so it matches
-/// the switches above and below it. A custom item has no title of its own, so
-/// its title and description are its search keywords.
-fn sensitivity_item<T: SliderUnit + std::fmt::Display>(
-    title: SharedString,
-    description: SharedString,
-    slider: Entity<SliderState>,
-    max: T,
-    default: T,
-) -> SettingItem {
-    SettingItem::render({
-        let (title, description) = (title.clone(), description.clone());
-        move |_, _, cx| {
-            let value = T::from_slider(slider.read(cx).value().start());
-            SliderRow::new(title.clone(), Slider::new(&slider).horizontal())
-                .value(value.to_string(), [max.to_string()])
-                .when(value == default, |row| row.marker(tr!("common.default")))
-                .description(description.clone())
-                .compact()
-        }
-    })
-    .keywords([title, description])
 }
 
 /// The launch-at-login switch — a persisted config value the agent reads
@@ -289,13 +245,252 @@ fn open_login_items_button(cx: &App) -> BaseButton {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::tests::{assert_main_wheel, assert_slider_value, click_control, set_slider};
     use crate::services::{assets::AssetResolver, i18n::LOCALE_LOCK};
-    use crate::state::{ConfigPersistence, Sources};
+    use crate::state::{
+        ConfigPersistence, Sources,
+        tests::{KNOWN_MOUSE_KEY, direct_inventory},
+    };
     use crate::windows::{WindowRegistry, settings};
     use gpui::{
         AppContext as _, Bounds, Modifiers, TestAppContext, VisualTestContext, point, px, size,
     };
-    use openlogi_core::config::{Config, UiScale};
+    use openlogi_core::config::{
+        Config, ThumbwheelSensitivity, UiScale, VerticalScrollSensitivity,
+    };
+    use openlogi_core::device::DeviceInventory;
+
+    const SAFARI: &str = "com.apple.Safari";
+    const GAME: &str = "com.example.game";
+    const HORIZONTAL: &str = "Horizontal scroll sensitivity";
+
+    fn open_scroll_settings(
+        cx: &mut TestAppContext,
+        config: Config,
+        read_only: bool,
+        inventories: &[DeviceInventory],
+    ) -> VisualTestContext {
+        let handle = cx.update(|cx| {
+            let (commands, _) = tokio::sync::mpsc::unbounded_channel();
+            let resolver = AssetResolver::new();
+            let mut sources = Sources {
+                inventories,
+                ..Sources::in_memory(config, &resolver, commands)
+            };
+            if read_only {
+                sources.persistence = ConfigPersistence::ReadOnly("read-only test".into());
+            }
+            let mut state = AppState::new(sources);
+            let _ = state.set_foreground(openlogi_ipc::ForegroundApps {
+                current: None,
+                recent: [(SAFARI, "Safari"), (GAME, "Example Game")]
+                    .map(|(id, name)| openlogi_core::app::ForegroundApp {
+                        id: id.into(),
+                        display_name: name.into(),
+                    })
+                    .into(),
+            });
+            AppState::set_global(cx.new(|_| state), cx);
+            settings::open(cx);
+            cx.global::<WindowRegistry>().settings.unwrap()
+        });
+        let mut visual = VisualTestContext::from_window(handle.into(), cx);
+        visual.simulate_resize(size(px(920.), px(640.)));
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        visual
+    }
+
+    fn add_recent_app(visual: &mut VisualTestContext, row: &'static str) {
+        click_control(visual, "scroll-profile:add-app-profile");
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        click_control(visual, row);
+    }
+
+    #[gpui::test]
+    fn smooth_scroll_app_profile_can_be_enabled_through_general_settings(cx: &mut TestAppContext) {
+        let _locale = LOCALE_LOCK.lock().unwrap();
+        rust_i18n::set_locale("en");
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            theme::register_builtin_themes(cx);
+        });
+        for read_only in [false, true] {
+            let mut visual = open_scroll_settings(cx, Config::ephemeral(), read_only, &[]);
+            visual.simulate_resize(size(px(920.), px(1000.)));
+            add_recent_app(&mut visual, "scroll-profile:catalog-app:com.apple.Safari");
+            visual.update(|_, cx| {
+                let state = AppState::try_read(cx).unwrap();
+                assert_eq!(state.editing_scroll_app(), Some(SAFARI));
+                assert!(!state.editing_smooth_scroll());
+                assert!(state.app_settings().per_app_smooth_scroll.is_empty());
+            });
+            click_control(&mut visual, "vertical-scroll-profile-inheritance");
+            visual.update(|_, cx| {
+                let state = AppState::try_read(cx).unwrap();
+                assert_eq!(
+                    state.editing_vertical_scroll_sensitivity_overridden(),
+                    !read_only
+                );
+                assert_eq!(
+                    state.editing_vertical_scroll_sensitivity(),
+                    VerticalScrollSensitivity::DEFAULT
+                );
+            });
+            click_control(&mut visual, "thumbwheel-profile-inheritance");
+            visual.update(|_, cx| {
+                let state = AppState::try_read(cx).unwrap();
+                assert_eq!(
+                    state.editing_thumbwheel_sensitivity_overridden(),
+                    !read_only
+                );
+                assert_eq!(
+                    state.editing_thumbwheel_sensitivity(),
+                    ThumbwheelSensitivity::DEFAULT
+                );
+            });
+            click_control(&mut visual, "smooth-scroll-profile-setting-control");
+            visual.update(|_, cx| {
+                let state = AppState::try_read(cx).unwrap();
+                assert_eq!(state.editing_smooth_scroll(), !read_only);
+                assert!(!state.app_settings().smooth_scroll);
+            });
+            click_control(&mut visual, "scroll-profile:default");
+            visual.update(|window, cx| {
+                let state = AppState::try_read(cx).unwrap();
+                assert_eq!(state.editing_scroll_app(), None);
+                assert!(!state.editing_smooth_scroll());
+                assert_eq!(
+                    state
+                        .app_settings()
+                        .per_app_smooth_scroll
+                        .contains_key(SAFARI),
+                    !read_only
+                );
+                window.remove_window();
+            });
+        }
+    }
+
+    #[gpui::test]
+    fn main_wheel_profile_game_uses_native_14_while_safari_inherits_18(cx: &mut TestAppContext) {
+        let _locale = LOCALE_LOCK.lock().unwrap();
+        rust_i18n::set_locale("en");
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            theme::register_builtin_themes(cx);
+        });
+        let mut config = Config::ephemeral();
+        config.app_settings.smooth_scroll = true;
+        config.app_settings.vertical_scroll_sensitivity =
+            VerticalScrollSensitivity::try_new(18).unwrap();
+        config.set_selected_device(Some(KNOWN_MOUSE_KEY.into()));
+        config.set_device_thumbwheel_sensitivity(
+            KNOWN_MOUSE_KEY,
+            Some(ThumbwheelSensitivity::try_new(36).unwrap()),
+        );
+        let mut visual = open_scroll_settings(
+            cx,
+            config,
+            false,
+            &[
+                direct_inventory([0xa3, 0x93, 0xca, 0xe0]),
+                direct_inventory([1, 2, 3, 4]),
+            ],
+        );
+        visual.simulate_resize(size(px(920.), px(1000.)));
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        assert_main_wheel(&mut visual, None, true, 18);
+        assert_slider_value(&mut visual, HORIZONTAL, 14);
+
+        add_recent_app(&mut visual, "scroll-profile:catalog-app:com.example.game");
+        assert_main_wheel(&mut visual, Some(GAME), true, 18);
+        assert_slider_value(&mut visual, HORIZONTAL, 36);
+        click_control(&mut visual, "smooth-scroll-profile-setting-control");
+        set_slider(&mut visual, "Vertical scroll sensitivity", 14);
+        set_slider(&mut visual, HORIZONTAL, 75);
+        assert_slider_value(&mut visual, HORIZONTAL, 75);
+        assert_main_wheel(&mut visual, Some(GAME), false, 14);
+        visual.update(|_, cx| {
+            let state = AppState::try_read(cx).unwrap();
+            assert!(state.editing_smooth_scroll_overridden());
+            assert!(state.editing_vertical_scroll_sensitivity_overridden());
+        });
+
+        add_recent_app(&mut visual, "scroll-profile:catalog-app:com.apple.Safari");
+        assert_main_wheel(&mut visual, Some(SAFARI), true, 18);
+        assert_slider_value(&mut visual, HORIZONTAL, 36);
+        // As the main window selects another mouse, General follows its fallback.
+        visual.update(|_, cx| {
+            AppState::apply(cx, |state| {
+                let other = state
+                    .devices()
+                    .iter()
+                    .position(|record| record.config_key != KNOWN_MOUSE_KEY)
+                    .unwrap();
+                state.select_device(other)
+            });
+        });
+        assert_slider_value(&mut visual, HORIZONTAL, 14);
+        visual.update(|_, cx| {
+            let state = AppState::try_read(cx).unwrap();
+            assert!(!state.editing_smooth_scroll_overridden());
+            assert!(!state.editing_vertical_scroll_sensitivity_overridden());
+            assert!(!state.editing_thumbwheel_sensitivity_overridden());
+            assert_eq!(
+                state.app_settings().thumbwheel_sensitivity,
+                ThumbwheelSensitivity::DEFAULT
+            );
+        });
+        click_control(&mut visual, "scroll-profile:default");
+        assert_main_wheel(&mut visual, None, true, 18);
+        click_control(&mut visual, "scroll-profile:app:com.example.game");
+        assert_main_wheel(&mut visual, Some(GAME), false, 14);
+        assert_slider_value(&mut visual, HORIZONTAL, 75);
+        visual.update(|window, _| window.remove_window());
+    }
+
+    #[gpui::test]
+    fn main_wheel_profile_pins_and_restores_each_inherited_value(cx: &mut TestAppContext) {
+        let _locale = LOCALE_LOCK.lock().unwrap();
+        rust_i18n::set_locale("en");
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            theme::register_builtin_themes(cx);
+        });
+        let mut visual = open_scroll_settings(cx, Config::ephemeral(), false, &[]);
+        visual.simulate_resize(size(px(920.), px(1000.)));
+        add_recent_app(&mut visual, "scroll-profile:catalog-app:com.example.game");
+        assert_main_wheel(&mut visual, Some(GAME), false, 14);
+        click_control(&mut visual, "vertical-scroll-profile-inheritance");
+        visual.update(|_, cx| {
+            let state = AppState::try_read(cx).unwrap();
+            assert!(state.editing_vertical_scroll_sensitivity_overridden());
+            assert!(!state.editing_smooth_scroll_overridden());
+        });
+        click_control(&mut visual, "smooth-scroll-profile-inheritance");
+        click_control(&mut visual, "thumbwheel-profile-inheritance");
+        click_control(&mut visual, "scroll-profile:default");
+        click_control(&mut visual, "smooth-scroll-profile-setting-control");
+        set_slider(&mut visual, "Vertical scroll sensitivity", 18);
+        set_slider(&mut visual, HORIZONTAL, 32);
+        assert_main_wheel(&mut visual, None, true, 18);
+
+        click_control(&mut visual, "scroll-profile:app:com.example.game");
+        assert_main_wheel(&mut visual, Some(GAME), false, 14);
+        click_control(&mut visual, "smooth-scroll-profile-inheritance");
+        assert_main_wheel(&mut visual, Some(GAME), true, 14);
+        click_control(&mut visual, "vertical-scroll-profile-inheritance");
+        assert_main_wheel(&mut visual, Some(GAME), true, 18);
+        assert_slider_value(&mut visual, HORIZONTAL, 14);
+        click_control(&mut visual, "thumbwheel-profile-inheritance");
+        assert_slider_value(&mut visual, HORIZONTAL, 32);
+        visual.update(|window, cx| {
+            let state = AppState::try_read(cx).unwrap();
+            assert!(!state.editing_vertical_scroll_sensitivity_overridden());
+            assert!(!state.editing_smooth_scroll_overridden());
+            window.remove_window();
+        });
+    }
 
     #[gpui::test]
     fn mouse_profile_target_choices_update_state_and_respect_failed_saves(cx: &mut TestAppContext) {
@@ -327,6 +522,11 @@ mod tests {
             let mut visual = VisualTestContext::from_window(handle.into(), cx);
             visual.simulate_resize(size(px(920.), px(640.)));
             visual.update(|window, cx| window.draw(cx).clear(cx));
+            visual.update(|window, cx| {
+                use gpui_kit::test::TestWindowExt as _;
+                window.within("settings-sidebar").click("input-state", cx);
+                window.input(&tr!("pointer.mouse_button_profiles"), cx);
+            });
             let viewport = Bounds::new(point(px(0.), px(0.)), size(px(920.), px(640.)));
             let pointer = visual.debug_bounds("mouse-profile-pointer").unwrap();
             let focused = visual.debug_bounds("mouse-profile-focused").unwrap();
@@ -362,6 +562,131 @@ mod tests {
                 );
                 window.remove_window();
             });
+        }
+        rust_i18n::set_locale("en");
+    }
+
+    #[gpui::test]
+    fn horizontal_sensitivity_is_reachable_in_a_narrow_settings_window(cx: &mut TestAppContext) {
+        use gpui::{ScrollDelta, ScrollEvent};
+        use gpui_kit::test::TestQueryExt as _;
+        let _locale = LOCALE_LOCK.lock().unwrap();
+        rust_i18n::set_locale("en");
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            theme::register_builtin_themes(cx);
+        });
+        let mut visual = open_scroll_settings(cx, Config::ephemeral(), false, &[]);
+        visual.simulate_resize(size(px(640.), px(460.)));
+        visual.update(gpui_kit::test::TestWindowExt::render_frame);
+        add_recent_app(&mut visual, "scroll-profile:catalog-app:com.example.game");
+        for _ in 0..8 {
+            let bounds = visual.update(|window, _| window.find_by_label(HORIZONTAL).bounds());
+            if bounds.top() >= px(40.) && bounds.bottom() <= px(440.) {
+                break;
+            }
+            visual.simulate_event(ScrollEvent {
+                position: point(px(470.), px(330.)),
+                delta: ScrollDelta::Pixels(point(px(0.), px(-85.))),
+                ..Default::default()
+            });
+            visual.update(gpui_kit::test::TestWindowExt::render_frame);
+        }
+        set_slider(&mut visual, HORIZONTAL, 38);
+        assert_slider_value(&mut visual, HORIZONTAL, 38);
+        visual.update(|_, cx| {
+            let state = AppState::try_read(cx).unwrap();
+            assert!(state.editing_thumbwheel_sensitivity_overridden());
+            assert!(!state.editing_smooth_scroll_overridden());
+            assert!(!state.editing_vertical_scroll_sensitivity_overridden());
+            assert_eq!(state.editing_thumbwheel_sensitivity().into_inner(), 38);
+            settings::open_at(settings::SettingsPage::WheelProfiles, cx);
+        });
+        visual.run_until_parked();
+        visual.update(gpui_kit::test::TestWindowExt::render_frame);
+        // The same General page was already mounted and vertically scrolled.
+        // The shortcut restores the top of the editor and retains the saved app.
+        click_control(&mut visual, "scroll-profile:default");
+        click_control(&mut visual, "scroll-profile:app:com.example.game");
+        visual.update(|window, cx| {
+            assert_eq!(
+                AppState::try_read(cx)
+                    .unwrap()
+                    .editing_thumbwheel_sensitivity()
+                    .into_inner(),
+                38
+            );
+            window.remove_window();
+        });
+    }
+
+    #[gpui::test]
+    fn searching_for_either_wheel_or_profiles_finds_the_whole_editor(cx: &mut TestAppContext) {
+        use gpui_kit::test::{TestQueryExt as _, TestWindowExt as _};
+
+        let _locale = LOCALE_LOCK.lock().unwrap();
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            theme::register_builtin_themes(cx);
+        });
+        for (locale, vertical, horizontal, thumb, profile) in [
+            (
+                "en",
+                "Vertical sensitivity",
+                "Horizontal scroll",
+                "Thumb wheel",
+                "Profile",
+            ),
+            ("zh-CN", "垂直灵敏度", "横向滚动", "拇指滚轮", "配置文件"),
+        ] {
+            rust_i18n::set_locale(locale);
+            let mut visual = open_scroll_settings(cx, Config::ephemeral(), false, &[]);
+            visual.update(|window, cx| {
+                window.within("settings-sidebar").click("input-state", cx);
+            });
+            for (query, show_editor) in [
+                (vertical, true),
+                (horizontal, true),
+                (thumb, true),
+                (profile, true),
+                ("Profile", true),
+                ("no-such-wheel-search-term", false),
+            ] {
+                visual.update(|window, cx| {
+                    window.press(
+                        if cfg!(target_os = "macos") {
+                            "cmd-a"
+                        } else {
+                            "ctrl-a"
+                        },
+                        cx,
+                    );
+                    window.input(query, cx);
+                    let shows_slider = |label: &str| {
+                        window.try_find_by_label(label).is_some_and(|item| {
+                            item.role() == Some(gpui::Role::Slider) && item.visible()
+                        })
+                    };
+                    assert_eq!(
+                        shows_slider(&tr!("pointer.vertical_scroll_sensitivity")),
+                        show_editor,
+                        "{locale}: {query}"
+                    );
+                    assert_eq!(
+                        shows_slider(&tr!("pointer.horizontal_scroll_sensitivity")),
+                        show_editor,
+                        "{locale}: {query}"
+                    );
+                });
+                assert_eq!(
+                    visual
+                        .debug_bounds("smooth-scroll-profile-setting-control")
+                        .is_some(),
+                    show_editor,
+                    "{locale}: {query}"
+                );
+            }
+            visual.update(|window, _| window.remove_window());
         }
         rust_i18n::set_locale("en");
     }

@@ -47,12 +47,26 @@ use crate::{ChannelRegistry, DeviceIoGate, DeviceRoute, SharedChannel};
 /// before the device accepts feature writes again.
 const REARM_SETTLE_DELAY: Duration = Duration::from_millis(200);
 
+/// Receives decoded inputs synchronously at the device report boundary.
+/// Implementations should enqueue promptly. This is where a host can attach
+/// the active application's identity before a report waits for dispatch.
+pub trait CaptureInputSink: Send + Sync + 'static {
+    /// Accept one input in the order the session observes it.
+    fn emit(&self, input: CapturedInput);
+}
+
+impl CaptureInputSink for mpsc::UnboundedSender<CapturedInput> {
+    fn emit(&self, input: CapturedInput) {
+        let _ = self.send(input);
+    }
+}
+
 /// What the process running a capture session hands it: where inputs go, when
 /// to stop, and the handles that tie the session to the rest of the device
 /// layer.
-pub struct CaptureHost<'a> {
+pub struct CaptureHost<'a, S = mpsc::UnboundedSender<CapturedInput>> {
     /// Receives every [`CapturedInput`] the session decodes.
-    pub sink: mpsc::UnboundedSender<CapturedInput>,
+    pub sink: S,
     /// Resolves, or is dropped, when the session should restore its controls
     /// and return. [`CaptureSessionStop::Handoff`] names the route that now
     /// reaches the same physical device.
@@ -68,7 +82,7 @@ pub struct CaptureHost<'a> {
     pub device_io: DeviceIoGate,
 }
 
-impl CaptureHost<'_> {
+impl<S> CaptureHost<'_, S> {
     /// The channel inventory currently publishes for `route`, once host
     /// device I/O is allowed. A registry miss is not retried here: the caller
     /// runs the session again after a later inventory publication.
@@ -131,6 +145,9 @@ pub(super) fn subscribe_reporting_changes(controls: &ReprogControlsV4) -> Report
 /// armed, what their reports mean, and how they are re-armed and handed back.
 /// [`run_capture`] owns the rest.
 pub(super) trait ArmedCapture {
+    /// The input destination shared by this session's report listeners.
+    type Sink: Clone;
+
     /// What this capture is called in the session's logs.
     const NAME: &'static str;
     /// Whether the session probes its channel once it goes quiet.
@@ -144,7 +161,7 @@ pub(super) trait ArmedCapture {
     fn report_handler(
         &self,
         device_index: u8,
-        sink: mpsc::UnboundedSender<CapturedInput>,
+        sink: Self::Sink,
     ) -> impl Fn(&v20::Message) + Send + Sync + 'static;
 
     /// Build the handler for every raw report read from the node, before the
@@ -156,7 +173,7 @@ pub(super) trait ArmedCapture {
     fn raw_report_handler(
         &self,
         _device_index: u8,
-        _sink: mpsc::UnboundedSender<CapturedInput>,
+        _sink: Self::Sink,
     ) -> impl Fn(&[u8]) + Send + Sync + 'static {
         |_bytes| {}
     }
@@ -213,7 +230,7 @@ pub(super) trait ArmedCapture {
 pub(super) async fn run_capture<A: ArmedCapture>(
     shared: SharedChannel,
     mut armed: A,
-    host: CaptureHost<'_>,
+    host: CaptureHost<'_, A::Sink>,
 ) -> CaptureSessionOutcome {
     let CaptureHost {
         sink,

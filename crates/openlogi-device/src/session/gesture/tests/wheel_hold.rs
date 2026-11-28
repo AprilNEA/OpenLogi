@@ -182,7 +182,7 @@ async fn raw_wheel_while_back_is_held_reaches_the_dispatcher_in_order() {
     let (armed, _channel, _handle) = arm(DIVERTABLE_RAW_WHEEL, true).await;
     let capture = GestureCapture::new(armed);
     let (sink, mut inputs) = mpsc::unbounded_channel();
-    let handler = capture.report_handler(0xff, sink);
+    let handler = capture.report_handler(0xff, Arc::new(sink));
     handler(&reprog_event(0, &BACK.to_be_bytes()));
     let [high, low] = (-16i16).to_be_bytes();
     // divertedRawWheel: high resolution (bit 4), one period, delta -16.
