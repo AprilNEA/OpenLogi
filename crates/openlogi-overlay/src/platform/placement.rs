@@ -206,24 +206,25 @@ fn wayland_notice_windows(size: Size<Pixels>) -> Vec<WindowOptions> {
         window_bounds: bounds,
         ..notice_window_options()
     };
-    layer_shell_notice(bounds)
-        .into_iter()
-        .chain([plain])
-        .collect()
+    super::IndicatorBackend::current().windows(plain)
 }
 
-/// The notice as a layer-shell surface on the bottom edge, above other
-/// windows and never taking the keyboard, unless the compositor refused one.
+/// A backend choice captured before opening preserves both the preferred
+/// surface and the ordinary window for compositors that reject layer-shell.
 #[cfg(target_os = "linux")]
-fn layer_shell_notice(bounds: Option<WindowBounds>) -> Option<WindowOptions> {
+pub(super) fn wayland_indicator_windows(plain: WindowOptions) -> Vec<WindowOptions> {
+    let layer = layer_shell_indicator(plain.window_bounds, plain.app_id.as_deref());
+    vec![layer, plain]
+}
+
+/// Shared non-focusing layer policy for notices and backlight indicators.
+#[cfg(target_os = "linux")]
+fn layer_shell_indicator(bounds: Option<WindowBounds>, app_id: Option<&str>) -> WindowOptions {
     use gpui::layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions};
 
-    if super::layer_shell_refused() {
-        return None;
-    }
-    Some(WindowOptions {
+    WindowOptions {
         kind: gpui::WindowKind::LayerShell(LayerShellOptions {
-            namespace: crate::notice::NOTICE_APP_ID.to_string(),
+            namespace: app_id.unwrap_or(crate::notice::NOTICE_APP_ID).to_string(),
             layer: Layer::Overlay,
             anchor: Anchor::BOTTOM,
             margin: Some((px(0.0), px(0.0), px(crate::notice::BOTTOM_MARGIN), px(0.0))),
@@ -231,13 +232,9 @@ fn layer_shell_notice(bounds: Option<WindowBounds>) -> Option<WindowOptions> {
             ..LayerShellOptions::default()
         }),
         window_bounds: bounds,
+        app_id: app_id.map(str::to_string),
         ..notice_window_options()
-    })
-}
-
-#[cfg(not(target_os = "linux"))]
-const fn layer_shell_notice(_bounds: Option<WindowBounds>) -> Option<WindowOptions> {
-    None
+    }
 }
 
 /// The ring's window on `display` as a layer-shell surface over the whole
@@ -287,7 +284,7 @@ fn covering_window_options(display: &dyn PlatformDisplay) -> WindowOptions {
 }
 
 /// Report whether GPUI's own backend selection is Wayland.
-fn on_wayland() -> bool {
+pub(super) fn on_wayland() -> bool {
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     {
         gpui::guess_compositor() == "Wayland"
@@ -345,6 +342,26 @@ pub(crate) fn usable_in_display(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn notice_layer_surface_keeps_its_own_identity_and_bottom_placement() {
+        use gpui::layer_shell::Anchor;
+
+        let size = crate::notice::stack_size(3);
+        let bounds = Some(WindowBounds::Windowed(Bounds::new(Point::default(), size)));
+        let options = layer_shell_indicator(bounds, Some(crate::notice::NOTICE_APP_ID));
+        let gpui::WindowKind::LayerShell(layer) = options.kind else {
+            panic!("notices still use layer shell");
+        };
+        assert_eq!(layer.namespace, crate::notice::NOTICE_APP_ID);
+        assert_eq!(layer.anchor, Anchor::BOTTOM);
+        assert_eq!(options.window_bounds, bounds);
+        assert_eq!(
+            options.app_id.as_deref(),
+            Some(crate::notice::NOTICE_APP_ID)
+        );
+    }
 
     const fn rect(x: f64, y: f64, width: f64, height: f64) -> CocoaRect {
         CocoaRect {

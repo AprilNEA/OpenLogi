@@ -17,6 +17,34 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use tracing::{debug, warn};
 
+/// The window-system choice captured before opening a transient indicator.
+#[derive(Clone, Copy)]
+pub(crate) enum IndicatorBackend {
+    #[cfg(target_os = "linux")]
+    WaylandLayerShell,
+    Plain,
+}
+
+impl IndicatorBackend {
+    /// Prefer layer-shell only on Wayland and until the compositor refuses it.
+    pub(crate) fn current() -> Self {
+        #[cfg(target_os = "linux")]
+        if placement::on_wayland() && !layer_shell_refused() {
+            return Self::WaylandLayerShell;
+        }
+        Self::Plain
+    }
+
+    /// Window options in preference order, retaining the original as fallback.
+    pub(crate) fn windows(self, plain: gpui::WindowOptions) -> Vec<gpui::WindowOptions> {
+        match self {
+            #[cfg(target_os = "linux")]
+            Self::WaylandLayerShell => placement::wayland_indicator_windows(plain),
+            Self::Plain => vec![plain],
+        }
+    }
+}
+
 /// Open the first of `alternatives` that shows a window, returning the first
 /// window it opened.
 ///

@@ -8,6 +8,8 @@ use openlogi_core::hid::backlight::max_backlight_level;
 use openlogi_ipc::BacklightObservation;
 use openlogi_ui::color::{self, neutral};
 
+use crate::platform::IndicatorBackend;
+
 pub(crate) struct BacklightView {
     pub(crate) observation: BacklightObservation,
 }
@@ -89,9 +91,77 @@ pub(crate) fn window_options(cx: &mut App) -> WindowOptions {
     }
 }
 
+/// Open the backlight indicator with the captured backend's preferred surface,
+/// falling back to its ordinary window if the preferred surface cannot open.
+pub(crate) fn open_window<H>(
+    options: WindowOptions,
+    backend: IndicatorBackend,
+    open: impl FnMut(WindowOptions) -> anyhow::Result<H>,
+) -> Option<H> {
+    let alternatives = backend
+        .windows(options)
+        .into_iter()
+        .map(|options| vec![options])
+        .collect();
+    crate::platform::open_first(alternatives, open)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn backlight_window_selection(cx: &mut gpui::TestAppContext) {
+        let cases = [(IndicatorBackend::Plain, false, &["popup"][..])];
+        #[cfg(target_os = "linux")]
+        let cases = cases.into_iter().chain([
+            (IndicatorBackend::WaylandLayerShell, false, &["layer"][..]),
+            (
+                IndicatorBackend::WaylandLayerShell,
+                true,
+                &["layer", "popup"][..],
+            ),
+        ]);
+
+        for (backend, reject_layer, expected) in cases {
+            let options = cx.update(window_options);
+            let bounds = options.window_bounds;
+            let mut attempted = Vec::new();
+            let opened = open_window(options, backend, |options| {
+                assert_eq!(options.app_id.as_deref(), Some("openlogi-backlight-osd"));
+                assert_eq!(options.window_bounds, bounds);
+                assert!(!options.focus);
+                assert!(!options.is_movable);
+                assert!(!options.is_resizable);
+                let kind = match options.kind {
+                    #[cfg(target_os = "linux")]
+                    WindowKind::LayerShell(layer) => {
+                        use gpui::layer_shell::{Anchor, KeyboardInteractivity, Layer};
+
+                        assert_eq!(layer.namespace, "openlogi-backlight-osd");
+                        assert_eq!(layer.layer, Layer::Overlay);
+                        assert_eq!(layer.anchor, Anchor::BOTTOM);
+                        assert_eq!(layer.exclusive_zone, None);
+                        assert_eq!(layer.keyboard_interactivity, KeyboardInteractivity::None);
+                        assert_eq!(
+                            layer.margin,
+                            Some((px(0.0), px(0.0), px(crate::notice::BOTTOM_MARGIN), px(0.0)))
+                        );
+                        "layer"
+                    }
+                    WindowKind::PopUp => "popup",
+                    other => panic!("unexpected backlight window kind: {other:?}"),
+                };
+                attempted.push(kind);
+                if reject_layer && kind == "layer" {
+                    anyhow::bail!("compositor refused the preferred layer surface");
+                }
+                Ok(attempted.len())
+            });
+            assert_eq!(attempted, expected, "backlight opening order");
+            assert_eq!(opened, Some(expected.len()), "a backlight window opened");
+        }
+    }
 
     #[test]
     fn highest_reported_level_fills_the_bar() {
