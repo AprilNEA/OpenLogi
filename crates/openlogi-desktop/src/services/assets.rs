@@ -25,6 +25,8 @@ mod paths;
 pub(crate) mod queries;
 pub mod sync;
 
+pub(crate) use images::device_image;
+
 pub(crate) use self::glow::GlowGeometry;
 
 use std::cell::RefCell;

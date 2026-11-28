@@ -1,9 +1,245 @@
 //! Device image and depot-manifest helpers.
 
 use std::path::Path;
+use std::{
+    cell::RefCell,
+    collections::{HashMap, VecDeque},
+    path::PathBuf,
+};
 
 use openlogi_assets::DepotManifest;
 use tracing::warn;
+
+/// Draw device artwork after filtering it to the display's physical pixel height.
+/// GPUI samples textures without mipmaps; feeding it the full-size Logitech
+/// renders makes fine surface textures alias when the device is drawn small.
+pub(crate) fn device_image(path: std::path::PathBuf, height: gpui::Pixels) -> gpui::Img {
+    gpui::img(move |window: &mut gpui::Window, cx: &mut gpui::App| {
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "layout heights are positive physical pixel counts, rounded before conversion"
+        )]
+        let physical_height = (f32::from(height) * window.scale_factor()).ceil().max(1.) as u32;
+        if cx.try_global::<DeviceImageSizes>().is_none() {
+            cx.set_global(DeviceImageSizes::default());
+        }
+        if let Some(expired) = cx
+            .global::<DeviceImageSizes>()
+            .record(&path, physical_height)
+        {
+            evict_device_image(&path, expired, window, cx);
+        }
+        let loaded = window
+            .use_asset::<gpui::AssetLogger<DeviceImage>>(&(path.clone(), physical_height), cx);
+        if matches!(loaded, Some(Ok(_)))
+            && let Some(expired) = cx
+                .global::<DeviceImageSizes>()
+                .loaded(&path, physical_height)
+        {
+            evict_device_image(&path, expired, window, cx);
+        }
+        loaded.or_else(|| {
+            let previous = cx.global::<DeviceImageSizes>().last_loaded(&path)?;
+            window.get_asset::<gpui::AssetLogger<DeviceImage>>(&(path.clone(), previous), cx)
+        })
+    })
+}
+
+fn evict_device_image(path: &Path, height: u32, window: &mut gpui::Window, cx: &mut gpui::App) {
+    let key = (path.to_owned(), height);
+    if let Some(Ok(image)) = window.get_asset::<gpui::AssetLogger<DeviceImage>>(&key, cx) {
+        cx.drop_image(image, Some(window));
+    }
+    cx.remove_asset::<gpui::AssetLogger<DeviceImage>>(&key);
+}
+
+// A device can appear at several sizes across the gallery and Buttons view.
+// Keep recent sizes plus the last drawable image while a replacement loads.
+const RECENT_DEVICE_IMAGE_SIZES: usize = 4;
+
+#[derive(Default)]
+struct DeviceImageSizes(RefCell<HashMap<PathBuf, PathImageState>>);
+
+#[derive(Default)]
+enum PathImageState {
+    #[default]
+    Unrequested,
+    Pending {
+        recent: RecentImageSizes,
+    },
+    Drawable {
+        recent: RecentImageSizes,
+        height: u32,
+    },
+}
+
+enum ImageEvent {
+    Requested(u32),
+    Loaded(u32),
+}
+
+// The newest request is always present, including while no image is drawable.
+struct RecentImageSizes {
+    newest: u32,
+    older: VecDeque<u32>,
+}
+
+impl RecentImageSizes {
+    fn new(height: u32) -> Self {
+        Self {
+            newest: height,
+            older: VecDeque::new(),
+        }
+    }
+
+    fn contains(&self, height: u32) -> bool {
+        self.newest == height || self.older.contains(&height)
+    }
+
+    fn request(&mut self, height: u32) -> Option<u32> {
+        if self.newest == height {
+            return None;
+        }
+        self.older.retain(|&size| size != height);
+        self.older.push_back(self.newest);
+        self.newest = height;
+        if self.older.len() >= RECENT_DEVICE_IMAGE_SIZES {
+            self.older.pop_front()
+        } else {
+            None
+        }
+    }
+}
+
+impl PathImageState {
+    fn transition(&mut self, event: ImageEvent) -> Option<u32> {
+        let (next, expired) = match (std::mem::take(self), event) {
+            (Self::Unrequested, ImageEvent::Requested(height)) => (
+                Self::Pending {
+                    recent: RecentImageSizes::new(height),
+                },
+                None,
+            ),
+            (Self::Pending { mut recent }, ImageEvent::Requested(height)) => {
+                let expired = recent.request(height);
+                (Self::Pending { recent }, expired)
+            }
+            (Self::Drawable { mut recent, height }, ImageEvent::Requested(requested)) => {
+                let expired = recent
+                    .request(requested)
+                    .filter(|&expired| expired != height);
+                (Self::Drawable { recent, height }, expired)
+            }
+            (Self::Pending { recent }, ImageEvent::Loaded(height)) if recent.contains(height) => {
+                (Self::Drawable { recent, height }, None)
+            }
+            (Self::Drawable { recent, height }, ImageEvent::Loaded(loaded))
+                if recent.contains(loaded) =>
+            {
+                let expired = (!recent.contains(height)).then_some(height);
+                (
+                    Self::Drawable {
+                        recent,
+                        height: loaded,
+                    },
+                    expired,
+                )
+            }
+            (state, ImageEvent::Loaded(_)) => (state, None),
+        };
+        *self = next;
+        expired
+    }
+
+    fn drawable_height(&self) -> Option<u32> {
+        match self {
+            Self::Drawable { height, .. } => Some(*height),
+            Self::Unrequested | Self::Pending { .. } => None,
+        }
+    }
+}
+
+impl gpui::Global for DeviceImageSizes {}
+
+impl DeviceImageSizes {
+    fn record(&self, path: &Path, height: u32) -> Option<u32> {
+        self.0
+            .borrow_mut()
+            .entry(path.to_owned())
+            .or_default()
+            .transition(ImageEvent::Requested(height))
+    }
+
+    fn loaded(&self, path: &Path, height: u32) -> Option<u32> {
+        self.0
+            .borrow_mut()
+            .get_mut(path)?
+            .transition(ImageEvent::Loaded(height))
+    }
+
+    fn last_loaded(&self, path: &Path) -> Option<u32> {
+        self.0.borrow().get(path)?.drawable_height()
+    }
+}
+
+struct DeviceImage;
+
+impl gpui::Asset for DeviceImage {
+    type Source = (std::path::PathBuf, u32);
+    type Output = Result<std::sync::Arc<gpui::RenderImage>, gpui::ImageCacheError>;
+
+    #[expect(
+        clippy::manual_async_fn,
+        reason = "the Send + 'static future must not capture the non-Send App borrow"
+    )]
+    fn load(
+        (path, height): Self::Source,
+        _cx: &mut gpui::App,
+    ) -> impl Future<Output = Self::Output> + Send + 'static {
+        async move {
+            let decoded = image::ImageReader::open(path)?
+                .with_guessed_format()?
+                .decode()?;
+            let image = prepare_device_image(decoded, height);
+            Ok(std::sync::Arc::new(gpui::RenderImage::new(vec![
+                image::Frame::new(image),
+            ])))
+        }
+    }
+}
+
+fn prepare_device_image(image: image::DynamicImage, height: u32) -> image::RgbaImage {
+    let image = if height < image.height() {
+        // Filter premultiplied channels so invisible RGB cannot bleed into
+        // translucent silhouette edges. GPUI expects straight alpha again.
+        let mut pixels = image.into_rgba32f();
+        for pixel in pixels.pixels_mut() {
+            let alpha = pixel.0[3];
+            for channel in &mut pixel.0[..3] {
+                *channel *= alpha;
+            }
+        }
+        let mut resized = image::DynamicImage::ImageRgba32F(pixels)
+            .resize(u32::MAX, height, image::imageops::FilterType::Lanczos3)
+            .into_rgba32f();
+        for pixel in resized.pixels_mut() {
+            let alpha = pixel.0[3];
+            for channel in &mut pixel.0[..3] {
+                *channel = if alpha > 0. { *channel / alpha } else { 0. };
+            }
+        }
+        image::DynamicImage::ImageRgba32F(resized)
+    } else {
+        image
+    };
+    let mut pixels = image.into_rgba8();
+    // RenderImage consumes BGRA, while the decoder returns RGBA.
+    for pixel in pixels.pixels_mut() {
+        pixel.0.swap(0, 2);
+    }
+    pixels
+}
 
 /// The leading bytes [`read_image_dimensions`] reads: a WebP `VP8X` or
 /// `VP8 ` size ends at byte 30, a PNG one at byte 24.
@@ -251,4 +487,127 @@ pub(super) fn load_manifest(dir: &Path) -> Option<DepotManifest> {
             |e| warn!(error = ?e, path = %manifest_path.display(), "depot manifest unreadable"),
         )
         .ok()
+}
+
+#[cfg(test)]
+mod rendering_tests {
+    use super::{DeviceImage, DeviceImageSizes, RECENT_DEVICE_IMAGE_SIZES, prepare_device_image};
+    use gpui::Asset as _;
+
+    #[gpui::test]
+    fn extensionless_webp_loads_through_the_device_image_asset(cx: &mut gpui::TestAppContext) {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("logitech-variant-uuid");
+        image::RgbaImage::from_pixel(8, 16, image::Rgba([20, 40, 60, 255]))
+            .save_with_format(&path, image::ImageFormat::WebP)
+            .unwrap();
+        let executor = cx.foreground_executor().clone();
+        let loaded = cx
+            .update(|cx| executor.block_on(DeviceImage::load((path, 4), cx)))
+            .unwrap();
+        assert_eq!(loaded.size(0).width.0, 2);
+        assert_eq!(loaded.size(0).height.0, 4);
+        assert_eq!(&loaded.as_bytes(0).unwrap()[..4], &[60, 40, 20, 255]);
+    }
+
+    #[test]
+    fn transparent_pixels_do_not_tint_filtered_edges() {
+        let original = image::RgbaImage::from_fn(16, 32, |x, _| {
+            if x < 8 {
+                image::Rgba([255, 0, 0, 255])
+            } else {
+                image::Rgba([0, 255, 0, 0])
+            }
+        });
+        let filtered = prepare_device_image(original.into(), 8);
+        let mut translucent = 0;
+        for pixel in filtered
+            .pixels()
+            .filter(|pixel| pixel[3] > 0 && pixel[3] < 255)
+        {
+            translucent += 1;
+            assert_eq!(pixel[0], 0, "blue fringe: {pixel:?}");
+            assert_eq!(pixel[1], 0, "hidden green leaked into edge: {pixel:?}");
+            assert_eq!(pixel[2], 255, "red silhouette darkened: {pixel:?}");
+        }
+        assert!(translucent > 0, "fixture must exercise a translucent edge");
+    }
+
+    #[test]
+    fn resize_history_evicts_old_sizes_per_path_and_refreshes_recent_ones() {
+        let history = DeviceImageSizes::default();
+        let path = std::path::Path::new("front.png");
+        let other = std::path::Path::new("side.png");
+        let mut retained = std::collections::HashSet::new();
+        assert_eq!(history.record(other, 200), None);
+        for height in 100..200 {
+            if let Some(expired) = history.record(path, height) {
+                assert!(retained.remove(&expired));
+            }
+            retained.insert(height);
+            assert!(retained.len() <= RECENT_DEVICE_IMAGE_SIZES);
+        }
+        let oldest = *retained.iter().min().unwrap();
+        assert_eq!(history.record(path, oldest), None);
+        assert_ne!(history.record(path, 300), Some(oldest));
+        assert_eq!(history.record(other, 200), None);
+    }
+
+    #[test]
+    fn completions_without_a_retained_request_do_not_change_the_drawable_size() {
+        let history = DeviceImageSizes::default();
+        let path = std::path::Path::new("front.png");
+        assert_eq!(history.loaded(path, 100), None);
+        assert_eq!(history.last_loaded(path), None);
+        assert_eq!(history.record(path, 100), None);
+        assert_eq!(history.loaded(path, 200), None);
+        assert_eq!(history.last_loaded(path), None);
+        assert_eq!(history.loaded(path, 100), None);
+        for height in 101..200 {
+            history.record(path, height);
+        }
+        assert_eq!(history.loaded(path, 101), None);
+        assert_eq!(history.last_loaded(path), Some(100));
+        assert_eq!(history.loaded(path, 199), Some(100));
+        assert_eq!(history.last_loaded(path), Some(199));
+    }
+
+    #[test]
+    fn last_drawable_size_survives_pending_resizes_and_is_released_after_replacement() {
+        let history = DeviceImageSizes::default();
+        let path = std::path::Path::new("front.png");
+        assert_eq!(history.record(path, 100), None);
+        assert_eq!(history.loaded(path, 100), None);
+        for height in 101..200 {
+            assert_ne!(history.record(path, height), Some(100));
+            assert_eq!(history.last_loaded(path), Some(100));
+        }
+        assert_eq!(history.loaded(path, 199), Some(100));
+        assert_eq!(history.last_loaded(path), Some(199));
+    }
+
+    #[test]
+    fn minification_averages_fine_texture_instead_of_aliasing() {
+        let texture = image::RgbaImage::from_fn(128, 256, |x, y| {
+            let value = if (x + y) % 2 == 0 { 0 } else { 255 };
+            image::Rgba([value, value, value, 255])
+        });
+        let filtered = prepare_device_image(texture.into(), 32);
+        assert_eq!(filtered.dimensions(), (16, 32));
+        for pixel in filtered.pixels() {
+            assert!(
+                (120..=135).contains(&pixel[0]),
+                "texture aliased: {pixel:?}"
+            );
+            assert_eq!(pixel[3], 255);
+        }
+    }
+
+    #[test]
+    fn small_images_keep_their_resolution_alpha_and_color() {
+        let original = image::RgbaImage::from_pixel(2, 3, image::Rgba([20, 40, 60, 128]));
+        let prepared = prepare_device_image(original.into(), 300);
+        assert_eq!(prepared.dimensions(), (2, 3));
+        assert_eq!(prepared.get_pixel(0, 0).0, [60, 40, 20, 128]);
+    }
 }
