@@ -8,20 +8,25 @@
 
 use gpui::{
     Bounds, BoxShadow, ClickEvent, Context, Div, Entity, Hsla, InteractiveElement, IntoElement,
-    MouseMoveEvent, ParentElement, PathBuilder, Pixels, Point, Render, SharedString, Size,
-    StatefulInteractiveElement as _, Styled, Subscription, Window, WindowAppearance,
-    WindowBackgroundAppearance, WindowId, WindowKind, WindowOptions, canvas, div,
+    MouseMoveEvent, ParentElement, PathBuilder, Pixels, Point, Render, ScrollDelta, ScrollEvent,
+    SharedString, Size, StatefulInteractiveElement as _, Styled, Subscription, Window,
+    WindowAppearance, WindowBackgroundAppearance, WindowId, WindowKind, WindowOptions, canvas, div,
     linear_color_stop, linear_gradient, point, prelude::FluentBuilder as _, px, svg,
 };
-use openlogi_core::binding::{Action, ActionRingSize, ActionRingSlot};
+use openlogi_core::action_ring::DISPLAY_LIFETIME;
+use openlogi_core::binding::{Action, ActionRingSize, ActionRingSlot, ScrollBadge};
 use openlogi_ipc::ActionRingInvocation;
-use openlogi_ui::action_icons::RING_CANCEL_ICON;
+use openlogi_ui::action_icons::{RING_CANCEL_ICON, RING_SCROLL_ICON};
 use openlogi_ui::color::{self, neutral};
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use std::time::{Duration, Instant};
 
-use crate::ipc::OverlayCommand;
+use crate::ipc::{OverlayCommand, RingReports, ScrollReport};
 use crate::session::{self, ClickAwaySession, ShowingRing};
+
+mod wheel;
+
+use wheel::WheelSteps;
 
 /// The ring's dimensions at one [`ActionRingSize`], in points.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -408,8 +413,13 @@ impl RingPointer {
 
 pub(crate) struct RingView {
     invocation: ActionRingInvocation,
-    commands: mpsc::UnboundedSender<OverlayCommand>,
+    reports: RingReports,
     hovered: Option<ActionRingSlot>,
+    /// Wheel travel over the hovered slot not yet worth a step.
+    wheel: WheelSteps,
+    /// When the ring opened or last sent wheel steps; it closes
+    /// [`DISPLAY_LIFETIME`] after this.
+    last_used: Instant,
     placement: Placement,
     /// Shared by every window of this ring.
     pointer: Entity<RingPointer>,
@@ -421,10 +431,10 @@ pub(crate) struct RingView {
 
 impl RingView {
     /// Open a view on `invocation` in `window`, reporting interactions through
-    /// `commands`. `pointer` is shared by all of the ring's windows.
+    /// `reports`. `pointer` is shared by all of the ring's windows.
     pub(crate) fn new(
         invocation: ActionRingInvocation,
-        commands: mpsc::UnboundedSender<OverlayCommand>,
+        reports: RingReports,
         live: &Arc<ClickAwaySession>,
         placement: Placement,
         pointer: Entity<RingPointer>,
@@ -445,8 +455,10 @@ impl RingView {
         });
         Self {
             invocation,
-            commands,
+            reports,
             hovered: None,
+            wheel: WheelSteps::default(),
+            last_used: Instant::now(),
             placement,
             pointer,
             _pointer_changes: pointer_changes,
@@ -459,10 +471,17 @@ impl RingView {
         self.invocation.session_id
     }
 
+    /// How long this window may stay up before the ring times out: the
+    /// remainder of [`DISPLAY_LIFETIME`] since it opened or last sent wheel
+    /// steps.
+    pub(crate) fn time_left(&self) -> Duration {
+        (self.last_used + DISPLAY_LIFETIME).saturating_duration_since(Instant::now())
+    }
+
     /// Report this ring cancelled. The window is closed by the caller, which
     /// is the only one holding the handle.
     pub(crate) fn cancel(&self) {
-        let _ = self.commands.send(OverlayCommand::Cancel {
+        let _ = self.reports.commands.send(OverlayCommand::Cancel {
             session_id: self.invocation.session_id,
         });
     }
@@ -475,11 +494,37 @@ impl RingView {
             return false;
         }
         self.hovered = slot;
-        let _ = self.commands.send(OverlayCommand::Hover {
+        self.wheel.reset();
+        let _ = self.reports.commands.send(OverlayCommand::Hover {
             session_id: self.invocation.session_id,
             slot,
         });
         true
+    }
+
+    /// Wheel travel while the pointer aims at a slot: whole steps over a
+    /// scrollable one go to the agent, which runs them with the ring open.
+    fn scroll(&mut self, delta: ScrollDelta) {
+        let Some(slot) = self.hovered.filter(|slot| self.is_scrollable(*slot)) else {
+            return;
+        };
+        let Some((direction, steps)) = self.wheel.turn(slot, delta) else {
+            return;
+        };
+        self.last_used = Instant::now();
+        let _ = self.reports.scrolls.send(ScrollReport {
+            session_id: self.invocation.session_id,
+            slot,
+            direction,
+            steps,
+        });
+    }
+
+    fn is_scrollable(&self, slot: ActionRingSlot) -> bool {
+        self.invocation
+            .slots
+            .get(&slot)
+            .is_some_and(|presentation| presentation.scrollable)
     }
 
     /// The dimensions this ring is drawn at.
@@ -533,9 +578,40 @@ impl RingView {
                     }
                 })
                 .child(svg().path(icon_path).size(px(glyph_size)).text_color(glyph))
+                .when(presentation.scrollable, |slot| {
+                    slot.child(scroll_badge(size, colors))
+                })
                 .into_any_element(),
         )
     }
+}
+
+/// The mark on a slot the wheel adjusts: a small disc on its lower-right rim
+/// with an up-and-down chevron, so the slot reads as "turn the wheel here".
+fn scroll_badge(slot_size: f32, colors: RingColors) -> Div {
+    let ScrollBadge {
+        diameter,
+        inset,
+        glyph,
+    } = ScrollBadge::for_slot(slot_size);
+    div()
+        .absolute()
+        .right(px(inset))
+        .bottom(px(inset))
+        .size(px(diameter))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .border_1()
+        .border_color(colors.cancel_border)
+        .bg(colors.cancel)
+        .child(
+            svg()
+                .path(RING_SCROLL_ICON)
+                .size(px(glyph))
+                .text_color(colors.glyph),
+        )
 }
 
 impl RingView {
@@ -746,7 +822,7 @@ fn label_tail(horizontal: Grow, points_up: bool) -> impl IntoElement {
 impl Render for RingView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let session_id = self.invocation.session_id;
-        let root_commands = self.commands.clone();
+        let root_commands = self.reports.commands.clone();
         let placement = self.placement;
         let center = self
             .pointer
@@ -792,6 +868,9 @@ impl Render for RingView {
                 if this.hover(aimed) {
                     cx.notify();
                 }
+            }))
+            .on_scroll(cx.listener(|this, event: &ScrollEvent, _, _| {
+                this.scroll(event.delta);
             }))
             .children(panel)
             // The view is not borrowed here, so the dismissal can reach every
@@ -891,8 +970,9 @@ mod tests {
     use std::rc::Rc;
 
     use gpui::{AppContext as _, Modifiers, TestAppContext, VisualTestContext, WindowHandle};
-    use openlogi_core::binding::ActionRingIcon;
+    use openlogi_core::binding::{ActionRingIcon, RingScrollDirection};
     use openlogi_ipc::ActionRingPresentation;
+    use tokio::sync::mpsc;
 
     use super::*;
 
@@ -1041,11 +1121,20 @@ mod tests {
                     label: "Copy".to_string(),
                     literal: true,
                     icon: ActionRingIcon::Copy,
+                    scrollable: false,
                 },
             )]
             .into(),
             language: None,
             size,
+        }
+    }
+
+    /// Reports whose wheel steps nobody reads.
+    fn reports(commands: mpsc::UnboundedSender<OverlayCommand>) -> RingReports {
+        RingReports {
+            commands,
+            scrolls: mpsc::unbounded_channel().0,
         }
     }
 
@@ -1069,7 +1158,7 @@ mod tests {
             cx.add_window(move |window, cx| {
                 RingView::new(
                     invocation(),
-                    commands,
+                    reports(commands),
                     &live,
                     Placement::AtPointer,
                     pointer,
@@ -1136,6 +1225,80 @@ mod tests {
         );
     }
 
+    /// Wheel notches over a scrollable slot leave as steps for that slot, and
+    /// keep the ring up; over a slot without a pair they do nothing.
+    #[gpui::test]
+    fn wheel_notches_over_a_scrollable_slot_report_steps(cx: &mut TestAppContext) {
+        let live = Arc::new(ClickAwaySession::new());
+        let (commands, _hovers) = mpsc::unbounded_channel();
+        let (scrolls, mut stepped) = mpsc::unbounded_channel();
+        let pointer = cx.new(|_| RingPointer::default());
+        let mut invocation = invocation();
+        invocation.slots.insert(
+            ActionRingSlot::Bottom,
+            ActionRingPresentation {
+                label: "Mute".to_string(),
+                literal: false,
+                icon: ActionRingIcon::Volume,
+                scrollable: true,
+            },
+        );
+        let ring = cx.add_window(move |window, cx| {
+            RingView::new(
+                invocation,
+                RingReports { commands, scrolls },
+                &live,
+                Placement::Window,
+                pointer,
+                window,
+                cx,
+            )
+        });
+        let mut ring_cx = VisualTestContext::from_window(ring.into(), cx);
+        let centre = MEDIUM.window / 2.0;
+        let at = |x: f32, y: f32| point(px(centre + x), px(centre + y));
+        let notch = |cx: &mut VisualTestContext, position, lines: f32| {
+            cx.simulate_event(ScrollEvent {
+                position,
+                delta: ScrollDelta::Lines(point(0.0, lines)),
+                ..ScrollEvent::default()
+            });
+        };
+
+        let bottom = at(0.0, MEDIUM.radius);
+        ring_cx.simulate_mouse_move(bottom, None, Modifiers::default());
+        let opened_left = ring
+            .read_with(&ring_cx, |view, _| view.time_left())
+            .unwrap();
+        notch(&mut ring_cx, bottom, 3.0);
+        notch(&mut ring_cx, bottom, -3.0);
+        let report = |direction| ScrollReport {
+            session_id: 7,
+            slot: ActionRingSlot::Bottom,
+            direction,
+            steps: std::num::NonZeroU8::MIN,
+        };
+        assert_eq!(
+            stepped.try_recv().ok(),
+            Some(report(RingScrollDirection::Up))
+        );
+        assert_eq!(
+            stepped.try_recv().ok(),
+            Some(report(RingScrollDirection::Down))
+        );
+        assert!(
+            ring.read_with(&ring_cx, |view, _| view.time_left())
+                .unwrap()
+                >= opened_left,
+            "a wheel step restarts the ring's display time"
+        );
+
+        let top = at(0.0, -MEDIUM.radius);
+        ring_cx.simulate_mouse_move(top, None, Modifiers::default());
+        notch(&mut ring_cx, top, 3.0);
+        assert_eq!(stepped.try_recv().ok(), None, "Top has no wheel pair");
+    }
+
     /// The pointer chooses by direction at every size: past a slot still
     /// chooses it, the dead zone and an empty slot's sector choose nothing,
     /// and a click lands on what it is aimed at.
@@ -1148,7 +1311,7 @@ mod tests {
             let ring = cx.add_window(move |window, cx| {
                 RingView::new(
                     sized_invocation(size),
-                    commands,
+                    reports(commands),
                     &live,
                     Placement::Window,
                     pointer,

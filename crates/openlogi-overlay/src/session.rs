@@ -6,6 +6,7 @@ use std::sync::{
     Arc, OnceLock,
     atomic::{AtomicU64, AtomicUsize, Ordering},
 };
+use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 use openlogi_ipc::{Identity, PROTOCOL_VERSION, RUN_ENV};
@@ -155,6 +156,23 @@ pub(crate) fn close_ring_windows(cx: &mut gpui::App, session_id: u64) -> bool {
         closed |= removed.unwrap_or(false);
     }
     closed
+}
+
+/// How long ring `session_id` may stay up before it times out, or `None` when
+/// no window shows it any more. Its windows share one clock, so the longest
+/// remainder among them is the ring's.
+pub(crate) fn ring_time_left(cx: &mut gpui::App, session_id: u64) -> Option<Duration> {
+    cx.windows()
+        .into_iter()
+        .filter_map(|handle| handle.downcast::<RingView>())
+        .filter_map(|ring| {
+            ring.read_with(cx, |view, _| {
+                (view.session_id() == session_id).then(|| view.time_left())
+            })
+            .ok()
+            .flatten()
+        })
+        .max()
 }
 
 /// Close every ring window, whichever session it shows.

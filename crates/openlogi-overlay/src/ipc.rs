@@ -7,15 +7,21 @@
 //! newer command for the same ring supersedes a stalled one rather than
 //! queueing behind it, which is what keeps the ring responsive when the agent
 //! is briefly slow.
+//!
+//! Wheel steps over a scrollable slot take their own path
+//! ([`ScrollReport`]): the command path keeps only the newest command, which
+//! would drop steps, and it retries, which would replay a volume step long
+//! after the hand moved on.
 
 use std::{
     future::Future,
+    num::NonZeroU8,
     pin::Pin,
     time::{Duration, Instant},
 };
 
 use openlogi_core::action_ring::DISPLAY_LIFETIME;
-use openlogi_core::binding::ActionRingSlot;
+use openlogi_core::binding::{ActionRingSlot, RingScrollDirection};
 use openlogi_ipc::client::{self, ConnectError, Observer, Stamped};
 use openlogi_ipc::{
     ActionRingInvocation, AgentClient, BacklightObservation, ClientKind, LockKeyObservation,
@@ -50,6 +56,42 @@ impl OverlayCommand {
     }
 }
 
+/// Wheel steps the view counted over a scrollable slot.
+///
+/// Sent once and never retried: a step that reaches the agent late would move
+/// the volume after the hand stopped, which is worse than losing it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ScrollReport {
+    pub(crate) session_id: u64,
+    pub(crate) slot: ActionRingSlot,
+    pub(crate) direction: RingScrollDirection,
+    pub(crate) steps: NonZeroU8,
+}
+
+impl ScrollReport {
+    /// Fold `next` into this report when it continues the same wheel motion,
+    /// or hand it back when it starts another one (another ring, slot, or
+    /// direction) that has to be sent on its own.
+    fn absorb(&mut self, next: Self) -> Option<Self> {
+        if (next.session_id, next.slot, next.direction)
+            != (self.session_id, self.slot, self.direction)
+        {
+            return Some(next);
+        }
+        self.steps = self.steps.saturating_add(next.steps.get());
+        None
+    }
+}
+
+/// Where a ring view reports what the user does with it.
+#[derive(Clone)]
+pub(crate) struct RingReports {
+    /// Hover, activation, and cancellation.
+    pub(crate) commands: mpsc::UnboundedSender<OverlayCommand>,
+    /// Wheel steps over scrollable slots.
+    pub(crate) scrolls: mpsc::UnboundedSender<ScrollReport>,
+}
+
 /// What the view holds to talk to the agent.
 pub(crate) struct Handle {
     /// The ring the agent says should be showing, each time that changes.
@@ -66,6 +108,8 @@ pub(crate) struct Handle {
     pub(crate) lock_keys: mpsc::UnboundedReceiver<LockKeyObservation>,
     /// Where the view reports hover, activation, and cancellation.
     pub(crate) commands: mpsc::UnboundedSender<OverlayCommand>,
+    /// Where the view reports wheel steps over scrollable slots.
+    pub(crate) scrolls: mpsc::UnboundedSender<ScrollReport>,
 }
 
 /// Spawn the IPC client thread. Returns immediately; the thread connects (and
@@ -76,6 +120,7 @@ pub(crate) fn spawn() -> Handle {
     let (notice_tx, notices) = mpsc::unbounded_channel();
     let (lock_key_tx, lock_keys) = mpsc::unbounded_channel();
     let (commands, mut command_rx) = mpsc::unbounded_channel();
+    let (scrolls, mut scroll_rx) = mpsc::unbounded_channel();
     let started = openlogi_core::worker::spawn("openlogi-overlay-ipc", move |runtime| {
         runtime.block_on(async {
             tokio::join!(
@@ -91,7 +136,8 @@ pub(crate) fn spawn() -> Handle {
                 observe(connect, LOCK_KEYS, |observed| lock_key_tx
                     .send(observed)
                     .is_ok()),
-                send_commands(&mut command_rx)
+                send_commands(&mut command_rx),
+                send_scrolls(&mut scroll_rx)
             );
         });
     });
@@ -104,6 +150,7 @@ pub(crate) fn spawn() -> Handle {
         notices,
         lock_keys,
         commands,
+        scrolls,
     }
 }
 
@@ -371,6 +418,66 @@ async fn send_command(client: &AgentClient, command: OverlayCommand) -> bool {
             .is_ok(),
         OverlayCommand::Cancel { session_id } => {
             client.action_ring_cancel(ctx, session_id).await.is_ok()
+        }
+    }
+}
+
+async fn send_scrolls(rx: &mut mpsc::UnboundedReceiver<ScrollReport>) {
+    let mut client = None;
+    while let Some(first) = rx.recv().await {
+        let mut report = first;
+        loop {
+            let started = drain_scrolls(rx, &mut report);
+            send_scroll(&mut client, report).await;
+            match started {
+                Some(next) => report = next,
+                None => break,
+            }
+        }
+    }
+}
+
+/// Fold every report already waiting into `report`, stopping at the first
+/// one that starts another motion and returning it.
+fn drain_scrolls(
+    rx: &mut mpsc::UnboundedReceiver<ScrollReport>,
+    report: &mut ScrollReport,
+) -> Option<ScrollReport> {
+    while let Ok(next) = rx.try_recv() {
+        if let Some(started) = report.absorb(next) {
+            return Some(started);
+        }
+    }
+    None
+}
+
+async fn send_scroll(client: &mut Option<AgentClient>, report: ScrollReport) {
+    if client.is_none() {
+        *client = connect().await;
+    }
+    let Some(active) = client.as_ref() else {
+        debug!(
+            ?report,
+            "agent unreachable; dropped Actions Ring wheel steps"
+        );
+        return;
+    };
+    let sent = active
+        .action_ring_scroll(
+            context::current(),
+            report.session_id,
+            report.slot,
+            report.direction,
+            report.steps.get(),
+        )
+        .await;
+    match sent {
+        Ok(Ok(())) => {}
+        // The ring closed or expired under the wheel; nothing to redo.
+        Ok(Err(error)) => debug!(?error, ?report, "agent refused Actions Ring wheel steps"),
+        Err(error) => {
+            debug!(%error, ?report, "dropped Actions Ring wheel steps");
+            *client = None;
         }
     }
 }

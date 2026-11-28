@@ -57,7 +57,7 @@ use openlogi_agent_core::backlight_overlay::BacklightOverlayManager;
 use openlogi_agent_core::lock_keys::LockKeyIndicator;
 use openlogi_agent_core::notices::{LowBatteryWatch, NoticeBoard};
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::ActionRingSlot;
+use openlogi_core::binding::{ActionRingSlot, RingScrollDirection};
 use openlogi_core::config::{AppSettings, Config, Lighting};
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind, LockKey,
@@ -1600,6 +1600,17 @@ impl Agent for MockAgent {
         self,
         _: Context,
         _session_id: u64,
+    ) -> Result<(), ActionRingCommandError> {
+        Err(ActionRingCommandError::SessionNotFound)
+    }
+
+    async fn action_ring_scroll(
+        self,
+        _: Context,
+        _session_id: u64,
+        _slot: ActionRingSlot,
+        _direction: RingScrollDirection,
+        _steps: u8,
     ) -> Result<(), ActionRingCommandError> {
         Err(ActionRingCommandError::SessionNotFound)
     }

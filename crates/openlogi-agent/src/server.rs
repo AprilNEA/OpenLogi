@@ -13,13 +13,15 @@ use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant};
 
 use futures::StreamExt as _;
-use openlogi_agent_core::action_ring::{ActionRingActivation, ActionRingManager};
+use openlogi_agent_core::action_ring::{
+    ActionRingActivation, ActionRingManager, ActionRingScrollSteps,
+};
 use openlogi_agent_core::backlight_overlay::BacklightOverlayManager;
 use openlogi_agent_core::event_monitor::SharedEventMonitor;
 use openlogi_agent_core::observable::ObservableState;
 use openlogi_agent_core::orchestrator::{self, Orchestrator, SharedHandles};
 use openlogi_agent_core::runtime::ActionDispatcher;
-use openlogi_core::binding::ActionRingSlot;
+use openlogi_core::binding::{ActionRingSlot, RingScrollDirection};
 use openlogi_core::config::{ConfigFile, ConfigRevision, Lighting};
 use openlogi_core::device::DeviceInventory;
 use openlogi_hid::{
@@ -599,6 +601,38 @@ impl Agent for AgentServer {
     ) -> Result<(), ActionRingCommandError> {
         self.action_ring.unhover(session_id)
     }
+
+    async fn action_ring_scroll(
+        self,
+        _: Context,
+        session_id: u64,
+        slot: ActionRingSlot,
+        direction: RingScrollDirection,
+        steps: u8,
+    ) -> Result<(), ActionRingCommandError> {
+        let steps = self
+            .action_ring
+            .scroll(session_id, slot, direction, steps)?;
+        run_ring_scroll(&self.dispatcher, &self.ring_haptics, steps);
+        Ok(())
+    }
+}
+
+/// Run the wheel steps a scrollable ring slot took, with one light tick for
+/// the report. The session stays open, so its haptic engine is not handed back.
+fn run_ring_scroll(
+    dispatcher: &ActionDispatcher,
+    haptics: &RingHapticPlayer,
+    steps: ActionRingScrollSteps,
+) {
+    for _ in 0..steps.steps {
+        dispatcher.dispatch(&steps.action, Some(&steps.device_key));
+    }
+    haptics.play(
+        steps.haptic_route,
+        HapticWaveform::SubtleCollision,
+        "scroll",
+    );
 }
 
 /// Run the action a ring session closed on, whether a click on the overlay

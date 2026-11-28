@@ -365,3 +365,66 @@ async fn losing_the_agent_hides_the_lock_key_indicator() {
         .expect("a lost agent's indicator is hidden");
     assert_eq!(shown, [Some(caps_lock_on), None]);
 }
+
+fn scroll(
+    session_id: u64,
+    slot: ActionRingSlot,
+    direction: RingScrollDirection,
+    steps: u8,
+) -> ScrollReport {
+    ScrollReport {
+        session_id,
+        slot,
+        direction,
+        steps: NonZeroU8::new(steps).expect("a report carries at least one step"),
+    }
+}
+
+#[test]
+fn wheel_steps_of_one_motion_pile_into_one_report() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let up = |steps| scroll(1, ActionRingSlot::Bottom, RingScrollDirection::Up, steps);
+    tx.send(up(2)).expect("open channel");
+    tx.send(up(3)).expect("open channel");
+    let mut report = up(1);
+    assert_eq!(drain_scrolls(&mut rx, &mut report), None);
+    assert_eq!(report, up(6));
+}
+
+#[test]
+fn a_new_direction_slot_or_ring_starts_its_own_report() {
+    let up = scroll(1, ActionRingSlot::Bottom, RingScrollDirection::Up, 1);
+    for started in [
+        scroll(1, ActionRingSlot::Bottom, RingScrollDirection::Down, 1),
+        scroll(1, ActionRingSlot::Top, RingScrollDirection::Up, 1),
+        scroll(2, ActionRingSlot::Bottom, RingScrollDirection::Up, 1),
+    ] {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        tx.send(up).expect("open channel");
+        tx.send(started).expect("open channel");
+        tx.send(up).expect("open channel");
+        let mut report = up;
+        assert_eq!(drain_scrolls(&mut rx, &mut report), Some(started));
+        assert_eq!(report.steps.get(), 2, "only the steps before {started:?}");
+        assert_eq!(
+            rx.try_recv().ok(),
+            Some(up),
+            "later steps wait for the next report"
+        );
+    }
+}
+
+#[test]
+fn a_pile_of_steps_saturates_instead_of_wrapping() {
+    let mut report = scroll(1, ActionRingSlot::Bottom, RingScrollDirection::Up, 200);
+    assert_eq!(
+        report.absorb(scroll(
+            1,
+            ActionRingSlot::Bottom,
+            RingScrollDirection::Up,
+            200
+        )),
+        None
+    );
+    assert_eq!(report.steps.get(), u8::MAX);
+}

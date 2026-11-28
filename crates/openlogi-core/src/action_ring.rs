@@ -11,7 +11,7 @@
 use std::time::Duration;
 
 /// How long the overlay keeps the ring on screen, counted from the moment its
-/// window opens. The overlay owns the display; the constant lives here so the
+/// window opens or, on a slot the wheel adjusts, from its last wheel step. The overlay owns the display; the constant lives here so the
 /// session that has to outlive it is derived from it rather than kept in step
 /// by hand.
 pub const DISPLAY_LIFETIME: Duration = Duration::from_secs(15);

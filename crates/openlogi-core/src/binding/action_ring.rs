@@ -15,8 +15,10 @@ use super::Action;
 use crate::app::{AppAliases, overlay_for, profile_key_for};
 
 mod icon;
+mod scroll;
 
 pub use icon::ActionRingIcon;
+pub use scroll::{RingScroll, RingScrollDirection, RingScrollPreset, ScrollBadge};
 
 /// One of the eight fixed positions in an Actions Ring, clockwise from the top.
 ///
@@ -188,6 +190,8 @@ pub struct ActionRingEntry {
     icon: Option<ActionRingIcon>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    scroll: Option<RingScroll>,
 }
 
 impl ActionRingEntry {
@@ -198,6 +202,7 @@ impl ActionRingEntry {
             action,
             icon: None,
             label: None,
+            scroll: None,
         }
     }
 
@@ -221,6 +226,12 @@ impl ActionRingEntry {
         self.label.as_deref()
     }
 
+    /// What the wheel does over this slot, or `None` when it does nothing.
+    #[must_use]
+    pub const fn scroll(&self) -> Option<&RingScroll> {
+        self.scroll.as_ref()
+    }
+
     /// Consume the entry into its executable action and presentation
     /// overrides (icon, label).
     #[must_use]
@@ -238,6 +249,10 @@ impl ActionRingEntry {
 
     fn set_label(&mut self, label: Option<String>) {
         self.label = label;
+    }
+
+    fn set_scroll(&mut self, scroll: Option<RingScroll>) {
+        self.scroll = scroll;
     }
 }
 
@@ -276,6 +291,14 @@ impl ActionRingLayout {
     pub fn set_label(&mut self, slot: ActionRingSlot, label: Option<String>) {
         if let Some(entry) = self.slots.get_mut(&slot) {
             entry.set_label(label);
+        }
+    }
+
+    /// Set what the wheel does over a populated slot, or `None` for nothing.
+    /// Empty slots remain empty.
+    pub fn set_scroll(&mut self, slot: ActionRingSlot, scroll: Option<RingScroll>) {
+        if let Some(entry) = self.slots.get_mut(&slot) {
+            entry.set_scroll(scroll);
         }
     }
 }
@@ -519,6 +542,58 @@ mod tests {
         let layout = ActionRingLayout::default();
         let encoded = toml::to_string(&layout).expect("could not serialize ring layout");
         assert!(!encoded.contains("label"));
+    }
+
+    #[test]
+    fn scroll_pairs_roundtrip_and_survive_action_replacement() {
+        let mut layout: ActionRingLayout = toml::from_str(
+            r#"
+            [slots]
+            Bottom = { action = "MuteVolume", scroll = { up = "VolumeUp", down = "VolumeDown" } }
+            "#,
+        )
+        .expect("could not deserialize a scrollable slot");
+        let scroll = layout.slots[&ActionRingSlot::Bottom].scroll().cloned();
+        assert_eq!(
+            scroll.as_ref().and_then(RingScroll::preset),
+            Some(RingScrollPreset::Volume)
+        );
+
+        let encoded = toml::to_string(&layout).expect("could not serialize a scrollable slot");
+        let decoded = toml::from_str::<ActionRingLayout>(&encoded)
+            .expect("could not deserialize a scrollable slot");
+        assert_eq!(decoded, layout);
+
+        // Like the icon and label, the pair belongs to the slot, not the action.
+        layout.set_action(
+            ActionRingSlot::Bottom,
+            Some(
+                RingAction::new(Action::PlayPause).expect("play/pause must be a valid ring action"),
+            ),
+        );
+        assert_eq!(
+            layout.slots[&ActionRingSlot::Bottom].scroll().cloned(),
+            scroll
+        );
+
+        layout.set_scroll(ActionRingSlot::Bottom, None);
+        assert_eq!(layout.slots[&ActionRingSlot::Bottom].scroll(), None);
+    }
+
+    #[test]
+    fn slots_without_a_scroll_pair_serialize_without_a_scroll_key() {
+        let encoded =
+            toml::to_string(&ActionRingLayout::default()).expect("could not serialize ring layout");
+        assert!(!encoded.contains("scroll"));
+    }
+
+    #[test]
+    fn a_scroll_pair_cannot_outlive_its_slot() {
+        let mut layout = ActionRingLayout::default();
+        layout.set_scroll(ActionRingSlot::Top, Some(RingScrollPreset::Volume.scroll()));
+        layout.set_action(ActionRingSlot::Top, None);
+        layout.set_scroll(ActionRingSlot::Top, Some(RingScrollPreset::Volume.scroll()));
+        assert!(!layout.slots.contains_key(&ActionRingSlot::Top));
     }
 
     #[test]

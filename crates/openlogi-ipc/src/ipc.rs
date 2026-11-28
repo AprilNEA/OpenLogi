@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::{ActionRingIcon, ActionRingSize, ActionRingSlot};
+use openlogi_core::binding::{ActionRingIcon, ActionRingSize, ActionRingSlot, RingScrollDirection};
 use openlogi_core::config::{ConfigRevision, FlowPeerName, FlowPublicKey, Lighting};
 use openlogi_core::device::{
     BatteryInfo, ChangedOnLight, DeviceInventory, DeviceKind, LightState, LockKey, StandaloneDevice,
@@ -194,6 +194,10 @@ pub use succession::Identity;
 ///      and `ActionRingIcon::{Channel1, Channel2, Channel3}` appended after
 ///      them — a device's move to another Easy-Switch channel, bound to a
 ///      button or an Actions Ring slot.
+///      `ActionRingPresentation::scrollable`,
+///      `ActionRingCommandError::NotScrollable` and
+///      `Agent::action_ring_scroll` appended after them — a ring slot whose
+///      wheel steps run an action while the ring stays open.
 pub const PROTOCOL_VERSION: u32 = 46;
 
 /// Environment variable through which the agent hands a supervised helper the
@@ -821,6 +825,9 @@ pub struct ActionRingPresentation {
     pub literal: bool,
     /// Fully resolved icon; the overlay does not need the executable action.
     pub icon: ActionRingIcon,
+    /// Whether wheel steps over this slot run an action, reported through
+    /// [`Agent::action_ring_scroll`]. Which action stays in the agent.
+    pub scrollable: bool,
 }
 
 /// One request for the overlay helper to display an Actions Ring.
@@ -946,6 +953,8 @@ pub enum ActionRingCommandError {
     SessionNotFound,
     /// The selected position has no action.
     SlotEmpty,
+    /// The selected position does nothing when the wheel turns over it.
+    NotScrollable,
 }
 
 /// What kind of client a connection is, declared through
@@ -1263,4 +1272,13 @@ pub trait Agent {
     /// held trigger cancels instead of choosing the slot last reported by
     /// [`Agent::action_ring_hover`].
     async fn action_ring_unhover(session_id: u64) -> Result<(), ActionRingCommandError>;
+    /// Run `slot`'s wheel action for `direction` `steps` times without closing
+    /// the ring, and keep the session alive for as long as it is used. The
+    /// agent bounds `steps`, so a burst cannot queue an unbounded run.
+    async fn action_ring_scroll(
+        session_id: u64,
+        slot: ActionRingSlot,
+        direction: RingScrollDirection,
+        steps: u8,
+    ) -> Result<(), ActionRingCommandError>;
 }

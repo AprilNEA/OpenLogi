@@ -20,12 +20,13 @@ use gpui_kit::component::{
 };
 use openlogi_core::binding::{
     ActionRingConfig, ActionRingEntry, ActionRingIcon, ActionRingLayout, ActionRingSize,
-    ActionRingSlot,
+    ActionRingSlot, ScrollBadge,
 };
-use openlogi_ui::action_icons::RING_CANCEL_ICON;
+use openlogi_ui::action_icons::{RING_CANCEL_ICON, RING_SCROLL_ICON};
+use std::rc::Rc;
 
 use self::action_icons::action_icon_path;
-use self::editor::{PowerUserInputs, action_library};
+use self::editor::{LibraryTarget, PowerUserInputs, SlotEditing, action_library};
 use crate::features::keyboard::editors::{PowerUserKind, text_editor_placeholder};
 use crate::state::{AppState, StateEvent};
 use crate::ui::action::localized_action_label;
@@ -37,6 +38,9 @@ use crate::ui::theme::{self, Palette, PressableStyle as _, SelectableStyle as _,
 pub struct ActionRingPanel {
     focus_handle: FocusHandle,
     selected_slot: ActionRingSlot,
+    /// Which of the selected slot's actions the library sets. A new slot
+    /// starts on its click action.
+    library_target: LibraryTarget,
     application_input: Option<Entity<InputState>>,
     shortcut_input: Option<Entity<InputState>>,
     type_text_input: Option<Entity<InputState>>,
@@ -55,6 +59,7 @@ impl ActionRingPanel {
         Self {
             focus_handle: cx.focus_handle(),
             selected_slot: ActionRingSlot::Top,
+            library_target: LibraryTarget::Click,
             application_input: None,
             shortcut_input: None,
             type_text_input: None,
@@ -120,6 +125,19 @@ impl Render for ActionRingPanel {
         );
         let power_user = self.power_user_inputs(window, cx);
         let view = cx.entity();
+        let editing = SlotEditing {
+            slot: self.selected_slot,
+            target: self.library_target,
+            retarget: Rc::new({
+                let view = view.clone();
+                move |target, cx| {
+                    view.update(cx, |panel, cx| {
+                        panel.library_target = target;
+                        cx.notify();
+                    });
+                }
+            }),
+        };
 
         v_flex()
             .w_full()
@@ -161,7 +179,7 @@ impl Render for ActionRingPanel {
                             .child(ring_switches(&ring, haptics_supported, pal, cx)),
                     )
                     .child(action_library(
-                        self.selected_slot,
+                        &editing,
                         layout.slots.get(&self.selected_slot),
                         &application_input,
                         &shortcut_input,
@@ -356,6 +374,7 @@ fn slot_button(
             ActionRingIcon::asset_path,
         )
     });
+    let scrollable = entry.and_then(ActionRingEntry::scroll).is_some();
     let accessible_label = label.clone();
     let selected_view = view.clone();
 
@@ -398,14 +417,43 @@ fn slot_button(
         .when(icon_path.is_none(), |button| {
             button.child(Icon::new(IconName::Plus).size_4())
         })
+        .when(scrollable, |button| button.child(preview_scroll_badge(pal)))
         .pressable_fill(selected, pal)
         .focus_visible(move |style| style.focus_ring(pal))
         .on_click(move |_, _, cx| {
             selected_view.update(cx, |panel, cx| {
                 panel.selected_slot = slot;
+                panel.library_target = LibraryTarget::Click;
                 cx.notify();
             });
         })
+}
+
+/// The preview's mark on a slot the wheel adjusts, the one the ring draws.
+fn preview_scroll_badge(pal: Palette) -> impl IntoElement {
+    let ScrollBadge {
+        diameter,
+        inset,
+        glyph,
+    } = ScrollBadge::for_slot(PREVIEW_SLOT_SIZE);
+    div()
+        .absolute()
+        .right(px(inset))
+        .bottom(px(inset))
+        .size(px(diameter))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .border_1()
+        .border_color(pal.border)
+        .bg(pal.muted)
+        .child(
+            svg()
+                .path(RING_SCROLL_ICON)
+                .size(px(glyph))
+                .text_color(pal.text_muted),
+        )
 }
 
 /// The name a populated slot shows in the preview: the label the user gave it,

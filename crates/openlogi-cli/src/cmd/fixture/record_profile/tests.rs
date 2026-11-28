@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use futures::StreamExt as _;
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::ActionRingSlot;
+use openlogi_core::binding::{ActionRingSlot, RingScrollDirection};
 use openlogi_core::config::Lighting;
 use openlogi_core::device::DeviceInventory;
 use openlogi_core::hid::{
@@ -455,6 +455,17 @@ impl Agent for TestAgent {
         self,
         _: TarpcContext,
         _session_id: u64,
+    ) -> Result<(), ActionRingCommandError> {
+        unreachable!("profile capture must not drive the Actions Ring")
+    }
+
+    async fn action_ring_scroll(
+        self,
+        _: TarpcContext,
+        _session_id: u64,
+        _slot: ActionRingSlot,
+        _direction: RingScrollDirection,
+        _steps: u8,
     ) -> Result<(), ActionRingCommandError> {
         unreachable!("profile capture must not drive the Actions Ring")
     }
