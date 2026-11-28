@@ -40,6 +40,7 @@ mod light_changes;
 mod light_reload;
 mod lock_keys;
 mod low_battery;
+mod modules;
 mod os_layout;
 mod pointer_speed;
 mod publication;

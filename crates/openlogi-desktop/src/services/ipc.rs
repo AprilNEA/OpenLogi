@@ -73,11 +73,11 @@ pub use request::PollEventMonitor;
 pub use request::{
     CancelFlowPairing, CancelPairing, Command, ConfirmFlowPairing, LoadConfig, PairDevice,
     PairFlowPeer, ReadBacklight, ReadDisableKeys, ReadDpi, ReadEasySwitchHosts, ReadFnLock,
-    ReadForceSensing, ReadOnboard, ReadPointerSpeed, ReadReportRate, ReadSidetone, ReadSmartShift,
-    ReloadConfig, RenameEasySwitchHost, RequestAccessibilityPrompt, RetryConnection, SetBacklight,
-    SetDisableKeys, SetDpi, SetFnLock, SetForceSensing, SetLight, SetLightManualPower, SetLighting,
-    SetPointerSpeed, SetReportRate, SetSidetone, SetSmartShift, StartFlowPairing, StartPairing,
-    StopFlowPairing, UnpairDevice,
+    ReadForceSensing, ReadModules, ReadOnboard, ReadPointerSpeed, ReadReportRate, ReadSidetone,
+    ReadSmartShift, ReloadConfig, RenameEasySwitchHost, RequestAccessibilityPrompt,
+    RetryConnection, SetBacklight, SetDisableKeys, SetDpi, SetFnLock, SetForceSensing, SetLight,
+    SetLightManualPower, SetLighting, SetPointerSpeed, SetReportRate, SetSidetone, SetSmartShift,
+    StartFlowPairing, StartPairing, StopFlowPairing, UnpairDevice,
 };
 
 /// Complete identity of one Disable Keys write/reload transaction.
@@ -109,6 +109,8 @@ const RECONNECT_DELAY: Duration = Duration::from_millis(250);
 pub enum GuiUpdate {
     /// The agent's state, as of a generation this client had not seen.
     Snapshot(Box<AgentSnapshot>),
+    /// The key modules the agent found, answering [`ReadModules`].
+    Modules(Vec<openlogi_ipc::ModuleStatus>),
     /// An established connection dropped. The agent may only be restarting —
     /// an update's self-exec, a supervised respawn — so the window keeps its
     /// last snapshot but stops presenting it as live. Sent once per lost

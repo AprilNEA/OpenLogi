@@ -2,6 +2,23 @@
 
 use gpui::SharedString;
 use openlogi_core::binding::Action;
+use openlogi_ipc::ModuleStatus;
+
+/// [`localized_action_label`], with a key module's action named as
+/// `modules`, the agent's list in `AppState`, names it.
+pub(crate) fn action_label(action: &Action, modules: &[ModuleStatus]) -> SharedString {
+    let Action::Module(id) = action else {
+        return localized_action_label(action);
+    };
+    modules
+        .iter()
+        .filter_map(|status| status.module.as_ref())
+        .find(|module| module.id == *id)
+        .map_or_else(
+            || id.to_string().into(),
+            |module| module.name.clone().into(),
+        )
+}
 
 /// Localized label for an action, including its dynamic payload.
 #[expect(
@@ -38,6 +55,8 @@ pub(crate) fn localized_action_label(action: &Action) -> SharedString {
         Action::OpenApplication(target) => {
             tr!("actions.open_named_target", name => target.display_name())
         }
+        // A module's name is the agent's to report: see `action_label`.
+        Action::Module(id) => id.to_string().into(),
         _ => tr!(action
             .translation_key()
             .expect("every payload-free action has a translation key")),

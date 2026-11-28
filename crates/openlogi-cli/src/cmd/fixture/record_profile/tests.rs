@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use futures::StreamExt as _;
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::ActionRingSlot;
+use openlogi_core::binding::{ActionRingSlot, ButtonId};
 use openlogi_core::config::Lighting;
 use openlogi_core::device::DeviceInventory;
 use openlogi_core::hid::{
@@ -21,9 +21,10 @@ use openlogi_ipc::client::ProtocolSkew;
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentStatus, BacklightObservation,
     ClientKind, ConfigReloadError, FlowIdentity, FlowPairTarget, FlowPairingCommandError,
-    FlowStatus, ForegroundApps, Generation, Identity, InventoryHealth, LockKeyObservation,
-    MonitorEvent, NoticeObservation, Observation, PROTOCOL_VERSION, PairingCommandError,
-    PairingFailure, PairingPhase, PairingUpdate, RingObservation, SavedConfig, SavedConfigVerdict,
+    FlowStatus, ForegroundApps, Generation, Identity, InventoryHealth, KeyImageError,
+    LockKeyObservation, MonitorEvent, NoticeObservation, Observation, PROTOCOL_VERSION,
+    PairingCommandError, PairingFailure, PairingPhase, PairingUpdate, RingObservation, SavedConfig,
+    SavedConfigVerdict,
 };
 use tarpc::client::RpcError;
 use tarpc::context::Context as TarpcContext;
@@ -457,6 +458,29 @@ impl Agent for TestAgent {
         _session_id: u64,
     ) -> Result<(), ActionRingCommandError> {
         unreachable!("profile capture must not drive the Actions Ring")
+    }
+
+    async fn set_key_image(
+        self,
+        _: TarpcContext,
+        _route: DeviceRoute,
+        _key: ButtonId,
+        _image: Vec<u8>,
+    ) -> Result<(), KeyImageError> {
+        unreachable!("profile capture must never write a key image")
+    }
+
+    async fn clear_key_image(
+        self,
+        _: TarpcContext,
+        _route: DeviceRoute,
+        _key: ButtonId,
+    ) -> Result<(), KeyImageError> {
+        unreachable!("profile capture must never write a key image")
+    }
+
+    async fn list_modules(self, _: TarpcContext) -> Vec<openlogi_ipc::ModuleStatus> {
+        unreachable!("profile capture never lists key modules")
     }
 
     async fn reload_saved_config(

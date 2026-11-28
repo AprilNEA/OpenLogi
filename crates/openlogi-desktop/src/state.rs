@@ -100,6 +100,7 @@ mod inventory;
 mod light;
 mod lighting;
 mod load;
+mod modules;
 mod onboard;
 mod os_layout;
 mod pointer;
@@ -215,6 +216,8 @@ pub struct AppState {
     duration_steps: DurationSteps,
     /// Sender to the IPC client thread. The agent owns the hook and device I/O.
     ipc_commands: mpsc::UnboundedSender<crate::services::ipc::Command>,
+    /// The key modules the agent last reported, in folder order.
+    modules: Vec<openlogi_ipc::ModuleStatus>,
     /// Camera-consent poll started by an in-app macOS prompt. The app-state
     /// entity owns it because permission can resolve after the initiating view
     /// or window closes; dropping the entity at process shutdown cancels it.
@@ -325,6 +328,7 @@ impl AppState {
             disable_keys_reads: DisableKeysReads::default(),
             next_disable_keys_request_id: 0,
             ipc_commands,
+            modules: Vec::new(),
             #[cfg(target_os = "macos")]
             camera_permission_poll: None,
         };

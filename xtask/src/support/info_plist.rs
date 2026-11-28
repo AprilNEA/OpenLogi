@@ -18,17 +18,28 @@ const URL_SCHEME: &str = "openlogi";
 /// identically.
 const URL_TYPE_NAME: &str = "OpenLogi";
 
-/// Stamp `NSCameraUsageDescription` (cargo-bundle can't; matches the dev plist) so camera requests prompt instead of killing the app.
+/// Stamp the privacy usage descriptions cargo-bundle can't (each matches the
+/// dev plist): `NSCameraUsageDescription`, so camera requests prompt instead of
+/// killing the app, and `NSAppleEventsUsageDescription`, without which macOS
+/// refuses the Apple events of an AppleScript action or key module the app
+/// started (it answers -1743 and never asks).
 pub(crate) fn stamp_privacy_usage_descriptions(app: &Path) -> Result<()> {
     println!("==> privacy usage descriptions");
     stamp_plist_strings(
         &app.join("Contents/Info.plist"),
-        &[(
-            "NSCameraUsageDescription",
-            "OpenLogi previews your Logitech webcam locally. Video never leaves your Mac.",
-        )],
+        &[
+            (
+                "NSCameraUsageDescription",
+                "OpenLogi previews your Logitech webcam locally. Video never leaves your Mac.",
+            ),
+            ("NSAppleEventsUsageDescription", APPLE_EVENTS_USAGE),
+        ],
     )
 }
+
+/// Why OpenLogi sends Apple events, shown when macOS asks to let it control
+/// another app. The agent's `Info.plist` carries the same text.
+const APPLE_EVENTS_USAGE: &str = "OpenLogi runs the AppleScript actions and key modules you set up, such as controlling a music app from a keypad key.";
 
 /// Stamp the Launch Services keys `Cargo.toml` cannot carry for every
 /// cargo-bundle: the minimum macOS version and the `openlogi://` URL type,

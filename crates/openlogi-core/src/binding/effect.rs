@@ -81,6 +81,9 @@ pub enum Effect<'a> {
     /// [`Action::HoldModifier`] is here because the agent holds its modifiers
     /// for the lifetime of the press (`openlogi_inject::press_hold_modifier`),
     /// so a one-shot dispatch has nothing to post.
+    ///
+    /// [`Action::Module`] is here because a press of a module's key goes to
+    /// the module, never to the injector.
     AgentSide,
 }
 
@@ -271,8 +274,8 @@ impl Action {
             Action::MuteVolume => Effect::Media(MediaKey::Mute),
 
             // DPI/SmartShift/precision mode/Easy-Switch/the Actions
-            // Ring/OpenApplication are all handled above (or beside) the
-            // injector — see `Effect::AgentSide`.
+            // Ring/OpenApplication/key modules are all handled above (or
+            // beside) the injector; see `Effect::AgentSide`.
             Action::CycleDpiPresets
             | Action::NextDpiPreset
             | Action::PreviousDpiPreset
@@ -288,7 +291,8 @@ impl Action {
             | Action::PreviousKeypadPage
             | Action::NextKeypadPage
             | Action::OpenApplication(_)
-            | Action::HoldModifier(_) => Effect::AgentSide,
+            | Action::HoldModifier(_)
+            | Action::Module(_) => Effect::AgentSide,
 
             Action::ScrollUp => Effect::Scroll { dx: 0, dy: 1 },
             Action::ScrollDown => Effect::Scroll { dx: 0, dy: -1 },

@@ -510,6 +510,7 @@ open_named_target = "%{name} を開く"
 easy_switch_channel_1 = "Easy-Switch チャンネル 1"
 easy_switch_channel_2 = "Easy-Switch チャンネル 2"
 easy_switch_channel_3 = "Easy-Switch チャンネル 3"
+key_module = "キーモジュール"
 
 [pairing]
 choose_receiver = "Choose a receiver"
@@ -655,6 +656,21 @@ clear_cache = "キャッシュをクリア"
 downloaded_images_size = "ダウンロード済みの画像は現在 %{size} を使用しています。"
 cache_location = "キャッシュの場所"
 show_downloaded_images_description = "ダウンロードした画像のフォルダをファイルマネージャーで表示します。"
+
+[modules]
+modules = "Modules"
+none_installed = "No modules installed"
+none_installed_description = "A module is a separate program that draws keypad keys and handles their presses. Put its folder in the modules folder, then turn it on here."
+folder = "Modules folder"
+security_note = "Modules are programs you install. OpenLogi runs only the ones turned on here and never downloads any. On macOS a module shares OpenLogi's permissions, so install only modules you trust."
+state_invalid = "Not a valid module: %{error}"
+state_unsupported = "Not available on this platform."
+state_off = "Off."
+state_starting = "Starting."
+state_running = "Running."
+state_restarting = "Restarting."
+state_restarting_after = "Restarting: %{error}."
+state_failed = "Stopped: %{error}. Turn it off and on to try again."
 
 [about]
 about_openlogi = "OpenLogi について"

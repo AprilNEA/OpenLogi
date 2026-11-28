@@ -430,6 +430,7 @@ fn persisted_action_variant_names_are_stable() {
                 .unwrap_or_else(|error| panic!("valid shortcut failed: {error}")),
         ),
         Action::HoldModifier("Ctrl".parse().expect("valid modifier")),
+        Action::Module(crate::module::ModuleId::try_new("a.b").expect("valid id")),
     ]);
     let mut actual: Vec<String> = actions.into_iter().map(persisted_name).collect();
     actual.sort();
@@ -457,6 +458,7 @@ fn persisted_action_variant_names_are_stable() {
         "LockScreen",
         "MiddleClick",
         "MissionControl",
+        "Module",
         "MouseBack",
         "MouseForward",
         "MuteVolume",
@@ -1040,4 +1042,41 @@ fn a_key_shows_its_press_action_or_nothing_when_unbound() {
     for (binding, shown) in cases {
         assert_eq!(binding.key_action(), shown, "{binding:?}");
     }
+}
+
+#[test]
+fn a_module_action_round_trips_by_its_id_and_refuses_an_invalid_one() {
+    #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+    struct Wrapper {
+        #[serde(rename = "gridMiddle")]
+        binding: Action,
+    }
+
+    let id = crate::module::ModuleId::try_new("com.example.spotify".to_owned())
+        .expect("valid module id");
+    let wrapper = Wrapper {
+        binding: Action::Module(id.clone()),
+    };
+    let encoded = toml::to_string(&wrapper).expect("action serializes");
+    assert_eq!(encoded, "[gridMiddle]\nModule = \"com.example.spotify\"\n");
+    assert_eq!(toml::from_str::<Wrapper>(&encoded), Ok(wrapper));
+    assert_eq!(
+        toml::from_str::<Wrapper>("gridMiddle = { Module = \"com.example.spotify\" }\n")
+            .expect("the inline form the docs show parses")
+            .binding,
+        Action::Module(id.clone())
+    );
+    toml::from_str::<Wrapper>("gridMiddle = { Module = \"Spotify\" }\n")
+        .expect_err("an id that is not reverse-DNS is refused");
+
+    let action = Action::Module(id.clone());
+    assert_eq!(action.module(), Some(&id));
+    assert_eq!(Action::Copy.module(), None);
+    assert_eq!(action.label(), "Module com.example.spotify");
+    assert_eq!(action.category(), Category::System);
+    assert!(action.translation_key().is_none());
+    assert_eq!(action.effect(), Effect::AgentSide);
+    assert_eq!(ActionRingIcon::for_action(&action), ActionRingIcon::Module);
+    assert!(!action.is_held());
+    assert!(!Action::catalog().contains(&action));
 }

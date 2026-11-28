@@ -54,10 +54,13 @@ v10 adds the per-device `disabled_keys` policy. Older readers reject a v10
 header before parsing its fields. A v9 file without the policy still loads.
 v11 adds the `[flow]` section. Older readers reject a v11 header before
 parsing its fields. A v10 file without the section loads with Flow disabled.
+v12 adds the `[modules]` table and the `Module` action. Older readers reject a
+v12 header before parsing its fields. A v11 file loads with no module turned
+on.
 
 ## Shape
 
-`schema_version` is required and currently `11`. `selected_device` is an
+`schema_version` is required and currently `12`. `selected_device` is an
 optional physical device key.
 
 `[app_settings]` contains application-wide preferences:
@@ -498,6 +501,21 @@ layout entries use the same edge, a layout entry or `peer_channels` names a
 peer that `[[flow.peers]]` does not define, two device entries share a key, a
 device has no `self` slot, or two machines share one slot.
 
+### Key modules
+
+`[modules."<id>"]` turns one installed key module on and hands it settings:
+`enabled` (default `false`) and a free-form `settings` table the module
+receives unchanged. Unknown keys and an invalid id are refused. Installing,
+the manifest, and the protocol: [MODULES.md](MODULES.md).
+
+```toml
+[modules."com.example.weather"]
+enabled = true
+
+[modules."com.example.weather".settings]
+city = "Lynchburg"
+```
+
 ## Actions
 
 Action names are the serialized Rust variant names, including `Copy`,
@@ -555,6 +573,11 @@ that fires it is the one that moves.
   the selected one.
 - If the device's receiver slot is paired to another device before the request
   runs, the request is refused.
+
+`Module` hands a keypad LCD key to a key module, named by its id, as in
+`gridMiddle = { Module = "com.example.spotify" }`: the module draws the key and
+receives its presses, and nothing is injected. Bound to anything other than a
+keypad grid key, it does nothing. See [MODULES.md](MODULES.md).
 
 Payload actions use a one-key inline table:
 

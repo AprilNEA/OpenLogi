@@ -1,0 +1,34 @@
+# Owner: openlogi_ipc::check_key_image_size, which decides whether an image
+# is small enough for Agent::set_key_image. The agent applies it, and every
+# client applies it before sending.
+id: ipc-key-image-size-owner
+language: rust
+severity: error
+message: Whether a key image is small enough to send is openlogi_ipc::check_key_image_size's decision; call it rather than comparing against MAX_KEY_IMAGE_BYTES here.
+note: |
+  The agent, the mock agent, and the CLI each refuse an oversized image, and
+  must refuse the same ones. See "Single source of truth" in AGENTS.md.
+files:
+  - crates/**/*.rs
+ignores:
+  - crates/openlogi-ipc/**
+rule:
+  all:
+    - any:
+        - all:
+            - kind: binary_expression
+            - has:
+                field: operator
+                regex: '^(<|<=|>|>=|==|!=)$'
+        - all:
+            - kind: call_expression
+            - has:
+                field: function
+                kind: field_expression
+                has:
+                  field: field
+                  regex: '^(cmp|partial_cmp|lt|le|gt|ge|eq|ne|min|max|clamp)$'
+    - has:
+        kind: identifier
+        regex: '^MAX_KEY_IMAGE_BYTES$'
+        stopBy: end

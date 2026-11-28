@@ -18,6 +18,7 @@ pub mod event_monitor;
 pub mod flow;
 pub mod hardware;
 pub mod lock_keys;
+pub mod modules;
 pub mod notices;
 pub mod observable;
 pub mod orchestrator;

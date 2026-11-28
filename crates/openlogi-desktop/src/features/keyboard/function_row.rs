@@ -57,7 +57,7 @@ use crate::features::mouse::geometry::asset_dimensions_for_png;
 use crate::features::profiles::profile_name;
 use crate::services::assets::{GlowGeometry, ResolvedAsset};
 use crate::state::{AppState, DeviceKey, DeviceRecord, GamingKeys, StateEvent, StateEvents};
-use crate::ui::action::localized_action_label;
+use crate::ui::action::action_label;
 use crate::ui::components::{MenuRow, control_button};
 use crate::ui::theme::{
     self, ACCENT_BLUE, Palette, PressableStyle as _, SCREEN_PAD, Typography as _,
@@ -209,8 +209,14 @@ struct EditScope {
 impl FunctionRowView {
     /// Create the view.
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let state_obs =
-            AppState::repaint_on(cx, |event| matches!(event, StateEvent::BindingsChanged(_)));
+        // A key bound to a module shows the module's name, and a grid key's
+        // picker offers the installed modules.
+        let state_obs = AppState::repaint_on(cx, |event| {
+            matches!(
+                event,
+                StateEvent::BindingsChanged(_) | StateEvent::ModulesChanged
+            )
+        });
         Self {
             selected_key: None,
             hovered_key: None,
@@ -841,7 +847,10 @@ fn key_slots_from_layouts(
                 target => state.and_then(|state| bound_action(state, target)),
             };
             let (binding, binding_icon) = match &bound {
-                Some(action) => (localized_action_label(action), action_icon_path(action)),
+                Some(action) => (
+                    action_label(action, state.map_or(&[], AppState::modules)),
+                    action_icon_path(action),
+                ),
                 None => unbound_binding(&layout.target),
             };
             KeySlot {
@@ -1599,6 +1608,7 @@ impl FunctionRowView {
         rows.extend(panel_action_rows(
             &target,
             current.as_ref(),
+            state,
             &on_pick,
             view,
             &pal,
@@ -1693,6 +1703,7 @@ fn inspector_title(title: SharedString, pal: &Palette) -> impl IntoElement {
 fn panel_action_rows(
     target: &KeyTarget,
     current: Option<&Action>,
+    state: Option<&AppState>,
     on_pick: &PickFn,
     view: &Entity<FunctionRowView>,
     pal: &Palette,
@@ -1708,8 +1719,9 @@ fn panel_action_rows(
         current,
         "",
         ActionOffer {
+            extra: &offered_modules(state, target),
             hidden,
-            ..ActionOffer::default()
+            modules: state.map_or(&[], AppState::modules),
         },
         on_pick,
         *pal,
@@ -1784,6 +1796,15 @@ fn panel_action_rows(
             )),
     );
     children
+}
+
+/// The key modules a picker for `target` offers: the installed ones, on a
+/// keypad grid key, the only key with an LCD for a module to draw.
+fn offered_modules(state: Option<&AppState>, target: &KeyTarget) -> Vec<Action> {
+    match target {
+        KeyTarget::Grid(_) => state.map_or_else(Vec::new, AppState::module_actions),
+        _ => Vec::new(),
+    }
 }
 
 /// Whether `current` is the action the `kind` editor makes, so its row reads

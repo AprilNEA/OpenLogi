@@ -6,6 +6,7 @@ use super::application_target::ApplicationTarget;
 use super::category::Category;
 use super::key_combo::KeyCombo;
 use super::modifiers::BareModifiers;
+use crate::module::ModuleId;
 
 /// What pressing a [`ButtonId`](crate::binding::ButtonId) should do.
 ///
@@ -264,6 +265,11 @@ pub enum Action {
     EasySwitchChannel2,
     /// Move the device to its third Easy-Switch channel.
     EasySwitchChannel3,
+    /// Hand the key to a key module (`docs/MODULES.md`): on a keypad LCD key
+    /// the module draws the key's face and receives its presses, and the
+    /// agent injects nothing. Bound anywhere else it does nothing.
+    /// Appended, since variant order is wire format.
+    Module(ModuleId),
 }
 
 /// Which of a held chord's keys stay down for the lifetime of the press.
@@ -423,6 +429,7 @@ macro_rules! derive_action_core {
                         None => format!("Tap {}", combo.rendered_key()),
                     },
                     Action::HoldModifier(mods) => format!("Hold {}", mods.rendered_label()),
+                    Action::Module(id) => format!("Module {id}"),
                 }
             }
 
@@ -444,7 +451,8 @@ macro_rules! derive_action_core {
                     | Action::OpenApplication(_)
                     | Action::HoldShortcut(_)
                     | Action::TapKeyHoldingModifiers(_)
-                    | Action::HoldModifier(_) => None,
+                    | Action::HoldModifier(_)
+                    | Action::Module(_) => None,
                 }
             }
 
@@ -477,7 +485,7 @@ macro_rules! derive_action_core {
                     | Action::TapKeyHoldingModifiers(_)
                     | Action::HoldModifier(_) => Category::Editing,
                     Action::SetDpiPreset(_) => Category::Dpi,
-                    Action::OpenApplication(_) => Category::System,
+                    Action::OpenApplication(_) | Action::Module(_) => Category::System,
                 }
             }
 
@@ -552,6 +560,16 @@ impl Action {
     pub fn held_modifier(&self) -> Option<BareModifiers> {
         match self {
             Self::HoldModifier(mods) => Some(*mods),
+            _ => None,
+        }
+    }
+
+    /// The key module this action hands its key to, or `None` for any other
+    /// action.
+    #[must_use]
+    pub fn module(&self) -> Option<&ModuleId> {
+        match self {
+            Self::Module(id) => Some(id),
             _ => None,
         }
     }

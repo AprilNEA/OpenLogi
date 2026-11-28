@@ -16,7 +16,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{
-    ActionRingIcon, Binding, ButtonId, GamingButtons, GamingLayout, GridKey, KeypadPage, ModeKey,
+    ActionRingIcon, Binding, ButtonId, GamingButtons, GamingLayout, GridKey, GridSlot, KeypadPage,
+    ModeKey,
 };
 use openlogi_core::bindings::{bindings_on_page, button_bindings_for, oshook_gestures_for};
 use openlogi_core::config::{
@@ -28,6 +29,7 @@ use openlogi_core::device::{
     LightState, StandaloneDevice, prettify_codename,
 };
 use openlogi_core::device_order::{DeviceIdentity, DeviceStableId, PhysicalDeviceKey};
+use openlogi_core::module::ModuleId;
 use openlogi_hid::{
     BacklightChange, BacklightState, CaptureChannelSlot, ChannelPool, ChannelRegistry,
     DeviceIoGate, DeviceRoute, DisableKeysMask, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
@@ -37,7 +39,7 @@ use openlogi_hid::{
 };
 #[cfg(test)]
 use openlogi_ipc::ChosenLight;
-use openlogi_ipc::{InventoryHealth, LockKeyChange, NoticeKind, SavedConfig};
+use openlogi_ipc::{InventoryHealth, KeyImageError, LockKeyChange, NoticeKind, SavedConfig};
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
@@ -51,6 +53,7 @@ use crate::hardware::{
     DeviceAccess, DeviceOp, HardwareContext, KeptOsLayouts, VolatileMouseSettings, WriteOrder,
     show_precision_led, write_pointer_speed_in_background,
 };
+use crate::modules::{ModulePlan, SharedModulePlan};
 use crate::notices::LowBatteryWatch;
 use crate::observable::ObservableState;
 use crate::pointer_speed::{AppWrite, ReloadChange, SavedSpeed, SpeedMouse, SpeedWrite};
@@ -60,13 +63,14 @@ use crate::runtime::scroll::ScrollPreferences;
 use crate::runtime::{PageTurn, PointerSelection};
 use crate::watchers::host_switch::{HostSwitchLink, HostSwitchLinks, LinkedHostSwitch};
 use crate::watchers::inventory::InventoryRefresh;
-use crate::watchers::key_display::{KeyDisplaySpec, KeyFace, SharedKeyDisplaySpecs};
+use crate::watchers::key_display::{KeyDisplaySpec, KeyFace, KeyImage, SharedKeyDisplaySpecs};
 use crate::watchers::keyboard::{KeyboardSpec, SharedKeyboardSpecs};
 use crate::watchers::light::{WatchedLight, WatchedLights};
 use crate::{DpiCycleState, DpiCycles, PointerSpeeds};
 
 mod devices;
 mod lights;
+mod modules;
 mod settings;
 
 pub use lights::{
@@ -167,6 +171,9 @@ pub struct SharedHandles {
     /// What every online keypad's LCD keys should show; empty while no
     /// keypad with display keys is present.
     pub key_display_specs: SharedKeyDisplaySpecs,
+    /// Which key modules `config.toml` turns on, with their settings, and
+    /// the keypad keys each one owns now; read by the module host.
+    pub module_plan: SharedModulePlan,
     /// Incremented when a device reconnects or the system wakes, so capture
     /// sessions re-arm volatile HID++ control diversion even when route and
     /// online flags look unchanged.
@@ -739,6 +746,21 @@ pub struct Orchestrator {
     /// keypad on page 1. Read through [`Self::keypad_page`], which clamps a
     /// page the config has since removed.
     keypad_pages: BTreeMap<String, KeypadPage>,
+    /// Images that keypad keys show in place of their bindings' glyphs, by
+    /// config key and slot ([`Self::set_key_image`]). Runtime state like
+    /// the pages: only [`Self::clear_key_image`] or a new agent drops one,
+    /// not a reconnect, a page turn, or a reload.
+    key_images: BTreeMap<String, BTreeMap<GridSlot, KeyImage>>,
+    /// The images key modules sent, by module and then keypad config key and
+    /// slot. Ownership is checked when faces are rendered: a key shows a
+    /// module's image only while that module owns it, and a key it owns
+    /// again shows the image it last sent for it until it draws again. A
+    /// module's images go when its process stops
+    /// ([`Self::apply_module_event`]).
+    module_faces: BTreeMap<ModuleId, BTreeMap<(String, GridSlot), KeyImage>>,
+    /// How many times a reload turned each key module off
+    /// ([`crate::modules::ModulePlan::turned_off`]).
+    modules_turned_off: BTreeMap<ModuleId, u64>,
     /// Whether the OS mouse hook is currently installed. Back/Forward gesture
     /// motion comes from HID++, but diversion is published only while the
     /// broader mouse-remapping path is available so losing the hook leaves the
@@ -749,6 +771,7 @@ pub struct Orchestrator {
     capture_plans_tx: watch::Sender<Arc<CapturePublication>>,
     keyboard_specs_tx: watch::Sender<Arc<Vec<KeyboardSpec>>>,
     key_display_specs_tx: watch::Sender<Arc<Vec<KeyDisplaySpec>>>,
+    module_plan_tx: watch::Sender<Arc<ModulePlan>>,
     host_switch_links_tx: watch::Sender<Arc<Vec<HostSwitchLink>>>,
     watched_lights_tx: watch::Sender<Arc<Vec<WatchedLight>>>,
     shared: SharedHandles,
@@ -882,6 +905,7 @@ impl Orchestrator {
             watch::channel(Arc::new(CapturePublication::default()));
         let (keyboard_specs_tx, keyboard_specs) = watch::channel(Arc::new(Vec::new()));
         let (key_display_specs_tx, key_display_specs) = watch::channel(Arc::new(Vec::new()));
+        let (module_plan_tx, module_plan) = watch::channel(Arc::new(ModulePlan::default()));
         let (host_switch_links_tx, host_switch_links) = watch::channel(Arc::new(Vec::new()));
         let (watched_lights_tx, watched_lights) = watch::channel(Arc::new(Vec::new()));
         openlogi_inject::set_desktop_switch(desktop_switch(&config.app_settings));
@@ -910,6 +934,7 @@ impl Orchestrator {
             keyboard_specs,
             keyboard_channel: Arc::new(RwLock::new(None)),
             key_display_specs,
+            module_plan,
             capture_rearm_generation: Arc::new(AtomicU64::new(0)),
             receiver_access,
             flow,
@@ -956,10 +981,14 @@ impl Orchestrator {
             kept_os_layouts: Arc::default(),
             follower_cookies: Arc::default(),
             keypad_pages: BTreeMap::new(),
+            key_images: BTreeMap::new(),
+            module_faces: BTreeMap::new(),
+            modules_turned_off: BTreeMap::new(),
             os_mouse_hook_available: false,
             capture_plans_tx,
             keyboard_specs_tx,
             key_display_specs_tx,
+            module_plan_tx,
             host_switch_links_tx,
             watched_lights_tx,
             shared,
@@ -1265,6 +1294,61 @@ impl Orchestrator {
         self.publish_device_runtime();
     }
 
+    /// Show `image` on the keypad key at `slot` of the device on `route`, in
+    /// place of its binding's glyph, and republish what the keypad's keys
+    /// show. What the key dispatches is unchanged.
+    pub fn set_key_image(
+        &mut self,
+        route: &DeviceRoute,
+        slot: GridSlot,
+        image: KeyImage,
+    ) -> Result<(), KeyImageError> {
+        let key = self.key_display_device(route)?;
+        let pages = self.config.keypad_pages(&key);
+        if slot.page > pages {
+            return Err(KeyImageError::PageOutOfRange { pages });
+        }
+        self.key_images.entry(key).or_default().insert(slot, image);
+        publish_arc_if_changed(&self.key_display_specs_tx, self.key_display_specs_for());
+        Ok(())
+    }
+
+    /// Show the binding's glyph again on the keypad key at `slot` of the
+    /// device on `route`. A key showing no image is left as it is.
+    ///
+    /// Any page is accepted, so an image on a page the config has since
+    /// removed can still be cleared.
+    pub fn clear_key_image(
+        &mut self,
+        route: &DeviceRoute,
+        slot: GridSlot,
+    ) -> Result<(), KeyImageError> {
+        let key = self.key_display_device(route)?;
+        if let Some(images) = self.key_images.get_mut(&key) {
+            images.remove(&slot);
+            if images.is_empty() {
+                self.key_images.remove(&key);
+            }
+        }
+        publish_arc_if_changed(&self.key_display_specs_tx, self.key_display_specs_for());
+        Ok(())
+    }
+
+    /// The config key of the device on `route`, preferring an online one,
+    /// when its keys show images.
+    fn key_display_device(&self, route: &DeviceRoute) -> Result<String, KeyImageError> {
+        let device = self
+            .devices
+            .iter()
+            .filter(|dev| dev.route.as_ref() == Some(route))
+            .min_by_key(|dev| !dev.online)
+            .ok_or(KeyImageError::DeviceNotFound)?;
+        if key_display_for(route).is_none() {
+            return Err(KeyImageError::NoKeyDisplay);
+        }
+        Ok(device.config_key.clone())
+    }
+
     /// Move the device that fired an Easy-Switch action to `slot`, as its own
     /// channel key would. A keyboard with linked pointing devices, or a
     /// device linked to a keyboard, moves with the rest of its link, as when
@@ -1364,40 +1448,77 @@ impl Orchestrator {
         publish_arc_if_changed(&self.watched_lights_tx, self.watched_lights());
         self.publish_lights();
         publish_arc_if_changed(&self.key_display_specs_tx, self.key_display_specs_for());
+        publish_arc_if_changed(&self.module_plan_tx, self.module_plan_for());
         self.publish_flow();
     }
 
     /// What each online, enabled keypad's LCD keys should show: the glyph of
     /// the action each grid key is bound to, or nothing for an unbound key —
     /// the same effective bindings (per-app overlay included) the keyboard
-    /// capture session dispatches, under the same "bound" rule.
-    ///
-    /// Only a device whose panel the registry describes qualifies; no kind
-    /// gate stands in for that identity fact.
+    /// capture session dispatches, under the same "bound" rule. A key with
+    /// an image set for the current page ([`Self::set_key_image`]) shows the
+    /// image instead, bound or not; a key bound to a key module shows the
+    /// image that module last sent for it, or its binding's own face until
+    /// then: the module glyph, or the short action's icon for a key the
+    /// module owns through its long press.
     fn key_display_specs_for(&self) -> Vec<KeyDisplaySpec> {
+        self.display_keypads()
+            .map(|keypad| {
+                let images = self.key_images.get(&keypad.dev.config_key);
+                let faces = GridKey::ALL
+                    .into_iter()
+                    .map(|key| {
+                        let slot = GridSlot {
+                            page: keypad.page,
+                            key,
+                        };
+                        let binding = keypad.bindings.get(&ButtonId::grid(key));
+                        let face = match images.and_then(|images| images.get(&slot)) {
+                            Some(image) => KeyFace::Image(image.clone()),
+                            None => self
+                                .module_face(&keypad.dev.config_key, slot, binding)
+                                .unwrap_or_else(|| key_face(binding)),
+                        };
+                        (key, face)
+                    })
+                    .collect();
+                let generation = self
+                    .panel_generations
+                    .get(&keypad.route)
+                    .copied()
+                    .unwrap_or(0);
+                KeyDisplaySpec {
+                    route: keypad.route,
+                    display: keypad.display,
+                    generation,
+                    faces,
+                }
+            })
+            .collect()
+    }
+
+    /// Every online, enabled keypad whose panel the registry describes, with
+    /// the page it is on and what that page binds for the app in front:
+    /// what its keys show and dispatch. No kind gate stands in for the
+    /// registry's identity fact.
+    fn display_keypads(&self) -> impl Iterator<Item = DisplayKeypad<'_>> {
         self.devices
             .iter()
             .filter(|dev| dev.online && self.config.device_enabled(&dev.config_key))
             .filter_map(|dev| {
                 let route = dev.route.clone()?;
                 let display = key_display_for(&route)?;
-                let bindings = self.current_page_of(
-                    &dev.config_key,
-                    &self.foreground_key_bindings(&dev.config_key),
-                );
-                let faces = GridKey::ALL
-                    .into_iter()
-                    .map(|key| (key, key_face(bindings.get(&ButtonId::grid(key)))))
-                    .collect();
-                let generation = self.panel_generations.get(&route).copied().unwrap_or(0);
-                Some(KeyDisplaySpec {
+                Some(DisplayKeypad {
+                    dev,
                     route,
                     display,
-                    generation,
-                    faces,
+                    page: self.keypad_page(&dev.config_key),
+                    bindings: self.current_page_of(
+                        &dev.config_key,
+                        &self.foreground_key_bindings(&dev.config_key),
+                    ),
                 })
             })
-            .collect()
     }
 
     /// Hand Flow its configuration and the devices it may move. Both
@@ -2377,6 +2498,7 @@ impl Orchestrator {
     fn replace_config_from(&mut self, config: Config, source: ConfigSource<'_>) -> Vec<LightWrite> {
         let previous_lights = self.effective_online_lights();
         let previous = std::mem::replace(&mut self.config, config);
+        self.count_modules_turned_off(&previous);
         self.forget_saved_light_changes(&previous, source);
         // Parameter-only edits must not erase a transient manual choice while
         // the light remains camera-linked. Changing the policy invalidates it.
@@ -2619,6 +2741,17 @@ fn write_value<T>(lock: &RwLock<T>, value: T, name: &str) {
         Ok(mut guard) => *guard = value,
         Err(e) => warn!(error = %e, lock = name, "lock poisoned — keeping stale value"),
     }
+}
+
+/// One keypad whose LCD keys the orchestrator drives
+/// ([`Orchestrator::display_keypads`]).
+struct DisplayKeypad<'a> {
+    dev: &'a AgentDevice,
+    route: DeviceRoute,
+    display: openlogi_hid::KeyDisplay,
+    page: KeypadPage,
+    /// Its current page's bindings, keyed by physical key.
+    bindings: BTreeMap<ButtonId, Binding>,
 }
 
 /// Publish a fresh immutable snapshot only when its projected value changed.

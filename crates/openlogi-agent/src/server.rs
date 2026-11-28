@@ -16,10 +16,12 @@ use futures::StreamExt as _;
 use openlogi_agent_core::action_ring::{ActionRingActivation, ActionRingManager};
 use openlogi_agent_core::backlight_overlay::BacklightOverlayManager;
 use openlogi_agent_core::event_monitor::SharedEventMonitor;
+use openlogi_agent_core::modules::ModuleHostHandle;
 use openlogi_agent_core::observable::ObservableState;
 use openlogi_agent_core::orchestrator::{self, Orchestrator, SharedHandles};
 use openlogi_agent_core::runtime::ActionDispatcher;
-use openlogi_core::binding::ActionRingSlot;
+use openlogi_agent_core::watchers::key_display::KeyImage;
+use openlogi_core::binding::{ActionRingSlot, ButtonId, GridSlot};
 use openlogi_core::config::{ConfigFile, ConfigRevision, Lighting};
 use openlogi_core::device::DeviceInventory;
 use openlogi_hid::{
@@ -32,9 +34,10 @@ use openlogi_ipc::transport;
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus,
     BacklightObservation, ClientKind, ConfigReloadError, FlowIdentity, FlowPairTarget,
-    FlowPairingCommandError, Generation, Identity, LockKeyObservation, MonitorEvent,
-    NoticeObservation, Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure,
-    PairingUpdate, RingObservation, SavedConfig, SavedConfigVerdict,
+    FlowPairingCommandError, Generation, Identity, KeyImageError, LockKeyObservation, ModuleStatus,
+    MonitorEvent, NoticeObservation, Observation, PROTOCOL_VERSION, PairingCommandError,
+    PairingFailure, PairingUpdate, RingObservation, SavedConfig, SavedConfigVerdict,
+    check_key_image_size,
 };
 use succession::Compat;
 
@@ -66,6 +69,12 @@ pub struct AgentServer {
     /// Forwards each connection's [`ClientKind`] declaration to the
     /// dormancy gate.
     pub demand: tokio::sync::mpsc::UnboundedSender<ClientKind>,
+    /// Taken by each key image change for its whole length
+    /// ([`set_key_image_in`], [`clear_key_image_in`]).
+    key_image_changes: Arc<Mutex<()>>,
+    /// The key-module host: scanned again on every config reload, and the
+    /// source of [`Agent::list_modules`].
+    pub modules: ModuleHostHandle,
 }
 
 impl AgentServer {
@@ -84,6 +93,7 @@ impl AgentServer {
         action_ring: Arc<ActionRingManager>,
         dispatcher: ActionDispatcher,
         backlight_overlay: BacklightOverlayManager,
+        modules: ModuleHostHandle,
     ) -> (Self, tokio::sync::mpsc::UnboundedReceiver<ClientKind>) {
         let ring_haptics = RingHapticPlayer::spawn(shared.clone());
         let (demand, declarations) = tokio::sync::mpsc::unbounded_channel();
@@ -99,6 +109,8 @@ impl AgentServer {
                 ring_haptics,
                 backlight_overlay,
                 demand,
+                key_image_changes: Arc::default(),
+                modules,
             },
             declarations,
         )
@@ -135,6 +147,9 @@ impl AgentServer {
                 }
                 self.observable.set_config_revision(revision);
                 self.dispatcher.cancel_all_buttons();
+                // A module folder dropped in before turning it on is found
+                // now rather than at the next periodic scan.
+                self.modules.rescan();
                 // The GUI's launch-at-login toggle reaches us through this
                 // reload, so re-reconcile the autostart from the new config.
                 crate::autostart::reconcile(launch_at_login);
@@ -599,6 +614,93 @@ impl Agent for AgentServer {
     ) -> Result<(), ActionRingCommandError> {
         self.action_ring.unhover(session_id)
     }
+
+    async fn set_key_image(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        key: ButtonId,
+        image: Vec<u8>,
+    ) -> Result<(), KeyImageError> {
+        let bytes = image.len();
+        let slot = set_key_image_in(
+            &self.orchestrator,
+            &self.key_image_changes,
+            &route,
+            decode_key_image(key, image),
+        )
+        .await?;
+        info!(%route, key = %slot.config_name(), bytes, "set_key_image");
+        Ok(())
+    }
+
+    async fn clear_key_image(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        key: ButtonId,
+    ) -> Result<(), KeyImageError> {
+        let slot =
+            clear_key_image_in(&self.orchestrator, &self.key_image_changes, &route, key).await?;
+        info!(%route, key = %slot.config_name(), "clear_key_image");
+        Ok(())
+    }
+
+    async fn list_modules(self, _: Context) -> Vec<ModuleStatus> {
+        self.modules.statuses()
+    }
+}
+
+/// Run `decoded`, an image's decode ([`decode_key_image`]), and show the
+/// image on its key of the keypad on `route`, holding `changes` throughout:
+/// a slow decode then cannot land after a later set or clear of the same
+/// key. The decode does nothing until it is awaited here, in turn.
+async fn set_key_image_in(
+    orchestrator: &Mutex<Orchestrator>,
+    changes: &Mutex<()>,
+    route: &DeviceRoute,
+    decoded: impl Future<Output = Result<(GridSlot, KeyImage), KeyImageError>>,
+) -> Result<GridSlot, KeyImageError> {
+    let _turn = changes.lock().await;
+    let (slot, image) = decoded.await?;
+    orchestrator
+        .lock()
+        .await
+        .set_key_image(route, slot, image)?;
+    Ok(slot)
+}
+
+/// Show the binding's glyph on `key` of the keypad on `route` again, in turn
+/// with the set calls under `changes`.
+async fn clear_key_image_in(
+    orchestrator: &Mutex<Orchestrator>,
+    changes: &Mutex<()>,
+    route: &DeviceRoute,
+    key: ButtonId,
+) -> Result<GridSlot, KeyImageError> {
+    let slot = key.grid_slot().ok_or(KeyImageError::NotAGridKey)?;
+    let _turn = changes.lock().await;
+    orchestrator.lock().await.clear_key_image(route, slot)?;
+    Ok(slot)
+}
+
+/// The slot and decoded image an [`Agent::set_key_image`] call names, or why
+/// it is refused before the orchestrator is asked.
+///
+/// Decoding a large PNG takes long enough to stall the runtime, so it runs on
+/// the blocking pool, outside the orchestrator's lock; a decoder that panics
+/// on a malformed file refuses that image rather than ending the agent.
+async fn decode_key_image(
+    key: ButtonId,
+    image: Vec<u8>,
+) -> Result<(GridSlot, KeyImage), KeyImageError> {
+    let slot = key.grid_slot().ok_or(KeyImageError::NotAGridKey)?;
+    check_key_image_size(image.len())?;
+    let image = tokio::task::spawn_blocking(move || KeyImage::decode(&image))
+        .await
+        .map_err(|error| KeyImageError::Undecodable(error.to_string()))?
+        .map_err(|error| KeyImageError::Undecodable(error.to_string()))?;
+    Ok((slot, image))
 }
 
 /// Run the action a ring session closed on, whether a click on the overlay
@@ -1168,7 +1270,10 @@ mod tests {
         ARM_BUDGET, Budget, HapticBreaker, PLAY_BUDGET, PlayOutcome, RESTORE_BUDGET, WriteError,
         haptic_restore, is_worth_retrying,
     };
-    use super::{DeviceRoute, ObservableState, Orchestrator, saved_config_verdict};
+    use super::{
+        ButtonId, DeviceRoute, KeyImageError, Mutex, ObservableState, Orchestrator,
+        clear_key_image_in, decode_key_image, saved_config_verdict, set_key_image_in,
+    };
     use openlogi_core::config::{Config, ConfigFile};
     use openlogi_device::test_support::publish_scripted_channel;
     use openlogi_ipc::{SavedConfig, SavedConfigVerdict};
@@ -1405,5 +1510,167 @@ mod tests {
             !played.record(PlayOutcome::Failed, now),
             "a play reset the streak"
         );
+    }
+
+    /// The longest a key image test waits for the agent before failing.
+    const WAIT: Duration = Duration::from_secs(5);
+
+    /// A 2 by 2 opaque red PNG.
+    const RED_PNG: &[u8] = b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR\x00\x00\x00\x02\x00\x00\x00\x02\x08\x02\x00\x00\x00\xfd\xd4\x9a\x73\x00\x00\x00\x10IDAT\x78\x9c\x63\xf8\xcf\xc0\x00\x44\x0c\x10\x0a\x00\x1f\xee\x03\xfd\x8b\x5f\x14\xd4\x00\x00\x00\x00IEND\xae\x42\x60\x82";
+
+    #[tokio::test]
+    async fn a_key_image_is_refused_before_the_orchestrator_is_asked() {
+        let decode = |key: ButtonId, image: Vec<u8>| async move {
+            tokio::time::timeout(WAIT, decode_key_image(key, image))
+                .await
+                .expect("the image is decoded or refused in time")
+        };
+        let middle: ButtonId = "page2:gridMiddle".parse().unwrap();
+        let (slot, _) = decode(middle, RED_PNG.to_vec()).await.unwrap();
+        assert_eq!(slot.config_name(), "page2:gridMiddle");
+
+        assert_eq!(
+            decode(ButtonId::MiddleClick, RED_PNG.to_vec())
+                .await
+                .unwrap_err(),
+            KeyImageError::NotAGridKey
+        );
+        let oversized = vec![0; usize::try_from(openlogi_ipc::MAX_KEY_IMAGE_BYTES).unwrap() + 1];
+        assert_eq!(
+            decode(middle, oversized).await.unwrap_err(),
+            KeyImageError::TooLarge {
+                max: openlogi_ipc::MAX_KEY_IMAGE_BYTES
+            }
+        );
+        assert!(matches!(
+            decode(middle, b"not an image".to_vec()).await,
+            Err(KeyImageError::Undecodable(_))
+        ));
+    }
+
+    /// An orchestrator with one wired MX Creative Keypad, and its route.
+    fn keypad_orchestrator() -> (Orchestrator, DeviceRoute) {
+        use openlogi_core::device::{
+            Capabilities, DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports,
+            PairedDevice, ReceiverInfo,
+        };
+
+        let route = DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc354,
+        };
+        let keypad = DeviceInventory {
+            receiver: ReceiverInfo {
+                name: "MX Creative Keypad".into(),
+                vendor_id: 0x046d,
+                product_id: 0xc354,
+                unique_id: None,
+            },
+            paired: vec![PairedDevice {
+                slot: openlogi_hid::DIRECT_DEVICE_INDEX,
+                codename: Some("MX Creative Keypad".into()),
+                wpid: None,
+                kind: DeviceKind::Numpad,
+                online: true,
+                battery: None,
+                model_info: Some(DeviceModelInfo {
+                    entity_count: 1,
+                    serial_number: None,
+                    unit_id: [1, 2, 3, 4],
+                    transports: DeviceTransports::default(),
+                    model_ids: [0xc354, 0, 0],
+                    extended_model_id: 0,
+                }),
+                capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Numpad)),
+                settings_revision: 0,
+                hidpp10: false,
+            }],
+        };
+        let observable = Arc::new(ObservableState::new("test".to_string()));
+        let mut orchestrator = Orchestrator::new(Config::default(), observable);
+        orchestrator.refresh_inventory(&[keypad], &[], false);
+        (orchestrator, route)
+    }
+
+    /// A clear sent while an earlier set is still decoding is the last word:
+    /// the set lands first and the clear removes it, never the other way.
+    #[tokio::test]
+    async fn a_key_image_cleared_while_it_decodes_stays_cleared() {
+        use openlogi_agent_core::watchers::key_display::KeyFace;
+        use openlogi_core::binding::GridKey;
+
+        let (orchestrator, route) = keypad_orchestrator();
+        let specs = orchestrator.shared().key_display_specs;
+        let orchestrator = Arc::new(Mutex::new(orchestrator));
+        let changes = Arc::new(Mutex::new(()));
+        let middle: ButtonId = "gridMiddle".parse().unwrap();
+        let shows_image = || {
+            let specs = specs.borrow();
+            let [spec] = specs.as_slice() else {
+                panic!("one keypad publishes one spec: {specs:?}");
+            };
+            matches!(spec.faces[&GridKey::Middle], KeyFace::Image(_))
+        };
+
+        tokio::time::timeout(
+            WAIT,
+            set_key_image_in(
+                &orchestrator,
+                &changes,
+                &route,
+                decode_key_image(middle, RED_PNG.to_vec()),
+            ),
+        )
+        .await
+        .expect("a set alone finishes in time")
+        .unwrap();
+        assert!(shows_image(), "a set alone shows the image");
+
+        // A set whose decode the test holds until the clear has started.
+        let (decoding, entered) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel::<()>();
+        let set = tokio::spawn({
+            let (orchestrator, changes, route) =
+                (orchestrator.clone(), changes.clone(), route.clone());
+            async move {
+                let decoded = async move {
+                    let _ = decoding.send(());
+                    let _ = released.await;
+                    decode_key_image(middle, RED_PNG.to_vec()).await
+                };
+                set_key_image_in(&orchestrator, &changes, &route, decoded).await
+            }
+        });
+        tokio::time::timeout(WAIT, entered)
+            .await
+            .expect("the set reaches its decode in time")
+            .unwrap();
+        let mut clear = tokio::spawn({
+            let (orchestrator, changes, route) =
+                (orchestrator.clone(), changes.clone(), route.clone());
+            async move { clear_key_image_in(&orchestrator, &changes, &route, middle).await }
+        });
+        // On this single-threaded runtime the clear runs as soon as the test
+        // waits, so a clear that did not wait for the decoding set would be
+        // done well before this expires.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut clear)
+                .await
+                .is_err(),
+            "the clear finished while the set was still decoding"
+        );
+        release.send(()).unwrap();
+        tokio::time::timeout(WAIT, set)
+            .await
+            .expect("the set finishes in time")
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(WAIT, clear)
+            .await
+            .expect("the clear finishes in time")
+            .unwrap()
+            .unwrap();
+
+        assert!(!shows_image(), "the clear came last");
     }
 }
