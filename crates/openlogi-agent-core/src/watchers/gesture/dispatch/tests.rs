@@ -187,3 +187,63 @@ fn shift_layer_stays_on_until_every_shift_button_is_released() {
     assert!(held.release(&session, ButtonId::Forward));
     assert!(!held.active(&session));
 }
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn pinch_uses_the_pressed_layer_and_cannot_restart_after_cancellation() {
+    let (mut dispatcher, mut actions, mut scroll) = super::super::tests::test_dispatcher();
+    let session = HidppSessionId::with_epoch("mouse", 1);
+    let mut plan = super::super::tests::plan().dispatch;
+    plan.bindings
+        .insert(ButtonId::Forward, Action::GShift.into());
+    for (base, shifted, expected) in [
+        (Action::PinchZoom, Action::Copy, false),
+        (Action::Copy, Action::PinchZoom, true),
+    ] {
+        plan.bindings.insert(ButtonId::DpiToggle, base.into());
+        plan.shift_bindings
+            .insert(ButtonId::DpiToggle, shifted.into());
+        dispatcher.dispatch(
+            &session,
+            &plan,
+            CapturedInput::ButtonDown(ButtonId::Forward),
+        );
+        dispatcher.dispatch(
+            &session,
+            &plan,
+            CapturedInput::ButtonDown(ButtonId::DpiToggle),
+        );
+        assert_eq!(dispatcher.pinch_presses.contains_key(&session), expected);
+        if expected {
+            dispatcher.dispatch(
+                &session,
+                &plan,
+                CapturedInput::PinchMotion {
+                    dy: 14,
+                    captured_at: Instant::now(),
+                },
+            );
+            assert!(matches!(
+                dispatcher.pinch_presses.get(&session),
+                Some(PinchPress::Pending(14))
+            ));
+            dispatcher.dispatch(&session, &plan, CapturedInput::Interrupted);
+            dispatcher.dispatch(
+                &session,
+                &plan,
+                CapturedInput::PinchMotion {
+                    dy: 120,
+                    captured_at: Instant::now(),
+                },
+            );
+            assert!(
+                !dispatcher.pinch_presses.contains_key(&session),
+                "motion from an interrupted hold cannot restart zoom"
+            );
+        } else {
+            dispatcher.cancel_session(&session);
+        }
+    }
+    scroll.shutdown();
+    actions.shutdown();
+}

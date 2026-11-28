@@ -422,11 +422,11 @@ impl SpyEdges {
         self.sink = Some(sink);
     }
 
-    /// Forget the held buttons. A mouse that power-cycled reports them up
-    /// only as an unchanged mask, which is no edge, so say their presses
-    /// ended. That is not a release: a waiting click must not run.
-    pub(super) fn interrupt(&mut self) {
-        if self.held != 0
+    /// Forget held spy buttons and report any press lost to a power cycle,
+    /// including holds owned by the reprogrammable-controls accumulator.
+    /// This is not a release: a waiting click must not run.
+    pub(super) fn interrupt(&mut self, had_reprog_press: bool) {
+        if (self.held != 0 || had_reprog_press)
             && let Some(sink) = &self.sink
         {
             let _ = sink.send(CapturedInput::Interrupted);
@@ -536,9 +536,9 @@ mod tests {
         let captured = host().captured().collect::<Vec<_>>();
         let mut edges = SpyEdges::default();
         edges.attach(tx.clone());
-        edges.interrupt(); // nothing held: nothing to say
+        edges.interrupt(false); // nothing held: nothing to say
         edges.on_mask(0b10_1000, &captured, &tx); // Back, G6 down
-        edges.interrupt();
+        edges.interrupt(false);
         edges.on_mask(0, &captured, &tx); // the woken mouse's all-up report
         let got: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
         assert_eq!(

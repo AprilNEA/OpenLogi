@@ -3,6 +3,7 @@
 //! which held wheel-hold button the raw wheel belongs to.
 
 use std::num::NonZeroU8;
+use std::time::Instant;
 
 use openlogi_core::binding::{ButtonId, GestureDirection, SwipeAccumulator};
 use tokio::sync::mpsc;
@@ -60,6 +61,8 @@ fn begin_hold(cid: u16, button: ButtonId, overlap: bool, skip_first_raw_xy: bool
 /// because the channel's read thread invokes the listener by shared reference.
 #[derive(Default)]
 pub(super) struct CaptureAccum {
+    /// Interpret the armed DPI/ModeShift source as continuous motion.
+    pinch_zoom: bool,
     /// The hold owning raw-XY motion, if any (see [`HoldState`]).
     hold: HoldState,
     /// The armed gesture sources held in the last event, for edge detection:
@@ -72,6 +75,26 @@ pub(super) struct CaptureAccum {
     /// Diverted standard-button and wheel-hold CIDs held in the last event,
     /// in press order.
     buttons_down: Vec<u16>,
+}
+
+impl CaptureAccum {
+    pub(super) fn pinch_zoom() -> Self {
+        Self {
+            pinch_zoom: true,
+            ..Self::default()
+        }
+    }
+
+    /// Forget the current reports and tell the caller if a press was lost.
+    pub(super) fn reset(&mut self) -> bool {
+        let had_press =
+            self.dpi_down || !self.gestures_down.is_empty() || !self.buttons_down.is_empty();
+        *self = Self {
+            pinch_zoom: self.pinch_zoom,
+            ..Self::default()
+        };
+        had_press
+    }
 }
 
 #[cfg(test)]
@@ -252,6 +275,14 @@ impl CaptureAccum {
         if *overlap {
             return;
         }
+        if self.pinch_zoom && *button == ButtonId::DpiToggle && dy != 0 {
+            let _ = sink.send(CapturedInput::PinchMotion {
+                dy,
+                captured_at: Instant::now(),
+            });
+        }
+        // A shifted pinch and an unshifted swipe can share this button. The
+        // dispatcher admits exactly one interpretation on the down edge.
         // Commit the instant a clean direction emerges (mid-swipe, repeatable per hold);
         // the accumulator gates on hold duration internally and drops travel that
         // arrives outside a hold.

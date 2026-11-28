@@ -161,6 +161,68 @@ fn cards_that_reach_past_a_shrunk_model_stay_on_the_canvas(cx: &mut TestAppConte
     cx.run_until_parked();
 }
 
+#[cfg(target_os = "macos")]
+#[gpui::test]
+fn pinch_zoom_picker_assigns_the_supported_button_and_keeps_dpi_actions(cx: &mut TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    cx.update(gpui_kit::init);
+    cx.update(|cx| {
+        let resolver = AssetResolver::new();
+        let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut inventory = crate::state::tests::direct_inventory([0xa3, 0x93, 0xca, 0xe0]);
+        inventory.paired[0]
+            .capabilities
+            .as_mut()
+            .unwrap()
+            .dpi_gestures = true;
+        let state = cx.new(|_| {
+            AppState::new(Sources {
+                inventories: &[inventory],
+                ..Sources::in_memory(Config::ephemeral(), &resolver, commands)
+            })
+        });
+        AppState::set_global(state, cx);
+    });
+    let (view, cx) = cx.add_window_view(MouseModelView::new);
+    cx.simulate_resize(size(px(1200.), px(1100.)));
+    view.update(cx, |view, _| {
+        view.select(MouseControlId::Button(ButtonId::DpiToggle));
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    click_picker_control(cx, "inspector-current-action");
+    cx.update(|window, cx| {
+        view.read(cx)
+            .action_search
+            .focus_handle(cx)
+            .focus(window, cx);
+    });
+    cx.simulate_input("Pinch");
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    click_picker_control(cx, "inspector-action-PinchZoom");
+    cx.update(|_, cx| {
+        assert_eq!(
+            AppState::try_read(cx)
+                .unwrap()
+                .button_bindings()
+                .get(&ButtonId::DpiToggle),
+            Some(&Action::PinchZoom)
+        );
+    });
+
+    view.update(cx, |view, _| {
+        view.select(MouseControlId::Button(ButtonId::Forward));
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    click_picker_control(cx, "inspector-current-action");
+    assert!(cx.debug_bounds("inspector-action-PinchZoom").is_none());
+    assert!(Action::catalog().contains(&Action::CycleDpiPresets));
+    assert!(Action::catalog().contains(&Action::ToggleSmartShift));
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}
+
 #[gpui::test]
 fn action_picker_renders_after_opening_through_the_inspector(cx: &mut TestAppContext) {
     let _locale = LOCALE_LOCK.lock().unwrap();
@@ -564,6 +626,7 @@ fn a_selected_gesture_can_render_in_the_binding_inspector(cx: &mut TestAppContex
                 layout: None,
                 gesture_maps: &gesture_maps,
                 dpi_gestures: false,
+                pinch_action: None,
                 virtual_thumbwheel: false,
                 wheel_hold: &BTreeSet::new(),
                 editing_app: None,

@@ -21,7 +21,7 @@ use openlogi_core::scroll::ScrollDelta;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
-pub use macos::{VirtualKeyboard, is_virtual_keyboard_product};
+pub use macos::{PinchGesture, VirtualKeyboard, is_virtual_keyboard_product};
 
 #[cfg(any(target_os = "macos", test))]
 mod space_switch;

@@ -718,6 +718,78 @@ fn a_dpi_gesture_button_uses_the_shared_raw_xy_path() {
 }
 
 #[test]
+fn dpi_pinch_reports_only_vertical_motion_during_the_hold() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::pinch_zoom();
+    let cid = reprog_controls::DPI_MODE_SHIFT_CIDS[0];
+    let buttons = [(cid, ButtonId::DpiToggle)];
+    let down = RawControlEvent::DivertedButtons([cid, 0, 0, 0]);
+    let up_motion = RawControlEvent::RawXy { dx: 5, dy: -120 };
+    let down_motion = RawControlEvent::RawXy { dx: 1, dy: 80 };
+
+    for event in [
+        up_motion,
+        down,
+        down_motion,
+        RawControlEvent::RawXy { dx: 50, dy: 0 },
+        RawControlEvent::RawXy { dx: 0, dy: -15 },
+        up_motion,
+        down_motion,
+        release(),
+        up_motion,
+    ] {
+        acc.on_event(event, &[], &[], &buttons, &[], &tx);
+    }
+
+    let events = std::iter::from_fn(|| rx.try_recv().ok())
+        .filter(|event| !matches!(event, CapturedInput::Gesture(..)))
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        events.as_slice(),
+        [
+            CapturedInput::ButtonDown(ButtonId::DpiToggle),
+            CapturedInput::PinchMotion { dy: -15, captured_at: first },
+            CapturedInput::PinchMotion { dy: -120, captured_at: up },
+            CapturedInput::PinchMotion { dy: 80, captured_at: down },
+            CapturedInput::ButtonUp(ButtonId::DpiToggle),
+        ] if first <= up && up <= down
+    ));
+}
+
+#[test]
+fn reconnect_forgets_the_pinch_hold_and_reports_that_a_press_was_lost() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::pinch_zoom();
+    let cid = reprog_controls::DPI_MODE_SHIFT_CIDS[0];
+    let buttons = [(cid, ButtonId::DpiToggle)];
+
+    acc.on_event(
+        RawControlEvent::DivertedButtons([cid, 0, 0, 0]),
+        &[],
+        &[],
+        &buttons,
+        &[],
+        &tx,
+    );
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::ButtonDown(ButtonId::DpiToggle))
+    );
+    assert!(acc.reset());
+    assert!(!acc.reset());
+    acc.on_event(
+        RawControlEvent::RawXy { dx: 0, dy: -120 },
+        &[],
+        &[],
+        &buttons,
+        &[],
+        &tx,
+    );
+    acc.on_event(release(), &[], &[], &buttons, &[], &tx);
+    assert_eq!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+}
+
+#[test]
 fn a_held_dpi_button_presses_once_on_the_rising_edge() {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut acc = CaptureAccum::default();

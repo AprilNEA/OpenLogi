@@ -1,7 +1,40 @@
 //! Button, thumb-wheel, gesture and Actions Ring edits, global and per-app.
 
 use super::*;
+use crate::state::BindingLayer;
 use openlogi_core::binding::LongPressBinding;
+
+#[test]
+fn pinch_zoom_requires_supported_button_and_replaces_previous_hold_modes() {
+    let mut state = state_with_a_known_mouse();
+    assert_eq!(
+        state.can_bind_pinch_zoom(ButtonId::DpiToggle),
+        cfg!(target_os = "macos")
+    );
+    assert!(!state.can_bind_pinch_zoom(ButtonId::Forward));
+    let original = state.config.stored_bindings(KNOWN_MOUSE_KEY);
+    let _ = state.commit_binding(ButtonId::Forward, Action::PinchZoom);
+    assert_eq!(state.config.stored_bindings(KNOWN_MOUSE_KEY), original);
+    if cfg!(target_os = "macos") {
+        state.config.edit(|config| {
+            config.set_binding(
+                KNOWN_MOUSE_KEY,
+                ButtonId::DpiToggle,
+                Binding::LongPress(LongPressBinding::new(Action::Copy, Action::Paste)),
+            );
+        });
+        let _ = state.commit_binding(ButtonId::DpiToggle, Action::PinchZoom);
+        assert_eq!(
+            state
+                .config
+                .stored_bindings(KNOWN_MOUSE_KEY)
+                .get(&ButtonId::DpiToggle),
+            Some(&Binding::Single(Action::PinchZoom))
+        );
+        let _ = state.set_binding_layer(BindingLayer::GShift);
+        assert!(!state.can_bind_pinch_zoom(ButtonId::DpiToggle));
+    }
+}
 
 #[test]
 fn picking_a_short_action_preserves_the_long_press_binding() {

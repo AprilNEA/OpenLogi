@@ -516,6 +516,14 @@ that mouse has no adjustable DPI; DPI presets saved for it are ignored. This
 makes the MX Ergo's precision button work with its default binding. On a mouse
 with adjustable DPI, `CycleDpiPresets` keeps cycling the DPI presets.
 
+On macOS, **Pinch Zoom** is available for DPI/ModeShift buttons that report raw
+movement. Set it under **Buttons > DPI Toggle**, or use
+`DpiToggle = "PinchZoom"` in the mouse's `bindings` table. Hold the button and
+move the mouse vertically to zoom in or out. Slow movement gives fine control
+and faster movement increases magnification more quickly. A tap or small
+movement has no effect. Mouse event capture, Accessibility and Input Monitoring
+must be enabled.
+
 A mouse with a DPI LED (HID++ `0x1300`), such as the MX Ergo, shows the mode
 on that LED, as in Logi Options+. The LED lights when precision mode starts
 and goes dark when it ends. OpenLogi takes control of the LED from the

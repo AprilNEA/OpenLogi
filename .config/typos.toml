@@ -19,6 +19,8 @@ extend-ignore-identifiers-re = ["^(?:ALS|AlsAutomatic|AlsSaturated)$"]
 extend-ignore-re = ['\bOL-SER-[0-9]{5}\b']
 
 [default.extend-identifiers]
+# Mach timebase numerator field from the Darwin SDK.
+numer = "numer"
 # Protocol and domain identifiers whose source spelling must stay exact.
 PNGs = "PNGs"
 # async-hid's `Device::open_writeable`.

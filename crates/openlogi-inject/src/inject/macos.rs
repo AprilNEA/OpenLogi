@@ -56,6 +56,8 @@ mod main_thread;
     reason = "Accessibility element creation and actions are unsafe FFI calls"
 )]
 mod menu_shortcut;
+mod pinch;
+pub use pinch::PinchGesture;
 mod scroll;
 /// Space switches — DockSwipe events, instant or a timed slide, or the user's
 /// Space shortcut for a slide — with read-only, per-display Space

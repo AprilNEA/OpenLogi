@@ -331,21 +331,21 @@ pub fn plan_for_device(
     // gesture at once, each armed with its own raw-XY divert (the capture
     // target below derives the CIDs to divert from this map's keys).
     let gesture_bindings = hidpp_gesture_maps_for(config, Some(config_key), app);
-    let mut divert_gesture_buttons = Vec::new();
-    if os_mouse_hook_available {
-        divert_gesture_buttons.extend(
-            DIVERTABLE_STANDARD_BUTTONS
-                .into_iter()
-                .filter(|(_, button)| side_gesture_bindings.contains_key(button)),
-        );
-    }
-    if gesture_bindings.contains_key(&ButtonId::DpiToggle) {
-        divert_gesture_buttons.extend(
-            DPI_MODE_SHIFT_CIDS
-                .into_iter()
-                .map(|cid| (cid, ButtonId::DpiToggle)),
-        );
-    }
+    let shift_bindings = shift_bindings_for(config, config_key);
+    let pinch_zoom = cfg!(target_os = "macos")
+        && os_mouse_hook_available
+        && config.app_settings.capture_mouse_events
+        && [&bindings, &shift_bindings].into_iter().any(|layer| {
+            matches!(
+                layer.get(&ButtonId::DpiToggle),
+                Some(Binding::Single(Action::PinchZoom))
+            )
+        });
+    let divert_gesture_buttons = gesture_button_diverts(
+        &side_gesture_bindings,
+        os_mouse_hook_available,
+        pinch_zoom || gesture_bindings.contains_key(&ButtonId::DpiToggle),
+    );
     // Wheel-hold turns the main wheel into a virtual thumb wheel, which works
     // only while the agent can post scroll events. Without the mouse hook
     // (on macOS, without Accessibility) Back/Forward are plain-diverted below
@@ -422,6 +422,7 @@ pub fn plan_for_device(
                     .map(|(cid, _)| cid)
                     .collect(),
                 divert_gesture_buttons,
+                pinch_zoom,
                 divert_buttons,
                 divert_wheel_buttons,
                 // Needs the device's wheel capabilities and the settings of
@@ -440,9 +441,32 @@ pub fn plan_for_device(
             invert_wheel: false,
             momentum: config.momentum_scrolling(config_key),
             pointer: None,
-            shift_bindings: shift_bindings_for(config, config_key),
+            shift_bindings,
         },
     }
+}
+
+fn gesture_button_diverts(
+    side_gesture_bindings: &BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
+    os_mouse_hook_available: bool,
+    capture_dpi_toggle: bool,
+) -> Vec<(u16, ButtonId)> {
+    let mut diverts = Vec::new();
+    if os_mouse_hook_available {
+        diverts.extend(
+            DIVERTABLE_STANDARD_BUTTONS
+                .into_iter()
+                .filter(|(_, button)| side_gesture_bindings.contains_key(button)),
+        );
+    }
+    if capture_dpi_toggle {
+        diverts.extend(
+            DPI_MODE_SHIFT_CIDS
+                .into_iter()
+                .map(|cid| (cid, ButtonId::DpiToggle)),
+        );
+    }
+    diverts
 }
 
 #[cfg(test)]
@@ -1204,6 +1228,45 @@ mod tests {
                 .map(|cid| (cid, ButtonId::DpiToggle))
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn dpi_pinch_requests_raw_xy_only_when_supported_and_effective() {
+        let mut config = Config::default();
+        config.app_settings.capture_mouse_events = true;
+        config.set_binding(
+            "2b042",
+            ButtonId::DpiToggle,
+            Binding::Single(Action::PinchZoom),
+        );
+        config.set_per_app_binding(
+            "2b042",
+            "com.example.Editor",
+            ButtonId::DpiToggle,
+            Some(Action::Copy),
+        );
+
+        for (app, hook_available, expected) in [
+            (None, true, cfg!(target_os = "macos")),
+            (None, false, false),
+            (Some("com.example.Editor"), true, false),
+        ] {
+            let plan = plan_for_device(&config, "2b042", route(), app, 0, hook_available);
+            assert_eq!(plan.target.spec.pinch_zoom, expected);
+            assert_eq!(
+                plan.target
+                    .spec
+                    .divert_gesture_buttons
+                    .iter()
+                    .filter(|(_, button)| *button == ButtonId::DpiToggle)
+                    .count(),
+                if expected {
+                    DPI_MODE_SHIFT_CIDS.len()
+                } else {
+                    0
+                },
+            );
+        }
     }
 
     #[test]

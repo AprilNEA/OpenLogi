@@ -100,6 +100,7 @@ struct MouseWorkspaceData<'a> {
     glow: Option<(Arc<GlowGeometry>, Hsla)>,
     thumbwheel: bool,
     dpi_gestures: bool,
+    pinch_action: Option<&'static Action>,
     virtual_thumbwheel: bool,
     wheel_hold: &'a BTreeSet<ButtonId>,
     editing_app: Option<String>,
@@ -133,6 +134,9 @@ impl<'a> MouseWorkspaceData<'a> {
                 .current_record()
                 .and_then(|record| record.capabilities)
                 .is_some_and(|capabilities| capabilities.dpi_gestures),
+            pinch_action: state
+                .can_bind_pinch_zoom(ButtonId::DpiToggle)
+                .then_some(&Action::PinchZoom),
             virtual_thumbwheel: state
                 .current_record()
                 .and_then(|record| record.capabilities)
@@ -173,6 +177,7 @@ impl<'a> MouseWorkspaceData<'a> {
             glow: None,
             thumbwheel: false,
             dpi_gestures: false,
+            pinch_action: None,
             virtual_thumbwheel: false,
             wheel_hold: &NO_WHEEL_HOLD,
             editing_app: None,
@@ -517,6 +522,7 @@ impl Render for MouseModelView {
             glow,
             thumbwheel,
             dpi_gestures,
+            pinch_action,
             virtual_thumbwheel,
             wheel_hold,
             editing_app,
@@ -590,6 +596,7 @@ impl Render for MouseModelView {
                 layout,
                 gesture_maps,
                 dpi_gestures,
+                pinch_action,
                 virtual_thumbwheel,
                 wheel_hold,
                 editing_app: editing_app.as_deref(),

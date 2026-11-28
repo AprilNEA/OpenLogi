@@ -119,7 +119,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// unreleased version and leave this pin alone (`crates/openlogi-ipc/AGENTS.md`).
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 46);
+    assert_eq!(PROTOCOL_VERSION, 47);
 }
 
 #[test]
@@ -518,6 +518,7 @@ fn easy_switch_channel_actions() {
     assert_wire(&Action::EasySwitchChannel1, "3e");
     assert_wire(&Action::EasySwitchChannel2, "3f");
     assert_wire(&Action::EasySwitchChannel3, "40");
+    assert_wire(&Action::PinchZoom, "41");
 }
 
 /// The Easy-Switch channel icons are unit variants appended after `Ban`, so

@@ -21,7 +21,7 @@ fn session_id(epoch: u64) -> HidppSessionId {
     HidppSessionId::with_epoch("mouse-a", epoch)
 }
 
-fn plan() -> DeviceCapturePlan {
+pub(super) fn plan() -> DeviceCapturePlan {
     crate::capture_plan::plan_for_device(
         &openlogi_core::config::Config::default(),
         crate::capture_plan::PlanDevice {
@@ -958,8 +958,11 @@ async fn pending_restore_follows_a_disabled_devices_latest_route() {
     );
 }
 
-#[tokio::test]
-async fn a_pointer_only_plan_refresh_keeps_a_held_gesture() {
+pub(super) fn test_dispatcher() -> (
+    InputDispatcher,
+    crate::runtime::ActionRuntime,
+    crate::runtime::scroll::ScrollRuntime,
+) {
     use crate::runtime::scroll::{ScrollPreferences, ScrollRuntime};
 
     let (_signal, device_io) = openlogi_hid::device_io_channel();
@@ -971,19 +974,26 @@ async fn a_pointer_only_plan_refresh_keeps_a_held_gesture() {
         device_io,
         transport_turns: crate::hardware::TransportTurns::default(),
     };
-    let mut actions =
+    let actions =
         crate::runtime::ActionRuntime::new(Arc::default(), Arc::default(), device_access, ring)
             .unwrap();
-    let mut scroll = ScrollRuntime::spawn(Arc::new(ScrollPreferences::new(
+    let scroll = ScrollRuntime::spawn(Arc::new(ScrollPreferences::new(
         false,
         VerticalScrollSensitivity::default(),
     )))
     .unwrap();
-    let mut dispatcher = InputDispatcher::new(GestureOutputs::new(
+    let dispatcher = InputDispatcher::new(GestureOutputs::new(
         actions.dispatcher(),
         scroll.input(),
         Arc::default(),
     ));
+
+    (dispatcher, actions, scroll)
+}
+
+#[tokio::test]
+async fn a_pointer_only_plan_refresh_keeps_a_held_gesture() {
+    let (mut dispatcher, mut actions, mut scroll) = test_dispatcher();
 
     let mut held = plan();
     held.dispatch.gesture_bindings.insert(

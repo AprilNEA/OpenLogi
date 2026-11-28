@@ -43,6 +43,7 @@ files; **keep this table in sync when you add or move one**:
 | `openlogi-hook/src/macos/sender.rs` | the HID sender-id lookup and the IOKit registry walk that resolves it to a device |
 | `openlogi-inject/src/inject/macos.rs` | CGEvent key and click synthesis, media-key `NSEvent`s |
 | `openlogi-inject/src/inject/macos/scroll.rs` | CGEvent scroll synthesis, including the continuous-scroll phase fields, and the zoom retyping of wheel events while Accessibility Zoom's scroll modifiers are held (`+[NSEvent modifierFlags]` and the `com.apple.universalaccess` defaults) |
+| `openlogi-inject/src/inject/macos/pinch.rs` | phased CGEvent magnification synthesis and monotonic Mach timestamps for a held pinch |
 | `openlogi-inject/src/inject/macos/ax.rs` | the shared `AXUIElement` attribute reads (`CFRetained` adoption of the Copy-rule out-pointer) and `AXChildren` iteration |
 | `openlogi-inject/src/inject/macos/browser.rs` | Safari's toolbar-button navigation over `ax.rs`, and the off-thread `NSWorkspace` Safari validation |
 | `openlogi-inject/src/inject/macos/menu_shortcut.rs` | the hidden probe `NSMenu` AppKit remaps for the keyboard layout, and pressing the frontmost app's matching menu item through AX |
