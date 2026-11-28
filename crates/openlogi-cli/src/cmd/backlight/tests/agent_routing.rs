@@ -78,6 +78,10 @@ fn state() -> BacklightState {
         controls: BacklightControls::AUTOMATIC
             | BacklightControls::LEVEL
             | BacklightControls::POWER_SAVE,
+        effects: [BacklightEffect::Static, BacklightEffect::Breathing]
+            .into_iter()
+            .collect(),
+        effect: BacklightEffect::Static,
     }
 }
 
@@ -185,7 +189,10 @@ async fn bare_and_status_read_exact_agent_routes_without_writing_or_arming() {
             result.unwrap();
             assert!(out.contains(&format!("device: Test keyboard ({expected})")));
             assert!(out.contains("level=2/7 battery-saving=true"));
-            assert!(out.contains("offers: on/off, auto, level, battery-saving"));
+            assert!(out.contains("effect=static"));
+            assert!(out.contains(
+                "offers: on/off, auto, level, battery-saving, effect (static, breathing)"
+            ));
             assert!(!out.contains('✓'));
         }
     }
@@ -215,6 +222,12 @@ async fn every_write_sends_one_exact_change_and_prints_the_agents_confirmed_stat
         (
             BacklightAction::BatterySaving { set: Switch::Off },
             BacklightChange::PowerSave(false),
+        ),
+        (
+            BacklightAction::Effect {
+                effect: BacklightEffect::Breathing,
+            },
+            BacklightChange::Effect(BacklightEffect::Breathing),
         ),
     ] {
         // The agent owns confirmation. An incidental brightness change must
@@ -256,6 +269,7 @@ async fn every_write_sends_one_exact_change_and_prints_the_agents_confirmed_stat
             .find(|line| line.contains("read-back:"))
             .unwrap();
         assert!(readback.contains(&format!("level={reported_level}/7")));
+        assert!(readback.contains(&format!("effect={}", after.effect)));
         assert!(out.contains(&format!("✓ {change}")));
     }
 }

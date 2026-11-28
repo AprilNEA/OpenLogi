@@ -193,7 +193,10 @@ pub use succession::Identity;
 ///      `Action::{EasySwitchChannel1, EasySwitchChannel2, EasySwitchChannel3}`
 ///      and `ActionRingIcon::{Channel1, Channel2, Channel3}` appended after
 ///      them — a device's move to another Easy-Switch channel, bound to a
-///      button or an Actions Ring slot.
+///      button or an Actions Ring slot. `BacklightEffect`,
+///      `BacklightChange::Effect` and `BacklightState::{effects, effect}`
+///      appended — the `0x1982` predefined effect a keyboard runs, which ones
+///      it lists, and picking one through `Agent::set_backlight`.
 pub const PROTOCOL_VERSION: u32 = 46;
 
 /// Environment variable through which the agent hands a supervised helper the

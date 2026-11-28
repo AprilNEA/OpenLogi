@@ -104,7 +104,9 @@
             "power_save": true,
             "duration": true
           },
-          "duration": 15
+          "duration": 15,
+          "effects": 3,
+          "effect": "Static"
         }
       },
       "fn_lock": {
