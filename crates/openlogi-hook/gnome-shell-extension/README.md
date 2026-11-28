@@ -15,6 +15,13 @@ animation ends, especially near screen edges ([#1210](https://github.com/AprilNE
 Other windows retain their normal animation policy; disabling the extension
 restores GNOME's original policy. The global animation setting is never changed.
 
+Because Mutter has no layer shell, the ring is an ordinary window and takes
+keyboard focus when it maps. The ring itself only needs the pointer, but the
+shortcut a slot injects (Copy, Paste, Back, ...) goes to the focused window, so
+it would reach the ring instead of the application ([#1826](https://github.com/AprilNEA/OpenLogi/issues/1826)).
+The extension hands keyboard focus straight back to the window that was focused
+before the ring. It focuses without raising, so the ring stays on top.
+
 No titles, window contents, or input are read, and the extension adds no UI.
 
 ## D-Bus surface
@@ -30,7 +37,7 @@ No titles, window contents, or input are read, and the extension adds no UI.
 UUID=openlogi-frontmost@openlogi.dev
 DEST="$HOME/.local/share/gnome-shell/extensions/$UUID"
 mkdir -p "$DEST"
-cp metadata.json extension.js ringAnimation.js "$DEST"/
+cp metadata.json extension.js ringWindow.js ringAnimation.js ringFocus.js "$DEST"/
 ```
 
 On Wayland the shell cannot be reloaded in place, so **log out and back in** to
@@ -70,10 +77,16 @@ enough inward to keep the ring visible. Hover and click a slot to verify its
 hit target matches the drawing. Ordinary application windows should still
 animate. Disable the extension to verify that its animation override is removed.
 
-The animation-policy regression tests need Node.js 22 or newer and no running shell:
+To check focus, select text in a native Wayland application, open the ring
+over it and choose Copy, then choose Paste elsewhere in that application. Try
+both a click on a slot and a held-trigger release. The application should
+receive both shortcuts.
+
+The animation-policy and focus regression tests need Node.js 22 or newer and
+no running shell:
 
 ```sh
-node --test crates/openlogi-hook/gnome-shell-extension/tests/ringAnimation.test.mjs
+node --test crates/openlogi-hook/gnome-shell-extension/tests/*.test.mjs
 ```
 
 Run that command from the repository root. It does not replace the live GNOME

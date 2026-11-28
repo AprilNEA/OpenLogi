@@ -1,8 +1,8 @@
 {
   "uuid": "openlogi-frontmost@openlogi.dev",
   "name": "OpenLogi Frontmost Window",
-  "description": "Supports per-app OpenLogi profiles on GNOME Wayland and keeps the Actions Ring positioned correctly by excluding it from window animations. No window contents or input are read.",
+  "description": "Supports per-app OpenLogi profiles on GNOME Wayland and keeps the Actions Ring positioned correctly by excluding it from window animations, and returns keyboard focus to the window the ring opened over. No window contents or input are read.",
   "shell-version": ["45", "46", "47", "48", "49", "50"],
   "url": "https://github.com/AprilNEA/OpenLogi",
-  "version": 3
+  "version": 4
 }
