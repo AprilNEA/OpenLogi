@@ -587,3 +587,49 @@ fn xdg_base_lists_expand_in_order() {
         "every expanded entry is an absolute unit directory: {dirs:?}"
     );
 }
+
+/// A unit an older release wrote stays ours, so `apply` upgrades it to the
+/// current template instead of leaving it in place as the user's. The fixture
+/// is the unit 0.9.0 wrote, kept literal so that editing or dropping its entry
+/// in `UNIT_TAILS` fails here.
+#[test]
+fn a_unit_written_by_0_9_0_is_ours() {
+    let old = "[Unit]\n\
+        Description=OpenLogi background agent (Logitech HID++ device control)\n\
+        After=graphical-session.target\n\
+        \n\
+        [Service]\n\
+        Type=simple\n\
+        ExecStart=/home/user/OpenLogi/target/release/openlogi-agent\n\
+        Restart=on-failure\n\
+        RestartSec=5\n\
+        \n\
+        [Install]\n\
+        WantedBy=graphical-session.target\n";
+    assert!(is_generated_unit(old));
+}
+
+#[test]
+fn the_current_template_is_ours() {
+    assert!(is_generated_unit(&render_unit("/usr/bin/openlogi-agent")));
+}
+
+#[test]
+fn rendered_unit_caps_the_journal_rate() {
+    let body = render_unit("/usr/bin/openlogi-agent");
+    assert!(body.contains("\nLogRateLimitIntervalSec=30s\n"));
+    assert!(body.contains("\nLogRateLimitBurst=2000\n"));
+}
+
+/// The packaged unit and the generated one describe the same service; once
+/// its leading comment is dropped, the package must be exactly the unit this
+/// app renders for the packaged binary path.
+#[test]
+fn the_packaged_unit_matches_the_rendered_one() {
+    let packaged = include_str!("../../../../../packaging/linux/systemd/openlogi-agent.service");
+    let body = packaged
+        .split_once("\n[Unit]\n")
+        .map(|(_, rest)| format!("[Unit]\n{rest}"))
+        .expect("packaged unit has a [Unit] section");
+    assert_eq!(body, render_unit("/usr/bin/openlogi-agent"));
+}
