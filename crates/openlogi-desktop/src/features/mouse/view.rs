@@ -336,6 +336,7 @@ impl MouseModelView {
         let drafts = self.mode.drafts().copied();
         let PickerDrafts {
             shortcut_mode,
+            wheel_direction,
             invalid,
         } = drafts.unwrap_or_default();
         ActionPickerContext {
@@ -345,6 +346,7 @@ impl MouseModelView {
             application_input: &self.custom_application_input,
             command_input: &self.custom_command_input,
             shortcut_mode,
+            wheel_direction,
             shortcut_recording: self.mode.is_recording(),
             shortcut_record_focus: &self.shortcut_record_focus,
             invalid,

@@ -13,6 +13,7 @@ use super::*;
 use crate::features::mouse::editor_mode::Selection;
 use crate::features::mouse::inspector::{InvalidDrafts, ShortcutMode};
 use crate::features::mouse::leader_lines::Side;
+use crate::features::mouse::thumbwheel::ThumbwheelDirection;
 use crate::services::assets::AssetResolver;
 use crate::services::i18n::LOCALE_LOCK;
 use crate::state::Sources;
@@ -579,6 +580,7 @@ fn a_selected_gesture_can_render_in_the_binding_inspector(cx: &mut TestAppContex
                 application_input: &view.custom_application_input,
                 command_input: &view.custom_command_input,
                 shortcut_mode: ShortcutMode::Tap,
+                wheel_direction: ThumbwheelDirection::Up,
                 shortcut_recording: false,
                 shortcut_record_focus: &view.shortcut_record_focus,
                 invalid: InvalidDrafts::default(),
@@ -626,6 +628,7 @@ fn reopening_the_picker_clears_every_custom_action_draft(cx: &mut TestAppContext
     cx.run_until_parked();
     let held = PickerDrafts {
         shortcut_mode: ShortcutMode::Hold,
+        wheel_direction: ThumbwheelDirection::Down,
         invalid: InvalidDrafts {
             shortcut: Some(ShiftedSymbol),
             application: true,
@@ -1215,6 +1218,190 @@ fn the_model_and_full_values_fit_the_canvas_area_below_the_chrome(cx: &mut TestA
             "{value}: shown in {shown:?}, needs {full:?} on one line"
         );
     }
+
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}
+
+/// The mouse view with the fixture mouse and `config`, the thumb wheel
+/// selected and its picker closed, at `window` size.
+fn thumbwheel_view(
+    cx: &mut TestAppContext,
+    config: Config,
+    window: gpui::Size<gpui::Pixels>,
+) -> (Entity<MouseModelView>, &mut VisualTestContext) {
+    cx.update(gpui_kit::init);
+    cx.update(|cx| {
+        let resolver = AssetResolver::new();
+        let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let inventory = crate::state::tests::direct_inventory([0xa3, 0x93, 0xca, 0xe0]);
+        let state = cx.new(|_| {
+            AppState::new(Sources {
+                inventories: &[inventory],
+                ..Sources::in_memory(config, &resolver, commands)
+            })
+        });
+        AppState::set_global(state, cx);
+    });
+    let (view, cx) = cx.add_window_view(MouseModelView::new);
+    cx.simulate_resize(window);
+    view.update(cx, |view, _| {
+        view.select(MouseControlId::ThumbwheelRotation);
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    (view, cx)
+}
+
+fn thumbwheel_binding(cx: &mut VisualTestContext, button: ButtonId) -> Option<Action> {
+    cx.update(|_, cx| {
+        AppState::try_read(cx)
+            .expect("state is installed")
+            .button_bindings()
+            .get(&button)
+            .cloned()
+    })
+}
+
+/// Pick Copy for `direction` through the Custom section, the way the user
+/// does: open the picker from the card, choose the direction, click the row.
+fn pick_copy_for(cx: &mut VisualTestContext, direction: &'static str) {
+    click_picker_control(cx, "inspector-current-thumbwheel-preset");
+    click_picker_control(cx, direction);
+    click_picker_control(cx, "inspector-thumbwheel-action-Copy");
+}
+
+#[gpui::test]
+fn thumbwheel_custom_picker_commits_selected_direction(cx: &mut TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    // Tall enough for the presets, the Custom section and the Copy row.
+    let (view, cx) = thumbwheel_view(cx, Config::ephemeral(), size(px(1200.), px(4000.)));
+    let up = thumbwheel_binding(cx, ButtonId::ThumbwheelScrollUp);
+
+    pick_copy_for(cx, "inspector-thumbwheel-direction-down");
+    view.read_with(cx, |view, _| assert!(!picker_open(view)));
+    assert_eq!(
+        thumbwheel_binding(cx, ButtonId::ThumbwheelScrollDown),
+        Some(Action::Copy)
+    );
+    assert_eq!(
+        thumbwheel_binding(cx, ButtonId::ThumbwheelScrollUp),
+        up,
+        "the other direction keeps its action"
+    );
+
+    // An app profile takes the pick as its own override of that direction.
+    cx.update(|_, cx| {
+        AppState::apply(cx, |state| {
+            state.set_editing_app(Some("com.apple.Safari".into()))
+        });
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    pick_copy_for(cx, "inspector-thumbwheel-direction-up");
+    cx.update(|_, cx| {
+        let state = AppState::try_read(cx).expect("state is installed");
+        let overrides = state
+            .editing_app_overrides()
+            .expect("the app profile is open");
+        assert_eq!(
+            overrides.get(&ButtonId::ThumbwheelScrollUp),
+            Some(&Action::Copy)
+        );
+        assert!(
+            !overrides.contains_key(&ButtonId::ThumbwheelScrollDown),
+            "the other direction keeps inheriting the default profile"
+        );
+    });
+
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}
+
+/// A wheel turn fires its action once, so the wheel's picker leaves out the
+/// actions that last as long as a press, and the shortcut editor's Hold mode.
+#[gpui::test]
+fn thumbwheel_picker_excludes_held_actions(cx: &mut TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    let (view, cx) = thumbwheel_view(cx, Config::ephemeral(), size(px(1200.), px(1000.)));
+
+    click_picker_control(cx, "inspector-current-thumbwheel-preset");
+    assert!(
+        cx.debug_bounds("inspector-thumbwheel-action-Copy")
+            .is_some()
+    );
+    assert!(
+        cx.debug_bounds("inspector-thumbwheel-action-DpiShift")
+            .is_none()
+    );
+    assert!(
+        cx.debug_bounds("inspector-thumbwheel-action-shortcut-hold")
+            .is_none()
+    );
+
+    // A button's picker still offers both.
+    view.update(cx, |view, _| {
+        view.close_action_picker();
+        view.select(MouseControlId::Button(ButtonId::Forward));
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    click_picker_control(cx, "inspector-current-action");
+    assert!(cx.debug_bounds("inspector-action-DpiShift").is_some());
+    assert!(cx.debug_bounds("inspector-action-shortcut-hold").is_some());
+
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}
+
+/// At the main window's minimum size and the 125% interface scale, the
+/// inspector scrolls far enough to show the wheel picker's last action.
+#[gpui::test]
+fn thumbwheel_picker_reaches_its_last_action_in_a_scaled_minimum_window(cx: &mut TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    let (view, cx) = thumbwheel_view(cx, Config::ephemeral(), size(px(720.), px(680.)));
+    cx.update(|window, cx| {
+        crate::ui::theme::apply_scale(window, openlogi_core::config::UiScale::ExtraLarge);
+        window.draw(cx).clear(cx);
+    });
+    click_picker_control(cx, "inspector-current-thumbwheel-preset");
+
+    let last = crate::features::binding_editor::grouped_catalog()
+        .into_iter()
+        .rev()
+        .find_map(|(_, actions)| actions.into_iter().rev().find(|action| !action.is_held()))
+        .expect("the catalog has actions");
+    // `debug_bounds` takes a static selector.
+    let selector: &'static str =
+        Box::leak(format!("inspector-thumbwheel-action-{last:?}").into_boxed_str());
+    let scroll = cx
+        .debug_bounds("binding-inspector")
+        .expect("the inspector renders");
+    let window_h = px(680.);
+    for _ in 0..200 {
+        let row = cx
+            .debug_bounds(selector)
+            .expect("the last action row renders");
+        if row.bottom() <= window_h {
+            break;
+        }
+        cx.simulate_event(gpui::ScrollEvent {
+            position: scroll.center(),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-120.))),
+            ..Default::default()
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+    }
+    let row = cx
+        .debug_bounds(selector)
+        .expect("the last action row renders");
+    assert!(
+        row.top() >= px(0.) && row.bottom() <= window_h,
+        "the last action {selector} at {row:?} must scroll into the {window_h:?} window"
+    );
 
     drop(view);
     cx.update(|window, _| window.remove_window());

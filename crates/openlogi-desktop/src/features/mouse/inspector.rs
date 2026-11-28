@@ -19,7 +19,7 @@ use openlogi_core::binding::{
 
 use super::editor_mode::Selection;
 use super::force_sensing::{PressForce, force_sensing_row};
-use super::thumbwheel::ThumbwheelPreset;
+use super::thumbwheel::{ThumbwheelDirection, ThumbwheelPreset, custom_pair_label};
 use super::view::MouseModelView;
 use crate::features::binding_editor::{
     ActionOffer, GESTURE_BUTTON_ICON, PickFn, action_icon_path, action_rows_with,
@@ -67,6 +67,8 @@ pub(super) struct ActionPickerContext<'a> {
     pub application_input: &'a Entity<InputState>,
     pub command_input: &'a Entity<InputState>,
     pub shortcut_mode: ShortcutMode,
+    /// The thumb-wheel direction the custom thumb-wheel editor binds.
+    pub wheel_direction: ThumbwheelDirection,
     /// Whether Record is waiting for the next key press.
     pub shortcut_recording: bool,
     /// The Record button's area, which holds focus while recording.
@@ -130,13 +132,7 @@ pub(super) fn binding_inspector(
             Some((button, direction)) => {
                 button_inspector(button, direction, &data, picker, pal, cx)
             }
-            None => thumbwheel_inspector(
-                data.bindings,
-                data.editing_app,
-                data.overridden,
-                picker,
-                pal,
-            ),
+            None => thumbwheel_inspector(&data, picker, pal, cx),
         },
     };
 
@@ -300,6 +296,7 @@ fn button_inspector(
                     extra: data.extra_actions,
                     hidden: data.hidden_actions,
                 },
+                Release::Delivered,
                 &on_pick,
                 pal,
                 cx,
@@ -442,6 +439,7 @@ fn inherited_gesture_inspector(
                     extra: data.extra_actions,
                     hidden: data.hidden_actions,
                 },
+                Release::Delivered,
                 &on_pick,
                 pal,
                 cx,
@@ -517,6 +515,7 @@ fn gesture_inspector(
                     extra: &[],
                     hidden: data.hidden_actions,
                 },
+                Release::Delivered,
                 &on_pick,
                 pal,
                 cx,
@@ -601,13 +600,19 @@ fn can_enable_gestures(button: ButtonId, editing_app: Option<&str>) -> bool {
     editing_app.is_none() && button.supports_gesture_mode()
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the thumb-wheel inspector lays out its rows inline"
+)]
 fn thumbwheel_inspector(
-    bindings: &BTreeMap<ButtonId, Action>,
-    editing_app: Option<&str>,
-    overridden: Option<&BTreeMap<ButtonId, Action>>,
+    data: &BindingInspectorData<'_>,
     picker: ActionPickerContext<'_>,
     pal: Palette,
+    cx: &Context<MouseModelView>,
 ) -> gpui::Div {
+    let bindings = data.bindings;
+    let editing_app = data.editing_app;
+    let overridden = data.overridden;
     let backward = bindings
         .get(&ButtonId::ThumbwheelScrollDown)
         .cloned()
@@ -626,7 +631,10 @@ fn thumbwheel_inspector(
         (Some(_), false) => tr!("profiles.inherited_from_default"),
         (None, _) => tr!("profiles.default_profile"),
     };
-    let current_label = current.map_or_else(|| tr!("common.custom"), |p| tr!(p.translation_key()));
+    let current_label = current.map_or_else(
+        || custom_pair_label(&backward, &forward),
+        |p| tr!(p.translation_key()),
+    );
     let current_icon = current.map_or("action-icons/chevrons-right.svg", ThumbwheelPreset::icon);
     let observer = picker.view.clone();
 
@@ -687,6 +695,16 @@ fn thumbwheel_inspector(
                                     });
                                 })
                         },
+                    ))
+                    .child(thumbwheel_custom_editor(
+                        [
+                            (ThumbwheelDirection::Up, &forward),
+                            (ThumbwheelDirection::Down, &backward),
+                        ],
+                        data,
+                        picker,
+                        pal,
+                        cx,
                     )),
             )
         })
@@ -707,6 +725,80 @@ fn thumbwheel_inspector(
                     }),
             )
         })
+}
+
+/// Custom actions for the thumb wheel, one direction at a time: the
+/// Up / Down choice, then the same action library a button's picker offers.
+/// A pick binds only the chosen direction, so the pair can mix any actions.
+fn thumbwheel_custom_editor(
+    current: [(ThumbwheelDirection, &Action); 2],
+    data: &BindingInspectorData<'_>,
+    picker: ActionPickerContext<'_>,
+    pal: Palette,
+    cx: &Context<MouseModelView>,
+) -> impl IntoElement {
+    let direction = picker.wheel_direction;
+    // A wheel turn fires its action once, so an action that lasts as long as
+    // its press (DPI Shift, G-Shift, a held chord) would do nothing or tap.
+    let extra: Vec<Action> = data
+        .extra_actions
+        .iter()
+        .filter(|action| !action.is_held())
+        .cloned()
+        .collect();
+    let current_action = current
+        .into_iter()
+        .find_map(|(side, action)| (side == direction).then_some(action));
+    let observer = picker.view.clone();
+    let on_pick: PickFn = Rc::new(move |action, _window, cx| {
+        AppState::apply(cx, |state| state.commit_binding(direction.button(), action));
+        observer.update(cx, |view, cx| {
+            view.close_action_picker();
+            cx.notify();
+        });
+    });
+    v_flex()
+        .gap_2()
+        .pt_2()
+        .child(editor_section(tr!("common.custom"), pal))
+        .child(
+            h_flex()
+                .gap_2()
+                .children(ThumbwheelDirection::ALL.into_iter().map(|option| {
+                    let (id, label) = match option {
+                        ThumbwheelDirection::Up => ("up", tr!("pointer.thumb_wheel_up")),
+                        ThumbwheelDirection::Down => ("down", tr!("pointer.thumb_wheel_down")),
+                    };
+                    let selected = option == direction;
+                    let view = picker.view.clone();
+                    control_button(format!("inspector-thumbwheel-direction-{id}"))
+                        .debug_selector(move || format!("inspector-thumbwheel-direction-{id}"))
+                        .selected(selected)
+                        .when(selected, |button| {
+                            button.selected_border(true, pal).selected_fill(true)
+                        })
+                        .label(label)
+                        .on_click(move |_, _, cx| {
+                            view.update(cx, |view, cx| {
+                                view.edit_picker_drafts(|drafts| drafts.wheel_direction = option);
+                                cx.notify();
+                            });
+                        })
+                })),
+        )
+        .child(action_library(
+            "inspector-thumbwheel-action",
+            current_action,
+            picker,
+            ActionOffer {
+                extra: &extra,
+                hidden: data.hidden_actions,
+            },
+            Release::None,
+            &on_pick,
+            pal,
+            cx,
+        ))
 }
 
 fn inspector_heading(
@@ -827,11 +919,24 @@ fn selection_card(
         })
 }
 
+/// Whether the control the picker binds delivers a release, so a held action
+/// can last as long as its press. Thumb-wheel turns fire once and have none.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Release {
+    Delivered,
+    None,
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the library takes the picker's whole context plus what the control offers"
+)]
 fn action_library(
     id_prefix: &'static str,
     current: Option<&Action>,
     picker: ActionPickerContext<'_>,
     offer: ActionOffer<'_>,
+    release: Release,
     on_pick: &PickFn,
     pal: Palette,
     cx: &Context<MouseModelView>,
@@ -841,7 +946,9 @@ fn action_library(
     v_flex()
         .gap_2()
         .pt_1()
-        .child(custom_shortcut_editor(id_prefix, &picker, on_pick, pal))
+        .child(custom_shortcut_editor(
+            id_prefix, &picker, release, on_pick, pal,
+        ))
         .child(application_editor(
             id_prefix,
             picker.application_input,
@@ -896,14 +1003,23 @@ fn action_library(
 /// `shortcut_editor` (`features/action_ring/editor.rs`) so the same custom
 /// action is reachable from the plain per-button picker, not just the ring.
 /// Record fills the field from the next key press; Add commits the field.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the editor lays out its mode, field and error rows inline"
+)]
 fn custom_shortcut_editor(
     id_prefix: &'static str,
     picker: &ActionPickerContext<'_>,
+    release: Release,
     on_pick: &PickFn,
     pal: Palette,
 ) -> impl IntoElement {
     let input = picker.shortcut_input;
-    let mode = picker.shortcut_mode;
+    // Without a release a held chord could only be tapped, so only Tap is offered.
+    let mode = match release {
+        Release::Delivered => picker.shortcut_mode,
+        Release::None => ShortcutMode::Tap,
+    };
     let recording = picker.shortcut_recording;
     let view = picker.view;
     let submit_input = input.clone();
@@ -913,22 +1029,24 @@ fn custom_shortcut_editor(
     v_flex()
         .gap_1()
         .child(editor_section(tr!("action_ring.custom_shortcut"), pal))
-        .child(
-            h_flex()
-                .gap_2()
-                .child(shortcut_mode_button(
-                    id_prefix,
-                    picker,
-                    ShortcutMode::Tap,
-                    pal,
-                ))
-                .child(shortcut_mode_button(
-                    id_prefix,
-                    picker,
-                    ShortcutMode::Hold,
-                    pal,
-                )),
-        )
+        .when(release == Release::Delivered, |editor| {
+            editor.child(
+                h_flex()
+                    .gap_2()
+                    .child(shortcut_mode_button(
+                        id_prefix,
+                        picker,
+                        ShortcutMode::Tap,
+                        pal,
+                    ))
+                    .child(shortcut_mode_button(
+                        id_prefix,
+                        picker,
+                        ShortcutMode::Hold,
+                        pal,
+                    )),
+            )
+        })
         .child(
             h_flex()
                 .gap_2()
