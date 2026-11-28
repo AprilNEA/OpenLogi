@@ -111,6 +111,26 @@ pub const G903_LIGHTSPEED: GamingLayout = GamingLayout {
     stock_dpi_presets: &[400, 800, 1600, 3200, 6400],
 };
 
+/// G PRO 2 LIGHTSPEED (wpid `0x40a8`, extended model id 1). Ambidextrous:
+/// the left side pair is Back and Forward, the right side pair is G7 and G8,
+/// and the DPI button is G6. Eight slots, no wheel tilt. Dumped on a unit
+/// connected over USB (`046d:c09a`).
+pub const G_PRO_2_LIGHTSPEED: GamingLayout = GamingLayout {
+    model_keys: &["140a8"],
+    slots: &[
+        Slot::native(ButtonId::LeftClick),
+        Slot::native(ButtonId::RightClick),
+        Slot::native(ButtonId::MiddleClick),
+        Slot::native(ButtonId::Back),
+        Slot::native(ButtonId::Forward),
+        Slot::stock(ButtonId::G6, Action::CycleDpiPresets),
+        // The right side pair mirrors the left one.
+        Slot::stock(ButtonId::G7, Action::MouseBack),
+        Slot::stock(ButtonId::G8, Action::MouseForward),
+    ],
+    stock_dpi_presets: &[400, 800, 1600, 3200, 6400],
+};
+
 /// A gaming mouse whose layout nobody has dumped. Its first five slots are
 /// the standard HID buttons, which the OS input hook remaps without host
 /// mode. G6 and up differ per model and are not guessed.
@@ -129,7 +149,7 @@ pub const STANDARD_BUTTONS: GamingLayout = GamingLayout {
     stock_dpi_presets: &[],
 };
 
-const LAYOUTS: &[&GamingLayout] = &[&G502_LIGHTSPEED, &G903_LIGHTSPEED];
+const LAYOUTS: &[&GamingLayout] = &[&G502_LIGHTSPEED, &G903_LIGHTSPEED, &G_PRO_2_LIGHTSPEED];
 
 /// Whether a device is a G-series mouse, and which buttons it offers. The
 /// agent, the tabs and the Buttons panel all ask this one verdict.
@@ -239,6 +259,11 @@ mod tests {
             GamingButtons::for_device("0409f", Some(&gaming)),
             Some(GamingButtons::Standard)
         );
+        assert_eq!(
+            GamingButtons::for_device("140a8", None),
+            Some(GamingButtons::Dumped(&G_PRO_2_LIGHTSPEED)),
+            "the G PRO 2 LIGHTSPEED answers before it is probed"
+        );
         assert_eq!(GamingButtons::Standard.layout(), &STANDARD_BUTTONS);
         assert_eq!(GamingButtons::for_device("0409f", None), None);
         assert_eq!(GamingButtons::for_device("2b042", Some(&mx)), None);
@@ -331,6 +356,28 @@ mod tests {
     }
 
     #[test]
+    fn g_pro_2_lightspeed_slots_match_the_hardware_dump() {
+        let layout = GamingLayout::for_model_key("140a8").unwrap();
+        assert_eq!(layout, &G_PRO_2_LIGHTSPEED);
+        assert_eq!(layout.button_for_g_number(4), Some(ButtonId::Back));
+        assert_eq!(layout.button_for_g_number(5), Some(ButtonId::Forward));
+        assert_eq!(layout.button_for_g_number(6), Some(ButtonId::G6));
+        assert_eq!(layout.button_for_g_number(8), Some(ButtonId::G8));
+        assert_eq!(layout.button_for_g_number(9), None);
+        assert_eq!(
+            layout.stock_action(ButtonId::G6),
+            Some(Action::CycleDpiPresets)
+        );
+        assert_eq!(layout.stock_action(ButtonId::G7), Some(Action::MouseBack));
+        assert_eq!(
+            layout.stock_action(ButtonId::G8),
+            Some(Action::MouseForward)
+        );
+        assert!(layout.needs_host_mode(ButtonId::G7));
+        assert!(!layout.needs_host_mode(ButtonId::Forward));
+    }
+
+    #[test]
     fn standard_buttons_are_what_the_os_hook_remaps() {
         let layout = &STANDARD_BUTTONS;
         assert_eq!(layout.button_for_g_number(3), Some(ButtonId::MiddleClick));
@@ -399,6 +446,17 @@ mod tests {
                     assert!(slot.stock.is_some(), "{:?}", slot.button);
                 }
             }
+        }
+    }
+
+    #[test]
+    fn no_model_key_belongs_to_two_layouts() {
+        let keys: Vec<&str> = LAYOUTS
+            .iter()
+            .flat_map(|layout| layout.model_keys.iter().copied())
+            .collect();
+        for (index, key) in keys.iter().enumerate() {
+            assert!(!keys[..index].contains(key), "duplicate model key {key}");
         }
     }
 

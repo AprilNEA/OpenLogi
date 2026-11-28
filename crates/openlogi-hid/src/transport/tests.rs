@@ -6,6 +6,8 @@ fn matches_usb_ble_and_keyboard_hidpp_collections() {
     assert!(is_hidpp_long_collection(0xff43, 0x0202)); // BLE-direct (Lift, Signature)
     assert!(is_hidpp_long_collection(0xff43, 0x0602)); // wired G-series keyboard (G513)
     assert!(is_hidpp_long_collection(0xff43, 0x1a02)); // wired MX Creative Keypad
+    assert!(is_hidpp_long_collection(0xff43, 0x0302)); // wired G PRO 2 mouse (long)
+    assert!(!is_hidpp_long_collection(0xff43, 0x0301)); // its short collection: one node only
     assert!(!is_hidpp_long_collection(0x0001, 0x0002)); // generic-desktop mouse
     assert!(!is_hidpp_long_collection(0xff43, 0x0002)); // page right, usage wrong
 }
@@ -15,6 +17,15 @@ fn matches_usb_ble_and_keyboard_hidpp_collections() {
 #[test]
 fn wired_keypad_collection_is_a_hidpp_candidate() {
     assert!(is_hidpp_candidate(0x046d, 0xc354, 0xff43, 0x1a02, false));
+}
+
+/// The wired G PRO 2 LIGHTSPEED mouse (`046d:c09a`) exposes a short (0x0301)
+/// and a long (0x0302) vendor collection; only the long one is a candidate, so
+/// the mouse enumerates as one HID++ node.
+#[test]
+fn wired_g_pro_2_long_collection_is_the_only_hidpp_candidate() {
+    assert!(is_hidpp_candidate(0x046d, 0xc09a, 0xff43, 0x0302, false));
+    assert!(!is_hidpp_candidate(0x046d, 0xc09a, 0xff43, 0x0301, false));
 }
 
 #[test]
