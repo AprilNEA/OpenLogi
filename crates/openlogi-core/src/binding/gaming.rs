@@ -111,6 +111,27 @@ pub const G903_LIGHTSPEED: GamingLayout = GamingLayout {
     stock_dpi_presets: &[400, 800, 1600, 3200, 6400],
 };
 
+/// G305 LIGHTSPEED (wpid `0x4074`). Six slots: the five standard buttons and
+/// the DPI button on top, which is G6 and cycles the DPI stages. The black
+/// unit with extended model id `0` was dumped. G HUB's `g305` depot gives
+/// extended ids `0` to `13` (the colours) one default configuration, with
+/// the DPI stages below.
+pub const G305_LIGHTSPEED: GamingLayout = GamingLayout {
+    model_keys: &[
+        "04074", "14074", "24074", "34074", "44074", "54074", "64074", "74074", "84074", "94074",
+        "a4074", "b4074", "c4074", "d4074",
+    ],
+    slots: &[
+        Slot::native(ButtonId::LeftClick),
+        Slot::native(ButtonId::RightClick),
+        Slot::native(ButtonId::MiddleClick),
+        Slot::native(ButtonId::Back),
+        Slot::native(ButtonId::Forward),
+        Slot::stock(ButtonId::G6, Action::CycleDpiPresets),
+    ],
+    stock_dpi_presets: &[400, 800, 1600, 3200, 6400],
+};
+
 /// A gaming mouse whose layout nobody has dumped. Its first five slots are
 /// the standard HID buttons, which the OS input hook remaps without host
 /// mode. G6 and up differ per model and are not guessed.
@@ -129,7 +150,7 @@ pub const STANDARD_BUTTONS: GamingLayout = GamingLayout {
     stock_dpi_presets: &[],
 };
 
-const LAYOUTS: &[&GamingLayout] = &[&G502_LIGHTSPEED, &G903_LIGHTSPEED];
+const LAYOUTS: &[&GamingLayout] = &[&G502_LIGHTSPEED, &G903_LIGHTSPEED, &G305_LIGHTSPEED];
 
 /// Whether a device is a G-series mouse, and which buttons it offers. The
 /// agent, the tabs and the Buttons panel all ask this one verdict.
@@ -328,6 +349,52 @@ mod tests {
             Some(Action::NextDpiPreset)
         );
         assert_eq!(layout.stock_action(ButtonId::WheelTiltLeft), None);
+    }
+
+    #[test]
+    fn g305_lightspeed_slots_match_the_hardware_dump() {
+        let layout = GamingLayout::for_model_key("04074").unwrap();
+        assert_eq!(layout, &G305_LIGHTSPEED);
+        assert_eq!(layout.button_for_g_number(1), Some(ButtonId::LeftClick));
+        assert_eq!(layout.button_for_g_number(2), Some(ButtonId::RightClick));
+        assert_eq!(layout.button_for_g_number(3), Some(ButtonId::MiddleClick));
+        assert_eq!(layout.button_for_g_number(4), Some(ButtonId::Back));
+        assert_eq!(layout.button_for_g_number(5), Some(ButtonId::Forward));
+        assert_eq!(layout.button_for_g_number(6), Some(ButtonId::G6));
+        assert_eq!(layout.button_for_g_number(7), None);
+        assert!(layout.needs_host_mode(ButtonId::G6));
+        assert!(!layout.needs_host_mode(ButtonId::Forward));
+        assert_eq!(
+            layout.stock_action(ButtonId::G6),
+            Some(Action::CycleDpiPresets)
+        );
+    }
+
+    /// G HUB's `g305` depot lists extended model ids 0 to 13, one per colour.
+    #[test]
+    fn every_g305_lightspeed_colour_takes_its_layout() {
+        use crate::device::{DeviceModelInfo, DeviceTransports};
+        let gaming = Capabilities::from_feature_ids(&[0x2201, 0x8100, 0x8110]);
+        for extended_model_id in 0x00..=0x0d {
+            let model = DeviceModelInfo {
+                entity_count: 1,
+                serial_number: None,
+                unit_id: [0; 4],
+                transports: DeviceTransports {
+                    usb: false,
+                    equad: true,
+                    btle: false,
+                    bluetooth: false,
+                },
+                model_ids: [0x4074, 0x0000, 0x0000],
+                extended_model_id,
+            };
+            assert_eq!(
+                GamingButtons::for_device(&model.model_key(), Some(&gaming)),
+                Some(GamingButtons::Dumped(&G305_LIGHTSPEED)),
+                "extended model id {extended_model_id}"
+            );
+        }
     }
 
     #[test]
