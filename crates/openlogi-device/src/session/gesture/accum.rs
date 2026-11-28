@@ -5,10 +5,9 @@
 use std::num::NonZeroU8;
 
 use openlogi_core::binding::{ButtonId, GestureDirection, SwipeAccumulator};
-use tokio::sync::mpsc;
 use tracing::{debug, trace};
 
-use super::{CapturedInput, GESTURE_SOURCE_BUTTONS};
+use super::{CaptureInputSink, CapturedInput, GESTURE_SOURCE_BUTTONS};
 use crate::reprog_controls::{RawControlEvent, RawWheelEvent, RawWheelResolution};
 
 /// The hold that owns raw-XY motion, or the absence of one. Raw-XY reports
@@ -116,7 +115,7 @@ impl CaptureAccum {
         dpi_cids: &[u16],
         gesture_button_cids: &[(u16, ButtonId)],
         button_cids: &[(u16, ButtonId)],
-        sink: &mpsc::UnboundedSender<CapturedInput>,
+        sink: &dyn CaptureInputSink,
     ) {
         match event {
             RawControlEvent::DivertedButtons(cids) => {
@@ -163,8 +162,7 @@ impl CaptureAccum {
                             && swipe.end()
                         {
                             debug!(%button, "gesture click");
-                            let _ =
-                                sink.send(CapturedInput::Gesture(button, GestureDirection::Click));
+                            sink.emit(CapturedInput::Gesture(button, GestureDirection::Click));
                         }
                         // ...and the first still-held source begins (or takes
                         // over) the hold. A source not down in the previous event
@@ -190,21 +188,21 @@ impl CaptureAccum {
                     if !held.iter().any(|(held_cid, _)| *held_cid == cid)
                         && let Some(button) = captured_gesture_button(cid, gesture_button_cids)
                     {
-                        let _ = sink.send(CapturedInput::ButtonUp(button));
+                        sink.emit(CapturedInput::ButtonUp(button));
                     }
                 }
                 for &(cid, button) in &held {
                     if !self.gestures_down.contains(&cid) {
-                        let _ = sink.send(CapturedInput::ButtonDown(button));
+                        sink.emit(CapturedInput::ButtonDown(button));
                     }
                 }
                 self.gestures_down = held.into_iter().map(|(cid, _)| cid).collect();
 
                 let dpi_down = dpi_cids.iter().any(|cid| cids.contains(cid));
                 if dpi_down && !self.dpi_down {
-                    let _ = sink.send(CapturedInput::ButtonDown(ButtonId::DpiToggle));
+                    sink.emit(CapturedInput::ButtonDown(ButtonId::DpiToggle));
                 } else if !dpi_down && self.dpi_down {
-                    let _ = sink.send(CapturedInput::ButtonUp(ButtonId::DpiToggle));
+                    sink.emit(CapturedInput::ButtonUp(ButtonId::DpiToggle));
                 }
                 self.dpi_down = dpi_down;
 
@@ -212,10 +210,10 @@ impl CaptureAccum {
                     let down = cids.contains(&cid);
                     let was_down = self.buttons_down.contains(&cid);
                     if down && !was_down {
-                        let _ = sink.send(CapturedInput::ButtonDown(button));
+                        sink.emit(CapturedInput::ButtonDown(button));
                         self.buttons_down.push(cid);
                     } else if !down && was_down {
-                        let _ = sink.send(CapturedInput::ButtonUp(button));
+                        sink.emit(CapturedInput::ButtonUp(button));
                         self.buttons_down.retain(|&c| c != cid);
                     }
                 }
@@ -226,7 +224,7 @@ impl CaptureAccum {
         }
     }
 
-    fn on_raw_xy(&mut self, dx: i16, dy: i16, sink: &mpsc::UnboundedSender<CapturedInput>) {
+    fn on_raw_xy(&mut self, dx: i16, dy: i16, sink: &dyn CaptureInputSink) {
         // Motion is attributed to the holding source; outside a hold the report
         // is stray and dropped.
         let HoldState::Holding {
@@ -257,7 +255,7 @@ impl CaptureAccum {
         // arrives outside a hold.
         if let Some(direction) = swipe.accumulate(i32::from(dx), i32::from(dy)) {
             debug!(?direction, %button, "gesture committed");
-            let _ = sink.send(CapturedInput::Gesture(*button, direction));
+            sink.emit(CapturedInput::Gesture(*button, direction));
         }
     }
 
@@ -272,7 +270,7 @@ impl CaptureAccum {
         event: RawWheelEvent,
         wheel_button_cids: &[(u16, ButtonId)],
         hires_per_notch: Option<NonZeroU8>,
-        sink: &mpsc::UnboundedSender<CapturedInput>,
+        sink: &dyn CaptureInputSink,
     ) {
         if event.delta == 0 {
             return;
@@ -299,7 +297,7 @@ impl CaptureAccum {
                 per_notch
             }
         };
-        let _ = sink.send(CapturedInput::HeldWheel {
+        sink.emit(CapturedInput::HeldWheel {
             button,
             delta: event.delta,
             per_notch,
@@ -316,7 +314,7 @@ pub(super) fn handle_reprog(
     gesture_cids: &[u16],
     dpi_cids: &[u16],
     button_cids: &[(u16, ButtonId)],
-    sink: &mpsc::UnboundedSender<CapturedInput>,
+    sink: &dyn CaptureInputSink,
 ) {
     acc.on_event(event, gesture_cids, dpi_cids, &[], button_cids, sink);
 }

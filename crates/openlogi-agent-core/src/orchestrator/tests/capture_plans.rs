@@ -9,6 +9,73 @@ use super::*;
 use crate::runtime::PointerSelection;
 
 #[test]
+fn an_app_thumbwheel_override_only_captures_devices_with_a_thumbwheel() {
+    let mut config = Config::default();
+    config.set_app_thumbwheel_sensitivity(
+        "editor",
+        openlogi_core::config::ThumbwheelSensitivity::from_rounded(28.0),
+    );
+    let mut orch = orchestrator(config);
+    let mut mouse = dev("mouse", 1, true);
+    mouse.capabilities = Some(Capabilities::from_feature_ids(&[]));
+    orch.devices = vec![mouse];
+    orch.set_current_app(Some(ForegroundApp::unnamed("editor".into())));
+    let unsupported = orch.capture_publication();
+    assert!(!unsupported.plans()[0].target.spec.capture_thumbwheel);
+    assert_eq!(
+        unsupported.plans()[0].dispatch.thumbwheel_sensitivity,
+        openlogi_core::config::ThumbwheelSensitivity::DEFAULT
+    );
+    orch.devices[0].capabilities = Some(Capabilities::from_feature_ids(&[0x2150]));
+    let supported = orch.capture_publication();
+    assert!(supported.plans()[0].target.spec.capture_thumbwheel);
+    assert_eq!(
+        supported.plans()[0].dispatch.thumbwheel_sensitivity,
+        openlogi_core::config::ThumbwheelSensitivity::from_rounded(28.0)
+    );
+}
+
+#[test]
+fn thumbwheel_capture_and_scale_follow_both_mouse_profile_targets() {
+    use openlogi_core::config::{MouseProfileTarget, ThumbwheelSensitivity};
+    use openlogi_hook::{PointerContext, PointerTarget};
+    for target in [MouseProfileTarget::Focused, MouseProfileTarget::Pointer] {
+        let mut config = Config::default();
+        config.app_settings.mouse_profile_target = target;
+        config.set_app_thumbwheel_sensitivity("editor", ThumbwheelSensitivity::from_rounded(28.0));
+        let mut orch = orchestrator(config);
+        let mut mouse = dev("mouse", 1, true);
+        mouse.capabilities = Some(Capabilities::from_feature_ids(&[0x2150]));
+        orch.devices = vec![mouse];
+        for (focused, hovered) in [("editor", "other"), ("other", "editor")] {
+            orch.set_current_app(Some(ForegroundApp::unnamed(focused.into())));
+            orch.set_pointer_context(PointerContext {
+                app: Some(ForegroundApp::unnamed(hovered.into())),
+                target: PointerTarget::Window {
+                    process_id: 41,
+                    window_id: 7,
+                },
+            });
+            let scaled = match target {
+                MouseProfileTarget::Focused => focused,
+                MouseProfileTarget::Pointer => hovered,
+            } == "editor";
+            let publication = orch.capture_publication();
+            let plan = &publication.plans()[0];
+            assert_eq!(plan.target.spec.capture_thumbwheel, scaled);
+            assert_eq!(
+                plan.dispatch.thumbwheel_sensitivity,
+                if scaled {
+                    ThumbwheelSensitivity::from_rounded(28.0)
+                } else {
+                    ThumbwheelSensitivity::DEFAULT
+                }
+            );
+        }
+    }
+}
+
+#[test]
 fn a_new_route_does_not_rearm_an_existing_capture() {
     let mut orch = orchestrator(Config::default());
     let old = direct_inventory(Some("old"), [1, 2, 3, 4]);
@@ -105,6 +172,77 @@ fn config_reload_publishes_scroll_preferences_without_restarting_the_hook() {
     assert_eq!(
         preferences.vertical_sensitivity(),
         VerticalScrollSensitivity::try_new(7).expect("valid sensitivity")
+    );
+}
+
+#[test]
+fn application_switches_publish_primary_wheel_smoothing_without_changing_global_smoothing() {
+    let mut config = Config::default();
+    config.set_app_smooth_scroll("editor", true);
+    let mut orch = orchestrator(config.clone());
+    let preferences = Arc::clone(&orch.shared.scroll_preferences);
+    assert!(!preferences.main_wheel_smooth_scroll_enabled());
+    assert!(!orch.set_current_app(Some(ForegroundApp::unnamed("editor".into()))));
+    assert!(preferences.main_wheel_smooth_scroll_enabled());
+    assert!(!preferences.smooth_scroll_enabled());
+    assert!(!orch.set_current_app(Some(ForegroundApp::unnamed("browser".into()))));
+    assert!(!preferences.main_wheel_smooth_scroll_enabled());
+
+    config.app_settings.smooth_scroll = true;
+    config.set_app_smooth_scroll("editor", false);
+    orch.reload_config(config);
+    assert!(preferences.main_wheel_smooth_scroll_enabled());
+    orch.set_current_app(Some(ForegroundApp::unnamed("editor".into())));
+    assert!(!preferences.main_wheel_smooth_scroll_enabled());
+    assert!(
+        preferences.smooth_scroll_enabled(),
+        "legacy thumb-wheel smoothing stays enabled"
+    );
+    orch.set_current_app(None);
+    assert!(preferences.main_wheel_smooth_scroll_enabled());
+}
+
+#[test]
+fn primary_wheel_smoothing_uses_the_profile_pointer_target() {
+    use openlogi_core::config::MouseProfileTarget;
+    use openlogi_hook::{PointerContext, PointerTarget};
+
+    let mut config = Config::default();
+    config.app_settings.mouse_profile_target = MouseProfileTarget::Pointer;
+    config.set_app_smooth_scroll("editor", true);
+    let mut orch = orchestrator(config.clone());
+    let preferences = Arc::clone(&orch.shared.scroll_preferences);
+    orch.set_current_app(Some(ForegroundApp::unnamed("browser".into())));
+    orch.set_pointer_context(PointerContext {
+        app: Some(ForegroundApp::unnamed("editor".into())),
+        target: PointerTarget::Window {
+            process_id: 41,
+            window_id: 7,
+        },
+    });
+    assert!(preferences.main_wheel_smooth_scroll_enabled());
+    orch.set_current_app(Some(ForegroundApp::unnamed("other".into())));
+    assert!(
+        preferences.main_wheel_smooth_scroll_enabled(),
+        "pointer profile remains authoritative"
+    );
+    orch.set_pointer_context(PointerContext {
+        app: None,
+        target: PointerTarget::Desktop,
+    });
+    assert!(!preferences.main_wheel_smooth_scroll_enabled());
+
+    config.app_settings.mouse_profile_target = MouseProfileTarget::Focused;
+    orch.reload_config(config);
+    orch.set_current_app(Some(ForegroundApp::unnamed("editor".into())));
+    assert!(preferences.main_wheel_smooth_scroll_enabled());
+    orch.set_pointer_context(PointerContext {
+        app: None,
+        target: PointerTarget::Desktop,
+    });
+    assert!(
+        preferences.main_wheel_smooth_scroll_enabled(),
+        "focused profiles ignore pointer updates"
     );
 }
 

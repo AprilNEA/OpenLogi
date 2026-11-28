@@ -2,12 +2,13 @@
 
 use super::device_key::DeviceKey;
 use super::events::StateEvents;
-use super::{AppState, StateEvent};
+use super::{AppState, DeviceRecord, StateEvent};
 use crate::platform::app_icon::AppIconExt as _;
 use gpui_kit::component::ThemeMode;
 use openlogi_core::config::{
-    AppIcon, AppSettings, Appearance, AssetSourcePreference, DeviceViewMode, MomentumScrolling,
-    MouseProfileTarget, ThumbwheelSensitivity, UiScale, VerticalScrollSensitivity,
+    AppIcon, AppSettings, Appearance, AssetSourcePreference, Config, DeviceViewMode,
+    MomentumScrolling, MouseProfileTarget, ThumbwheelSensitivity, UiScale,
+    VerticalScrollSensitivity,
 };
 use openlogi_core::update_feed::UpdateChannel;
 
@@ -313,6 +314,157 @@ impl AppState {
         self.config
             .edit(|config| config.app_settings.smooth_scroll = enabled);
         self.persist_and_reload("smooth scroll");
+        StateEvent::SettingsChanged.into()
+    }
+
+    /// The application open in the software scrolling editor, or the default.
+    #[must_use]
+    pub fn editing_scroll_app(&self) -> Option<&str> {
+        self.editing_scroll_app.as_deref()
+    }
+
+    /// Select a software scrolling profile without changing configuration.
+    pub fn set_editing_scroll_app(&mut self, app: Option<String>) -> StateEvents {
+        self.editing_scroll_app = app;
+        StateEvent::SettingsChanged.into()
+    }
+
+    /// The software scrolling value shown for the open profile.
+    #[must_use]
+    pub fn editing_smooth_scroll(&self) -> bool {
+        self.config.smooth_scroll_for(self.editing_scroll_app())
+    }
+
+    /// The vertical main-wheel sensitivity effective in the open editor.
+    #[must_use]
+    pub fn editing_vertical_scroll_sensitivity(&self) -> VerticalScrollSensitivity {
+        self.config
+            .vertical_scroll_sensitivity_for(self.editing_scroll_app())
+    }
+
+    /// Default edits the global preference. An app without a matching override
+    /// inherits the thumb-wheel sensitivity of the selected device.
+    #[must_use]
+    pub fn editing_thumbwheel_sensitivity(&self) -> ThumbwheelSensitivity {
+        let Some(app) = self.editing_scroll_app() else {
+            return self.app_settings().thumbwheel_sensitivity;
+        };
+        let device = self
+            .current_record()
+            .and_then(DeviceRecord::persistent_config_key);
+        self.config
+            .thumbwheel_profile_for(device, Some(app))
+            .sensitivity
+    }
+
+    /// A named tab for every app with at least one wheel override.
+    pub fn scroll_profile_keys(&self) -> impl Iterator<Item = &str> {
+        self.config.wheel_scroll_profile_keys()
+    }
+
+    /// Whether the selected app stores its own smooth scrolling switch.
+    #[must_use]
+    pub fn editing_smooth_scroll_overridden(&self) -> bool {
+        self.editing_scroll_app()
+            .is_some_and(|app| self.app_settings().per_app_smooth_scroll.contains_key(app))
+    }
+
+    /// Whether the selected app stores its own main-wheel sensitivity.
+    #[must_use]
+    pub fn editing_vertical_scroll_sensitivity_overridden(&self) -> bool {
+        self.editing_scroll_app().is_some_and(|app| {
+            self.app_settings()
+                .per_app_vertical_scroll_sensitivity
+                .contains_key(app)
+        })
+    }
+
+    /// Whether this exact app has saved its own thumb-wheel sensitivity.
+    #[must_use]
+    pub fn editing_thumbwheel_sensitivity_overridden(&self) -> bool {
+        self.editing_scroll_app().is_some_and(|app| {
+            self.app_settings()
+                .per_app_thumbwheel_sensitivity
+                .contains_key(app)
+        })
+    }
+
+    /// Save software scrolling for the selected application or the default.
+    pub fn commit_editing_smooth_scroll(&mut self, enabled: bool) -> StateEvents {
+        if self.editing_scroll_app.is_none() {
+            return self.commit_smooth_scroll(enabled);
+        }
+        self.edit_scroll_override(|config, app| config.set_app_smooth_scroll(app, enabled))
+    }
+
+    /// Save vertical sensitivity for the selected app even when it currently
+    /// equals the inherited value. Default edits the app-wide preference.
+    pub fn commit_editing_vertical_scroll_sensitivity(
+        &mut self,
+        sensitivity: VerticalScrollSensitivity,
+    ) -> StateEvents {
+        if self.editing_scroll_app.is_none() {
+            return self.commit_vertical_scroll_sensitivity(sensitivity);
+        }
+        self.edit_scroll_override(|config, app| {
+            config.set_app_vertical_scroll_sensitivity(app, sensitivity)
+        })
+    }
+
+    /// Store the selected app's thumb-wheel sensitivity even when it matches
+    /// its fallback. The Default tab always writes the global preference.
+    pub fn commit_editing_thumbwheel_sensitivity(
+        &mut self,
+        sensitivity: ThumbwheelSensitivity,
+    ) -> StateEvents {
+        if self.editing_scroll_app.is_none() {
+            return self.commit_thumbwheel_sensitivity(sensitivity);
+        }
+        self.edit_scroll_override(|config, app| {
+            config.set_app_thumbwheel_sensitivity(app, sensitivity)
+        })
+    }
+
+    /// Restore only the selected app's inherited smooth scrolling switch.
+    pub fn reset_editing_smooth_scroll(&mut self) -> StateEvents {
+        self.edit_scroll_override(Config::remove_app_smooth_scroll)
+    }
+
+    /// Restore only the selected app's inherited vertical sensitivity.
+    pub fn reset_editing_vertical_scroll_sensitivity(&mut self) -> StateEvents {
+        self.edit_scroll_override(Config::remove_app_vertical_scroll_sensitivity)
+    }
+
+    /// Restore only the selected app's inherited thumb-wheel sensitivity.
+    pub fn reset_editing_thumbwheel_sensitivity(&mut self) -> StateEvents {
+        self.edit_scroll_override(Config::remove_app_thumbwheel_sensitivity)
+    }
+
+    fn edit_scroll_override(
+        &mut self,
+        edit: impl FnOnce(&mut Config, &str) -> bool,
+    ) -> StateEvents {
+        if let Some(app) = self.editing_scroll_app.as_deref()
+            && self.config.edit(|config| edit(config, app))
+        {
+            self.persist_and_reload("app wheel setting");
+        }
+        StateEvent::SettingsChanged.into()
+    }
+
+    /// Remove all exact wheel overrides in one save. A failed save keeps the existing
+    /// profile open; removing an unsaved draft simply selects Default.
+    pub fn remove_scroll_profile(&mut self, app: &str) -> StateEvents {
+        if self
+            .config
+            .edit(|config| config.remove_wheel_scroll_profile(app))
+            && !self.persist_and_reload("remove app wheel profile")
+        {
+            return StateEvent::SettingsChanged.into();
+        }
+        if self.editing_scroll_app() == Some(app) {
+            self.editing_scroll_app = None;
+        }
         StateEvent::SettingsChanged.into()
     }
     /// Persist the app-wide momentum-scrolling settings, the default for

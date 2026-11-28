@@ -202,13 +202,49 @@ fn scroll(increments: i16) -> CapturedInput {
     }
 }
 
+/// The host can tag each decoded 0x2150 report before waiting for dispatch,
+/// even when the application changes between two reports on the same wheel.
+#[tokio::test]
+async fn decoded_wheel_reports_reach_the_sink_before_the_target_changes() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct AppTaggedInput {
+        app_generation: Arc<AtomicUsize>,
+        events: mpsc::UnboundedSender<(usize, CapturedInput)>,
+    }
+
+    impl CaptureInputSink for AppTaggedInput {
+        fn emit(&self, input: CapturedInput) {
+            self.events
+                .send((self.app_generation.load(Ordering::Relaxed), input))
+                .unwrap();
+        }
+    }
+
+    let capture = armed_thumbwheel_capture().await;
+    let generation = Arc::new(AtomicUsize::new(0));
+    let (events, mut pending) = mpsc::unbounded_channel();
+    let handler = capture.report_handler(
+        0xff,
+        Arc::new(AppTaggedInput {
+            app_generation: Arc::clone(&generation),
+            events,
+        }),
+    );
+    handler(&wheel_report(2, 1, false));
+    generation.store(1, Ordering::Relaxed);
+    handler(&wheel_report(3, 2, false));
+    assert_eq!(pending.try_recv().unwrap(), (0, scroll(2)));
+    assert_eq!(pending.try_recv().unwrap(), (1, scroll(3)));
+}
+
 /// Through the session's handler: a roll whose `Stop` never arrives ends at
 /// the release, and the next tap on the settled wheel still fires.
 #[tokio::test]
 async fn a_roll_that_never_reports_its_stop_ends_without_a_tap() {
     let capture = armed_thumbwheel_capture().await;
     let (sink, mut inputs) = mpsc::unbounded_channel();
-    let handler = capture.report_handler(0xff, sink);
+    let handler = capture.report_handler(0xff, Arc::new(sink));
     handler(&wheel_report(2, 1, true));
     handler(&wheel_report(3, 2, true));
     // The release, reported as `Inactive` in place of the dropped `Stop`.
@@ -230,7 +266,7 @@ async fn a_roll_that_never_reports_its_stop_ends_without_a_tap() {
 async fn a_reconnect_forgets_a_roll_left_open() {
     let capture = armed_thumbwheel_capture().await;
     let (sink, mut inputs) = mpsc::unbounded_channel();
-    let handler = capture.report_handler(0xff, sink);
+    let handler = capture.report_handler(0xff, Arc::new(sink));
     handler(&wheel_report(3, 2, true));
     capture.reset_input_state();
     handler(&wheel_report(0, 0, true));
@@ -247,7 +283,7 @@ async fn a_reconnect_forgets_a_roll_left_open() {
 async fn an_unknown_status_byte_with_a_tap_is_not_a_click() {
     let capture = armed_thumbwheel_capture().await;
     let (sink, mut inputs) = mpsc::unbounded_channel();
-    let handler = capture.report_handler(0xff, sink);
+    let handler = capture.report_handler(0xff, Arc::new(sink));
     handler(&wheel_report(0, 0x04, true));
     handler(&wheel_report(0, 0xff, true));
     assert_eq!(received(&mut inputs), Vec::new());

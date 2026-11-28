@@ -16,6 +16,7 @@ use openlogi_core::binding::{
 };
 use openlogi_core::bindings::{button_bindings_for, hidpp_gesture_maps_for, oshook_gestures_for};
 use openlogi_core::config::{Config, MomentumScrolling, OnboardMemory, ThumbwheelSensitivity};
+use openlogi_core::device::Capabilities;
 use openlogi_core::device_order::PhysicalDeviceKey;
 use openlogi_hid::DeviceRoute;
 use openlogi_hid::reprog_controls::DPI_MODE_SHIFT_CIDS;
@@ -26,6 +27,7 @@ use openlogi_hid::session::gesture::{
 use tokio::sync::watch;
 
 use crate::runtime::PointerSelection;
+use crate::runtime::scroll::WheelProfileEpoch;
 
 /// Hardware identity of one HID++ capture session.
 ///
@@ -67,9 +69,13 @@ pub struct DispatchPlan {
     /// On Windows the OS hook remains a passive fallback; these maps also
     /// remain available while an old diversion is draining.
     pub side_gesture_bindings: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
-    /// This device's effective thumb-wheel sensitivity (device override or the
-    /// app-wide default).
+    /// This device's effective thumb-wheel sensitivity: a supported App
+    /// override, otherwise the device override or app-wide default.
     pub thumbwheel_sensitivity: ThumbwheelSensitivity,
+    /// Application identity that scopes thumb-wheel thresholds and output.
+    pub(crate) thumbwheel_app: Option<String>,
+    /// Publication epoch that admitted this application's wheel input.
+    pub(crate) wheel_profile_epoch: WheelProfileEpoch,
     /// Whether this device's wheel scrolls inverted, so the scrolling the
     /// agent posts for it — a wheel-hold button's horizontal scroll, and the
     /// diverted smooth wheel, whose native invert bit has no effect — follows
@@ -296,6 +302,8 @@ pub(crate) fn shift_bindings_for(config: &Config, config_key: &str) -> BTreeMap<
 
 /// The device a capture plan is built for.
 pub struct PlanDevice<'a> {
+    /// Last measured feature support; App-only thumb capture needs a real wheel.
+    pub capabilities: Option<Capabilities>,
     /// The physical device the plan's capture session belongs to.
     pub physical_key: PhysicalDeviceKey,
     /// The key of the device's settings in the config.
@@ -312,6 +320,7 @@ pub struct PlanDevice<'a> {
 pub fn plan_for_device(
     config: &Config,
     PlanDevice {
+        capabilities,
         physical_key,
         config_key,
         route,
@@ -397,25 +406,20 @@ pub fn plan_for_device(
             })
         })
         .collect();
-    let thumbwheel_bindings_nondefault = [
-        ButtonId::Thumbwheel,
-        ButtonId::ThumbwheelScrollUp,
-        ButtonId::ThumbwheelScrollDown,
-    ]
-    .iter()
-    .any(|button| {
-        bindings
-            .get(button)
-            .is_some_and(|binding| binding.click_action() != default_binding(*button))
-    });
-    let thumbwheel_sensitivity = config.thumbwheel_sensitivity(config_key);
+    let thumbwheel_profile = config.thumbwheel_profile_for(Some(config_key), app);
+    let thumbwheel_sensitivity = if thumbwheel_profile.overridden
+        && !capabilities.is_some_and(|capabilities| capabilities.thumbwheel)
+    {
+        config.thumbwheel_sensitivity(config_key)
+    } else {
+        thumbwheel_profile.sensitivity
+    };
     DeviceCapturePlan {
         target: CaptureTarget {
             physical_key,
             route,
             spec: CaptureSpec {
-                capture_thumbwheel: thumbwheel_sensitivity != ThumbwheelSensitivity::DEFAULT
-                    || thumbwheel_bindings_nondefault,
+                capture_thumbwheel: captures_thumbwheel(&bindings, thumbwheel_sensitivity),
                 divert_gesture_sources: GESTURE_SOURCE_BUTTONS
                     .into_iter()
                     .filter(|(_, button)| gesture_bindings.contains_key(button))
@@ -437,12 +441,33 @@ pub fn plan_for_device(
             gesture_bindings,
             side_gesture_bindings,
             thumbwheel_sensitivity,
+            thumbwheel_app: thumbwheel_profile.app.map(str::to_owned),
+            wheel_profile_epoch: WheelProfileEpoch::default(),
             invert_wheel: false,
             momentum: config.momentum_scrolling(config_key),
             pointer: None,
             shift_bindings: shift_bindings_for(config, config_key),
         },
     }
+}
+
+/// One owner decides when a thumb wheel must leave native reporting.
+fn captures_thumbwheel(
+    bindings: &BTreeMap<ButtonId, Binding>,
+    sensitivity: ThumbwheelSensitivity,
+) -> bool {
+    sensitivity != ThumbwheelSensitivity::DEFAULT
+        || [
+            ButtonId::Thumbwheel,
+            ButtonId::ThumbwheelScrollUp,
+            ButtonId::ThumbwheelScrollDown,
+        ]
+        .iter()
+        .any(|button| {
+            bindings
+                .get(button)
+                .is_some_and(|binding| binding.click_action() != default_binding(*button))
+        })
 }
 
 #[cfg(test)]
@@ -459,6 +484,46 @@ mod tests {
         DeviceRoute::Bolt {
             receiver_uid: "cafe".into(),
             slot: 2,
+        }
+    }
+
+    #[test]
+    fn app_thumbwheel_sensitivity_owns_capture_and_preserves_custom_bindings() {
+        let mut config = Config::default();
+        config.set_device_thumbwheel_sensitivity(
+            "mouse",
+            Some(ThumbwheelSensitivity::from_rounded(28.0)),
+        );
+        config.set_app_thumbwheel_sensitivity("native", ThumbwheelSensitivity::DEFAULT);
+        config.set_app_thumbwheel_sensitivity("scaled", ThumbwheelSensitivity::from_rounded(42.0));
+        let native = plan_for_device(&config, "mouse", route(), Some("native"), 0, true);
+        assert!(!native.target.spec.capture_thumbwheel);
+        assert_eq!(
+            native.dispatch.thumbwheel_sensitivity,
+            ThumbwheelSensitivity::DEFAULT
+        );
+        let scaled = plan_for_device(&config, "mouse", route(), Some("scaled"), 0, true);
+        assert!(scaled.target.spec.capture_thumbwheel);
+        assert_eq!(
+            scaled.dispatch.thumbwheel_sensitivity,
+            ThumbwheelSensitivity::from_rounded(42.0)
+        );
+        for button in [
+            ButtonId::Thumbwheel,
+            ButtonId::ThumbwheelScrollUp,
+            ButtonId::ThumbwheelScrollDown,
+        ] {
+            config.set_per_app_binding("mouse", "native", button, Some(Action::Copy));
+            let rebound = plan_for_device(&config, "mouse", route(), Some("native"), 0, true);
+            assert!(
+                rebound.target.spec.capture_thumbwheel,
+                "an authored {button} action still needs capture at 14"
+            );
+            assert_eq!(
+                rebound.dispatch.bindings[&button],
+                Binding::Single(Action::Copy)
+            );
+            config.set_per_app_binding("mouse", "native", button, None);
         }
     }
 
@@ -515,6 +580,7 @@ mod tests {
         super::plan_for_device(
             config,
             super::PlanDevice {
+                capabilities: Some(Capabilities::from_feature_ids(&[0x2150])),
                 physical_key: PhysicalDeviceKey::parse("receiver:cafe:slot:2")
                     .expect("fixture should be a physical key"),
                 config_key,
@@ -534,6 +600,7 @@ mod tests {
         super::plan_for_device(
             config,
             super::PlanDevice {
+                capabilities: None,
                 physical_key: PhysicalDeviceKey::parse("receiver:cafe:slot:2")
                     .expect("fixture should be a physical key"),
                 config_key: "g502",

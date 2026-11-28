@@ -143,6 +143,175 @@ fn mouse_profile_target_persists_and_reloads_only_when_changed() {
 }
 
 #[test]
+fn vertical_scroll_profile_preserves_the_default_and_another_apps_sensitivity() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(openlogi_core::paths::CONFIG_FILE);
+    let (config, file) = ConfigFile::load_from_path(&path).unwrap();
+    let resolver = AssetResolver::new();
+    let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = AppState::new(Sources {
+        persistence: ConfigPersistence::UserFile(file),
+        ..Sources::in_memory(config, &resolver, commands)
+    });
+    let game = "example.game";
+    let fast = VerticalScrollSensitivity::try_new(60).unwrap();
+    let native = VerticalScrollSensitivity::DEFAULT;
+    let thumb = ThumbwheelSensitivity::try_new(32).unwrap();
+    let _ = state.set_editing_scroll_app(Some(game.into()));
+    assert_eq!(state.editing_vertical_scroll_sensitivity(), native);
+    let _ = state.commit_editing_vertical_scroll_sensitivity(native);
+    assert!(state.editing_vertical_scroll_sensitivity_overridden());
+    assert!(!state.editing_smooth_scroll_overridden());
+    assert_eq!(state.scroll_profile_keys().collect::<Vec<_>>(), [game]);
+
+    let _ = state.commit_editing_smooth_scroll(false);
+    let _ = state.commit_editing_thumbwheel_sensitivity(thumb);
+    let _ = state.set_editing_scroll_app(None);
+    let _ = state.commit_editing_smooth_scroll(true);
+    let _ = state.commit_editing_vertical_scroll_sensitivity(fast);
+    let _ = state.set_editing_scroll_app(Some(game.into()));
+    let _ = state.commit_editing_vertical_scroll_sensitivity(native);
+    assert!(state.editing_smooth_scroll_overridden());
+    assert_eq!(state.app_settings().vertical_scroll_sensitivity, fast);
+
+    let saved = Config::load_from_path(&path).unwrap();
+    assert!(!saved.smooth_scroll_for(Some(game)));
+    assert_eq!(
+        saved.thumbwheel_profile_for(None, Some(game)).sensitivity,
+        thumb
+    );
+    assert_eq!(saved.vertical_scroll_sensitivity_for(Some(game)), native);
+    assert!(saved.smooth_scroll_for(Some("other.app")));
+    assert_eq!(
+        saved.vertical_scroll_sensitivity_for(Some("other.app")),
+        fast
+    );
+    assert_eq!(
+        saved.wheel_scroll_profile_keys().collect::<Vec<_>>(),
+        [game]
+    );
+
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(crate::services::ipc::Command::LoadConfig(_))
+    ));
+    for _ in 0..5 {
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(crate::services::ipc::Command::ReloadConfig(_))
+        ));
+    }
+    assert!(
+        receiver.try_recv().is_err(),
+        "unchanged explicit sensitivity writes nothing"
+    );
+    let _ = state.remove_scroll_profile(game);
+    assert_eq!(state.editing_scroll_app(), None);
+    assert!(state.scroll_profile_keys().next().is_none());
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(crate::services::ipc::Command::ReloadConfig(_))
+    ));
+    assert!(
+        receiver.try_recv().is_err(),
+        "all three overrides were removed in one save"
+    );
+    let saved = Config::load_from_path(&path).unwrap();
+    assert!(saved.smooth_scroll_for(Some(game)));
+    assert_eq!(saved.vertical_scroll_sensitivity_for(Some(game)), fast);
+}
+
+#[test]
+fn thumbwheel_profile_default_and_selected_device_have_separate_fallbacks() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join(openlogi_core::paths::CONFIG_FILE);
+    let (mut config, file) = ConfigFile::load_from_path(&path).unwrap();
+    let device_value = ThumbwheelSensitivity::try_new(36).unwrap();
+    let global_value = ThumbwheelSensitivity::try_new(77).unwrap();
+    config.set_device_thumbwheel_sensitivity(KNOWN_MOUSE_KEY, Some(device_value));
+    config.set_selected_device(Some(KNOWN_MOUSE_KEY.to_owned()));
+    let resolver = AssetResolver::new();
+    let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = AppState::new(Sources {
+        persistence: ConfigPersistence::UserFile(file),
+        inventories: &[
+            direct_inventory([0xa3, 0x93, 0xca, 0xe0]),
+            direct_inventory([1, 2, 3, 4]),
+        ],
+        ..Sources::in_memory(config, &resolver, commands)
+    });
+    assert_eq!(state.current_record().unwrap().config_key, KNOWN_MOUSE_KEY);
+    assert_eq!(
+        state.editing_thumbwheel_sensitivity(),
+        ThumbwheelSensitivity::DEFAULT
+    );
+    let _ = state.commit_editing_thumbwheel_sensitivity(global_value);
+    let game = "example.game";
+    let _ = state.set_editing_scroll_app(Some(game.into()));
+    assert_eq!(state.editing_thumbwheel_sensitivity(), device_value);
+    assert!(!state.editing_thumbwheel_sensitivity_overridden());
+    assert_eq!(
+        state.commit_editing_thumbwheel_sensitivity(device_value),
+        [StateEvent::SettingsChanged]
+    );
+    let _ = state.commit_editing_thumbwheel_sensitivity(device_value);
+    assert!(state.editing_thumbwheel_sensitivity_overridden());
+    assert_eq!(state.scroll_profile_keys().collect::<Vec<_>>(), [game]);
+
+    let other = state
+        .devices()
+        .iter()
+        .position(|record| record.config_key != KNOWN_MOUSE_KEY)
+        .unwrap();
+    let _ = state.select_device(other);
+    assert_eq!(
+        state.editing_thumbwheel_sensitivity(),
+        device_value,
+        "the explicit app value follows the app across devices"
+    );
+    let saved = Config::load_from_path(&path).unwrap();
+    assert_eq!(saved.app_settings.thumbwheel_sensitivity, global_value);
+    assert_eq!(
+        saved.devices[KNOWN_MOUSE_KEY].thumbwheel_sensitivity,
+        Some(device_value)
+    );
+    assert_eq!(
+        saved.devices[&state.current_record().unwrap().config_key].thumbwheel_sensitivity,
+        None
+    );
+    assert_eq!(
+        saved.thumbwheel_profile_for(None, Some(game)).sensitivity,
+        device_value
+    );
+
+    let _ = state.reset_editing_thumbwheel_sensitivity();
+    assert_eq!(state.editing_scroll_app(), Some(game));
+    assert!(!state.editing_thumbwheel_sensitivity_overridden());
+    assert_eq!(state.editing_thumbwheel_sensitivity(), global_value);
+    assert!(
+        Config::load_from_path(&path)
+            .unwrap()
+            .wheel_scroll_profile_keys()
+            .next()
+            .is_none()
+    );
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(crate::services::ipc::Command::LoadConfig(_))
+    ));
+    for _ in 0..4 {
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(crate::services::ipc::Command::ReloadConfig(_))
+        ));
+    }
+    assert!(
+        receiver.try_recv().is_err(),
+        "committing an unchanged exact value sent no reload"
+    );
+}
+
+#[test]
 fn smooth_scroll_change_reloads_the_agent_once() {
     let resolver = AssetResolver::new();
     let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -157,6 +326,203 @@ fn smooth_scroll_change_reloads_the_agent_once() {
     ));
 
     let _ = state.commit_smooth_scroll(true);
+    assert!(receiver.try_recv().is_err());
+}
+
+#[test]
+fn smooth_scroll_profiles_are_independent_and_reload_only_when_saved() {
+    let resolver = AssetResolver::new();
+    let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = AppState::new(Sources::in_memory(Config::ephemeral(), &resolver, commands));
+    let safari = "com.apple.Safari";
+    let editor = "com.example.Editor";
+
+    let _ = state.set_editing_scroll_app(Some(safari.into()));
+    assert!(!state.editing_smooth_scroll());
+    assert!(
+        receiver.try_recv().is_err(),
+        "selecting a draft writes nothing"
+    );
+    let _ = state.commit_editing_smooth_scroll(true);
+    assert!(state.editing_smooth_scroll());
+    assert!(!state.app_settings().smooth_scroll);
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(crate::services::ipc::Command::ReloadConfig(_))
+    ));
+    let _ = state.commit_editing_smooth_scroll(true);
+    assert!(
+        receiver.try_recv().is_err(),
+        "an unchanged app value writes nothing"
+    );
+
+    let _ = state.set_editing_scroll_app(Some(editor.into()));
+    assert!(
+        !state.editing_smooth_scroll(),
+        "other apps still inherit off"
+    );
+    let _ = state.set_editing_scroll_app(None);
+    let _ = state.commit_editing_smooth_scroll(true);
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(crate::services::ipc::Command::ReloadConfig(_))
+    ));
+    let _ = state.set_editing_scroll_app(Some(editor.into()));
+    assert!(
+        state.editing_smooth_scroll(),
+        "legacy global on is inherited"
+    );
+    let _ = state.commit_editing_smooth_scroll(false);
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(crate::services::ipc::Command::ReloadConfig(_))
+    ));
+    assert!(!state.editing_smooth_scroll());
+    assert!(state.app_settings().smooth_scroll);
+
+    let _ = state.reset_editing_smooth_scroll();
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(crate::services::ipc::Command::ReloadConfig(_))
+    ));
+    assert_eq!(state.editing_scroll_app(), Some(editor));
+    assert!(
+        state.editing_smooth_scroll(),
+        "reset restores inheritance in place"
+    );
+    let _ = state.remove_scroll_profile(editor);
+    assert_eq!(state.editing_scroll_app(), None);
+    assert!(
+        receiver.try_recv().is_err(),
+        "an unsaved draft needs no reload"
+    );
+
+    let _ = state.set_editing_scroll_app(Some(safari.into()));
+    let _ = state.remove_scroll_profile(safari);
+    assert_eq!(state.editing_scroll_app(), None);
+    assert!(state.app_settings().per_app_smooth_scroll.is_empty());
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(crate::services::ipc::Command::ReloadConfig(_))
+    ));
+    assert!(receiver.try_recv().is_err());
+    assert!(
+        state.config.devices.is_empty(),
+        "software profiles do not create device settings"
+    );
+}
+
+#[test]
+fn wheel_scroll_profile_settings_independently_restore_their_matching_alias() {
+    let resolver = AssetResolver::new();
+    let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut config = Config::ephemeral();
+    let app = "com.example.editor";
+    config.apps = serde_json::from_value(serde_json::json!({
+        "editor": {"macos": app, "linux": app, "windows": app}
+    }))
+    .unwrap();
+    config.set_app_smooth_scroll("app:editor", true);
+    config.set_app_smooth_scroll(app, false);
+    let alias_sensitivity = VerticalScrollSensitivity::try_new(55).unwrap();
+    config.set_app_vertical_scroll_sensitivity("app:editor", alias_sensitivity);
+    config.set_app_vertical_scroll_sensitivity(app, VerticalScrollSensitivity::DEFAULT);
+    let alias_thumb = ThumbwheelSensitivity::try_new(41).unwrap();
+    config.set_app_thumbwheel_sensitivity("app:editor", alias_thumb);
+    config.set_app_thumbwheel_sensitivity(app, ThumbwheelSensitivity::DEFAULT);
+    let mut state = AppState::new(Sources::in_memory(config, &resolver, commands));
+    let _ = state.set_editing_scroll_app(Some(app.into()));
+    assert!(!state.editing_smooth_scroll());
+
+    let _ = state.reset_editing_smooth_scroll();
+
+    assert_eq!(state.editing_scroll_app(), Some(app));
+    assert!(
+        state.editing_smooth_scroll(),
+        "reset reveals the matching alias setting"
+    );
+    assert!(
+        !state.app_settings().smooth_scroll,
+        "the global default stays off"
+    );
+    assert!(!state.app_settings().per_app_smooth_scroll.contains_key(app));
+    assert!(
+        state
+            .app_settings()
+            .per_app_smooth_scroll
+            .contains_key("app:editor")
+    );
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(crate::services::ipc::Command::ReloadConfig(_))
+    ));
+    assert!(receiver.try_recv().is_err());
+    assert!(state.editing_vertical_scroll_sensitivity_overridden());
+    assert_eq!(
+        state.editing_vertical_scroll_sensitivity(),
+        VerticalScrollSensitivity::DEFAULT
+    );
+    let _ = state.commit_editing_smooth_scroll(false);
+    let _ = state.reset_editing_vertical_scroll_sensitivity();
+    assert!(state.editing_smooth_scroll_overridden());
+    assert!(!state.editing_smooth_scroll());
+    assert!(!state.editing_vertical_scroll_sensitivity_overridden());
+    assert_eq!(
+        state.editing_vertical_scroll_sensitivity(),
+        alias_sensitivity
+    );
+    assert!(state.editing_thumbwheel_sensitivity_overridden());
+    assert_eq!(
+        state.editing_thumbwheel_sensitivity(),
+        ThumbwheelSensitivity::DEFAULT
+    );
+    let _ = state.reset_editing_thumbwheel_sensitivity();
+    assert!(!state.editing_thumbwheel_sensitivity_overridden());
+    assert_eq!(state.editing_thumbwheel_sensitivity(), alias_thumb);
+    assert!(state.editing_smooth_scroll_overridden());
+    assert_eq!(
+        state.editing_vertical_scroll_sensitivity(),
+        alias_sensitivity
+    );
+}
+
+#[test]
+fn failed_wheel_scroll_profile_saves_restore_the_value_and_keep_the_editor_open() {
+    let resolver = AssetResolver::new();
+    let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut config = Config::ephemeral();
+    let app = "com.apple.Safari";
+    config.set_app_smooth_scroll(app, true);
+    let fast = VerticalScrollSensitivity::try_new(60).unwrap();
+    config.set_app_vertical_scroll_sensitivity(app, fast);
+    let thumb = ThumbwheelSensitivity::try_new(38).unwrap();
+    config.set_app_thumbwheel_sensitivity(app, thumb);
+    let mut state = AppState::new(Sources {
+        persistence: ConfigPersistence::ReadOnly("read-only test".into()),
+        ..Sources::in_memory(config, &resolver, commands)
+    });
+    let _ = state.set_editing_scroll_app(Some(app.into()));
+    for operation in [
+        AppState::reset_editing_smooth_scroll,
+        AppState::reset_editing_vertical_scroll_sensitivity,
+        AppState::reset_editing_thumbwheel_sensitivity,
+    ] {
+        let _ = operation(&mut state);
+        assert!(state.editing_vertical_scroll_sensitivity_overridden());
+        assert_eq!(state.editing_vertical_scroll_sensitivity(), fast);
+        assert!(state.editing_thumbwheel_sensitivity_overridden());
+        assert_eq!(state.editing_thumbwheel_sensitivity(), thumb);
+        assert_eq!(state.editing_scroll_app(), Some(app));
+        assert!(state.editing_smooth_scroll());
+    }
+    let _ = state.remove_scroll_profile(app);
+    let _ = state.commit_editing_vertical_scroll_sensitivity(VerticalScrollSensitivity::DEFAULT);
+    let _ = state.commit_editing_smooth_scroll(false);
+    let _ = state.commit_editing_thumbwheel_sensitivity(ThumbwheelSensitivity::DEFAULT);
+    assert_eq!(state.editing_thumbwheel_sensitivity(), thumb);
+    assert_eq!(state.editing_vertical_scroll_sensitivity(), fast);
+    assert_eq!(state.editing_scroll_app(), Some(app));
+    assert!(state.editing_smooth_scroll());
     assert!(receiver.try_recv().is_err());
 }
 

@@ -27,6 +27,8 @@ pub(super) struct WheelConfiguration {
     up: Action,
     down: Action,
     sensitivity: ThumbwheelSensitivity,
+    app: Option<String>,
+    epoch: crate::runtime::scroll::WheelProfileEpoch,
 }
 
 impl WheelConfiguration {
@@ -41,6 +43,8 @@ impl WheelConfiguration {
             up: action(ButtonId::ThumbwheelScrollUp),
             down: action(ButtonId::ThumbwheelScrollDown),
             sensitivity: plan.thumbwheel_sensitivity,
+            app: plan.thumbwheel_app.clone(),
+            epoch: plan.wheel_profile_epoch,
         }
     }
 
@@ -84,15 +88,31 @@ impl HeldPresses {
 /// rather than device prevents a replacement epoch from inheriting progress or
 /// having its state removed by a stale completion from the previous epoch.
 #[derive(Default)]
-struct SessionWheels(HashMap<HidppSessionId, WheelAccumulators>);
+struct SessionWheels(
+    HashMap<HidppSessionId, WheelAccumulators>,
+    HashMap<HidppSessionId, WheelConfiguration>,
+);
 
 impl SessionWheels {
     fn for_session(&mut self, session: &HidppSessionId) -> &mut WheelAccumulators {
         self.0.entry(session.clone()).or_default()
     }
 
+    fn for_configuration(
+        &mut self,
+        session: &HidppSessionId,
+        configuration: &WheelConfiguration,
+    ) -> &mut WheelAccumulators {
+        if self.1.get(session) != Some(configuration) {
+            self.cancel_session(session);
+            self.1.insert(session.clone(), configuration.clone());
+        }
+        self.for_session(session)
+    }
+
     fn cancel_session(&mut self, session: &HidppSessionId) {
         self.0.remove(session);
+        self.1.remove(session);
     }
 }
 
@@ -131,6 +151,33 @@ impl InputDispatcher {
         self.held_presses.cancel_session(session);
         self.shift_held.0.remove(session);
         self.publish_shift(session);
+    }
+
+    /// End only thumb-wheel progress and output; held buttons keep their press.
+    pub(super) fn cancel_thumbwheel(&mut self, session: &HidppSessionId) {
+        self.wheels.cancel_session(session);
+        self.outputs.scroll.cancel_hidpp_thumb(session);
+    }
+
+    pub(super) fn wheel_plan<'a>(
+        &self,
+        notification: &super::WheelNotification,
+        retiring: &'a DispatchPlan,
+        published: Option<&'a DispatchPlan>,
+    ) -> Option<&'a DispatchPlan> {
+        notification.resolve(
+            retiring,
+            published,
+            self.outputs.scroll.wheel_profile_epoch(),
+        )
+    }
+
+    pub(super) fn holds_input(&self, session: &HidppSessionId) -> bool {
+        self.held_presses
+            .tokens
+            .keys()
+            .any(|(own, _)| own == session)
+            || self.shift_held.active(session)
     }
 
     /// Tell the OS hook whether `session`'s device has G-Shift held, so its
@@ -238,7 +285,6 @@ impl InputDispatcher {
                 let is_gesture = plan.gesture_bindings.contains_key(&button)
                     || plan.side_gesture_bindings.contains_key(&button);
                 let (binding, pointer) = self.binding_for(session, plan, button, is_gesture);
-                let tracks_hold = is_gesture || binding.is_some_and(Binding::is_wheel_hold);
                 if let Some(binding) = binding {
                     debug!(key, ?button, action = %binding.click_action().label(), "HID++ button → binding");
                 } else {
@@ -248,12 +294,10 @@ impl InputDispatcher {
                     .outputs
                     .actions
                     .try_hidpp_button_down(session, button, binding, pointer);
-                if tracks_hold {
-                    if let Some(press) = press {
-                        self.held_presses.start(session, button, press);
-                    } else {
-                        self.held_presses.end(session, button);
-                    }
+                if let Some(press) = press {
+                    self.held_presses.start(session, button, press);
+                } else {
+                    self.held_presses.end(session, button);
                 }
             }
             CapturedInput::ButtonUp(button) => {
@@ -360,7 +404,7 @@ impl InputDispatcher {
         let button = rotation.button();
         let configuration = WheelConfiguration::for_plan(plan);
         let action = configuration.action(rotation);
-        let wheels = self.wheels.for_session(session);
+        let wheels = self.wheels.for_configuration(session, &configuration);
         match wheels.advance(
             rotation,
             action,
@@ -370,7 +414,8 @@ impl InputDispatcher {
             WheelOutput::Idle => {}
             WheelOutput::Scroll(delta) => {
                 debug!(key, ?button, action = %action.label(), ?delta, "thumb wheel → scroll");
-                self.outputs.post_scroll(session, delta);
+                self.outputs
+                    .post_thumb_scroll(session, delta, plan.wheel_profile_epoch);
             }
             WheelOutput::FireAction(repeats) => {
                 debug!(key, ?button, action = %action.label(), repeats, "thumb wheel → action");

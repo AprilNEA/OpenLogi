@@ -18,7 +18,8 @@ use openlogi_core::binding::{
 use openlogi_core::config::KeyTrigger;
 use openlogi_hid::DeviceRoute;
 use openlogi_hook::{
-    EventDevice, EventDisposition, Hook, HookEvent, KeyEvent, MouseEvent, source_is_remappable,
+    EventDevice, EventDisposition, Hook, HookEvent, KeyEvent, MouseEvent, ScrollDelta,
+    source_is_remappable,
 };
 use tracing::{debug, info, warn};
 
@@ -391,6 +392,19 @@ fn scroll_source_may_intercept(from_trackpad: bool, device: Option<&EventDevice>
     !from_trackpad && button_source_may_remap(device)
 }
 
+/// Decide whether to forward this original OS event. A remapped thumb wheel
+/// arrives through its HID++ session and sends no native ticks (#2242, #1708).
+pub(super) fn handle_scroll(
+    delta: ScrollDelta,
+    from_trackpad: bool,
+    device: Option<&EventDevice>,
+    scroll: &ScrollInputHandle,
+) -> EventDisposition {
+    queued_event_disposition(
+        scroll_source_may_intercept(from_trackpad, device) && scroll.try_hook_scroll(delta),
+    )
+}
+
 /// Off-thread worker for bound actions so the tap callback never injects input
 /// or writes a log line. The control is carried only for that log line.
 type QueuedAction = (Action, ActionDispatchTarget, PressControl);
@@ -705,18 +719,7 @@ pub fn start(
                     delta,
                     from_trackpad,
                     device,
-                } => {
-                    // No thumb-wheel binding is resolved here. A rebound thumb
-                    // wheel is diverted over `0x2150`, so its HID++ capture
-                    // session dispatches it and the wheel sends no native
-                    // ticks. A native horizontal tick therefore comes from
-                    // another source, such as a touchpad pan or RDP input
-                    // (#2242, #1708), which the hook cannot attribute.
-                    if scroll_source_may_intercept(from_trackpad, device.as_ref()) {
-                        return queued_event_disposition(scroll.try_hook_scroll(delta));
-                    }
-                    EventDisposition::PassThrough
-                }
+                } => handle_scroll(delta, from_trackpad, device.as_ref(), &scroll),
             }
         }
         // Function-key remapper: ordinary actions remain one-shot, while a

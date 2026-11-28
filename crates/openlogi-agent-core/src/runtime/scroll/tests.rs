@@ -7,8 +7,21 @@ use openlogi_core::config::{GlideShape, MomentumParams, MomentumScrolling};
 
 use super::*;
 
+impl ScrollEngine {
+    /// The existing global-mode traces all use the legacy swipe lifecycle.
+    fn phased_impulse(
+        &mut self,
+        source: ScrollSource,
+        impulse: WheelDelta,
+        at: Instant,
+        emit: &mut impl FnMut(ScrollFrame),
+    ) {
+        self.phased_impulse_on(source, impulse, at, WheelStream::Legacy, emit);
+    }
+}
+
 fn source() -> ScrollSource {
-    ScrollSource::current_hook()
+    ScrollSource::current_hook(SoftwareWheel::Primary)
 }
 
 /// The main wheel of a HID++ capture session.
@@ -21,9 +34,11 @@ fn hidpp_source(device_key: &str, epoch: u64) -> ScrollSource {
 
 /// The thumb wheel of a HID++ capture session.
 fn thumb_source(device_key: &str, epoch: u64) -> ScrollSource {
+    static DISPATCH: std::sync::LazyLock<ThumbDispatch> =
+        std::sync::LazyLock::new(ThumbDispatch::default);
     ScrollSource::Hidpp(
         HidppSessionId::with_epoch(device_key, epoch),
-        HidppWheel::Thumb,
+        HidppWheel::Thumb(DISPATCH.clone()),
     )
 }
 
@@ -658,6 +673,113 @@ fn smooth_output_inside_an_open_phased_gesture_stays_phased() {
     );
 }
 
+#[test]
+fn activating_profiles_releases_a_legacy_stream_held_only_by_the_thumb_timeout() {
+    let at = Instant::now();
+    let mut engine = ScrollEngine::default();
+    let mut frames = Vec::new();
+    let mut emit = |frame| frames.push(frame);
+    engine.impulse(hidpp_source("mouse", 1), wheel(0.0, 1.0), at, &mut emit);
+    let midway = at + ANIMATION_DURATION / 2;
+    engine.advance_due(midway, &mut emit);
+    engine.phased_impulse(thumb_source("mouse", 1), wheel(1.0, 0.0), midway, &mut emit);
+    engine.advance_due(at + ANIMATION_DURATION, &mut emit);
+    engine.cancel_destination_swipe(WheelStream::Legacy, &mut emit);
+    // With the last app profile removed, a legacy thumb tick owns a fresh gesture.
+    engine.phased_impulse(
+        thumb_source("mouse", 1),
+        wheel(1.0, 0.0),
+        at + ANIMATION_DURATION * 2,
+        &mut emit,
+    );
+    let terminal = frames[frames.len() - 2];
+    assert_eq!(
+        (terminal.kind, terminal.phase, terminal.delta),
+        (
+            FrameKind::Eased,
+            SmoothScrollPhase::Cancelled,
+            WheelDelta::ZERO
+        )
+    );
+    let next = frames.last().expect("next thumb tick");
+    assert_eq!(
+        (next.kind, next.phase),
+        (FrameKind::Phased, SmoothScrollPhase::Began)
+    );
+}
+
+/// The two injection entry points, recorded without posting a system event.
+#[derive(Debug, PartialEq)]
+enum PostedScroll {
+    Smooth(ScrollDelta, SmoothScrollPhase),
+    Phased(ScrollDelta, SmoothScrollPhase),
+}
+
+#[test]
+fn per_app_wheel_overlap_main_first_preserves_both_endings() {
+    use PostedScroll::{Phased, Smooth};
+    use SmoothScrollPhase::{Began, Changed, Ended};
+
+    let at = Instant::now();
+    let midway = at + ANIMATION_DURATION / 2;
+    let thumb = thumb_source("mouse", 1);
+    let mut engine = ScrollEngine::default();
+    let mut posted = Vec::new();
+    let mut emit = |frame: ScrollFrame| posted.push(frame.dispatch(Smooth, Phased));
+
+    engine.impulse(source(), wheel(0.0, 1.0), at, &mut emit);
+    engine.advance_due(midway, &mut emit);
+    engine.phased_impulse(thumb.clone(), wheel(1.0, 0.0), midway, &mut emit);
+    let last_thumb = midway + FRAME_PERIOD;
+    engine.phased_impulse(thumb, wheel(-2.0, 0.0), last_thumb, &mut emit);
+    engine.advance_due(at + ANIMATION_DURATION, &mut emit);
+    engine.advance_due(last_thumb + PHASED_IDLE, &mut emit);
+
+    assert_eq!(
+        posted,
+        [
+            Smooth(ScrollDelta::wheel_ticks(0.0, 0.5), Began),
+            Phased(ScrollDelta::wheel_ticks(1.0, 0.0), Began),
+            Phased(ScrollDelta::wheel_ticks(-2.0, 0.0), Changed),
+            Smooth(ScrollDelta::wheel_ticks(0.0, 0.5), Ended),
+            Phased(ScrollDelta::wheel_ticks(0.0, 0.0), Ended),
+        ]
+    );
+    assert_eq!(engine.next_deadline(), None);
+}
+
+#[test]
+fn per_app_wheel_overlap_thumb_first_cancels_only_the_thumb_gesture() {
+    use PostedScroll::{Phased, Smooth};
+    use SmoothScrollPhase::{Began, Cancelled, Changed, Ended};
+
+    let at = Instant::now();
+    let thumb = thumb_source("mouse", 1);
+    let mut engine = ScrollEngine::default();
+    let mut posted = Vec::new();
+    let mut emit = |frame: ScrollFrame| posted.push(frame.dispatch(Smooth, Phased));
+
+    engine.phased_impulse(thumb.clone(), wheel(1.0, 0.0), at, &mut emit);
+    engine.impulse(source(), wheel(0.0, 1.0), at, &mut emit);
+    let midway = at + ANIMATION_DURATION / 2;
+    engine.advance_due(midway, &mut emit);
+    engine.phased_impulse(thumb, wheel(-2.0, 0.0), midway, &mut emit);
+    engine.cancel_session(&HidppSessionId::with_epoch("mouse", 1), &mut emit);
+    engine.advance_due(at + ANIMATION_DURATION, &mut emit);
+
+    assert_eq!(
+        posted,
+        [
+            Phased(ScrollDelta::wheel_ticks(1.0, 0.0), Began),
+            Smooth(ScrollDelta::wheel_ticks(0.0, 0.5), Began),
+            Phased(ScrollDelta::wheel_ticks(-2.0, 0.0), Changed),
+            Phased(ScrollDelta::wheel_ticks(0.0, 0.0), Cancelled),
+            Smooth(ScrollDelta::wheel_ticks(0.0, 0.5), Ended),
+        ]
+    );
+    assert_eq!(engine.next_deadline(), None);
+}
+
 /// An engine whose smoothed main wheels all report one mouse's
 /// momentum-scrolling settings, as the dispatcher passes them for it.
 struct MomentumEngine {
@@ -1101,7 +1223,7 @@ fn only_the_smoothed_wheel_scrolls_in_pixels() {
     );
     let mut other = Vec::new();
     engine.impulse(
-        ScrollSource::current_hook(),
+        ScrollSource::current_hook(SoftwareWheel::Primary),
         wheel(0.0, 1.0),
         start,
         &mut |f| other.push(f),

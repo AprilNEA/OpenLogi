@@ -1,0 +1,30 @@
+id: gui-wheel-profile-editor-owner
+language: rust
+severity: error
+message: Mount features::profiles::WheelProfileEditor to edit app-specific wheel settings. It binds each control to the selected profile and handles inheritance and stale releases after profile or device changes.
+files:
+  - crates/openlogi-desktop/src/**/*.rs
+ignores:
+  - crates/openlogi-desktop/src/features/profiles/wheel.rs
+  - "**/tests.rs"
+  - "**/tests/**"
+rule:
+  all:
+    - any:
+        - pattern: $STATE.commit_editing_smooth_scroll($VALUE)
+        - pattern: $STATE.reset_editing_smooth_scroll()
+        - pattern: $STATE.commit_editing_vertical_scroll_sensitivity($VALUE)
+        - pattern: $STATE.reset_editing_vertical_scroll_sensitivity()
+        - pattern: $STATE.commit_editing_thumbwheel_sensitivity($VALUE)
+        - pattern: $STATE.reset_editing_thumbwheel_sensitivity()
+        - pattern: AppState::commit_editing_thumbwheel_sensitivity
+        - pattern: AppState::reset_editing_thumbwheel_sensitivity
+        - pattern: AppState::commit_editing_vertical_scroll_sensitivity
+        - pattern: AppState::reset_editing_vertical_scroll_sensitivity
+    - not:
+        inside:
+          kind: mod_item
+          stopBy: end
+          has:
+            field: name
+            regex: '^tests$'

@@ -13,12 +13,18 @@
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, ClickEvent, Div, ElementId, FontFeatures, InteractiveElement as _,
+    AnyElement, App, ClickEvent, Div, ElementId, Entity, FontFeatures, InteractiveElement as _,
     IntoElement, ParentElement, RenderOnce, SharedString, Styled, Window, div,
     prelude::FluentBuilder as _, px, rems,
 };
 use gpui_kit::base::Button as BaseButton;
-use gpui_kit::component::{h_flex, v_flex};
+use gpui_kit::component::{
+    h_flex,
+    slider::{Slider, SliderState},
+    v_flex,
+};
+
+use super::commit_slider::SliderUnit;
 
 use super::theme::{self, FocusRingStyle as _, Palette, PressableStyle as _, Typography as _};
 
@@ -136,6 +142,26 @@ impl SliderRow {
         self.compact = true;
         self
     }
+}
+
+/// The same labeled slider layout for a profile's vertical and horizontal wheels.
+pub(crate) fn sensitivity_row<T: SliderUnit + std::fmt::Display>(
+    title: SharedString,
+    description: SharedString,
+    slider: &Entity<SliderState>,
+    max: T,
+    baseline: (T, SharedString),
+    cx: &App,
+) -> SliderRow {
+    let value = T::from_slider(slider.read(cx).value().start());
+    let control = Slider::new(slider)
+        .horizontal()
+        .accessibility_label(title.clone());
+    SliderRow::new(title, control)
+        .value(value.to_string(), [max.to_string()])
+        .when(value == baseline.0, |row| row.marker(baseline.1))
+        .description(description)
+        .compact()
 }
 
 impl RenderOnce for SliderRow {

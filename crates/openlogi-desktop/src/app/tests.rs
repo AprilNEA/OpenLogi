@@ -230,6 +230,47 @@ fn open_device_detail(
     (app_view, cx)
 }
 
+/// Bring a lower control into the Pointer tab's scrolling viewport before
+/// using it, just as a user reaches the device cards on a short window.
+fn reveal_pointer_control(visual: &mut gpui::VisualTestContext, selector: &'static str) {
+    use gpui::{ScrollDelta, ScrollEvent, point, px};
+
+    let viewport = visual.update(|window, _| window.viewport_size());
+    let body = visual.debug_bounds("detail-tab-body").unwrap();
+    let target_y = (body.top() + viewport.height) * 0.5;
+    let scroll_at = point(body.left() + px(8.), target_y);
+    let row = visual.debug_bounds(selector).unwrap();
+    if row.bottom() > viewport.height || row.top() < body.top() {
+        visual.simulate_event(ScrollEvent {
+            position: scroll_at,
+            delta: ScrollDelta::Pixels(point(px(0.), target_y - row.center().y)),
+            ..Default::default()
+        });
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+    }
+    let row = visual.debug_bounds(selector).unwrap();
+    assert!(
+        row.top() >= body.top() && row.bottom() <= viewport.height,
+        "{selector} remains outside the scrolling viewport: {row:?}, {viewport:?}"
+    );
+}
+
+pub(crate) fn click_control(visual: &mut gpui::VisualTestContext, selector: &'static str) {
+    use gpui::{Bounds, Modifiers, point, px};
+
+    let bounds = visual
+        .debug_bounds(selector)
+        .unwrap_or_else(|| panic!("missing {selector}"));
+    let viewport =
+        visual.update(|window, _| Bounds::new(point(px(0.), px(0.)), window.viewport_size()));
+    assert!(
+        viewport.contains(&bounds.center()),
+        "{selector}: {bounds:?} outside {viewport:?}"
+    );
+    visual.simulate_click(bounds.center(), Modifiers::none());
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+}
+
 /// The Pointer tab's Scrolling card carries the smooth-wheel switch, shows the
 /// saved setting (a smooth wheel turned on earlier switches off) and knows this
 /// link has `0x2121` (so it switches back on).
@@ -260,6 +301,7 @@ fn the_pointer_tab_offers_the_smooth_wheel(cx: &mut gpui::TestAppContext) {
         window.draw(cx).clear(cx);
     });
 
+    reveal_pointer_control(cx, "smooth-wheel-row-control");
     let switch = cx
         .debug_bounds("smooth-wheel-row-control")
         .expect("the Scrolling card offers the smooth wheel");
@@ -280,6 +322,172 @@ fn the_pointer_tab_offers_the_smooth_wheel(cx: &mut gpui::TestAppContext) {
         click_and_read(),
         "this link has 0x2121, so it turns back on"
     );
+}
+
+pub(crate) fn set_slider(visual: &mut gpui::VisualTestContext, label: &str, value: u8) {
+    use gpui::{Bounds, Modifiers, point, px};
+    use gpui_kit::test::TestQueryExt as _;
+    let at = visual.update(|window, _| {
+        let slider = window.find_by_label(label);
+        assert!(slider.visible(), "{label}");
+        let bounds = slider.bounds();
+        let fraction = f32::from(value - 1) / 99.;
+        let at = point(
+            bounds.left() + bounds.size.width * fraction,
+            bounds.center().y,
+        );
+        let viewport = Bounds::new(point(px(0.), px(0.)), window.viewport_size());
+        assert!(
+            viewport.contains(&at),
+            "{label}: {at:?} outside {viewport:?}"
+        );
+        at
+    });
+    visual.simulate_click(at, Modifiers::default());
+    visual.update(gpui_kit::test::TestWindowExt::render_frame);
+}
+
+pub(crate) fn assert_main_wheel(
+    visual: &mut gpui::VisualTestContext,
+    app: Option<&str>,
+    smoothing: bool,
+    sensitivity: u8,
+) {
+    use crate::state::AppState;
+    use gpui_kit::test::TestWindowExt as _;
+    visual.update(|window, cx| {
+        window.render_frame(cx);
+        let state = AppState::try_read(cx).unwrap();
+        assert_eq!(state.editing_scroll_app(), app);
+        assert_eq!(state.editing_smooth_scroll(), smoothing);
+        assert_eq!(
+            state.editing_vertical_scroll_sensitivity().into_inner(),
+            sensitivity
+        );
+        assert_eq!(
+            window.find("smooth-scroll-profile-toggle").checked(),
+            Some(smoothing)
+        );
+    });
+    assert_slider_value(visual, "Vertical scroll sensitivity", sensitivity);
+}
+
+pub(crate) fn assert_slider_value(visual: &mut gpui::VisualTestContext, label: &str, value: u8) {
+    use gpui::px;
+    use gpui_kit::test::{TestQueryExt as _, TestWindowExt as _};
+
+    visual.update(|window, cx| {
+        window.render_frame(cx);
+        let slider = window.find_by_label(label);
+        let track = slider.bounds();
+        let thumb = window
+            .within(slider.path().last().unwrap().clone())
+            .find(("slider-thumb", 0u32))
+            .bounds();
+        let expected = track.left() + track.size.width * (f32::from(value - 1) / 99.);
+        assert!(
+            (thumb.center().x - expected).abs() <= px(1.),
+            "slider must show the selected profile's value"
+        );
+    });
+}
+
+/// The Pointer shortcut opens General's three wheel settings in a single
+/// Settings window and clears a previous page or search when used again.
+#[gpui::test]
+fn pointer_scrolling_opens_and_refocuses_general_wheel_profiles(cx: &mut gpui::TestAppContext) {
+    use gpui::{Bounds, VisualTestContext, point, px, size};
+    use gpui_kit::test::{TestQueryExt as _, TestWindowExt as _};
+    use openlogi_core::config::{Config, ScrollResolution};
+
+    use crate::services::i18n::LOCALE_LOCK;
+    use crate::state::{
+        AppState,
+        tests::{KNOWN_MOUSE_KEY, direct_inventory},
+    };
+    use crate::windows::{WindowRegistry, settings};
+
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    let test_app = cx.clone();
+    let mut config = Config::ephemeral();
+    config.set_smooth_wheel(KNOWN_MOUSE_KEY, true);
+    config.set_scroll_resolution(KNOWN_MOUSE_KEY, Some(ScrollResolution::High));
+    let (view, main) = open_device_detail(cx, direct_inventory([0xa3, 0x93, 0xca, 0xe0]), config);
+    main.update(|_, cx| crate::ui::theme::register_builtin_themes(cx));
+    main.simulate_resize(size(px(720.), px(680.)));
+    main.update(gpui_kit::test::TestWindowExt::render_frame);
+    click_control(main, "detail-navigation-Pointer");
+    assert!(
+        main.debug_bounds("scroll-profile:add-app-profile")
+            .is_none()
+    );
+    let link = "pointer-edit-app-wheel-profiles";
+    reveal_pointer_control(main, link);
+    // From a fresh window and from a pre-existing filtered About page.
+    for existing in [false, true] {
+        let original = existing.then(|| {
+            let handle = main.update(|_, cx| {
+                settings::open_at(settings::SettingsPage::About, cx);
+                cx.global::<WindowRegistry>().settings.unwrap()
+            });
+            let mut settings = VisualTestContext::from_window(handle.into(), &test_app);
+            settings.update(|window, cx| {
+                window.render_frame(cx);
+                window.within("settings-sidebar").click("input-state", cx);
+                window.input("unmatched setting", cx);
+            });
+            assert!(
+                settings
+                    .debug_bounds("scroll-profile:add-app-profile")
+                    .is_none()
+            );
+            handle
+        });
+        click_control(main, link);
+        main.run_until_parked();
+        let handle = main.update(|_, cx| {
+            assert_eq!(cx.windows().len(), 2);
+            let state = AppState::try_read(cx).unwrap();
+            assert!(state.current_smooth_wheel());
+            assert_eq!(
+                state.current_scroll_resolution(),
+                Some(ScrollResolution::High)
+            );
+            assert_eq!(view.read(cx).active_tab, DetailTab::Pointer);
+            cx.global::<WindowRegistry>().settings.unwrap()
+        });
+        if let Some(original) = original {
+            assert_eq!(original, handle, "refocus the same Settings window");
+        }
+        let mut general = VisualTestContext::from_window(handle.into(), &test_app);
+        general.update(gpui_kit::test::TestWindowExt::render_frame);
+        let add = general
+            .debug_bounds("scroll-profile:add-app-profile")
+            .unwrap();
+        general.update(|window, _| {
+            let viewport = Bounds::new(point(px(0.), px(0.)), window.viewport_size());
+            assert!(
+                viewport.contains(&add.center()),
+                "the Add app control must be in view"
+            );
+            for label in [
+                tr!("pointer.vertical_scroll_sensitivity"),
+                tr!("pointer.horizontal_scroll_sensitivity"),
+            ] {
+                assert_eq!(
+                    window.find_by_label(label.as_ref()).role(),
+                    Some(gpui::Role::Slider)
+                );
+            }
+        });
+        assert!(
+            general
+                .debug_bounds("smooth-scroll-profile-setting-control")
+                .is_some()
+        );
+        general.update(|window, _| window.remove_window());
+        main.run_until_parked();
+    }
 }
 
 /// Each detail tab opens at its top. One call site builds every tab's

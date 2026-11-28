@@ -26,21 +26,18 @@ pub(super) use gpui_kit::component::{
     input::{InputEvent, InputState},
     select::{SelectEvent, SelectItem, SelectState},
     setting::{SelectIndex, SettingField, SettingGroup, SettingItem, SettingPage, Settings},
-    slider::{Slider, SliderState},
     tag::Tag,
     theme::ThemeConfig,
     v_flex,
 };
 pub(super) use gpui_updater::{UpdateStatus, Updater};
 pub(super) use openlogi_core::brand::{HELP_URL, RELEASES_URL, REPO_URL};
-pub(super) use openlogi_core::config::{
-    Appearance, AssetSourcePreference, ThumbwheelSensitivity, UiScale, VerticalScrollSensitivity,
-};
+pub(super) use openlogi_core::config::{Appearance, AssetSourcePreference, UiScale};
 
 use crate::features::pointer::momentum::{MomentumPanel, MomentumScope};
+use crate::features::profiles::WheelProfileEditor;
 pub(super) use crate::services::assets::sync::{AssetCommand, AssetControl};
 pub(super) use crate::state::{AppState, StateEvent};
-use crate::ui::commit_slider::{CommitSlider, SliderRange};
 pub(super) use crate::ui::theme::{self, Palette};
 #[cfg(target_os = "macos")]
 pub(super) use openlogi_permissions::Permission;
@@ -71,6 +68,8 @@ mod updates;
 pub enum SettingsPage {
     #[default]
     General,
+    /// The wheel profiles group at the top of General, including on a repeat visit.
+    WheelProfiles,
     Updates,
     /// Where Linux shows input-device access, which the agent needs to run.
     #[cfg(target_os = "linux")]
@@ -82,7 +81,7 @@ impl SettingsPage {
     /// Sidebar index — must track the `.page(...)` order in `render`.
     fn index(self) -> usize {
         match self {
-            Self::General => 0,
+            Self::General | Self::WheelProfiles => 0,
             Self::Updates => 1,
             #[cfg(target_os = "linux")]
             Self::Permissions => 2,
@@ -121,16 +120,15 @@ pub struct SettingsView {
     theme_filter: ThemeFilter,
     /// Free-text filter for the Appearance theme grid (search 50+ themes by name).
     theme_search: Entity<InputState>,
-    /// Page selected when the window first opens. Consumed once by the Settings
-    /// widget's keyed state, so it only steers a fresh open (an already-open
-    /// window is just focused).
+    /// Initial selection of the Kit widget, also used after a wheel-profile shortcut.
     initial_page: SettingsPage,
+    /// Kit owns its search, page and scroll state under this key.
+    navigation_generation: usize,
     language_select: Entity<SelectState<Vec<language::LanguageOption>>>,
     asset_source_select: Entity<SelectState<Vec<assets::AssetSourceOption>>>,
-    thumbwheel_sensitivity: CommitSlider<ThumbwheelSensitivity>,
-    vertical_scroll_sensitivity: CommitSlider<VerticalScrollSensitivity>,
     /// The General page's momentum-scrolling card: the app-wide default.
     momentum_panel: Entity<MomentumPanel>,
+    wheel_profile_editor: Entity<WheelProfileEditor>,
     /// Shared app-wide updater, surfaced on the Updates page. A launch-time
     /// check result is already visible when the window opens.
     updater: Entity<Updater>,
@@ -228,8 +226,7 @@ impl SettingsView {
         cx.subscribe_in(&asset_source_select, window, Self::on_asset_source_select)
             .detach();
 
-        let thumbwheel_sensitivity = Self::thumbwheel_sensitivity_slider(cx);
-        let vertical_scroll_sensitivity = Self::vertical_scroll_sensitivity_slider(cx);
+        let wheel_profile_editor = cx.new(|cx| WheelProfileEditor::new(window, cx));
         let momentum_panel = cx.new(|cx| MomentumPanel::new(MomentumScope::General, cx));
 
         // Poll the agent's live event monitor while this window is open. The task
@@ -270,10 +267,10 @@ impl SettingsView {
             theme_filter: ThemeFilter::All,
             theme_search,
             initial_page,
+            navigation_generation: 0,
             language_select,
             asset_source_select,
-            thumbwheel_sensitivity,
-            vertical_scroll_sensitivity,
+            wheel_profile_editor,
             momentum_panel,
             updater,
             updater_obs,
@@ -302,46 +299,6 @@ impl SettingsView {
                 this.refresh_registration_status(cx);
             }
         })
-    }
-
-    /// The thumb-wheel sensitivity slider. The label tracks the live slider
-    /// value while it is dragged; persistence happens once on release.
-    fn thumbwheel_sensitivity_slider(
-        cx: &mut Context<Self>,
-    ) -> CommitSlider<ThumbwheelSensitivity> {
-        let current = AppState::try_read(cx).map_or(ThumbwheelSensitivity::DEFAULT, |state| {
-            state.app_settings().thumbwheel_sensitivity
-        });
-        CommitSlider::new(
-            SliderRange::new(ThumbwheelSensitivity::MIN, ThumbwheelSensitivity::MAX),
-            current,
-            cx,
-            |_, sensitivity, cx| {
-                AppState::apply(cx, |state| state.commit_thumbwheel_sensitivity(sensitivity));
-            },
-        )
-    }
-
-    /// The vertical scroll sensitivity slider, committed once it is released.
-    fn vertical_scroll_sensitivity_slider(
-        cx: &mut Context<Self>,
-    ) -> CommitSlider<VerticalScrollSensitivity> {
-        let current = AppState::try_read(cx).map_or(VerticalScrollSensitivity::DEFAULT, |state| {
-            state.app_settings().vertical_scroll_sensitivity
-        });
-        CommitSlider::new(
-            SliderRange::new(
-                VerticalScrollSensitivity::MIN,
-                VerticalScrollSensitivity::MAX,
-            ),
-            current,
-            cx,
-            |_, sensitivity, cx| {
-                AppState::apply(cx, |state| {
-                    state.commit_vertical_scroll_sensitivity(sensitivity)
-                });
-            },
-        )
     }
 
     fn on_language_select(
@@ -400,16 +357,31 @@ pub fn open(cx: &mut App) {
     open_at(SettingsPage::General, cx);
 }
 
-/// Open the Settings window on a specific page, or focus it if it's already
-/// open. The page only steers a *fresh* open — an already-open window is just
-/// focused on whatever page it last showed (the Settings widget owns selection).
 /// The window's native title — one definition for open and the live-language
 /// retitle ([`windows::retitle_open`]), so the two cannot drift.
 pub(crate) fn window_title() -> SharedString {
     tr!("app.settings")
 }
 
+/// Open Settings on this page, or focus the current Settings window.
 pub fn open_at(page: SettingsPage, cx: &mut App) {
+    // A shortcut can be invoked while Settings is on another page, filtered,
+    // or scrolled away. Only this targeted navigation starts a fresh Kit view.
+    if matches!(page, SettingsPage::WheelProfiles)
+        && let Some(handle) = cx.default_global::<windows::WindowRegistry>().settings
+    {
+        cx.defer(move |cx| {
+            let _ = handle.update(cx, |root, _, cx| {
+                if let Ok(view) = root.view().clone().downcast::<SettingsView>() {
+                    view.update(cx, |view, cx| {
+                        view.initial_page = SettingsPage::WheelProfiles;
+                        view.navigation_generation = view.navigation_generation.wrapping_add(1);
+                        cx.notify();
+                    });
+                }
+            });
+        });
+    }
     windows::open_or_focus(
         |reg| &mut reg.settings,
         window_title(),
@@ -431,18 +403,6 @@ impl Render for SettingsView {
             window,
             cx,
         );
-        // A failed write restores AppState's persisted configuration. Re-seat
-        // these independently owned sliders so neither can keep presenting the
-        // rejected value after that rollback.
-        if let Some(settings) = AppState::try_read(cx).map(AppState::app_settings) {
-            let (vertical_scroll, thumbwheel) = (
-                settings.vertical_scroll_sensitivity,
-                settings.thumbwheel_sensitivity,
-            );
-            self.vertical_scroll_sensitivity
-                .sync(vertical_scroll, window, cx);
-            self.thumbwheel_sensitivity.sync(thumbwheel, window, cx);
-        }
         let pal = theme::palette(cx);
         let view = cx.entity();
         // Only surface the Camera permission when a webcam is actually present,
@@ -455,19 +415,16 @@ impl Render for SettingsView {
         // Filled group boxes use the theme's content-surface token, keeping
         // settings groups distinct from the page without borrowing a control
         // colour for a large card.
-        let settings = Settings::new("settings")
+        let settings = Settings::new(("settings", self.navigation_generation))
             .with_group_variant(GroupBoxVariant::Fill)
             .sidebar_width(px(210.))
             .default_selected_index(SelectIndex {
                 page_ix: self.initial_page.index(),
-                group_ix: None,
+                group_ix: matches!(self.initial_page, SettingsPage::WheelProfiles).then_some(0),
             })
             .page(general::general_page(
-                general::SensitivitySliders {
-                    vertical_scroll: self.vertical_scroll_sensitivity.slider().clone(),
-                    thumbwheel: self.thumbwheel_sensitivity.slider().clone(),
-                },
                 self.momentum_panel.clone(),
+                self.wheel_profile_editor.clone(),
                 self.registration_status,
             ))
             .page(updates::updates_page(self.updater.clone()));

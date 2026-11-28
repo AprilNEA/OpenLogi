@@ -1,10 +1,11 @@
 //! Debug-only gallery for reviewing shared controls without app runtime state.
 
 use super::theme::FocusRingStyle as _;
+use crate::features::profiles::{AppCatalogPicker, ProfileIconCache, wheel_profile_scope_preview};
 use gpui::{
     App, AppContext as _, Context, InteractiveElement, IntoElement, ParentElement, Render, Role,
-    SharedString, Size, StatefulInteractiveElement as _, Styled, Window, WindowOptions, div,
-    prelude::FluentBuilder as _, px, rems,
+    SharedString, Size, StatefulInteractiveElement as _, Styled, Subscription, Window,
+    WindowOptions, div, prelude::FluentBuilder as _, px, rems,
 };
 use gpui_kit::base::Button as BaseButton;
 use gpui_kit::component::{
@@ -64,7 +65,7 @@ pub(crate) fn run() {
         };
         let opened = cx.open_window(options, |window, cx| {
             theme::apply_scale(window, UiScale::Normal);
-            let view = cx.new(ComponentGallery::new);
+            let view = cx.new(|cx| ComponentGallery::new(window, cx));
             cx.new(|cx| Root::new(view, window, cx).bg(cx.theme().background))
         });
 
@@ -107,6 +108,10 @@ struct ComponentGallery {
     segment_selected: usize,
     menu_selected: usize,
     profile_selected: usize,
+    scope_app: Option<String>,
+    scope_icons: ProfileIconCache,
+    scope_catalog: gpui::Entity<AppCatalogPicker>,
+    _scope_catalog_obs: Subscription,
     preset_selected: bool,
     pill_selected: usize,
     carousel_selected: usize,
@@ -123,7 +128,7 @@ struct ComponentGallery {
 const ROW_DEFAULT: u8 = 14;
 
 impl ComponentGallery {
-    fn new(cx: &mut Context<Self>) -> Self {
+    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let slider_committed = 40;
         let slider = CommitSlider::new(
             SliderRange::new(0, 100),
@@ -145,6 +150,9 @@ impl ComponentGallery {
             cx,
             |this: &mut Self, _, _| this.entry_auto = false,
         );
+        let scope_icons = ProfileIconCache::default();
+        let scope_catalog = cx.new(|cx| AppCatalogPicker::new(scope_icons.clone(), window, cx));
+        let scope_catalog_obs = cx.observe(&scope_catalog, |_, _, cx| cx.notify());
         Self {
             mode: ThemeMode::Light,
             scale: UiScale::Normal,
@@ -153,6 +161,10 @@ impl ComponentGallery {
             segment_selected: 1,
             menu_selected: 0,
             profile_selected: 1,
+            scope_app: Some("example.editor".into()),
+            scope_icons,
+            scope_catalog,
+            _scope_catalog_obs: scope_catalog_obs,
             preset_selected: true,
             pill_selected: 1,
             carousel_selected: 1,
@@ -399,29 +411,47 @@ impl ComponentGallery {
     }
 
     fn profile_panel(&self, pal: Palette, cx: &mut Context<Self>) -> gpui::Div {
+        let gallery = cx.entity();
+        let setting_scope = wheel_profile_scope_preview(
+            &self.scope_icons,
+            &self.scope_catalog,
+            self.scope_app.clone(),
+            move |app, cx| {
+                gallery.update(cx, |this, cx| {
+                    this.scope_app = app;
+                    cx.notify();
+                });
+            },
+            cx,
+        );
         gallery_panel(
-            "ProfileTab",
+            "ProfileTab / wheel profile scope",
             IconName::Eye,
-            h_flex()
-                .gap_2()
-                .flex_wrap()
+            v_flex()
+                .gap_3()
                 .child(
-                    ProfileTab::new("gallery-profile-default", "Default")
-                        .selected(self.profile_selected == 0)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.profile_selected = 0;
-                            cx.notify();
-                        })),
+                    h_flex()
+                        .gap_2()
+                        .flex_wrap()
+                        .child(
+                            ProfileTab::new("gallery-profile-default", "Default")
+                                .selected(self.profile_selected == 0)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.profile_selected = 0;
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            ProfileTab::new("gallery-profile-custom", "Custom")
+                                .selected(self.profile_selected == 1)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.profile_selected = 1;
+                                    cx.notify();
+                                }))
+                                .on_delete("gallery-profile-delete", |_, _, _| {}),
+                        ),
                 )
-                .child(
-                    ProfileTab::new("gallery-profile-custom", "Custom")
-                        .selected(self.profile_selected == 1)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.profile_selected = 1;
-                            cx.notify();
-                        }))
-                        .on_delete("gallery-profile-delete", |_, _, _| {}),
-                ),
+                .child(setting_scope),
             pal,
         )
     }
@@ -774,7 +804,7 @@ mod tests {
         cx.update(gpui_kit::init);
         cx.update(theme::register_builtin_themes);
         cx.update(install_openlogi_themes);
-        let (view, cx) = cx.add_window_view(|_, cx| ComponentGallery::new(cx));
+        let (view, cx) = cx.add_window_view(ComponentGallery::new);
 
         cx.update(|window, cx| window.draw(cx).clear(cx));
         view.update(cx, |gallery, cx| {

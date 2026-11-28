@@ -226,11 +226,25 @@ pub struct AppSettings {
     /// message there.
     #[serde(default)]
     pub smooth_scroll: bool,
+    /// Per-app software smoothing for discrete OS wheel ticks and captured
+    /// thumb-wheel scrolling.
+    /// Missing applications inherit [`Self::smooth_scroll`], preserving
+    /// existing configurations. Keys match button profiles (exact identifier,
+    /// `exe:<filename>`, or `app:<alias>`); consumers use
+    /// [`Config::smooth_scroll_for`](super::Config::smooth_scroll_for).
+    /// The separate device-level HID++ Smooth wheel switch owns the diverted main wheel.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub per_app_smooth_scroll: BTreeMap<String, bool>,
     /// Distance multiplier for traditional vertical mouse-wheel input.
     /// [`VerticalScrollSensitivity::DEFAULT`] means 1×; trackpad and other
     /// continuous pixel input is never scaled.
     #[serde(default)]
     pub vertical_scroll_sensitivity: VerticalScrollSensitivity,
+    /// Per-app vertical sensitivity for discrete OS main-wheel input. Missing
+    /// values inherit [`Self::vertical_scroll_sensitivity`]. An explicit 1×
+    /// overrides global scaling even when app smoothing is disabled.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub per_app_vertical_scroll_sensitivity: BTreeMap<String, VerticalScrollSensitivity>,
     /// Momentum scrolling for a smoothed main wheel: the default for every
     /// mouse, which a device's
     /// [`DeviceConfig::momentum_scrolling`](crate::config::DeviceConfig::momentum_scrolling)
@@ -271,6 +285,11 @@ pub struct AppSettings {
     /// only diverted from native scrolling once this leaves the default.
     #[serde(default)]
     pub thumbwheel_sensitivity: ThumbwheelSensitivity,
+    /// Optional app-specific thumb-wheel responsiveness. Keys follow the
+    /// button profile matcher. Unmatched apps retain this device's sensitivity
+    /// override or [`Self::thumbwheel_sensitivity`].
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub per_app_thumbwheel_sensitivity: BTreeMap<String, ThumbwheelSensitivity>,
     /// Light/dark appearance preference. Defaults to following the OS.
     #[serde(default)]
     pub appearance: Appearance,
@@ -506,12 +525,15 @@ impl Default for AppSettings {
             show_in_menu_bar: true,
             capture_mouse_events: true,
             smooth_scroll: false,
+            per_app_smooth_scroll: BTreeMap::new(),
             vertical_scroll_sensitivity: VerticalScrollSensitivity::DEFAULT,
+            per_app_vertical_scroll_sensitivity: BTreeMap::new(),
             momentum_scrolling: MomentumScrolling::default(),
             auto_download_assets: true,
             asset_source: AssetSourcePreference::Automatic,
             language: None,
             thumbwheel_sensitivity: ThumbwheelSensitivity::DEFAULT,
+            per_app_thumbwheel_sensitivity: BTreeMap::new(),
             appearance: Appearance::System,
             ui_scale: UiScale::Normal,
             device_view_mode: DeviceViewMode::Grid,

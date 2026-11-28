@@ -15,10 +15,11 @@ use hidpp::{
 };
 use openlogi_core::binding::ButtonId;
 use openlogi_core::hid::{ProfileIndex, ReportRate, WriteError};
+#[cfg(test)]
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use super::CapturedInput;
+use super::{CaptureInputSink, CapturedInput};
 use crate::session::capture_restore::CaptureError;
 use crate::write::set_report_rate_on_channel;
 
@@ -413,12 +414,12 @@ pub(super) fn decode_mask(msg: &v20::Message, device_index: u8, spy_index: u8) -
 #[derive(Default)]
 pub(super) struct SpyEdges {
     held: u16,
-    sink: Option<mpsc::UnboundedSender<CapturedInput>>,
+    sink: Option<Arc<dyn CaptureInputSink>>,
 }
 
 impl SpyEdges {
     /// Where [`Self::interrupt`] reports.
-    pub(super) fn attach(&mut self, sink: mpsc::UnboundedSender<CapturedInput>) {
+    pub(super) fn attach(&mut self, sink: Arc<dyn CaptureInputSink>) {
         self.sink = Some(sink);
     }
 
@@ -429,7 +430,7 @@ impl SpyEdges {
         if self.held != 0
             && let Some(sink) = &self.sink
         {
-            let _ = sink.send(CapturedInput::Interrupted);
+            sink.emit(CapturedInput::Interrupted);
         }
         self.held = 0;
     }
@@ -438,7 +439,7 @@ impl SpyEdges {
         &mut self,
         mask: u16,
         captured: &[(u8, ButtonId)],
-        sink: &mpsc::UnboundedSender<CapturedInput>,
+        sink: &dyn CaptureInputSink,
     ) {
         let changed = mask ^ self.held;
         self.held = mask;
@@ -452,7 +453,7 @@ impl SpyEdges {
             } else {
                 CapturedInput::ButtonDown(button)
             };
-            let _ = sink.send(input);
+            sink.emit(input);
         }
     }
 }
@@ -535,7 +536,7 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let captured = host().captured().collect::<Vec<_>>();
         let mut edges = SpyEdges::default();
-        edges.attach(tx.clone());
+        edges.attach(Arc::new(tx.clone()));
         edges.interrupt(); // nothing held: nothing to say
         edges.on_mask(0b10_1000, &captured, &tx); // Back, G6 down
         edges.interrupt();

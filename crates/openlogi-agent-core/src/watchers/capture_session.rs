@@ -202,7 +202,6 @@ impl<Target, Dispatch, Stop> CaptureSession<Target, Dispatch, Stop> {
     }
 
     /// Hardware capture identity that decides whether rearming is required.
-    #[cfg(test)]
     pub(super) fn target(&self) -> &Target {
         &self.target
     }
@@ -243,6 +242,14 @@ impl<Target, Dispatch, Stop> CaptureSession<Target, Dispatch, Stop> {
 }
 
 impl<Target: PartialEq, Dispatch: Clone + PartialEq, Stop> CaptureSession<Target, Dispatch, Stop> {
+    /// Update dispatch while an active hardware owner safely defers rearming.
+    pub(super) fn refresh_dispatch(&mut self, dispatch: &Dispatch) -> ReconcileAction {
+        if !self.is_active() || self.dispatch == *dispatch {
+            return ReconcileAction::None;
+        }
+        self.dispatch.clone_from(dispatch);
+        ReconcileAction::DispatchChanged
+    }
     /// Reconcile against the latest wanted target and dispatch state. A target
     /// change begins teardown exactly once; dispatch-only changes hot-refresh
     /// the plan while preserving the hardware epoch.
@@ -257,11 +264,7 @@ impl<Target: PartialEq, Dispatch: Clone + PartialEq, Stop> CaptureSession<Target
         if let Some((target, dispatch)) = wanted
             && self.target == *target
         {
-            if self.dispatch == *dispatch {
-                return ReconcileAction::None;
-            }
-            self.dispatch.clone_from(dispatch);
-            return ReconcileAction::DispatchChanged;
+            return self.refresh_dispatch(dispatch);
         }
         let stop_command = stop_for_change(&self.target, wanted.map(|(target, _)| target));
         let SessionPhase::Active(stop) = std::mem::replace(&mut self.phase, SessionPhase::Draining)

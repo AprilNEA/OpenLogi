@@ -34,14 +34,13 @@ use std::sync::{Arc, Mutex, PoisonError};
 use hidpp::feature::hires_wheel::{self, HiResWheelEvent};
 use hidpp::protocol::v20;
 use openlogi_core::binding::{ButtonId, GestureDirection};
-use tokio::sync::mpsc;
 use tracing::{debug, info};
 
 use crate::SharedChannel;
 use crate::channel::route::DeviceRoute;
 
-pub use super::capture::CaptureHost;
 use super::capture::{ArmedCapture, Liveness, ReportingChangeStream, run_capture};
+pub use super::capture::{CaptureHost, CaptureInputSink};
 use accum::CaptureAccum;
 pub(crate) use arm::enumerate_controls;
 use arm::{ArmedControls, ArmedThumb, ArmedThumbwheel, arm_controls};
@@ -232,20 +231,27 @@ pub struct CaptureSpec {
 pub async fn run_capture_session(
     route: DeviceRoute,
     spec: CaptureSpec,
-    host: CaptureHost<'_>,
+    host: CaptureHost<'_, impl CaptureInputSink>,
 ) -> Result<CaptureSessionOutcome, CaptureSessionFailure> {
     let shared = host.channel_for(&route)?;
     let armed = arm_controls(&shared, &spec, host.registry).await?;
     for button in armed.diverted_buttons() {
-        let _ = host.sink.send(CapturedInput::ButtonDiverted(button));
+        host.sink.emit(CapturedInput::ButtonDiverted(button));
     }
     if armed
         .onboard
         .as_ref()
         .is_some_and(|onboard| onboard.spy().is_some())
     {
-        let _ = host.sink.send(CapturedInput::HostModeEntered);
+        host.sink.emit(CapturedInput::HostModeEntered);
     }
+    let host = CaptureHost {
+        sink: Arc::new(host.sink) as Arc<dyn CaptureInputSink>,
+        shutdown: host.shutdown,
+        channel_slot: host.channel_slot,
+        registry: host.registry,
+        device_io: host.device_io,
+    };
     Ok(run_capture(shared, GestureCapture::new(armed), host).await)
 }
 
@@ -274,6 +280,8 @@ impl GestureCapture {
 }
 
 impl ArmedCapture for GestureCapture {
+    type Sink = Arc<dyn CaptureInputSink>;
+
     const NAME: &'static str = "control";
     const LIVENESS: Liveness = Liveness::Watched;
 
@@ -301,7 +309,7 @@ impl ArmedCapture for GestureCapture {
     fn report_handler(
         &self,
         device_index: u8,
-        sink: mpsc::UnboundedSender<CapturedInput>,
+        sink: Self::Sink,
     ) -> impl Fn(&v20::Message) + Send + Sync + 'static {
         let armed = &self.armed;
         let accum = Arc::clone(&self.accum);
@@ -342,7 +350,7 @@ impl ArmedCapture for GestureCapture {
                 spy_edges
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
-                    .on_mask(mask, captured, &sink);
+                    .on_mask(mask, captured, sink.as_ref());
                 return;
             }
             if let Some(idx) = reprog_index
@@ -357,7 +365,7 @@ impl ArmedCapture for GestureCapture {
                     &dpi_set,
                     &gesture_button_set,
                     &button_set,
-                    &sink,
+                    sink.as_ref(),
                 );
                 return;
             }
@@ -367,7 +375,7 @@ impl ArmedCapture for GestureCapture {
                 accum
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
-                    .on_raw_wheel(event, &wheel_set, hires_per_notch, &sink);
+                    .on_raw_wheel(event, &wheel_set, hires_per_notch, sink.as_ref());
                 return;
             }
             if let Some(idx) = thumb_index
@@ -378,7 +386,7 @@ impl ArmedCapture for GestureCapture {
                     event.rotation_status,
                 );
                 if let Some(input) = thumbwheel_input(event, previous, thumb_resolution) {
-                    let _ = sink.send(input);
+                    sink.emit(input);
                 }
                 return;
             }
@@ -387,7 +395,7 @@ impl ArmedCapture for GestureCapture {
             {
                 // Gesture 46 reports no resolution, so its steps pass through
                 // as increments; the sign already reads positive-is-up.
-                let _ = sink.send(CapturedInput::Scroll {
+                sink.emit(CapturedInput::Scroll {
                     increments: step,
                     resolution: WheelResolution::UNKNOWN,
                 });
@@ -402,7 +410,7 @@ impl ArmedCapture for GestureCapture {
                     // SmartShift.
                     debug!(index = device_index, ?state, "wheel ratchet switched");
                 } else if let Some(input) = main_wheel::movement_input(event, per_notch) {
-                    let _ = sink.send(input);
+                    sink.emit(input);
                 }
             }
         }
