@@ -746,6 +746,7 @@ applying_light_setting = "Stosowanie ustawienia oświetlenia…"
 auto_on_with_camera = "Automatycznie z kamerą"
 camera_light_auto_description = "Włączaj światło, gdy używana jest dowolna kamera, i wyłączaj, gdy żadna nie jest aktywna."
 keyboard_lighting_description = "Stosowane przez OpenLogi, gdy działa; nie jest zapisywane w klawiaturze."
+custom_color = "Własny kolor"
 
 [action_ring]
 actions_ring = "Pierścień akcji"
