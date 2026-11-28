@@ -1,14 +1,17 @@
 //! Sans-I/O accumulator for diverted `0x1b04` reports: which armed source
 //! holds the raw-XY stream, the button edges and gestures that follow, and
-//! which held wheel-hold button the raw wheel belongs to.
+//! which held wheel-hold button the raw wheel belongs to. While the capture
+//! spec asks, the same hold also turns diverted main-wheel samples into
+//! wheel directions.
 
+use std::collections::BTreeMap;
 use std::num::NonZeroU8;
 
 use openlogi_core::binding::{ButtonId, GestureDirection, SwipeAccumulator};
 use tokio::sync::mpsc;
 use tracing::{debug, trace};
 
-use super::{CapturedInput, GESTURE_SOURCE_BUTTONS};
+use super::{CapturedInput, GESTURE_SOURCE_BUTTONS, WheelNotchRepeat};
 use crate::reprog_controls::{RawControlEvent, RawWheelEvent, RawWheelResolution};
 
 /// The hold that owns raw-XY motion, or the absence of one. Raw-XY reports
@@ -29,6 +32,9 @@ enum HoldState {
         button: ButtonId,
         /// Mid-swipe travel accumulated over this hold.
         swipe: SwipeAccumulator,
+        /// Main-wheel notches accumulated over this hold. Independent of
+        /// `swipe`: a wheel notch must not look like a committed swipe.
+        wheel: HoldWheel,
         /// A second armed source is held alongside the holder. Overlap motion
         /// could belong to either control — dropped until the overlap ends.
         overlap: bool,
@@ -43,7 +49,84 @@ enum HoldState {
     },
 }
 
-/// Begin a hold for `cid`, its swipe accumulator started fresh.
+/// Most gestures one wheel report may emit. A ratchet is one notch per
+/// report. A coalesced high-resolution spin can be larger, and an `i16`
+/// delta with a multiplier of 1 is 32767. Whole notches past the cap are
+/// dropped, not saved for the next report.
+const MAX_WHEEL_GESTURES_PER_REPORT: usize = 48;
+
+/// Main-wheel progress for one gesture hold. `pending` is a signed fraction
+/// of a notch: positive is away from the user ([`GestureDirection::WheelUp`]).
+#[derive(Default)]
+struct HoldWheel {
+    /// Notch fraction still to be completed.
+    pending: f64,
+    /// This hold has already emitted [`GestureDirection::WheelUp`].
+    up_sent: bool,
+    /// This hold has already emitted [`GestureDirection::WheelDown`].
+    down_sent: bool,
+    /// A wheel gesture was emitted. The release then must not also click.
+    committed: bool,
+}
+
+impl HoldWheel {
+    /// Add one sample. `delta` uses the wheel's own sign (positive is away
+    /// from the user) and is divided by `per_notch`, so one ratchet is one
+    /// notch however many reports the firmware splits it into.
+    ///
+    /// A direction in `each` fires once per whole notch. Any other direction
+    /// fires once for the hold; later notches that way are consumed and do
+    /// not fire again, even after the wheel has been the other way. Whole
+    /// notches past [`MAX_WHEEL_GESTURES_PER_REPORT`] are dropped. The
+    /// sub-notch remainder stays, so reversing spends it before the other
+    /// direction can complete. A sample that fires nothing does not set
+    /// [`Self::committed`].
+    fn observe(
+        &mut self,
+        delta: i16,
+        per_notch: NonZeroU8,
+        each: WheelNotchRepeat,
+    ) -> Vec<GestureDirection> {
+        let mut fired = Vec::new();
+        self.pending += f64::from(delta) / f64::from(per_notch.get());
+        if !self.pending.is_finite() {
+            self.pending = 0.0;
+            return fired;
+        }
+        while self.pending.abs() >= 1.0 {
+            if fired.len() == MAX_WHEEL_GESTURES_PER_REPORT {
+                self.pending = self.pending.fract();
+                break;
+            }
+            let up = self.pending.is_sign_positive();
+            let repeat = if up { each.up } else { each.down };
+            let already = if up { self.up_sent } else { self.down_sent };
+            if !repeat && already {
+                self.pending = self.pending.fract();
+                break;
+            }
+            if up {
+                self.pending -= 1.0;
+            } else {
+                self.pending += 1.0;
+            }
+            if up {
+                self.up_sent = true;
+            } else {
+                self.down_sent = true;
+            }
+            self.committed = true;
+            fired.push(if up {
+                GestureDirection::WheelUp
+            } else {
+                GestureDirection::WheelDown
+            });
+        }
+        fired
+    }
+}
+
+/// Begin a hold for `cid`, its swipe and wheel accumulators started fresh.
 fn begin_hold(cid: u16, button: ButtonId, overlap: bool, skip_first_raw_xy: bool) -> HoldState {
     let mut swipe = SwipeAccumulator::default();
     swipe.begin();
@@ -51,6 +134,7 @@ fn begin_hold(cid: u16, button: ButtonId, overlap: bool, skip_first_raw_xy: bool
         cid,
         button,
         swipe,
+        wheel: HoldWheel::default(),
         overlap,
         skip_first_raw_xy,
     }
@@ -145,22 +229,28 @@ impl CaptureAccum {
                         cid,
                         button,
                         swipe,
+                        wheel,
                         skip_first_raw_xy,
                         ..
                     } if cids.contains(&cid) => HoldState::Holding {
                         cid,
                         button,
                         swipe,
+                        wheel,
                         overlap: held.len() > 1,
                         skip_first_raw_xy,
                     },
                     previous => {
                         // No holder, or the holder released: a released hold that
-                        // never committed a direction is a plain click...
+                        // never committed a swipe or a wheel notch is a plain click...
                         if let HoldState::Holding {
-                            button, mut swipe, ..
+                            button,
+                            mut swipe,
+                            wheel,
+                            ..
                         } = previous
                             && swipe.end()
+                            && !wheel.committed
                         {
                             debug!(%button, "gesture click");
                             let _ =
@@ -304,6 +394,45 @@ impl CaptureAccum {
             delta: event.delta,
             per_notch,
         });
+    }
+
+    /// Attribute one diverted main-wheel sample to the gesture source that
+    /// currently holds, when `enabled`.
+    ///
+    /// Returns `true` when the sample was consumed, so the caller must not
+    /// also emit [`CapturedInput::MainWheel`]. A whole notch — `per_notch`
+    /// units of `delta`, positive away from the user — emits
+    /// [`CapturedInput::Gesture`] of [`GestureDirection::WheelUp`] or
+    /// [`GestureDirection::WheelDown`], once per notch when `each_notch` says
+    /// so and once per direction for the hold otherwise. The sample is still
+    /// consumed when it is too small to fire or a one-shot direction has
+    /// already fired, so the document under the pointer does not scroll.
+    /// Returns `false`, emitting nothing, when the feature is off or no
+    /// gesture source is held.
+    ///
+    /// Wheel samples carry their own feature index, unlike raw XY, so overlap
+    /// does not drop them and the hold's first sample is not stale travel.
+    #[must_use]
+    pub(super) fn on_main_wheel(
+        &mut self,
+        delta: i16,
+        per_notch: NonZeroU8,
+        enabled: bool,
+        each_notch: &BTreeMap<ButtonId, WheelNotchRepeat>,
+        sink: &mpsc::UnboundedSender<CapturedInput>,
+    ) -> bool {
+        if !enabled {
+            return false;
+        }
+        let HoldState::Holding { button, wheel, .. } = &mut self.hold else {
+            return false;
+        };
+        let each = each_notch.get(button).copied().unwrap_or_default();
+        for direction in wheel.observe(delta, per_notch, each) {
+            debug!(?direction, %button, "gesture wheel notch");
+            let _ = sink.send(CapturedInput::Gesture(*button, direction));
+        }
+        true
     }
 }
 

@@ -34,6 +34,42 @@ impl Config {
         }
     }
 
+    /// Opt `direction` of `button` into firing on every wheel notch, or remove
+    /// that opt-in.
+    ///
+    /// Only [`GestureDirection::WheelUp`] and [`GestureDirection::WheelDown`]
+    /// are written. A step action already repeats, so listing it changes
+    /// nothing, and a missing or [`Action::None`] direction does not consume
+    /// the wheel just because it is listed. An empty set is removed, so a
+    /// device with no opt-ins omits the field.
+    pub fn set_wheel_notch_repeat(
+        &mut self,
+        device_key: &str,
+        button: ButtonId,
+        direction: GestureDirection,
+        repeat: bool,
+    ) {
+        if !matches!(
+            direction,
+            GestureDirection::WheelUp | GestureDirection::WheelDown
+        ) {
+            return;
+        }
+        if !repeat && !self.devices.contains_key(device_key) {
+            return;
+        }
+        let device = self.devices.entry(device_key.to_string()).or_default();
+        let set = device.wheel_notch_repeat.entry(button).or_default();
+        if repeat {
+            set.insert(direction);
+        } else {
+            set.remove(&direction);
+        }
+        if set.is_empty() {
+            device.wheel_notch_repeat.remove(&button);
+        }
+    }
+
     /// Ensure `button` on `device_key` is a [`Binding::Gesture`], creating the
     /// device + a default binding if needed and upgrading a [`Binding::Single`]
     /// in place (its action kept as the [`GestureDirection::Click`]). Returns the

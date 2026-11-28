@@ -35,11 +35,15 @@ use objc2_foundation::{
 
 use super::super::DesktopSwitch;
 use super::super::space_switch::{
-    self, Backend, Direction, Failure, Lease, Pace, PostGate, SlideFrame, SlidePhase, SpaceState,
+    self, Backend, Direction, Failure, FlickAdmit, Lease, Pace, PostGate, SlideFrame, SlidePhase,
+    SpaceState,
 };
 use super::{app_services, app_services_symbol};
 
 static BUSY: AtomicBool = AtomicBool::new(false);
+/// Notches that arrived while a trackpad flick was already moving.
+static FLICKS: std::sync::Mutex<space_switch::FlickChain> =
+    std::sync::Mutex::new(space_switch::FlickChain::new());
 /// Whether a switch slides. The host publishes the user's choice here
 /// through [`set_desktop_switch`]; until it does, switches stay instant.
 static SLIDE: AtomicBool = AtomicBool::new(false);
@@ -63,6 +67,100 @@ pub(super) fn next_desktop() {
     start(Direction::Next);
 }
 
+/// One gesture-wheel notch toward the previous desktop.
+///
+/// With animation on, this is a short trackpad flick rather than the Space
+/// shortcut, and a notch that arrives while one is moving joins the chain.
+/// With animation off it switches at once, like [`previous_desktop`].
+pub(super) fn previous_desktop_flick() {
+    begin_flick(Direction::Previous);
+}
+
+/// One gesture-wheel notch toward the next desktop. See
+/// [`previous_desktop_flick`].
+pub(super) fn next_desktop_flick() {
+    begin_flick(Direction::Next);
+}
+
+fn flicks() -> std::sync::MutexGuard<'static, space_switch::FlickChain> {
+    FLICKS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Start or extend a trackpad-flick chain. The worker posts every slide;
+/// the caller returns without waiting, so the next notch can join at once.
+fn begin_flick(direction: Direction) {
+    if desktop_switch() != DesktopSwitch::Animated {
+        start(direction);
+        return;
+    }
+    if flicks().admit(direction) != FlickAdmit::Start {
+        tracing::debug!(?direction, "gesture wheel desktop flick queued");
+        return;
+    }
+    let Some(lease) = Lease::acquire(&BUSY) else {
+        flicks().stop();
+        tracing::debug!(?direction, "Space switch already pending — skipped");
+        return;
+    };
+    let Some(display_id) = cursor_display() else {
+        flicks().stop();
+        tracing::warn!(?direction, "Space switch: cursor display unavailable");
+        return;
+    };
+    if let Err(error) = std::thread::Builder::new()
+        .name("openlogi-spaces".into())
+        .spawn(move || {
+            let _lease = lease;
+            autoreleasepool(|_| play_flick_chain(display_id, direction));
+        })
+    {
+        flicks().stop();
+        tracing::warn!(%error, "Space switch worker unavailable");
+    }
+}
+
+/// Play the flick in flight, then each one queued behind it.
+fn play_flick_chain(display_id: u32, direction: Direction) {
+    let mut native = match Native::new(display_id, Posted::Flick) {
+        Ok(native) => native,
+        Err(error) => {
+            flicks().stop();
+            tracing::warn!(?error, "Space switch unconfirmed — no retry");
+            return;
+        }
+    };
+    let mut direction = direction;
+    loop {
+        let result = space_switch::run(&mut native, direction, PostGate::detached());
+        match result {
+            Ok(space_switch::Outcome::Reached(target)) => {
+                tracing::debug!(display_id, ?direction, target, "Space flick reached");
+            }
+            Ok(space_switch::Outcome::Boundary) => {
+                flicks().stop();
+                tracing::debug!(display_id, ?direction, "Space flick stopped at the end");
+                return;
+            }
+            Err(error) => {
+                flicks().stop();
+                tracing::warn!(
+                    display_id,
+                    ?direction,
+                    ?error,
+                    "Space flick unconfirmed — no retry"
+                );
+                return;
+            }
+        }
+        match flicks().finish_one() {
+            Some(next) => direction = next,
+            None => return,
+        }
+    }
+}
+
 fn start(direction: Direction) {
     let Some(lease) = Lease::acquire(&BUSY) else {
         tracing::debug!(?direction, "Space switch already pending — skipped");
@@ -79,7 +177,7 @@ fn start(direction: Direction) {
     let result = space_switch::spawn_ordered(move |gate| {
         let _lease = lease;
         autoreleasepool(|_| {
-            let result = Native::new(display_id, switch)
+            let result = Native::new(display_id, Posted::Host(switch))
                 .and_then(|mut native| space_switch::run(&mut native, direction, gate));
             match result {
                 Ok(outcome) => {
@@ -210,10 +308,18 @@ impl Drop for Observer {
     }
 }
 
+/// Which slide [`Native`] posts. The host setting types the Space shortcut
+/// when it can; a gesture-wheel notch always flicks.
+#[derive(Clone, Copy)]
+enum Posted {
+    Host(DesktopSwitch),
+    Flick,
+}
+
 struct Native {
     api: &'static Api,
     display: u32,
-    switch: DesktopSwitch,
+    posted: Posted,
     uuid: String,
     started: Instant,
     changed: mpsc::Receiver<()>,
@@ -221,7 +327,7 @@ struct Native {
 }
 
 impl Native {
-    fn new(display: u32, switch: DesktopSwitch) -> Result<Self, Failure> {
+    fn new(display: u32, posted: Posted) -> Result<Self, Failure> {
         let api = API.as_ref().ok_or(Failure::Unavailable)?;
         // SAFETY: dynamically resolved CGDisplayCreateUUIDFromDisplayID accepts
         // a public CGDirectDisplayID and returns a Create-rule CFUUID or null.
@@ -237,7 +343,7 @@ impl Native {
         Ok(Self {
             api,
             display,
-            switch,
+            posted,
             uuid,
             started: Instant::now(),
             changed,
@@ -258,7 +364,11 @@ impl Backend for Native {
     }
 
     fn post(&mut self, direction: Direction, gate: PostGate) -> Result<(), Failure> {
-        let output = Output::prepare(self.switch, direction).ok_or(Failure::PostFailed)?;
+        let output = match self.posted {
+            Posted::Host(switch) => Output::prepare(switch, direction),
+            Posted::Flick => Output::flick(direction),
+        }
+        .ok_or(Failure::PostFailed)?;
         if cursor_display() != Some(self.display) {
             return Err(Failure::ContextChanged);
         }
@@ -293,6 +403,11 @@ enum Output {
 }
 
 impl Output {
+    /// A gesture-wheel notch: the short slide, never the Space shortcut.
+    fn flick(direction: Direction) -> Option<Self> {
+        flick_events(direction).map(Self::Slide)
+    }
+
     fn prepare(switch: DesktopSwitch, direction: Direction) -> Option<Self> {
         match switch {
             DesktopSwitch::Instant => swipe_events(direction).map(Self::Instant),
@@ -413,7 +528,15 @@ fn field_swipe_events(direction: Direction) -> Option<[CFRetained<CGEvent>; 2]> 
 
 /// The events of a slide in `direction`, each with its time from the first.
 fn slide_events(direction: Direction) -> Option<Vec<(Duration, CFRetained<CGEvent>)>> {
-    let frames = space_switch::slide(direction);
+    events_for(space_switch::slide(direction))
+}
+
+/// The events of one trackpad flick.
+fn flick_events(direction: Direction) -> Option<Vec<(Duration, CFRetained<CGEvent>)>> {
+    events_for(space_switch::flick(direction))
+}
+
+fn events_for(frames: Vec<SlideFrame>) -> Option<Vec<(Duration, CFRetained<CGEvent>)>> {
     match *DOCK_SWIPE_LAYOUT {
         DockSwipeLayout::HidEvent => hid_slide_events(&frames, natural_scrolling()),
         DockSwipeLayout::Fields => frames

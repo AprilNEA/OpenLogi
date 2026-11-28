@@ -2,7 +2,7 @@
 //! diverts, the firmware state that records, and how it is re-armed and handed
 //! back.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU8;
 use std::sync::Arc;
 
@@ -14,9 +14,9 @@ use hidpp::{channel::HidppChannel, device::Device};
 use openlogi_core::binding::ButtonId;
 use tracing::{debug, info, warn};
 
-use super::CaptureSpec;
 use super::main_wheel::{self, ArmedMainWheel, MainWheelDivert};
 use super::spy::{self, ArmedOnboard};
+use super::{CaptureSpec, WheelNotchRepeat};
 use crate::reprog_controls::{self, ReprogControlsV4};
 use crate::session::capture::{ReportingChangeStream, open_device, subscribe_reporting_changes};
 use crate::session::capture_restore::{
@@ -67,6 +67,16 @@ pub(super) struct ArmedControls {
     pub(super) thumb: Option<ArmedThumb>,
     /// `0x2121` main wheel, present when its movement reports are diverted.
     pub(super) main_wheel: Option<ArmedMainWheel>,
+    /// When set, a held gesture source consumes diverted main-wheel samples
+    /// as gesture directions instead of main-wheel scrolling. Copied from
+    /// [`CaptureSpec::gesture_wheel`]. Not itself a diverted control, so it
+    /// does not keep an otherwise idle session awake.
+    pub(super) gesture_wheel: bool,
+    /// Which held gesture buttons fire a wheel direction on every notch.
+    /// Copied from [`CaptureSpec::gesture_wheel_each_notch`]. A direction
+    /// absent here fires once per hold. Not itself a diverted control, so it
+    /// does not keep an otherwise idle session awake.
+    pub(super) gesture_wheel_each_notch: BTreeMap<ButtonId, WheelNotchRepeat>,
     pub(super) onboard: Option<ArmedOnboard>,
 }
 
@@ -284,6 +294,8 @@ pub(super) async fn arm_controls_into(
     spec: &CaptureSpec,
     armed: &mut ArmedControls,
 ) -> Result<(), CaptureError> {
+    armed.gesture_wheel = spec.gesture_wheel;
+    armed.gesture_wheel_each_notch = spec.gesture_wheel_each_notch.clone();
     if let Some(info) = device
         .root()
         .get_feature(reprog_controls::FEATURE_ID)

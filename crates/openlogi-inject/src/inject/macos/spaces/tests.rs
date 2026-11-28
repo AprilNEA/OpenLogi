@@ -225,6 +225,22 @@ fn slide_frames_carry_progress_phase_and_an_exit_velocity_on_end() {
 }
 
 #[test]
+fn a_flick_is_the_short_slide_and_never_the_space_shortcut() {
+    for direction in [Direction::Previous, Direction::Next] {
+        let output = Output::flick(direction).expect("CGEvent allocation");
+        let Output::Slide(frames) = output else {
+            panic!("a flick must not type the Space shortcut: {direction:?}");
+        };
+        assert_eq!(frames.len(), space_switch::flick(direction).len());
+        assert_eq!(frames[0].0, Duration::ZERO);
+        assert_eq!(
+            frames.last().map(|(at, _)| *at),
+            space_switch::flick(direction).last().map(|frame| frame.at)
+        );
+    }
+}
+
+#[test]
 fn an_instant_switch_keeps_its_two_frames() {
     for direction in [Direction::Previous, Direction::Next] {
         let output =
@@ -377,7 +393,8 @@ fn interactive_space_round_trip() {
     for switch in [DesktopSwitch::Instant, DesktopSwitch::Animated] {
         autoreleasepool(|_| {
             let display_id = cursor_display().expect("one unambiguous pointer display");
-            let mut backend = Native::new(display_id, switch).expect("Space SPI available");
+            let mut backend =
+                Native::new(display_id, Posted::Host(switch)).expect("Space SPI available");
             let before = backend.state().expect("read initial display state");
             let result = space_switch::run(&mut backend, Direction::Next, PostGate::for_test())
                 .expect("Space switch confirmed");
@@ -391,7 +408,8 @@ fn interactive_space_round_trip() {
             assert_eq!(cursor_display(), Some(display_id));
             // Give the reverse transaction its own observer and deadline. The
             // expectation is the original native ID, not the direction encoder.
-            let mut reverse = Native::new(display_id, switch).expect("Space SPI available");
+            let mut reverse =
+                Native::new(display_id, Posted::Host(switch)).expect("Space SPI available");
             assert_eq!(
                 space_switch::run(&mut reverse, Direction::Previous, PostGate::for_test())
                     .expect("reverse Space switch confirmed"),

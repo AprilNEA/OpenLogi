@@ -328,6 +328,19 @@ pub(crate) enum EndReason {
     Canceled(CancelReason),
 }
 
+/// How a triggered desktop switch should move.
+///
+/// Gesture-wheel Previous and Next Desktop use [`Self::Trackpad`]. A button,
+/// a swipe, and every other action stay on [`Self::System`]: the host's
+/// animated Space shortcut when that setting is on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DesktopMotion {
+    /// The host desktop-switch setting.
+    System,
+    /// A short trackpad flick that a later notch in the same direction joins.
+    Trackpad,
+}
+
 /// Typed output from the lifecycle worker.
 pub(crate) enum ButtonRuntimeEvent {
     Started(ActivePress),
@@ -340,6 +353,7 @@ pub(crate) enum ButtonRuntimeEvent {
     Triggered {
         press: ActivePress,
         action: Action,
+        motion: DesktopMotion,
     },
 }
 
@@ -354,6 +368,7 @@ enum ButtonInput {
     TriggerWhilePressed {
         token: PressToken,
         action: Action,
+        motion: DesktopMotion,
     },
     /// The wheel moved while the press `token` was down.
     WheelWhilePressed {
@@ -614,6 +629,20 @@ impl ButtonInputHandle {
     }
 
     pub(crate) fn try_trigger_while_pressed(&self, token: &PressToken, action: &Action) -> bool {
+        self.try_trigger(token, action, DesktopMotion::System)
+    }
+
+    /// Like [`Self::try_trigger_while_pressed`], but Previous or Next Desktop
+    /// moves as a trackpad flick instead of the host's Space shortcut.
+    pub(crate) fn try_trigger_trackpad_while_pressed(
+        &self,
+        token: &PressToken,
+        action: &Action,
+    ) -> bool {
+        self.try_trigger(token, action, DesktopMotion::Trackpad)
+    }
+
+    fn try_trigger(&self, token: &PressToken, action: &Action, motion: DesktopMotion) -> bool {
         let generation = self.generation.load(Ordering::Acquire);
         if token.generation != generation {
             return false;
@@ -623,6 +652,7 @@ impl ButtonInputHandle {
             ButtonInput::TriggerWhilePressed {
                 token: token.clone(),
                 action: action.clone(),
+                motion,
             },
         )
     }

@@ -1,5 +1,7 @@
 //! Gesture mode as a per-button shape: seeding, demoting, and what survives a save.
 
+use std::collections::BTreeSet;
+
 use super::*;
 
 #[test]
@@ -304,4 +306,82 @@ fn disabled_gesture_maps_survive_a_save_load_cycle() {
         }
         other => panic!("expected the persisted stash restored, got {other:?}"),
     }
+}
+
+#[test]
+fn wheel_notch_repeat_survives_a_save() {
+    let mut cfg = Config::default();
+    cfg.devices
+        .insert("2b042".to_string(), DeviceConfig::default());
+    let body = toml::to_string(&cfg).expect("serialize");
+    assert!(
+        !body.contains("wheel_notch_repeat"),
+        "an empty set stays out of the file: {body}"
+    );
+
+    cfg.devices
+        .get_mut("2b042")
+        .expect("device")
+        .wheel_notch_repeat
+        .insert(
+            ButtonId::GestureButton,
+            BTreeSet::from([GestureDirection::WheelUp, GestureDirection::Click]),
+        );
+    let restored = write_and_read(&cfg);
+    let set = &restored.devices["2b042"].wheel_notch_repeat[&ButtonId::GestureButton];
+    assert!(set.contains(&GestureDirection::WheelUp));
+    assert!(
+        set.contains(&GestureDirection::Click),
+        "a non-wheel direction is stored; the planner ignores it"
+    );
+}
+
+#[test]
+fn set_wheel_notch_repeat_writes_only_wheel_directions_and_drops_an_empty_set() {
+    let mut cfg = Config::default();
+    cfg.set_wheel_notch_repeat(
+        "2b042",
+        ButtonId::GestureButton,
+        GestureDirection::Click,
+        true,
+    );
+    assert!(
+        !cfg.devices.contains_key("2b042"),
+        "a swipe direction is not an opt-in"
+    );
+
+    cfg.set_wheel_notch_repeat(
+        "2b042",
+        ButtonId::GestureButton,
+        GestureDirection::WheelUp,
+        true,
+    );
+    cfg.set_wheel_notch_repeat(
+        "2b042",
+        ButtonId::GestureButton,
+        GestureDirection::WheelDown,
+        true,
+    );
+    let set = &cfg.devices["2b042"].wheel_notch_repeat[&ButtonId::GestureButton];
+    assert_eq!(
+        set,
+        &BTreeSet::from([GestureDirection::WheelUp, GestureDirection::WheelDown])
+    );
+
+    cfg.set_wheel_notch_repeat(
+        "2b042",
+        ButtonId::GestureButton,
+        GestureDirection::WheelUp,
+        false,
+    );
+    cfg.set_wheel_notch_repeat(
+        "2b042",
+        ButtonId::GestureButton,
+        GestureDirection::WheelDown,
+        false,
+    );
+    assert!(
+        cfg.devices["2b042"].wheel_notch_repeat.is_empty(),
+        "the last opt-in removes the button, so the field can stay out of the file"
+    );
 }

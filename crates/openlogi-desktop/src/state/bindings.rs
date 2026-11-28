@@ -44,6 +44,9 @@ pub(super) struct BindingState {
     /// Device-global like the gesture maps: a per-app entry holds one
     /// `Action`, so wheel-hold lives only in the global profile.
     wheel_hold_buttons: BTreeSet<ButtonId>,
+    /// Wheel directions that repeat on every notch. Device-global, like the
+    /// gesture maps: a per-app entry cannot carry the set.
+    wheel_notch_repeat: BTreeMap<ButtonId, BTreeSet<GestureDirection>>,
     /// Global keyboard F-key bindings (Esc + F1-F19).
     keyboard_bindings: BTreeMap<KeyTrigger, Action>,
 }
@@ -60,6 +63,7 @@ impl BindingState {
             button_bindings: BTreeMap::new(),
             gesture_bindings: BTreeMap::new(),
             wheel_hold_buttons: BTreeSet::new(),
+            wheel_notch_repeat: BTreeMap::new(),
             keyboard_bindings: config.keyboard.bindings.clone(),
         };
         state.refresh_device(config, persistent_key, layout);
@@ -130,6 +134,9 @@ impl BindingState {
                 .filter(|button| config.is_wheel_hold(key, *button))
                 .collect()
         });
+        self.wheel_notch_repeat = persistent_key
+            .and_then(|key| config.devices.get(key))
+            .map_or_default(|device| device.wheel_notch_repeat.clone());
     }
 
     fn restore(
@@ -287,6 +294,14 @@ impl AppState {
     #[must_use]
     pub fn wheel_hold_buttons(&self) -> &BTreeSet<ButtonId> {
         &self.bindings.wheel_hold_buttons
+    }
+
+    /// Wheel directions that repeat on every notch for the selected device.
+    /// Empty when no device is selected. A step action repeats without being
+    /// listed; this is only the extra opt-in.
+    #[must_use]
+    pub fn wheel_notch_repeat(&self) -> &BTreeMap<ButtonId, BTreeSet<GestureDirection>> {
+        &self.bindings.wheel_notch_repeat
     }
 
     /// Global keyboard F-key bindings.
@@ -810,6 +825,66 @@ impl AppState {
             .edit(|config| config.set_gesture_direction(&key, button, direction, action));
         // The agent owns the gesture watcher; have it rebuild from config.
         self.persist_and_reload("gesture binding");
+        events
+    }
+
+    /// Opt one wheel direction of `button` into running on every notch, or
+    /// remove that opt-in. A step action already repeats, and the set cannot
+    /// turn that off. Persists and reloads like a gesture binding. No-op
+    /// outside the global profile, outside gesture mode, or for a direction
+    /// that is not a wheel slot.
+    pub fn commit_wheel_notch_repeat(
+        &mut self,
+        button: ButtonId,
+        direction: GestureDirection,
+        repeat: bool,
+    ) -> StateEvents {
+        let events = self.for_current_device(StateEvent::BindingsChanged);
+        if !matches!(
+            direction,
+            GestureDirection::WheelUp | GestureDirection::WheelDown
+        ) {
+            return events;
+        }
+        let Some(key) = self
+            .current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .map(str::to_string)
+        else {
+            debug!(
+                ?button,
+                ?direction,
+                "no persistent device key — wheel notch repeat ignored"
+            );
+            return events;
+        };
+        if self.editing_app().is_some() {
+            debug!(
+                ?button,
+                ?direction,
+                "wheel notch repeat is not editable in a per-app profile"
+            );
+            return events;
+        }
+        if !self.config.is_gesture_mode(&key, button) {
+            debug!(
+                ?button,
+                ?direction,
+                "button is not in gesture mode — ignoring wheel notch repeat"
+            );
+            return events;
+        }
+        let already = self
+            .wheel_notch_repeat()
+            .get(&button)
+            .is_some_and(|set| set.contains(&direction));
+        if already == repeat {
+            return events;
+        }
+        self.config
+            .edit(|config| config.set_wheel_notch_repeat(&key, button, direction, repeat));
+        self.refresh_binding_projections();
+        self.persist_and_reload("wheel notch repeat");
         events
     }
 }

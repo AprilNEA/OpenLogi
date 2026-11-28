@@ -53,6 +53,20 @@ fn catalog_excludes_actions_that_last_as_long_as_their_press() {
 }
 
 #[test]
+fn step_actions_repeat_on_every_wheel_notch_and_clicks_do_not() {
+    assert!(Action::NextDesktop.each_wheel_notch());
+    assert!(Action::PreviousDesktop.each_wheel_notch());
+    assert!(Action::NextTab.each_wheel_notch());
+    assert!(Action::VolumeUp.each_wheel_notch());
+    assert!(Action::ScrollDown.each_wheel_notch());
+    assert!(!Action::LeftClick.each_wheel_notch());
+    assert!(!Action::MissionControl.each_wheel_notch());
+    assert!(!Action::AppExpose.each_wheel_notch());
+    assert!(!Action::NewTab.each_wheel_notch());
+    assert!(!Action::None.each_wheel_notch());
+}
+
+#[test]
 fn hold_shortcut_has_distinct_lifecycle_semantics() {
     let combo: KeyCombo = "Alt+Space".parse().expect("valid shortcut failed");
     let held = Action::HoldShortcut(combo.clone());
@@ -320,7 +334,9 @@ fn wheel_hold_clicks_with_its_click_action_and_has_no_directions() {
 #[test]
 fn binding_direction_keyed_table_routes_to_gesture() {
     for dir in GestureDirection::ALL {
-        // `GestureDirection`'s serde key equals its `Display`/variant name.
+        // For these five, `Display` equals the serde variant name. Wheel
+        // directions do not: their labels contain a space, so they are
+        // covered by `binding_wheel_direction_keyed_table_routes_to_gesture`.
         let toml = format!("bindings.GestureButton.{dir} = \"None\"");
         let parsed = toml::from_str::<BindingWrapper>(&toml).expect("deserialize");
         assert!(
@@ -329,6 +345,59 @@ fn binding_direction_keyed_table_routes_to_gesture() {
                 Binding::Gesture(_)
             ),
             "a {dir}-keyed table must route to Gesture, not Single"
+        );
+    }
+}
+
+/// Wheel keys are the serde variant names, not the human labels (`Wheel Up`).
+/// They must route to [`Binding::Gesture`] the same way the five swipe slots do,
+/// and they must not be folded into that loop: [`GestureDirection`]'s `Display`
+/// is the label, which is not valid TOML for these two.
+#[test]
+fn binding_wheel_direction_keyed_table_routes_to_gesture() {
+    for (key, direction) in [
+        ("WheelUp", GestureDirection::WheelUp),
+        ("WheelDown", GestureDirection::WheelDown),
+    ] {
+        let toml = format!("bindings.GestureButton.{key} = \"PreviousDesktop\"");
+        let parsed = toml::from_str::<BindingWrapper>(&toml).expect("deserialize");
+        let Binding::Gesture(map) = &parsed.bindings[&ButtonId::GestureButton] else {
+            panic!("a {key}-keyed table must route to Gesture, not Single");
+        };
+        assert_eq!(map.get(&direction), Some(&Action::PreviousDesktop));
+    }
+}
+
+/// Seeding still fills exactly [`GestureDirection::ALL`]. A stored wheel key
+/// is kept, and the other wheel direction is not invented.
+#[test]
+fn gesture_defaults_stay_the_five_swipe_and_click_directions() {
+    let Binding::Gesture(map) = default_binding_for(ButtonId::GestureButton) else {
+        panic!("the gesture button defaults to a direction map");
+    };
+    assert_eq!(
+        map.keys().copied().collect::<Vec<_>>(),
+        GestureDirection::ALL.to_vec()
+    );
+
+    let mut seeded = Binding::Gesture(BTreeMap::from([(
+        GestureDirection::WheelUp,
+        Action::PreviousDesktop,
+    )]));
+    seeded.fill_gesture_defaults();
+    let Binding::Gesture(map) = seeded else {
+        panic!("filling defaults keeps the gesture map");
+    };
+    assert_eq!(map.len(), GestureDirection::ALL.len() + 1);
+    assert_eq!(
+        map.get(&GestureDirection::WheelUp),
+        Some(&Action::PreviousDesktop)
+    );
+    assert!(!map.contains_key(&GestureDirection::WheelDown));
+    for direction in GestureDirection::ALL {
+        assert_eq!(
+            map.get(&direction),
+            Some(&default_gesture_binding(direction))
         );
     }
 }

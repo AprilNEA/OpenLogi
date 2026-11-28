@@ -24,6 +24,10 @@ pub enum GestureDirection {
     /// A press-and-release that never committed a swipe — the gesture
     /// button's plain-click slot.
     Click,
+    /// Hold + scroll wheel up.
+    WheelUp,
+    /// Hold + scroll wheel down.
+    WheelDown,
 }
 
 impl GestureDirection {
@@ -48,6 +52,8 @@ impl GestureDirection {
             GestureDirection::Left => "Left",
             GestureDirection::Right => "Right",
             GestureDirection::Click => "Click",
+            GestureDirection::WheelUp => "Wheel Up",
+            GestureDirection::WheelDown => "Wheel Down",
         }
     }
 
@@ -60,6 +66,8 @@ impl GestureDirection {
             GestureDirection::Left => "common.left",
             GestureDirection::Right => "common.right",
             GestureDirection::Click => "common.click",
+            GestureDirection::WheelUp => "common.wheel_up",
+            GestureDirection::WheelDown => "common.wheel_down",
         }
     }
 }

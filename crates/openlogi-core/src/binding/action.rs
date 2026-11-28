@@ -564,4 +564,83 @@ impl Action {
             || self.held_modifier().is_some()
             || matches!(self, Self::DpiShift | Self::GShift)
     }
+
+    /// Whether one gesture-wheel notch should run this action again.
+    ///
+    /// A step — next desktop, tab, history entry, track, volume tick, DPI
+    /// preset, keypad page, or a scroll tick — moves once per notch. A
+    /// click, a shortcut, or a one-shot view such as Mission Control does
+    /// not. The device config can opt a non-step direction into repeating;
+    /// this method does not look at that opt-in, and it cannot turn a step
+    /// off.
+    #[must_use]
+    pub fn each_wheel_notch(&self) -> bool {
+        match self {
+            Self::BrowserBack
+            | Self::BrowserForward
+            | Self::NextTab
+            | Self::PrevTab
+            | Self::PreviousDesktop
+            | Self::NextDesktop
+            | Self::NextTrack
+            | Self::PrevTrack
+            | Self::VolumeUp
+            | Self::VolumeDown
+            | Self::CycleDpiPresets
+            | Self::NextDpiPreset
+            | Self::PreviousDpiPreset
+            | Self::PreviousKeypadPage
+            | Self::NextKeypadPage
+            | Self::ScrollUp
+            | Self::ScrollDown
+            | Self::HorizontalScrollLeft
+            | Self::HorizontalScrollRight => true,
+            Self::None
+            | Self::LeftClick
+            | Self::RightClick
+            | Self::MiddleClick
+            | Self::MouseBack
+            | Self::MouseForward
+            | Self::Copy
+            | Self::Paste
+            | Self::Cut
+            | Self::Undo
+            | Self::Redo
+            | Self::SelectAll
+            | Self::Find
+            | Self::Save
+            | Self::NewTab
+            | Self::CloseTab
+            | Self::ReopenTab
+            | Self::ReloadPage
+            | Self::MissionControl
+            | Self::AppExpose
+            | Self::ShowDesktop
+            | Self::LaunchpadShow
+            | Self::LockScreen
+            | Self::Screenshot
+            | Self::CaptureRegion
+            | Self::Sleep
+            | Self::ShowActionsRing
+            | Self::EasySwitchChannel1
+            | Self::EasySwitchChannel2
+            | Self::EasySwitchChannel3
+            | Self::PlayPause
+            | Self::MuteVolume
+            | Self::ToggleSmartShift
+            | Self::TogglePrecisionMode
+            | Self::DpiShift
+            | Self::GShift
+            | Self::SetDpiPreset(_)
+            | Self::CustomShortcut(_)
+            | Self::TypeText(_)
+            | Self::RunAppleScript(_)
+            | Self::RunShellCommand(_)
+            | Self::Workflow(_)
+            | Self::OpenApplication(_)
+            | Self::HoldShortcut(_)
+            | Self::TapKeyHoldingModifiers(_)
+            | Self::HoldModifier(_) => false,
+        }
+    }
 }

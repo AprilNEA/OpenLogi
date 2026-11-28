@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use super::{
     ActivePress, ButtonCommand, ButtonInput, ButtonRuntimeEvent, ButtonState, CancelReason,
-    EVENT_QUEUE_CAPACITY, EndReason, PressBehavior, PressToken, ShutdownRequest,
+    DesktopMotion, EVENT_QUEUE_CAPACITY, EndReason, PressBehavior, PressToken, ShutdownRequest,
 };
 use crate::runtime::receive_command;
 
@@ -289,6 +289,7 @@ pub(super) fn process_input(
                     emit(ButtonRuntimeEvent::Triggered {
                         press: press.clone(),
                         action,
+                        motion: DesktopMotion::System,
                     });
                 }
                 emit_released(press, emit);
@@ -306,9 +307,17 @@ pub(super) fn process_input(
                 emit_released(press, emit);
             }
         }
-        ButtonInput::TriggerWhilePressed { token, action } => {
+        ButtonInput::TriggerWhilePressed {
+            token,
+            action,
+            motion,
+        } => {
             if let Some(press) = state.active(&token).cloned() {
-                emit(ButtonRuntimeEvent::Triggered { press, action });
+                emit(ButtonRuntimeEvent::Triggered {
+                    press,
+                    action,
+                    motion,
+                });
             }
         }
         ButtonInput::WheelWhilePressed { token } => state.wheel_moved(&token),
@@ -322,7 +331,11 @@ pub(super) fn emit_selected_long_presses(
     emit: &mut impl FnMut(ButtonRuntimeEvent),
 ) {
     for (press, action) in state.fire_selected_long_presses(tokens, now) {
-        emit(ButtonRuntimeEvent::Triggered { press, action });
+        emit(ButtonRuntimeEvent::Triggered {
+            press,
+            action,
+            motion: DesktopMotion::System,
+        });
     }
 }
 
@@ -331,6 +344,7 @@ fn emit_released(press: ActivePress, emit: &mut impl FnMut(ButtonRuntimeEvent)) 
         emit(ButtonRuntimeEvent::Triggered {
             press: press.clone(),
             action,
+            motion: DesktopMotion::System,
         });
     }
     emit(ButtonRuntimeEvent::Ended {

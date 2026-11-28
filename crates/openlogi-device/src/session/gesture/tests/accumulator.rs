@@ -1,5 +1,7 @@
 //! The capture accumulator: presses, taps, swipes and raw XY across the gesture sources.
 
+use std::collections::BTreeMap;
+
 use super::*;
 
 const GESTURE: &[u16] = &[reprog_controls::GESTURE_BUTTON_CID];
@@ -902,4 +904,294 @@ fn raw_wheel_that_cannot_be_attributed_or_scaled_is_dropped() {
         &tx,
     );
     assert_eq!(held_wheel(&mut rx), []);
+}
+
+fn per_notch() -> NonZeroU8 {
+    NonZeroU8::new(8).expect("non-zero")
+}
+
+fn hold_gesture(acc: &mut CaptureAccum, tx: &mpsc::UnboundedSender<CapturedInput>) {
+    handle_reprog(acc, press(), GESTURE, &[], &[], tx);
+}
+
+fn wheel_at(
+    acc: &mut CaptureAccum,
+    delta: i16,
+    enabled: bool,
+    tx: &mpsc::UnboundedSender<CapturedInput>,
+) -> bool {
+    acc.on_main_wheel(delta, per_notch(), enabled, &BTreeMap::new(), tx)
+}
+
+fn wheel_each(
+    acc: &mut CaptureAccum,
+    delta: i16,
+    tx: &mpsc::UnboundedSender<CapturedInput>,
+) -> bool {
+    let mut each = BTreeMap::new();
+    each.insert(
+        ButtonId::GestureButton,
+        WheelNotchRepeat {
+            up: true,
+            down: true,
+        },
+    );
+    acc.on_main_wheel(delta, per_notch(), true, &each, tx)
+}
+
+fn assert_wheel(rx: &mut mpsc::UnboundedReceiver<CapturedInput>, direction: GestureDirection) {
+    assert_eq!(
+        next_gesture(rx),
+        Ok(CapturedInput::Gesture(ButtonId::GestureButton, direction))
+    );
+}
+
+fn assert_no_gesture(rx: &mut mpsc::UnboundedReceiver<CapturedInput>) {
+    match next_gesture(rx) {
+        Err(mpsc::error::TryRecvError::Empty) => {}
+        other => panic!("expected no gesture, got {other:?}"),
+    }
+}
+
+fn assert_wheels(
+    rx: &mut mpsc::UnboundedReceiver<CapturedInput>,
+    direction: GestureDirection,
+    count: usize,
+) {
+    for _ in 0..count {
+        assert_wheel(rx, direction);
+    }
+    assert_no_gesture(rx);
+}
+
+/// Eight high-resolution units are one notch. Seven do not fire; the eighth
+/// fires one `WheelUp`. A further notch is not saved for later.
+#[test]
+fn sub_notch_samples_sum_to_one_wheel_up_and_a_blocked_notch_is_not_banked() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+    hold_gesture(&mut acc, &tx);
+
+    for _ in 0..7 {
+        assert!(wheel_at(&mut acc, 1, true, &tx));
+    }
+    assert_no_gesture(&mut rx);
+
+    assert!(wheel_at(&mut acc, 1, true, &tx));
+    assert_wheel(&mut rx, GestureDirection::WheelUp);
+
+    assert!(wheel_at(&mut acc, 8, true, &tx));
+    assert_no_gesture(&mut rx);
+
+    assert!(wheel_at(&mut acc, 1, true, &tx));
+    assert_no_gesture(&mut rx);
+}
+
+/// One free-spin report fires one gesture when the direction does not repeat.
+/// The notches past the first are discarded.
+#[test]
+fn one_report_of_many_notches_fires_once() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+    hold_gesture(&mut acc, &tx);
+
+    assert!(wheel_at(&mut acc, 120, true, &tx));
+    assert_wheel(&mut rx, GestureDirection::WheelUp);
+    assert_no_gesture(&mut rx);
+
+    assert!(wheel_at(&mut acc, 120, true, &tx));
+    assert_no_gesture(&mut rx);
+
+    assert!(wheel_at(&mut acc, 1, true, &tx));
+    assert_no_gesture(&mut rx);
+}
+
+/// A direction that does not repeat fires once for the hold, not once per notch.
+#[test]
+fn a_second_notch_in_the_same_direction_does_not_fire() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+    hold_gesture(&mut acc, &tx);
+
+    assert!(wheel_at(&mut acc, 8, true, &tx));
+    assert_wheel(&mut rx, GestureDirection::WheelUp);
+
+    assert!(wheel_at(&mut acc, 8, true, &tx));
+    assert_no_gesture(&mut rx);
+}
+
+/// After the one allowed notch, a later sample keeps only its fraction. That
+/// fraction must not complete a second step in the same direction.
+#[test]
+fn a_limited_direction_keeps_the_fraction_but_does_not_fire_again() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+    hold_gesture(&mut acc, &tx);
+
+    assert!(wheel_at(&mut acc, 8, true, &tx));
+    assert_wheel(&mut rx, GestureDirection::WheelUp);
+
+    // 12 units is 1.5 notches. The whole one is consumed; half a notch remains.
+    assert!(wheel_at(&mut acc, 12, true, &tx));
+    assert_no_gesture(&mut rx);
+
+    assert!(wheel_at(&mut acc, 4, true, &tx));
+    assert_no_gesture(&mut rx);
+}
+
+/// The leftover fraction can still be cancelled, and the other direction then
+/// gets its own single step.
+#[test]
+fn a_leftover_fraction_can_still_be_cancelled() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+    hold_gesture(&mut acc, &tx);
+
+    assert!(wheel_at(&mut acc, 8, true, &tx));
+    assert_wheel(&mut rx, GestureDirection::WheelUp);
+    assert!(wheel_at(&mut acc, 12, true, &tx));
+    assert_no_gesture(&mut rx);
+
+    assert!(wheel_at(&mut acc, -4, true, &tx));
+    assert_no_gesture(&mut rx);
+
+    assert!(wheel_at(&mut acc, -8, true, &tx));
+    assert_wheel(&mut rx, GestureDirection::WheelDown);
+}
+
+/// 120 units at 8 per notch is fifteen steps, and the other way counts too.
+#[test]
+fn each_notch_mode_fires_every_whole_notch_in_the_report() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+    hold_gesture(&mut acc, &tx);
+
+    assert!(wheel_each(&mut acc, 120, &tx));
+    assert_wheels(&mut rx, GestureDirection::WheelUp, 15);
+
+    assert!(wheel_each(&mut acc, -16, &tx));
+    assert_wheels(&mut rx, GestureDirection::WheelDown, 2);
+
+    assert!(wheel_each(&mut acc, 8, &tx));
+    assert_wheels(&mut rx, GestureDirection::WheelUp, 1);
+
+    handle_reprog(&mut acc, release(), GESTURE, &[], &[], &tx);
+    assert_no_gesture(&mut rx);
+}
+
+/// Whole notches past the cap are dropped. The next report starts clean.
+#[test]
+fn a_report_past_the_cap_drops_the_extra_notches() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+    hold_gesture(&mut acc, &tx);
+    let mut each = BTreeMap::new();
+    each.insert(
+        ButtonId::GestureButton,
+        WheelNotchRepeat {
+            up: true,
+            down: true,
+        },
+    );
+    let one = NonZeroU8::new(1).expect("non-zero");
+
+    assert!(acc.on_main_wheel(100, one, true, &each, &tx));
+    assert_wheels(&mut rx, GestureDirection::WheelUp, 48);
+
+    assert!(acc.on_main_wheel(1, one, true, &each, &tx));
+    assert_wheels(&mut rx, GestureDirection::WheelUp, 1);
+}
+
+#[test]
+fn reversing_through_zero_cancels_a_partial_notch() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+    hold_gesture(&mut acc, &tx);
+
+    assert!(wheel_at(&mut acc, 4, true, &tx));
+    assert!(wheel_at(&mut acc, -4, true, &tx));
+    assert_no_gesture(&mut rx);
+
+    assert!(wheel_at(&mut acc, -8, true, &tx));
+    assert_wheel(&mut rx, GestureDirection::WheelDown);
+}
+
+#[test]
+fn sub_threshold_wheel_motion_still_clicks_on_release() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+    hold_gesture(&mut acc, &tx);
+
+    assert!(wheel_at(&mut acc, 1, true, &tx));
+    assert_no_gesture(&mut rx);
+
+    handle_reprog(&mut acc, release(), GESTURE, &[], &[], &tx);
+    assert_wheel(&mut rx, GestureDirection::Click);
+
+    assert!(!wheel_at(&mut acc, 8, true, &tx));
+    assert_no_gesture(&mut rx);
+}
+
+#[test]
+fn a_committed_wheel_direction_suppresses_click() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+    hold_gesture(&mut acc, &tx);
+
+    assert!(wheel_at(&mut acc, 8, true, &tx));
+    assert_wheel(&mut rx, GestureDirection::WheelUp);
+
+    handle_reprog(&mut acc, release(), GESTURE, &[], &[], &tx);
+    assert_no_gesture(&mut rx);
+}
+
+#[test]
+fn a_disabled_wheel_gesture_leaves_the_sample_and_the_click() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+    hold_gesture(&mut acc, &tx);
+
+    assert!(!wheel_at(&mut acc, 8, false, &tx));
+    assert_no_gesture(&mut rx);
+
+    handle_reprog(&mut acc, release(), GESTURE, &[], &[], &tx);
+    assert_wheel(&mut rx, GestureDirection::Click);
+}
+
+#[test]
+fn wheel_motion_outside_a_hold_is_not_consumed() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+    assert!(!wheel_at(&mut acc, 8, true, &tx));
+    assert_eq!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+}
+
+#[test]
+fn wheel_sign_follows_the_report_and_each_direction_fires_once() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+    hold_gesture(&mut acc, &tx);
+
+    assert!(wheel_at(&mut acc, 8, true, &tx));
+    assert_wheel(&mut rx, GestureDirection::WheelUp);
+
+    assert!(wheel_at(&mut acc, -8, true, &tx));
+    assert_wheel(&mut rx, GestureDirection::WheelDown);
+
+    assert!(wheel_at(&mut acc, 8, true, &tx));
+    assert_no_gesture(&mut rx);
+}
+
+#[test]
+fn wheel_motion_during_overlap_stays_with_the_first_holder() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+    handle_reprog(&mut acc, press(), BOTH, &[], &[], &tx);
+    handle_reprog(&mut acc, both_press(), BOTH, &[], &[], &tx);
+
+    assert!(wheel_at(&mut acc, 8, true, &tx));
+    assert_wheel(&mut rx, GestureDirection::WheelUp);
+
+    handle_reprog(&mut acc, release(), BOTH, &[], &[], &tx);
+    assert_no_gesture(&mut rx);
 }

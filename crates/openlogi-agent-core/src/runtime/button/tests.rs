@@ -309,11 +309,44 @@ fn stale_token_cannot_trigger_after_same_key_repress() {
 
     assert!(input.try_trigger_while_pressed(&old, &Action::Copy));
     assert!(input.try_trigger_while_pressed(&new, &Action::Paste));
-    let ButtonRuntimeEvent::Triggered { press, action } = recv_event(&received) else {
+    let ButtonRuntimeEvent::Triggered { press, action, .. } = recv_event(&received) else {
         panic!("only the replacement token should trigger");
     };
     assert_eq!(press.token, new);
     assert_eq!(action, Action::Paste);
+    assert!(owner.shutdown());
+}
+
+#[test]
+fn a_wheel_desktop_trigger_flicks_and_a_swipe_desktop_trigger_does_not() {
+    let (sent, received) = mpsc::channel();
+    let mut owner = ButtonRuntimeOwner::spawn(move |event| {
+        sent.send(event)
+            .expect("test receiver should stay connected");
+    })
+    .expect("button worker should start");
+    let input = owner.input();
+    let token = input
+        .try_hook_down(ButtonId::GestureButton, None)
+        .expect("gesture down should be queued");
+    assert!(matches!(
+        recv_event(&received),
+        ButtonRuntimeEvent::Started(_)
+    ));
+
+    assert!(input.try_trigger_while_pressed(&token, &Action::PreviousDesktop));
+    let ButtonRuntimeEvent::Triggered { action, motion, .. } = recv_event(&received) else {
+        panic!("a swipe desktop switch should still trigger");
+    };
+    assert_eq!(action, Action::PreviousDesktop);
+    assert_eq!(motion, DesktopMotion::System);
+
+    assert!(input.try_trigger_trackpad_while_pressed(&token, &Action::NextDesktop));
+    let ButtonRuntimeEvent::Triggered { action, motion, .. } = recv_event(&received) else {
+        panic!("a wheel desktop switch should still trigger");
+    };
+    assert_eq!(action, Action::NextDesktop);
+    assert_eq!(motion, DesktopMotion::Trackpad);
     assert!(owner.shutdown());
 }
 
@@ -347,7 +380,7 @@ fn hook_actions_retain_the_press_time_target_across_focus_changes() {
     ));
 
     assert!(input.try_trigger_while_pressed(&token, &Action::BrowserBack));
-    let ButtonRuntimeEvent::Triggered { press, action } = recv_event(&received) else {
+    let ButtonRuntimeEvent::Triggered { press, action, .. } = recv_event(&received) else {
         panic!("queued browser action should retain its originating press");
     };
     assert_eq!(press.target(), target);

@@ -566,6 +566,8 @@ fn a_selected_gesture_can_render_in_the_binding_inspector(cx: &mut TestAppContex
                 dpi_gestures: false,
                 virtual_thumbwheel: false,
                 wheel_hold: &BTreeSet::new(),
+                wheel_notch_repeat: &BTreeMap::new(),
+                smooth_wheel_note: crate::features::mouse::inspector::SmoothWheelNote::Hidden,
                 editing_app: None,
                 overridden: None,
                 press_force: None,
@@ -692,6 +694,52 @@ fn fallback_model_only_adds_thumbwheel_when_capability_is_measured() {
             .count(),
         1
     );
+}
+
+/// The known mouse, with or without a hi-res wheel, opened on the gesture button.
+/// Callers hold `LOCALE_LOCK` in English: a locale change from another test
+/// between a click's mouse-down redraw and its mouse-up reflows the inspector,
+/// and the release then misses the row.
+fn gesture_wheel_view(
+    cx: &mut TestAppContext,
+    hires_wheel: bool,
+) -> (Entity<MouseModelView>, &mut VisualTestContext) {
+    cx.update(gpui_kit::init);
+    cx.update(|cx| {
+        let resolver = AssetResolver::new();
+        let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut inventory = crate::state::tests::direct_inventory([0xa3, 0x93, 0xca, 0xe0]);
+        inventory.paired[0]
+            .capabilities
+            .as_mut()
+            .expect("the fixture mouse has capabilities")
+            .hires_wheel = hires_wheel;
+        let state = cx.new(|_| {
+            AppState::new(Sources {
+                inventories: &[inventory],
+                ..Sources::in_memory(Config::ephemeral(), &resolver, commands)
+            })
+        });
+        AppState::set_global(state, cx);
+    });
+    let (view, cx) = cx.add_window_view(MouseModelView::new);
+    // Tall enough that the gesture picker stays inside the inspector scrollport.
+    cx.simulate_resize(size(px(1200.), px(2400.)));
+    view.update(cx, |view, _| {
+        view.select(MouseControlId::Button(ButtonId::GestureButton));
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    (view, cx)
+}
+
+fn wheel_repeat_contains(cx: &mut VisualTestContext, direction: GestureDirection) -> bool {
+    cx.update(|_, cx| {
+        AppState::try_read(cx)
+            .expect("state is installed")
+            .wheel_notch_repeat()
+            .get(&ButtonId::GestureButton)
+            .is_some_and(|set| set.contains(&direction))
+    })
 }
 
 /// Installs the known mouse, with or without raw wheel on Back/Forward, and
@@ -953,6 +1001,107 @@ fn an_inherited_gesture_button_offers_the_held_actions(cx: &mut TestAppContext) 
     assert!(
         cx.debug_bounds("inspector-gesture-override-DpiShift")
             .is_some()
+    );
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn the_gesture_inspector_binds_the_wheel_and_can_repeat_each_notch(cx: &mut TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    let (view, cx) = gesture_wheel_view(cx, true);
+    assert!(cx.debug_bounds("inspector-wheel-caption").is_some());
+    assert!(
+        cx.debug_bounds("inspector-wheel-needs-smooth").is_some(),
+        "a hi-res wheel that is not smooth says where to turn that on"
+    );
+    assert!(cx.debug_bounds("inspector-wheel-up").is_some());
+    assert!(cx.debug_bounds("inspector-wheel-down").is_some());
+    assert!(
+        cx.debug_bounds("inspector-wheel-each-notch").is_none(),
+        "an unbound wheel direction has nothing to repeat"
+    );
+
+    view.update(cx, |view, _| {
+        view.select(MouseControlId::Button(ButtonId::MiddleClick));
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        cx.debug_bounds("inspector-wheel-caption").is_none(),
+        "a button that is not in gesture mode does not offer the wheel"
+    );
+
+    view.update(cx, |view, _| {
+        view.select(MouseControlId::Button(ButtonId::GestureButton));
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    click_picker_control(cx, "inspector-wheel-up");
+    click_picker_control(cx, "inspector-current-action");
+    click_picker_control(cx, "inspector-gesture-action-Copy");
+    assert!(cx.debug_bounds("inspector-wheel-each-notch").is_some());
+    assert!(!wheel_repeat_contains(cx, GestureDirection::WheelUp));
+
+    click_picker_control(cx, "inspector-wheel-each-notch-control");
+    assert!(wheel_repeat_contains(cx, GestureDirection::WheelUp));
+
+    cx.update(|_, cx| {
+        AppState::apply(cx, |state| {
+            state.commit_gesture_binding(
+                ButtonId::GestureButton,
+                GestureDirection::WheelUp,
+                Action::NextDesktop,
+            )
+        });
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        cx.debug_bounds("inspector-wheel-each-notch").is_none(),
+        "a step already runs on every notch"
+    );
+    assert!(
+        wheel_repeat_contains(cx, GestureDirection::WheelUp),
+        "hiding the switch leaves a stored opt-in in place"
+    );
+
+    cx.update(|_, cx| {
+        AppState::apply(cx, |state| state.commit_smooth_wheel(true));
+    });
+    view.update(cx, |_, cx| cx.notify());
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(cx.debug_bounds("inspector-wheel-needs-smooth").is_none());
+    assert!(cx.debug_bounds("inspector-wheel-up").is_some());
+
+    cx.update(|_, cx| {
+        AppState::apply(cx, |state| state.commit_gesture_mode(ButtonId::Back, true));
+    });
+    view.update(cx, |view, _| {
+        view.select(MouseControlId::Button(ButtonId::Back));
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        cx.debug_bounds("inspector-wheel-caption").is_some(),
+        "every gesture-mode button can bind the wheel"
+    );
+    assert!(cx.debug_bounds("inspector-wheel-each-notch").is_none());
+
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn the_wheel_rows_stay_when_smooth_wheel_cannot_be_turned_on(cx: &mut TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    let (view, cx) = gesture_wheel_view(cx, false);
+    assert!(cx.debug_bounds("inspector-wheel-up").is_some());
+    assert!(cx.debug_bounds("inspector-wheel-down").is_some());
+    assert!(cx.debug_bounds("inspector-wheel-caption").is_some());
+    assert!(
+        cx.debug_bounds("inspector-wheel-needs-smooth").is_none(),
+        "the note must not tell the user to turn on a switch this link cannot"
     );
     drop(view);
     cx.update(|window, _| window.remove_window());

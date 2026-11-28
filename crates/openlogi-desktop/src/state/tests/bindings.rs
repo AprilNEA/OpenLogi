@@ -1,5 +1,7 @@
 //! Button, thumb-wheel, gesture and Actions Ring edits, global and per-app.
 
+use std::collections::BTreeSet;
+
 use super::*;
 use openlogi_core::binding::LongPressBinding;
 
@@ -580,4 +582,81 @@ fn gesture_maps_cover_every_gesture_mode_button() {
         maps.contains_key(&ButtonId::Back),
         "a promoted OS-hook button gets its own menu simultaneously"
     );
+}
+
+fn repeat_set(state: &AppState, button: ButtonId) -> Option<BTreeSet<GestureDirection>> {
+    state
+        .config
+        .devices
+        .get(KNOWN_MOUSE_KEY)
+        .and_then(|device| device.wheel_notch_repeat.get(&button).cloned())
+}
+
+#[test]
+fn wheel_notch_repeat_is_saved_only_for_a_global_gesture_wheel_direction() {
+    let resolver = AssetResolver::new();
+    let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = AppState::new(Sources {
+        inventories: &[direct_inventory([0xa3, 0x93, 0xca, 0xe0])],
+        ..Sources::in_memory(Config::ephemeral(), &resolver, commands)
+    });
+    super::fn_lock::drain(&mut receiver);
+    let button = ButtonId::GestureButton;
+    let only_wheel_up = BTreeSet::from([GestureDirection::WheelUp]);
+
+    let _ = state.commit_wheel_notch_repeat(button, GestureDirection::WheelUp, false);
+    assert!(
+        super::fn_lock::drain(&mut receiver).is_empty(),
+        "turning off an opt-in that is not stored must not reload"
+    );
+    assert!(repeat_set(&state, button).is_none());
+
+    let _ = state.commit_gesture_binding(button, GestureDirection::WheelUp, Action::Copy);
+    super::fn_lock::drain(&mut receiver);
+
+    let events = state.commit_wheel_notch_repeat(button, GestureDirection::WheelUp, true);
+    assert_eq!(
+        events,
+        [StateEvent::BindingsChanged(DeviceKey::from(
+            KNOWN_MOUSE_KEY
+        ))]
+    );
+    assert_eq!(
+        state.wheel_notch_repeat().get(&button),
+        Some(&only_wheel_up)
+    );
+    assert_eq!(repeat_set(&state, button), Some(only_wheel_up.clone()));
+    assert!(matches!(
+        super::fn_lock::drain(&mut receiver).as_slice(),
+        [crate::services::ipc::Command::ReloadConfig(_)]
+    ));
+
+    let _ = state.commit_wheel_notch_repeat(button, GestureDirection::WheelUp, true);
+    assert!(
+        super::fn_lock::drain(&mut receiver).is_empty(),
+        "the same opt-in must not reload again"
+    );
+
+    let _ = state.commit_wheel_notch_repeat(button, GestureDirection::Click, true);
+    let _ = state.commit_wheel_notch_repeat(ButtonId::MiddleClick, GestureDirection::WheelUp, true);
+    assert!(super::fn_lock::drain(&mut receiver).is_empty());
+    assert_eq!(repeat_set(&state, button), Some(only_wheel_up.clone()));
+    assert!(repeat_set(&state, ButtonId::MiddleClick).is_none());
+
+    let _ = state.set_editing_app(Some("com.apple.Safari".into()));
+    let _ = state.commit_wheel_notch_repeat(button, GestureDirection::WheelDown, true);
+    assert!(
+        super::fn_lock::drain(&mut receiver).is_empty(),
+        "an app profile cannot store a device-wide opt-in"
+    );
+    assert_eq!(repeat_set(&state, button), Some(only_wheel_up));
+
+    let _ = state.set_editing_app(None);
+    let _ = state.commit_wheel_notch_repeat(button, GestureDirection::WheelUp, false);
+    assert!(repeat_set(&state, button).is_none());
+    assert!(state.wheel_notch_repeat().get(&button).is_none());
+    assert!(matches!(
+        super::fn_lock::drain(&mut receiver).as_slice(),
+        [crate::services::ipc::Command::ReloadConfig(_)]
+    ));
 }
