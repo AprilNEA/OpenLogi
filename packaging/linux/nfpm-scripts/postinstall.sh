@@ -6,7 +6,14 @@ set -eu
 # before the script exits so the agent can open /dev/hidraw* and the mouse's
 # /dev/input/event* node immediately, even for a device connected before the
 # install.
-if command -v udevadm >/dev/null 2>&1; then
+#
+# Skipped on OSTree systems (Fedora Atomic, Bazzite, Bluefin, ...):
+# rpm-ostree runs scriptlets in a bwrap sandbox while composing the next
+# deployment, with no access to the host's udev, so `udevadm control` would
+# fail and abort the whole `rpm-ostree install`. rpm-ostree exposes
+# /run/ostree-booted inside that sandbox for exactly this purpose; the new
+# rules are picked up when booting into the new deployment.
+if [ ! -e /run/ostree-booted ] && command -v udevadm >/dev/null 2>&1; then
   udevadm control --reload-rules
   udevadm trigger --subsystem-match=hidraw
   udevadm trigger --subsystem-match=input
