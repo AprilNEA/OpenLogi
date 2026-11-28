@@ -4,6 +4,44 @@ Durable "why we did it this way" records that are not obvious from the code.
 Add a dated entry when a non-obvious architectural or dependency decision is
 made or revisited.
 
+## 2026-11: Desktop switch presses during a switch queue on its display
+
+Previous Desktop and Next Desktop skipped a press while another switch was
+under way, and a switch stays under way until the Dock reports the new Space,
+after the slide. Pressing a button three times quickly moved one Space, while
+Ctrl+←/→ typed three times on the keyboard moves three. A press for the
+display being switched is now kept as a step and taken after that switch.
+
+- **Net steps per display, taken on the Space worker.** Each press adds one
+  step in its direction, so opposite presses cancel out. The worker of the
+  switch under way takes the next step once that switch reaches its Space,
+  with the same confirmation per step. `execute` returns at once for a
+  queued press.
+- **Not a wait on the caller.** Waiting there for the switch under way was
+  tried and dropped: mouse-button bindings run on the `openlogi-buttons`
+  worker, which also releases held chords, so a held shortcut's keys would
+  stay down until the switch ended, up to four seconds for a stuck one.
+  Waiting kept later actions behind the switches, but only in posting order:
+  the Dock applies a switch after its events, so even one switch followed by
+  Cmd+W can reach a window of the old Space.
+- **Another display is still skipped.** No step runs later on a display the
+  cursor has left (#1586): a press for another display is skipped, and each
+  step's post still checks the cursor is on its display.
+- **A miss ends the run.** A step that finds the last Space, times out, or
+  sees the context change discards the steps left. Nothing is retried.
+- **Slower than the keyboard.** Each step waits for its own confirmation, so
+  presses in a row take about one second per Space. Two Ctrl+→ presses typed
+  134 ms apart gave one Space change, 1.2 s after the first: the Dock chains
+  the shortcut into one slide. Chaining the typed shortcut would need a
+  confirmation that follows several steps at once and is left for later.
+
+Verified on macOS 26.6.2 (Apple silicon) with an AppKit loop running, as in
+the agent, for the variant that waited on the caller: two Next Desktop
+presses 140 ms apart changed Space after 1.0 s and 2.0 s, each confirmed.
+The queue posts the same switches from the Space worker; with no AppKit loop,
+two queued presses moved two Spaces, each step confirmed. Not verified inside
+the agent app.
+
 ## 2026-11: The agent saves a paired Flow computer in `config.toml`
 
 Until now the agent only read `config.toml`; the GUI and `openlogi api` wrote
