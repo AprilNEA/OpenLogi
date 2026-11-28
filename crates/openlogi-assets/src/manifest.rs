@@ -54,8 +54,10 @@ pub struct ManifestDevice {
 }
 
 /// One (`key`, `src`) pair. `key` is a stable Logitech identifier
-/// (`device_image`, `device_buttons_image`, …); `src` is a filename
-/// relative to the depot directory.
+/// (`device_image`, `device_buttons_image`, …); `src` is a path relative to
+/// the depot directory — usually a bare filename, but G HUB depots point
+/// into sub-directories (`images/device/<uuid>`). Join it with
+/// [`http::safe_relative_path`].
 #[derive(Debug, Deserialize)]
 pub struct ManifestResource {
     pub key: String,

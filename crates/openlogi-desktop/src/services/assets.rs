@@ -32,7 +32,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use openlogi_assets::http::safe_component_path;
+use openlogi_assets::http::{safe_component_path, safe_relative_path};
 use openlogi_assets::{
     BUTTONS_RENDER_FILES, DepotManifest, DeviceEntry, FRONT_RENDER_FILES, Index, METADATA_FILES,
     Metadata,
@@ -168,6 +168,7 @@ fn main_view(path: PathBuf, side: Option<&SideView>, front: Option<&PathBuf>) ->
 fn resolve_side_view(
     dir: &Path,
     entry: &DeviceEntry,
+    depot: &str,
     manifest: Option<&DepotManifest>,
     extended_model_id: u8,
     metadata: &Metadata,
@@ -175,16 +176,14 @@ fn resolve_side_view(
     metadata
         .image(SIDE_VIEW_KEY)
         .filter(|image| !image.assignments.is_empty())?;
-    let variant = manifest.and_then(|m| {
-        entry.model_id_candidates().find_map(|base| {
-            m.resource_for_variant(base, extended_model_id, SIDE_VIEW_KEY)
-                .map(str::to_string)
-        })
-    });
+    // The same manifest bases the sync downloads by: G HUB depots key their
+    // variants on the depot name (`g502x_plus_ext1`), not on a model id.
+    let variant = manifest
+        .and_then(|m| find_variant_in_manifest(m, entry, depot, extended_model_id, side_image_for));
     let (image_path, (png_width, png_height)) = variant
         .into_iter()
         .chain(["side.png".to_string()])
-        .filter_map(|n| safe_component_path(dir, &n, "asset file").ok())
+        .filter_map(|n| safe_relative_path(dir, &n, "asset file").ok())
         .find_map(|p| read_image_dimensions(&p).ok().map(|dims| (p, dims)))?;
     Some(SideView {
         image_path,
@@ -304,7 +303,7 @@ impl AssetResolver {
     /// constructing one just to reuse [`Self::resolve`] would conflate a
     /// physical protocol identity with a model-level asset identity. The
     /// registry lookup remains exact and case-insensitive, while all local
-    /// filenames still pass through the same safe component checks.
+    /// filenames still pass through the same safe path checks.
     pub fn resolve_registry_model(&self, registry_model_id: &str) -> Option<ResolvedAsset> {
         let index = self.index.as_ref()?;
         let (depot, entry) = index.find_by_model_id(registry_model_id)?;
@@ -396,7 +395,7 @@ impl AssetResolver {
                 .clone()
                 .into_iter()
                 .chain(FRONT_RENDER_FILES.map(str::to_string))
-                .filter_map(|n| safe_component_path(&dir, &n, "asset file").ok())
+                .filter_map(|n| safe_relative_path(&dir, &n, "asset file").ok())
                 .find(|p| is_drawable_image(p));
             let image_name = buttons_name
                 .clone()
@@ -414,7 +413,7 @@ impl AssetResolver {
             candidates.extend(FRONT_RENDER_FILES.map(str::to_string));
             let Some(image_path) = candidates
                 .iter()
-                .filter_map(|n| safe_component_path(&dir, n, "asset file").ok())
+                .filter_map(|n| safe_relative_path(&dir, n, "asset file").ok())
                 .find(|p| is_drawable_image(p))
             else {
                 continue;
@@ -429,7 +428,8 @@ impl AssetResolver {
                 debug!(depot, root = %root.display(), "depot ships no hotspot metadata — rendering image without hotspots");
                 Metadata::default()
             };
-            let side_view = resolve_side_view(&dir, entry, manifest.as_ref(), ext, &metadata);
+            let side_view =
+                resolve_side_view(&dir, entry, depot, manifest.as_ref(), ext, &metadata);
             let image_path = main_view(image_path, side_view.as_ref(), hero_image_path.as_ref());
             let (png_width, png_height) = match read_image_dimensions(&image_path) {
                 Ok(dims) => dims,
@@ -497,7 +497,7 @@ impl AssetResolver {
             else {
                 continue;
             };
-            let Ok(image_path) = safe_component_path(&dir, image_name, "asset file") else {
+            let Ok(image_path) = safe_relative_path(&dir, image_name, "asset file") else {
                 continue;
             };
             if !image_path.is_file() {
@@ -559,7 +559,7 @@ fn drawable_variant(
     let renders: Vec<PathBuf> = [variant_image_for, buttons_image_for, side_image_for]
         .into_iter()
         .filter_map(|lookup| find_variant_in_manifest(manifest, entry, depot, ext, lookup))
-        .filter_map(|name| safe_component_path(dir, &name, "asset file").ok())
+        .filter_map(|name| safe_relative_path(dir, &name, "asset file").ok())
         .filter(|path| path.is_file())
         .collect();
     if renders.is_empty() || renders.iter().any(|path| is_drawable_image(path)) {
@@ -580,7 +580,7 @@ fn drawable_variant(
 /// keys its metadata `core_metadata_left.json` / `core_metadata_right.json` —
 /// so a name-only lookup skips the depot outright and the GUI falls back to the
 /// generic silhouette. Manifest-sourced names are attacker-influenced, so they
-/// pass the same component check as every other asset file.
+/// pass the same path check as every other asset file.
 fn resolve_metadata(
     dir: &Path,
     entry: &DeviceEntry,
@@ -594,7 +594,7 @@ fn resolve_metadata(
         .collect();
     candidates.extend(METADATA_FILES.map(str::to_string));
     candidates.into_iter().find_map(|name| {
-        let path = safe_component_path(dir, &name, "asset file").ok()?;
+        let path = safe_relative_path(dir, &name, "asset file").ok()?;
         path.exists().then_some((name, path))
     })
 }

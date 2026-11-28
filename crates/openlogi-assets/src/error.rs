@@ -65,6 +65,16 @@ pub enum AssetError {
         /// The offending value.
         component: String,
     },
+    /// A remote-supplied depot-relative path had a segment that is not a
+    /// single safe path component (empty, `.`/`..`, a root or prefix, or a
+    /// backslash).
+    #[error("{label} must be a relative path of safe components, got {path:?}")]
+    UnsafeRelativePath {
+        /// Which input was rejected (e.g. `"asset file name"`).
+        label: String,
+        /// The offending value.
+        path: String,
+    },
     /// Every built-in asset mirror failed its catalog probe.
     #[error(
         "all asset sources are unavailable (assets.openlogi.org: {production}; Pages: {pages}; jsDelivr: {jsdelivr})"

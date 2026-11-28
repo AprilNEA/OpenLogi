@@ -378,6 +378,109 @@ mod tests {
         assert_eq!(std::fs::read(dir.join("metadata.json")).unwrap(), metadata);
     }
 
+    /// #2457: the white G502 X PLUS (`ext1`) synced only the baseline. Its
+    /// manifest names the variant renders `images/device/<uuid>`, and the
+    /// fetch rejected every name that was not a single path component.
+    #[test]
+    fn g502x_plus_sync_fetches_variant_renders_under_images_device() {
+        use std::collections::HashMap;
+        use std::io::{Read, Write};
+        use std::net::{TcpListener, TcpStream};
+
+        const FRONT: &str = "images/device/e0e9dacc-b5c0-4434-8b8d-410a7aa81d2f";
+        const SIDE: &str = "images/device/22c9ac7a-43ed-48b7-8771-72ca4ae2a6bb";
+        let root = tempfile::tempdir().expect("asset root");
+        let dir = root.path().join("g502x_plus");
+        std::fs::create_dir(&dir).unwrap();
+        let manifest = format!(
+            r#"{{"devices":[{{"modelId":"g502x_plus_ext1","resources":[
+                {{"key":"device_image","src":"{FRONT}"}},
+                {{"key":"device_side","src":"{SIDE}"}}]}}]}}"#
+        );
+        let mut entry = openlogi_assets::DeviceEntry {
+            model_id: "c095".into(),
+            model_ids: vec!["c095".into(), "4099".into()],
+            display_name: "G502 X PLUS".into(),
+            kind: "MOUSE".into(),
+            asset_path: "v1/devices/g502x_plus/".into(),
+            files: Vec::new(),
+        };
+        // The baseline is already cached, so only the renders go on the wire.
+        let mut bodies = HashMap::new();
+        for (name, bytes) in [
+            ("manifest.json", manifest.into_bytes()),
+            ("metadata.json", br#"{"images":[]}"#.to_vec()),
+            ("front.png", b"black front".to_vec()),
+            (FRONT, b"white front".to_vec()),
+            (SIDE, b"white side".to_vec()),
+        ] {
+            entry.files.push(openlogi_assets::FileEntry {
+                name: name.into(),
+                sha256: openlogi_assets::http::sha256_hex(&bytes),
+                bytes: bytes.len() as u64,
+            });
+            if name.contains('/') {
+                bodies.insert(format!("/v1/devices/g502x_plus/{name}"), bytes);
+            } else {
+                std::fs::write(dir.join(name), bytes).unwrap();
+            }
+        }
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let expected = bodies.len();
+        let server = std::thread::spawn(move || {
+            let mut paths = Vec::new();
+            for _ in 0..expected {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut byte = [0];
+                while stream.read(&mut byte).unwrap() != 0 {
+                    request.push(byte[0]);
+                    if request.ends_with(b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let request = String::from_utf8(request).unwrap();
+                let Some(path) = request.split(' ').nth(1) else {
+                    continue;
+                };
+                let body = bodies.get(path).cloned().unwrap_or_default();
+                let status = if bodies.contains_key(path) {
+                    "200 OK"
+                } else {
+                    "404 Not Found"
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                stream.write_all(&body).unwrap();
+                paths.push(path.to_owned());
+            }
+            paths
+        });
+        let client = openlogi_assets::http::AssetClient::new(&format!("http://{address}"));
+        super::sync_depot(&client, root.path(), "g502x_plus", &entry, 1).unwrap();
+        // Release the server even when a regression skips the HTTP requests.
+        for _ in 0..expected {
+            drop(TcpStream::connect(address));
+        }
+        let mut paths = server.join().unwrap();
+        paths.sort();
+
+        assert_eq!(
+            paths,
+            [
+                format!("/v1/devices/g502x_plus/{SIDE}"),
+                format!("/v1/devices/g502x_plus/{FRONT}"),
+            ]
+        );
+        assert_eq!(std::fs::read(dir.join(FRONT)).unwrap(), b"white front");
+        assert_eq!(std::fs::read(dir.join(SIDE)).unwrap(), b"white side");
+    }
+
     #[test]
     fn g512_photo_and_metadata_are_selected_for_download() {
         let root = tempfile::tempdir().expect("asset root");

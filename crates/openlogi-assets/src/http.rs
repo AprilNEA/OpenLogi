@@ -200,9 +200,9 @@ impl AssetClient {
         dir: &Path,
         file: &FileEntry,
     ) -> Result<FetchOutcome, AssetError> {
-        // `name` comes from remote metadata; validate it down to a single
-        // path component before any path is built.
-        let dst = safe_component_path(dir, &file.name, "asset file name")?;
+        // `name` comes from remote metadata; validate every segment of it
+        // before any path is built.
+        let dst = safe_relative_path(dir, &file.name, "asset file name")?;
         if cached_matches(&dst, &file.sha256) {
             return Ok(FetchOutcome::CacheHit);
         }
@@ -293,9 +293,10 @@ pub fn read_bytes(path: &Path) -> Result<Vec<u8>, AssetError> {
 
 /// Join one untrusted registry component onto a trusted directory.
 ///
-/// Remote asset metadata is expected to carry depot and file *names*, not
-/// paths. Rejecting separators, absolute prefixes, and `.`/`..` keeps every
-/// sync write inside the cache or bundle directory chosen by the caller.
+/// For depot names, which are always a single component. Rejecting
+/// separators, absolute prefixes, and `.`/`..` keeps every sync write inside
+/// the cache or bundle directory chosen by the caller. Files inside a depot
+/// go through [`safe_relative_path`] instead.
 pub fn safe_component_path(
     base: &Path,
     component: &str,
@@ -317,11 +318,32 @@ pub fn safe_component_path(
     }
 }
 
+/// Join one untrusted depot-relative file path onto a trusted depot directory.
+///
+/// Registry file names and manifest `src` values are relative to the depot.
+/// Most are a bare name, but G HUB depots keep their renders in
+/// sub-directories (`images/device/<uuid>`). The path is split on `/`, the
+/// separator the registry and the asset URLs use, and every segment must pass
+/// [`safe_component_path`], so the result never leaves `base`.
+pub fn safe_relative_path(base: &Path, relative: &str, label: &str) -> Result<PathBuf, AssetError> {
+    relative
+        .split('/')
+        .try_fold(base.to_path_buf(), |dir, segment| {
+            safe_component_path(&dir, segment, label)
+        })
+        .map_err(|_| AssetError::UnsafeRelativePath {
+            label: label.to_owned(),
+            path: relative.to_owned(),
+        })
+}
+
 /// Write `bytes` beside `dst` and atomically rename into place.
 ///
 /// The temporary file is created in the destination directory and committed via
 /// rename, so a concurrent reader sees the old file or the new one, never a
-/// half-written one. A planted symlink at `dst` is replaced, not followed.
+/// half-written one. A planted symlink at `dst` is replaced, not followed. The
+/// destination directory is created when missing, since a depot file can sit
+/// in a sub-directory of the depot.
 pub(crate) fn write_replace(dst: &Path, bytes: &[u8]) -> Result<(), AssetError> {
     use std::io::Write as _;
 
@@ -329,6 +351,9 @@ pub(crate) fn write_replace(dst: &Path, bytes: &[u8]) -> Result<(), AssetError> 
         path: dst.to_owned(),
         source,
     };
+    if let Some(parent) = dst.parent() {
+        fs::create_dir_all(parent).map_err(fail)?;
+    }
     let mut file = AtomicWriteFile::open(dst).map_err(fail)?;
     file.write_all(bytes).map_err(fail)?;
     file.commit().map_err(fail)
@@ -362,7 +387,11 @@ pub fn cached_matches(path: &Path, expected_sha: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{AssetClient, is_retryable, safe_component_path, write_replace};
+    use super::{
+        AssetClient, FetchOutcome, is_retryable, safe_component_path, safe_relative_path,
+        sha256_hex, write_replace,
+    };
+    use crate::index::FileEntry;
     use std::path::Path;
     use ureq::Error;
 
@@ -438,6 +467,117 @@ mod tests {
                 "{name:?} should be rejected"
             );
         }
+    }
+
+    #[test]
+    fn safe_relative_path_accepts_names_and_depot_sub_paths() {
+        let depot = Path::new("/cache/g502x_plus");
+        assert_eq!(
+            safe_relative_path(depot, "front.png", "asset").ok(),
+            Some(depot.join("front.png"))
+        );
+        assert_eq!(
+            safe_relative_path(
+                depot,
+                "images/device/e0e9dacc-b5c0-4434-8b8d-410a7aa81d2f",
+                "asset"
+            )
+            .ok(),
+            Some(
+                depot
+                    .join("images")
+                    .join("device")
+                    .join("e0e9dacc-b5c0-4434-8b8d-410a7aa81d2f")
+            )
+        );
+    }
+
+    #[test]
+    fn safe_relative_path_rejects_any_unsafe_segment() {
+        for name in [
+            "",
+            ".",
+            "..",
+            "/etc/passwd",
+            "../front.png",
+            "images/../../front.png",
+            "images/./front.png",
+            "images//front.png",
+            "images/",
+            "images\\device\\front.png",
+            "images/..\\front.png",
+        ] {
+            assert!(
+                safe_relative_path(Path::new("/cache/depot"), name, "asset").is_err(),
+                "{name:?} should be rejected"
+            );
+        }
+    }
+
+    /// #2457: G HUB depots name their renders `images/device/<uuid>`. The
+    /// fetch must request that path and land the file in the same
+    /// sub-directory of the depot, which does not exist yet.
+    #[test]
+    fn fetch_entry_writes_a_sub_path_file_into_its_depot_sub_directory() {
+        use std::io::{Read, Write};
+        use std::net::{TcpListener, TcpStream};
+
+        let body = b"\x89PNG\r\n\x1a\n render".to_vec();
+        let entry = FileEntry {
+            name: "images/device/e0e9dacc-b5c0-4434-8b8d-410a7aa81d2f".into(),
+            sha256: sha256_hex(&body),
+            bytes: body.len() as u64,
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let address = listener.local_addr().expect("local address");
+        let response = body.clone();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut request = Vec::new();
+            let mut byte = [0];
+            while stream.read(&mut byte).expect("read request") != 0 {
+                request.push(byte[0]);
+                if request.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+            }
+            if !request.is_empty() {
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    response.len()
+                )
+                .expect("write head");
+                stream.write_all(&response).expect("write body");
+            }
+            request
+        });
+        let root = tempfile::tempdir().expect("create temp dir");
+        let depot = root.path().join("g502x_plus");
+        std::fs::create_dir(&depot).expect("create depot dir");
+        let client = AssetClient::new(&format!("http://{address}"));
+
+        let outcome = client.fetch_entry_if_stale("v1/devices/g502x_plus/", &depot, &entry);
+        // Release the server even when a regression skips the HTTP request.
+        drop(TcpStream::connect(address));
+        let request = server.join().expect("server thread");
+
+        assert!(
+            matches!(outcome, Ok(FetchOutcome::Fetched { .. })),
+            "{outcome:?}"
+        );
+        assert!(request.starts_with(
+            b"GET /v1/devices/g502x_plus/images/device/e0e9dacc-b5c0-4434-8b8d-410a7aa81d2f "
+        ));
+        let landed = depot
+            .join("images")
+            .join("device")
+            .join("e0e9dacc-b5c0-4434-8b8d-410a7aa81d2f");
+        assert_eq!(std::fs::read(&landed).expect("read landed file"), body);
+        assert!(matches!(
+            client.fetch_entry_if_stale("v1/devices/g502x_plus/", &depot, &entry),
+            Ok(FetchOutcome::CacheHit)
+        ));
     }
 
     #[test]
