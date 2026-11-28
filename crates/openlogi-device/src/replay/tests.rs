@@ -903,6 +903,7 @@ fn dpi_settings(route: DeviceRoute, current: u16, supported: Vec<u16>) -> Profil
         force_sensing: ProfileSetting::Unsupported,
         disable_keys: ProfileSetting::Unsupported,
         sidetone: ProfileSetting::Unsupported,
+        power_off_timeout: ProfileSetting::Unsupported,
         lighting: ProfileSupport::Unsupported,
         light: ProfileSupport::Unsupported,
     }

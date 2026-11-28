@@ -42,7 +42,8 @@ pub use light::LightCommandStatus;
 pub(crate) use load::Load;
 pub use load::{
     BacklightLoad, DisableKeysLoad, DpiLoad, EasySwitchLoad, FnLockLoad, ForceSensingLoad,
-    OnboardLoad, PointerSpeedLoad, ReportRateLoad, SidetoneLoad, SmartShiftLoad,
+    OnboardLoad, PointerSpeedLoad, PowerOffTimeoutLoad, ReportRateLoad, SidetoneLoad,
+    SmartShiftLoad,
 };
 
 /// Result of confirming a SmartShift write by reading the value back.
@@ -104,6 +105,7 @@ mod onboard;
 mod os_layout;
 mod pointer;
 mod pointer_speed;
+mod power_off_timeout;
 mod reconciliation;
 mod report_rate;
 mod scroll;
@@ -260,6 +262,7 @@ impl AppState {
             state.load_current_report_rate(cx);
             state.load_current_pointer_speed(cx);
             state.load_current_sidetone(cx);
+            state.load_current_power_off_timeout(cx);
             state.load_current_force_sensing(cx);
             state.load_current_backlight(cx);
             state.load_current_easy_switch(cx);

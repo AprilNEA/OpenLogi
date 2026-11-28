@@ -25,8 +25,8 @@ use openlogi_core::device::DeviceInventory;
 use openlogi_hid::{
     BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
     ForceSensingInfo, HapticRestore, HapticRestoreOutcome, HapticWaveform, HidppOperation,
-    LightCommand, OnboardState, PointerSpeed, ReceiverSelector, ReportRate, ReportRateInfo,
-    ScrollWheelMode, SidetoneLevel, SmartShiftStatus, WriteError,
+    LightCommand, OnboardState, PointerSpeed, PowerOffTimeout, ReceiverSelector, ReportRate,
+    ReportRateInfo, ScrollWheelMode, SidetoneLevel, SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
@@ -598,6 +598,23 @@ impl Agent for AgentServer {
         session_id: u64,
     ) -> Result<(), ActionRingCommandError> {
         self.action_ring.unhover(session_id)
+    }
+
+    async fn read_power_off_timeout(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<PowerOffTimeout, WriteError> {
+        self.shared.read_power_off_timeout(&route).await
+    }
+
+    async fn set_power_off_timeout(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        timeout: PowerOffTimeout,
+    ) -> Result<PowerOffTimeout, WriteError> {
+        self.shared.set_power_off_timeout(&route, timeout).await
     }
 }
 

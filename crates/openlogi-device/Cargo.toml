@@ -34,6 +34,7 @@ tracing = { workspace = true }
 serde_json.workspace = true
 tempfile = "3"
 tokio = { workspace = true, features = ["test-util"] }
+tracing-subscriber = { workspace = true }
 
 [lints]
 workspace = true

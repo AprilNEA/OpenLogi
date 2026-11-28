@@ -31,9 +31,9 @@ use openlogi_core::device_order::{DeviceIdentity, DeviceStableId, PhysicalDevice
 use openlogi_hid::{
     BacklightChange, BacklightState, CaptureChannelSlot, ChannelPool, ChannelRegistry,
     DeviceIoGate, DeviceRoute, DisableKeysMask, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
-    ForceSensingInfo, GamingWanted, HidppOperation, HostOs, PointerSpeed, ReportRate,
-    ReportRateInfo, SidetoneLevel, SmartShiftStatus, WriteError, commands_for_light_settings,
-    is_reserved_keyboard_control, key_display_for,
+    ForceSensingInfo, GamingWanted, HidppOperation, HostOs, PointerSpeed, PowerOffTimeout,
+    ReportRate, ReportRateInfo, SidetoneLevel, SmartShiftStatus, WriteError,
+    commands_for_light_settings, is_reserved_keyboard_control, key_display_for,
 };
 #[cfg(test)]
 use openlogi_ipc::ChosenLight;
@@ -200,6 +200,8 @@ pub struct SharedHandles {
     force_sensing_order: WriteOrder,
     /// Orders the GUI's sidetone writes per headset.
     sidetone_order: WriteOrder,
+    /// Orders the GUI's power-off timeout writes per headset.
+    power_off_timeout_order: WriteOrder,
     /// Orders the GUI's backlight writes per keyboard.
     backlight_order: WriteOrder,
     /// Orders host renames per device.
@@ -314,6 +316,18 @@ impl SharedHandles {
         self.device(route)
             .run(HidppOperation::ReadSidetone, |c| async move {
                 openlogi_hid::get_sidetone_on(&c).await
+            })
+            .await
+    }
+
+    /// Read the automatic power-off timeout of the headset at `route`.
+    pub async fn read_power_off_timeout(
+        &self,
+        route: &DeviceRoute,
+    ) -> Result<PowerOffTimeout, WriteError> {
+        self.device(route)
+            .run(HidppOperation::ReadPowerOffTimeout, |c| async move {
+                openlogi_hid::get_power_off_timeout_on(&c).await
             })
             .await
     }
@@ -465,6 +479,26 @@ impl SharedHandles {
                 &ticket,
                 |c| async move { openlogi_hid::set_sidetone_on(&c, level).await },
                 |c| async move { openlogi_hid::get_sidetone_on(&c).await },
+            )
+            .await
+    }
+
+    /// Write `timeout` to the headset at `route` and return the timeout it
+    /// confirms. When a newer power-off timeout write for the headset is
+    /// requested before this one gets its turn, this one reads the headset
+    /// instead of writing a timeout that is about to be replaced.
+    pub async fn set_power_off_timeout(
+        &self,
+        route: &DeviceRoute,
+        timeout: PowerOffTimeout,
+    ) -> Result<PowerOffTimeout, WriteError> {
+        let ticket = self.power_off_timeout_order.request(route);
+        self.device(route)
+            .run_in_turn(
+                HidppOperation::WritePowerOffTimeout,
+                &ticket,
+                |c| async move { openlogi_hid::set_power_off_timeout_on(&c, timeout).await },
+                |c| async move { openlogi_hid::get_power_off_timeout_on(&c).await },
             )
             .await
     }
@@ -922,6 +956,7 @@ impl Orchestrator {
             pointer_speeds: Arc::default(),
             force_sensing_order: WriteOrder::default(),
             sidetone_order: WriteOrder::default(),
+            power_off_timeout_order: WriteOrder::default(),
             backlight_order: WriteOrder::default(),
             host_name_order: WriteOrder::default(),
             host_switch_order: WriteOrder::default(),

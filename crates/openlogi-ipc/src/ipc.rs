@@ -21,8 +21,8 @@ use openlogi_core::device::{
 use openlogi_core::hid::{
     BacklightChange, BacklightState, DeviceRoute, DisableKeysMask, DisableKeysState, Dpi, DpiInfo,
     EasySwitchHosts, FnLockState, ForceSensingInfo, LightCommand, OnboardState, PairingError,
-    PasskeyMethod, PointerSpeed, ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode,
-    SidetoneLevel, SmartShiftStatus, WriteError,
+    PasskeyMethod, PointerSpeed, PowerOffTimeout, ReceiverSelector, ReportRate, ReportRateInfo,
+    ScrollWheelMode, SidetoneLevel, SmartShiftStatus, WriteError,
 };
 use serde::{Deserialize, Serialize};
 pub use succession::Identity;
@@ -194,7 +194,12 @@ pub use succession::Identity;
 ///      and `ActionRingIcon::{Channel1, Channel2, Channel3}` appended after
 ///      them — a device's move to another Easy-Switch channel, bound to a
 ///      button or an Actions Ring slot.
-pub const PROTOCOL_VERSION: u32 = 46;
+/// v47: `Capabilities::power_off_timeout`,
+///      `HidppOperation::{ReadPowerOffTimeout, WritePowerOffTimeout}` and
+///      `Agent::{read_power_off_timeout, set_power_off_timeout}` appended — a
+///      headset's HID++ `0x1F20` automatic power-off timeout, as a
+///      [`PowerOffTimeout`].
+pub const PROTOCOL_VERSION: u32 = 47;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -1263,4 +1268,16 @@ pub trait Agent {
     /// held trigger cancels instead of choosing the slot last reported by
     /// [`Agent::action_ring_hover`].
     async fn action_ring_unhover(session_id: u64) -> Result<(), ActionRingCommandError>;
+
+    /// Read the automatic power-off timeout of the headset on `route` (HID++
+    /// `0x1F20` function `1`). A headset that refuses the read answers
+    /// [`WriteError::FeatureUnsupported`].
+    async fn read_power_off_timeout(route: DeviceRoute) -> Result<PowerOffTimeout, WriteError>;
+    /// Write the automatic power-off timeout of the headset on `route` now and
+    /// answer with the timeout the headset confirms. The headset keeps it
+    /// across power cycles, so nothing is saved to the config.
+    async fn set_power_off_timeout(
+        route: DeviceRoute,
+        timeout: PowerOffTimeout,
+    ) -> Result<PowerOffTimeout, WriteError>;
 }

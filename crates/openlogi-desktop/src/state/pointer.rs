@@ -29,6 +29,11 @@ pub(super) struct PointerState {
     /// save it.
     pub(super) pending_force_sensing_writes: HashMap<DeviceKey, u64>,
     pub(super) next_force_sensing_write: u64,
+    /// The newest automatic power-off write sent to each headset whose answer
+    /// has not arrived yet. Only that write's answer may change the shown
+    /// timeout.
+    pub(super) pending_power_off_timeout_writes: HashMap<DeviceKey, u64>,
+    pub(super) next_power_off_timeout_write: u64,
 }
 
 impl Default for PointerState {
@@ -43,6 +48,8 @@ impl Default for PointerState {
             refused_force_sensing: HashSet::new(),
             pending_force_sensing_writes: HashMap::new(),
             next_force_sensing_write: 0,
+            pending_power_off_timeout_writes: HashMap::new(),
+            next_power_off_timeout_write: 0,
         }
     }
 }

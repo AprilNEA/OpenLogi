@@ -181,6 +181,21 @@ fn open_device_detail(
     inventory: openlogi_core::device::DeviceInventory,
     config: openlogi_core::config::Config,
 ) -> (gpui::Entity<super::AppView>, &mut gpui::VisualTestContext) {
+    let (app_view, cx, _commands) = open_device_detail_with_commands(cx, inventory, config);
+    (app_view, cx)
+}
+
+/// [`open_device_detail`], keeping the commands the state sends the agent,
+/// so a test can answer the device's reads and see its writes.
+fn open_device_detail_with_commands(
+    cx: &mut gpui::TestAppContext,
+    inventory: openlogi_core::device::DeviceInventory,
+    config: openlogi_core::config::Config,
+) -> (
+    gpui::Entity<super::AppView>,
+    &mut gpui::VisualTestContext,
+    tokio::sync::mpsc::UnboundedReceiver<crate::services::ipc::Command>,
+) {
     use std::{cell::RefCell, rc::Rc};
 
     use gpui::AppContext as _;
@@ -192,8 +207,8 @@ fn open_device_detail(
 
     rust_i18n::set_locale("en");
     cx.update(gpui_kit::init);
+    let (commands, receiver) = tokio::sync::mpsc::unbounded_channel();
     cx.update(|cx| {
-        let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
         let resolver = AssetResolver::new();
         let state = cx.new(|_| {
             let mut state = AppState::new(Sources {
@@ -227,7 +242,7 @@ fn open_device_detail(
         app_view.update(cx, |view, cx| view.open_device(record_key, cx));
         window.draw(cx).clear(cx);
     });
-    (app_view, cx)
+    (app_view, cx, receiver)
 }
 
 /// The Pointer tab's Scrolling card carries the smooth-wheel switch, shows the
@@ -1317,6 +1332,7 @@ fn tabs_prefer_buttons_when_a_keyboard_kind_measures_a_pointer() {
         m_keys: false,
         macro_record: false,
         change_host: false,
+        power_off_timeout: false,
     });
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
     assert!(
@@ -1360,6 +1376,7 @@ fn tabs_follow_capabilities_not_kind() {
         m_keys: false,
         macro_record: false,
         change_host: false,
+        power_off_timeout: false,
     });
     // After 0x0005 kind-correction the record has kind=Mouse, not Keyboard.
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Mouse, caps));
@@ -1450,6 +1467,7 @@ fn keyboard_without_asset_hides_buttons_tab() {
         m_keys: false,
         macro_record: false,
         change_host: false,
+        power_off_timeout: false,
     });
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
     assert!(
@@ -1487,6 +1505,7 @@ fn keyboard_with_buttons_shows_keys_tab() {
         m_keys: false,
         macro_record: false,
         change_host: false,
+        power_off_timeout: false,
     });
     let keyboard = record(DeviceKind::Keyboard, caps);
     let tabs = DetailTab::tabs_for(&keyboard);
@@ -1580,6 +1599,191 @@ fn a_sidetone_headset_opens_on_the_audio_tab() {
         vec![DetailTab::Audio, DetailTab::Device]
     );
     assert_eq!(DetailTab::default_for(&headset), DetailTab::Audio);
+}
+
+/// A headset with an automatic power-off but no sidetone still needs the
+/// Audio tab: the power-off row lives there.
+#[test]
+fn a_power_off_only_headset_opens_on_the_audio_tab() {
+    let caps = Some(Capabilities {
+        power_off_timeout: true,
+        ..Capabilities::default()
+    });
+    let headset = record(DeviceKind::Headset, caps);
+    assert_eq!(
+        DetailTab::tabs_for(&headset),
+        vec![DetailTab::Audio, DetailTab::Device]
+    );
+    assert_eq!(DetailTab::default_for(&headset), DetailTab::Audio);
+}
+
+/// A G933 has both settings; they share one Audio tab rather than adding a
+/// second.
+#[test]
+fn a_headset_with_sidetone_and_power_off_has_one_audio_tab() {
+    let caps = Some(Capabilities {
+        sidetone: true,
+        power_off_timeout: true,
+        ..Capabilities::default()
+    });
+    let headset = record(DeviceKind::Headset, caps);
+    assert_eq!(
+        DetailTab::tabs_for(&headset),
+        vec![DetailTab::Audio, DetailTab::Device]
+    );
+}
+
+/// Answer the headset reads the state has sent the agent — sidetone at 40 %,
+/// power-off at 15 minutes — and return the power-off writes among them.
+fn answer_headset(
+    commands: &mut tokio::sync::mpsc::UnboundedReceiver<crate::services::ipc::Command>,
+) -> Vec<openlogi_core::hid::PowerOffTimeout> {
+    use openlogi_core::hid::{PowerOffTimeout, SidetoneLevel};
+
+    use crate::services::ipc::{Command, ReadPowerOffTimeout, ReadSidetone, SetPowerOffTimeout};
+
+    let mut written = Vec::new();
+    while let Ok(command) = commands.try_recv() {
+        match command {
+            Command::ReadSidetone(ReadSidetone { reply, .. }) => {
+                let _ = reply.send(Ok(SidetoneLevel::try_new(40).expect("a level")));
+            }
+            Command::ReadPowerOffTimeout(ReadPowerOffTimeout { reply, .. }) => {
+                let _ = reply.send(Ok(PowerOffTimeout::clamped(15)));
+            }
+            Command::SetPowerOffTimeout(SetPowerOffTimeout { timeout, .. }) => {
+                written.push(timeout);
+            }
+            _ => {}
+        }
+    }
+    written
+}
+
+/// Open a G933 — sidetone and automatic power-off — at the largest
+/// interface scale in the smallest main window, with its reads answered.
+fn open_headset_at_125_percent(
+    cx: &mut gpui::TestAppContext,
+) -> (
+    gpui::Entity<super::AppView>,
+    &mut gpui::VisualTestContext,
+    tokio::sync::mpsc::UnboundedReceiver<crate::services::ipc::Command>,
+) {
+    use openlogi_core::config::{Config, UiScale};
+
+    use crate::state::tests::direct_inventory;
+    use crate::windows::main_window::MIN_SIZE;
+
+    let mut inventory = direct_inventory([0x0a, 0x5b, 0x00, 0x01]);
+    inventory.paired[0].kind = DeviceKind::Headset;
+    inventory.paired[0].capabilities = Some(Capabilities {
+        sidetone: true,
+        power_off_timeout: true,
+        ..Capabilities::default()
+    });
+    let mut config = Config::ephemeral();
+    config.app_settings.ui_scale = UiScale::ExtraLarge;
+    let (app_view, cx, mut commands) = open_device_detail_with_commands(cx, inventory, config);
+    // The settings app reads the headset through its device-read service.
+    cx.update(|_, cx| {
+        let runtime: std::sync::Arc<dyn swr_core::Runtime> =
+            std::sync::Arc::new(swr_gpui::GpuiRuntime::new(cx));
+        let client = swr_core::SwrClient::builder().build(runtime.clone());
+        crate::state::AppState::update(cx, |state, _| state.connect_device_reads(client, runtime));
+        crate::state::AppState::load_current_device_reads(cx);
+    });
+    // Answer the reads as they come.
+    for _ in 0..3 {
+        cx.run_until_parked();
+        assert!(
+            answer_headset(&mut commands).is_empty(),
+            "opening the tab writes nothing"
+        );
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+    }
+    cx.simulate_resize(MIN_SIZE);
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert_eq!(
+        cx.update(|window, _| window.rem_size()),
+        crate::ui::theme::rem_size(UiScale::ExtraLarge),
+        "the window renders at 125 %"
+    );
+    (app_view, cx, commands)
+}
+
+/// A G933 at the largest interface scale in the smallest main window: with
+/// the Audio tab scrolled to its end, the last row, the power-off slider,
+/// sits inside the window with the sidetone row above it, and dragging the
+/// slider writes the headset once, on release, not at every step.
+#[gpui::test]
+fn the_power_off_slider_is_reachable_and_writes_only_on_release(cx: &mut gpui::TestAppContext) {
+    use gpui::{Modifiers, MouseButton, ScrollDelta, ScrollEvent, point, px};
+    use openlogi_core::hid::PowerOffTimeout;
+
+    use crate::services::i18n::LOCALE_LOCK;
+    use crate::ui::commit_slider::SliderUnit as _;
+    use crate::windows::main_window::MIN_SIZE;
+
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    let (app_view, cx, mut commands) = open_headset_at_125_percent(cx);
+    let body = cx
+        .debug_bounds("detail-tab-body")
+        .expect("a headset opens on the Audio tab");
+    cx.simulate_event(ScrollEvent {
+        position: point(body.left() + px(8.), body.top() + px(8.)),
+        delta: ScrollDelta::Pixels(point(px(0.), px(-5000.))),
+        ..Default::default()
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        cx.debug_bounds("audio-sidetone-row").is_some(),
+        "the sidetone row shows beside the power-off row"
+    );
+    let row = cx
+        .debug_bounds("audio-power-off-row")
+        .expect("the power-off row shows");
+    assert!(
+        row.bottom() <= MIN_SIZE.height,
+        "the power-off row {row:?} must end inside the {MIN_SIZE:?} window"
+    );
+
+    let slider = cx.update(|_, cx| {
+        app_view
+            .read(cx)
+            .audio_panel
+            .read(cx)
+            .power_off_slider()
+            .cloned()
+            .expect("a read timeout shows the slider")
+    });
+    let bar = cx.update(|_, cx| slider.read(cx).bounds());
+    assert!(
+        bar.bottom() <= MIN_SIZE.height,
+        "the slider {bar:?} must sit inside the {MIN_SIZE:?} window"
+    );
+    let at = |fraction: f32| point(bar.left() + bar.size.width * fraction, bar.center().y);
+    cx.simulate_mouse_down(at(0.25), MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(at(0.5), MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(at(0.7), MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    assert!(
+        answer_headset(&mut commands).is_empty(),
+        "a drag writes nothing until it ends"
+    );
+
+    cx.simulate_mouse_up(at(0.7), MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    let released = cx.update(|_, cx| PowerOffTimeout::from_slider(slider.read(cx).value().end()));
+    assert_ne!(
+        released,
+        PowerOffTimeout::clamped(15),
+        "the drag moved the thumb"
+    );
+    assert_eq!(
+        answer_headset(&mut commands),
+        [released],
+        "the release writes the headset once"
+    );
 }
 
 /// An unprobed (offline) device has no measured capabilities and falls back

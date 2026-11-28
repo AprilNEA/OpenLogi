@@ -8,10 +8,12 @@
 //! the agent owns the device's HID channel and the device leaves this
 //! computer's radio link after the write.
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::Subcommand;
 use openlogi_core::device::DeviceInventory;
+use openlogi_core::single_instance::{self, InstanceGuard, Role};
 use openlogi_hid::{DeviceRoute, dump_features};
+use openlogi_ipc::client::ConnectError;
 
 pub mod battery;
 pub mod controls;
@@ -23,6 +25,7 @@ pub mod lighting;
 pub mod mouse_buttons;
 pub mod onboard;
 pub mod pointer_speed;
+pub mod power_off;
 pub mod sidetone;
 pub mod smartshift;
 pub mod wheel;
@@ -56,6 +59,8 @@ pub enum DiagCmd {
     HostSwitch(host_switch::HostSwitchArgs),
     /// Read a headset's HID++ 0x8300 sidetone level, or set it.
     Sidetone(sidetone::SidetoneArgs),
+    /// Read a headset's HID++ 0x1F20 automatic power-off timeout, or set it.
+    PowerOff(power_off::PowerOffArgs),
     /// Light each HID++ 0x8081 zone of a keyboard alone and record its key.
     Zones(zones::ZonesArgs),
 }
@@ -81,6 +86,7 @@ impl DiagCmd {
             Self::MouseButtons(args) => mouse_buttons::run(args).await,
             Self::HostSwitch(args) => host_switch::run(args).await,
             Self::Sidetone(args) => sidetone::run(args).await,
+            Self::PowerOff(args) => power_off::run(args).await,
             Self::Zones(args) => zones::run(args).await,
         }
     }
@@ -218,6 +224,25 @@ fn no_match_err(devices: &[Candidate], query: Option<&str>) -> anyhow::Error {
 
 /// Pick the device a diag should run against.
 ///
+/// Keep the agent off the hardware for as long as the returned guard lives.
+///
+/// The agent holds a device's channel and may write to it at any time. It
+/// takes this lock before any HID I/O, so a caller that holds the guard to
+/// the end of its run keeps one from starting; the endpoint check catches an
+/// agent that is already up.
+pub(crate) async fn exclude_agent() -> Result<InstanceGuard> {
+    let agent_lock = single_instance::acquire(Role::Agent).context(
+        "could not take the agent's instance lock; quit the OpenLogi agent, then run this again",
+    )?;
+    if !matches!(
+        crate::agent::connect().await,
+        Err(ConnectError::Endpoint(_))
+    ) {
+        bail!("the OpenLogi agent is running; quit it, then run this again");
+    }
+    Ok(agent_lock)
+}
+
 /// Selection order:
 /// 1. If `query` is set, the one online device whose name contains it
 ///    (case-insensitive), as [`select_named_device`] decides — ambiguous

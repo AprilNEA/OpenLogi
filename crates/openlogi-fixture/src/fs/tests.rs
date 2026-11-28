@@ -164,6 +164,46 @@ fn rejects_easy_switch_hosts_the_inventory_capabilities_do_not_advertise() {
 }
 
 #[test]
+fn rejects_a_power_off_timeout_the_inventory_capabilities_do_not_advertise() {
+    let (_temp, fixture) = copied_canonical_fixture();
+    let mut profile: serde_json::Value =
+        serde_json::from_str(CANONICAL_DEVICE_PROFILE_JSON).expect("canonical profile JSON");
+    // Slot 1 is an online mouse whose measured capabilities have no `0x1F20`.
+    profile["settings"][0]["power_off_timeout"] = serde_json::json!({
+        "support": "supported",
+        "value": 15
+    });
+    std::fs::write(
+        fixture.join(PROFILE_FILE),
+        serde_json::to_vec_pretty(&profile).expect("serialize profile"),
+    )
+    .expect("write contradicting power-off timeout");
+    let error = Fixture::load(&fixture).expect_err("a contradicting timeout must fail");
+    assert!(
+        format!("{error:#}")
+            .contains("power-off timeout support does not match inventory capabilities"),
+        "{error:#}"
+    );
+}
+
+#[test]
+fn accepts_an_advertised_power_off_timeout_the_device_refused() {
+    let (_temp, fixture) = copied_canonical_fixture();
+    let mut profile: serde_json::Value =
+        serde_json::from_str(CANONICAL_DEVICE_PROFILE_JSON).expect("canonical profile JSON");
+    // `0x1F20` is listed for the battery, but the device refused function 1,
+    // so the recorder wrote the timeout as unsupported.
+    profile["inventories"][0]["paired"][0]["capabilities"]["power_off_timeout"] = true.into();
+    profile["settings"][0]["power_off_timeout"] = serde_json::json!({ "support": "unsupported" });
+    std::fs::write(
+        fixture.join(PROFILE_FILE),
+        serde_json::to_vec_pretty(&profile).expect("serialize profile"),
+    )
+    .expect("write refused power-off timeout");
+    Fixture::load(&fixture).expect("a refused read is not a contradiction");
+}
+
+#[test]
 fn rejects_unknown_fields_as_schema_failures() {
     let (_temp, fixture) = copied_canonical_fixture();
     let mut profile: serde_json::Value =

@@ -36,6 +36,7 @@ pub(super) fn unsupported_settings(route: DeviceRoute) -> ProfileDeviceSettings 
         force_sensing: ProfileSetting::Unsupported,
         disable_keys: ProfileSetting::Unsupported,
         sidetone: ProfileSetting::Unsupported,
+        power_off_timeout: ProfileSetting::Unsupported,
         lighting: ProfileSupport::Unsupported,
         light: ProfileSupport::Unsupported,
     }

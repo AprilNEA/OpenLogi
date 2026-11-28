@@ -5,8 +5,8 @@ use std::collections::HashSet;
 use openlogi_core::device::{Capabilities, DeviceInventory, LightCapabilities, StandaloneDevice};
 use openlogi_core::hid::{
     BacklightState, BacklightStatus, DIRECT_DEVICE_INDEX, DeviceRoute, DisableKeysState, DpiInfo,
-    EasySwitchHosts, FnLockState, ForceSensingInfo, PointerSpeed, ReportRateInfo, ScrollWheelMode,
-    SidetoneLevel, SmartShiftStatus,
+    EasySwitchHosts, FnLockState, ForceSensingInfo, PointerSpeed, PowerOffTimeout, ReportRateInfo,
+    ScrollWheelMode, SidetoneLevel, SmartShiftStatus,
 };
 use serde::{Deserialize, Deserializer, Serialize, de};
 use thiserror::Error;
@@ -213,6 +213,11 @@ pub struct ProfileDeviceSettings {
     /// profiles recorded before it existed keep loading.
     #[serde(default = "ProfileSetting::unsupported")]
     pub sidetone: ProfileSetting<SidetoneLevel>,
+    /// Headset automatic power-off timeout (`0x1F20` functions `1`/`2`) read
+    /// state. Defaults to unsupported so profiles recorded before it existed
+    /// keep loading.
+    #[serde(default = "ProfileSetting::unsupported")]
+    pub power_off_timeout: ProfileSetting<PowerOffTimeout>,
     /// RGB keyboard-lighting write support.
     pub lighting: ProfileSupport,
     /// Standalone-light command support.
@@ -663,6 +668,7 @@ fn validate_setting_support(
             || settings.force_sensing.supports_feature()
             || settings.disable_keys.supports_feature()
             || settings.sidetone.supports_feature()
+            || settings.power_off_timeout.supports_feature()
             || settings.lighting.is_supported()
         {
             return Err(FixtureError::invalid(
@@ -746,9 +752,29 @@ fn validate_setting_support(
             for (family, declared, advertised) in families {
                 validate_capability_support(settings, family, declared, advertised)?;
             }
+            validate_power_off_timeout_support(settings, &capabilities)?;
         }
     }
     Ok(())
+}
+
+/// `0x1F20` is advertised for the battery too, and a headset that refuses
+/// function `1` reads as unsupported, so only a timeout without the advertised
+/// feature contradicts the inventory.
+fn validate_power_off_timeout_support(
+    settings: &ProfileDeviceSettings,
+    capabilities: &Capabilities,
+) -> Result<(), FixtureError> {
+    if settings.power_off_timeout.supports_feature() {
+        validate_capability_support(
+            settings,
+            "power-off timeout",
+            true,
+            capabilities.power_off_timeout,
+        )
+    } else {
+        Ok(())
+    }
 }
 
 fn validate_capability_support(

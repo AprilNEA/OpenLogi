@@ -20,7 +20,8 @@ use openlogi_core::config::{ConfigRevision, Lighting};
 use openlogi_core::hid::{
     BacklightChange, BacklightState, DeviceRoute, DisableKeysMask, DisableKeysState, Dpi, DpiInfo,
     EasySwitchHosts, FnLockState, ForceSensingInfo, LightCommand, OnboardState, PointerSpeed,
-    ReceiverSelector, ReportRate, ReportRateInfo, SidetoneLevel, SmartShiftStatus, WriteError,
+    PowerOffTimeout, ReceiverSelector, ReportRate, ReportRateInfo, SidetoneLevel, SmartShiftStatus,
+    WriteError,
 };
 use openlogi_ipc::{
     AgentClient, ChosenLight, ConfigReloadError, FlowPairTarget, FlowPairingCommandError,
@@ -254,6 +255,35 @@ impl Request for SetSidetone {
     fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
         let _ = updates.send(GuiUpdate::SidetoneWritten {
             key: self.key,
+            result: or_unavailable(outcome),
+        });
+    }
+}
+
+/// Write a headset's automatic power-off timeout now, answered as
+/// [`GuiUpdate::PowerOffTimeoutWritten`] with the timeout the headset confirms.
+pub struct SetPowerOffTimeout {
+    pub route: DeviceRoute,
+    pub timeout: PowerOffTimeout,
+    pub key: DeviceKey,
+    /// The number the state gave this write, returned with the answer so it
+    /// is matched to the write it answers.
+    pub write: u64,
+}
+
+impl Request for SetPowerOffTimeout {
+    type Answer = Result<PowerOffTimeout, WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .set_power_off_timeout(context::current(), self.route.clone(), self.timeout)
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        let _ = updates.send(GuiUpdate::PowerOffTimeoutWritten {
+            key: self.key,
+            write: self.write,
             result: or_unavailable(outcome),
         });
     }
@@ -582,6 +612,27 @@ impl Request for ReadSidetone {
     async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
         client
             .read_sidetone(context::current(), self.route.clone())
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, _: &UpdateSender) {
+        let _ = self.reply.send(or_unavailable(outcome));
+    }
+}
+
+/// Read a headset's automatic power-off timeout; the answer goes back over
+/// `reply`.
+pub struct ReadPowerOffTimeout {
+    pub route: DeviceRoute,
+    pub reply: oneshot::Sender<Result<PowerOffTimeout, WriteError>>,
+}
+
+impl Request for ReadPowerOffTimeout {
+    type Answer = Result<PowerOffTimeout, WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .read_power_off_timeout(context::current(), self.route.clone())
             .await
     }
 
@@ -1150,6 +1201,7 @@ commands! {
     SetReportRate,
     SetPointerSpeed,
     SetSidetone,
+    SetPowerOffTimeout,
     SetForceSensing,
     SetBacklight,
     RenameEasySwitchHost,
@@ -1159,6 +1211,7 @@ commands! {
     ReadReportRate,
     ReadPointerSpeed,
     ReadSidetone,
+    ReadPowerOffTimeout,
     ReadForceSensing,
     ReadBacklight,
     ReadEasySwitchHosts,

@@ -50,9 +50,10 @@ use openlogi_core::hid::{
     BacklightStatus, Click, DeviceRoute, DisableKeysMask, DisableKeysState, Dpi, DpiCapabilities,
     DpiInfo, EasySwitchHosts, EasySwitchSlot, FnLockState, ForceSensingInfo, HidppFeatureErrorKind,
     HidppOperation, HostConnection, HostOsInfo, HostOsKind, LightCommand, OnboardMode,
-    OnboardProfile, OnboardState, PasskeyMethod, ProfileIndex, ReceiverSelector, ReportRate,
-    ReportRateInfo, ScrollReportingTarget, ScrollWheelMode, SidetoneLevel, SmartShiftAutoDisengage,
-    SmartShiftMode, SmartShiftStatus, SmartShiftThreshold, TunableTorque, WriteError,
+    OnboardProfile, OnboardState, PasskeyMethod, PowerOffTimeout, ProfileIndex, ReceiverSelector,
+    ReportRate, ReportRateInfo, ScrollReportingTarget, ScrollWheelMode, SidetoneLevel,
+    SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, SmartShiftThreshold, TunableTorque,
+    WriteError,
 };
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
@@ -119,7 +120,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// unreleased version and leave this pin alone (`crates/openlogi-ipc/AGENTS.md`).
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 46);
+    assert_eq!(PROTOCOL_VERSION, 47);
 }
 
 #[test]
@@ -404,6 +405,32 @@ fn sidetone_calls() {
         "3202fb6d04fbc40a28",
     );
     assert_wire(&AgentResponse::SetSidetone(Ok(level)), "320028");
+}
+
+/// The power-off timeout calls are appended last, and carry the timeout in
+/// minutes as one byte.
+#[test]
+fn power_off_timeout_calls() {
+    let route = DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0x0a5b,
+    };
+    let timeout = PowerOffTimeout::try_new(30).expect("a timeout in range");
+    assert_wire(&HidppOperation::ReadPowerOffTimeout, "21");
+    assert_wire(&HidppOperation::WritePowerOffTimeout, "22");
+    assert_wire(&timeout, "1e");
+    assert_wire(&Ok::<PowerOffTimeout, WriteError>(timeout), "001e");
+    assert_wire(
+        &AgentRequest::ReadPowerOffTimeout {
+            route: route.clone(),
+        },
+        "3a02fb6d04fb5b0a",
+    );
+    assert_wire(
+        &AgentRequest::SetPowerOffTimeout { route, timeout },
+        "3b02fb6d04fb5b0a1e",
+    );
+    assert_wire(&AgentResponse::SetPowerOffTimeout(Ok(timeout)), "3b001e");
 }
 
 /// The overlay long-polls the backlight indicator by generation, like
@@ -975,6 +1002,7 @@ fn device_inventory() {
                 m_keys: false,
                 macro_record: false,
                 change_host: false,
+                power_off_timeout: true,
             }),
             settings_revision: 7,
             hidpp10: false,
@@ -982,7 +1010,7 @@ fn device_inventory() {
     }];
     assert_wire(
         &inventory,
-        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b01010100000101010101000101010101010100000001000000000700",
+        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b0101010000010101010100010101010101010000000100000000010700",
     );
 }
 

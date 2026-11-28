@@ -19,7 +19,8 @@ use openlogi_core::config::{
 use openlogi_core::device::LightCapabilities;
 use openlogi_core::hid::{
     BacklightChange, BacklightState, DisableKeysMask, DisableKeysState, Dpi, LightCommand,
-    SidetoneLevel, SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, WriteError,
+    PowerOffTimeout, SidetoneLevel, SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus,
+    WriteError,
 };
 use rust_i18n::t;
 
@@ -27,6 +28,9 @@ use super::{DeviceRow, DeviceState};
 
 /// The sidetone levels the submenu offers, in percent.
 const SIDETONE_LEVELS: [u8; 5] = [0, 25, 50, 75, 100];
+/// The automatic power-off timeouts the submenu offers, in minutes; 0 is
+/// never.
+const POWER_OFF_TIMEOUTS: [u8; 6] = [0, 5, 15, 30, 60, 90];
 /// The brightness levels the submenu offers a light, in percent of its range.
 const LIGHT_BRIGHTNESS_LEVELS: [u8; 4] = [25, 50, 75, 100];
 
@@ -57,6 +61,9 @@ pub struct Controls {
     pub disable_keys: bool,
     /// Whether the headset plays the microphone back.
     pub sidetone: bool,
+    /// Whether the headset switches itself off after an adjustable idle
+    /// time.
+    pub power_off_timeout: bool,
     /// The controls of a standalone light.
     pub light: Option<LightCapabilities>,
 }
@@ -160,6 +167,8 @@ pub struct Reading {
     pub disabled_keys: Read<DisableKeysState>,
     /// Its sidetone.
     pub sidetone: Read<SidetoneLevel>,
+    /// Its automatic power-off timeout.
+    pub power_off_timeout: Read<PowerOffTimeout>,
 }
 
 impl Reading {
@@ -180,6 +189,11 @@ impl Reading {
             fresh.disabled_keys,
         );
         take(reads.sidetone, &mut self.sidetone, fresh.sidetone);
+        take(
+            reads.power_off_timeout,
+            &mut self.power_off_timeout,
+            fresh.power_off_timeout,
+        );
     }
 
     /// Take a change the device and config just took, so the next opening
@@ -200,6 +214,7 @@ impl Reading {
                 }
             }
             Change::Sidetone(level) => self.sidetone = Read::Value(level),
+            Change::PowerOffTimeout(timeout) => self.power_off_timeout = Read::Value(timeout),
             // The snapshot and the reloaded config carry these.
             Change::Managed(_) | Change::Light(_) => {}
         }
@@ -268,6 +283,8 @@ pub struct Reads {
     pub disabled_keys: bool,
     /// Its sidetone.
     pub sidetone: bool,
+    /// Its automatic power-off timeout.
+    pub power_off_timeout: bool,
 }
 
 impl Reads {
@@ -280,6 +297,7 @@ impl Reads {
             || self.backlight
             || self.disabled_keys
             || self.sidetone
+            || self.power_off_timeout
     }
 
     /// The reads in either.
@@ -291,6 +309,7 @@ impl Reads {
             backlight: self.backlight || other.backlight,
             disabled_keys: self.disabled_keys || other.disabled_keys,
             sidetone: self.sidetone || other.sidetone,
+            power_off_timeout: self.power_off_timeout || other.power_off_timeout,
         }
     }
 
@@ -303,6 +322,7 @@ impl Reads {
             backlight: self.backlight && !other.backlight,
             disabled_keys: self.disabled_keys && !other.disabled_keys,
             sidetone: self.sidetone && !other.sidetone,
+            power_off_timeout: self.power_off_timeout && !other.power_off_timeout,
         }
     }
 }
@@ -318,6 +338,7 @@ impl Change {
             Self::Backlight(_) => reads.backlight = true,
             Self::DisabledKeys(_) => reads.disabled_keys = true,
             Self::Sidetone(_) => reads.sidetone = true,
+            Self::PowerOffTimeout(_) => reads.power_off_timeout = true,
             Self::Managed(_) | Self::Light(_) => {}
         }
         reads
@@ -341,6 +362,8 @@ pub enum Change {
     DisabledKeys(DisableKeysMask),
     /// Set the sidetone.
     Sidetone(SidetoneLevel),
+    /// Set the automatic power-off timeout.
+    PowerOffTimeout(PowerOffTimeout),
     /// Have the light take the command and save it.
     Light(LightCommand),
 }
@@ -516,6 +539,7 @@ impl DeviceRow {
             backlight: controls.backlight,
             disabled_keys: controls.disable_keys,
             sidetone: controls.sidetone,
+            power_off_timeout: controls.power_off_timeout,
         }
     }
 
@@ -539,6 +563,7 @@ impl DeviceRow {
         groups.push(self.keyboard_group(reading));
         groups.push(self.disabled_keys_group(reading));
         groups.push(self.sidetone_group(reading));
+        groups.push(self.power_off_group(reading));
         if let Some(capabilities) = self.controls.light {
             groups.extend(self.light_groups(capabilities));
         }
@@ -584,6 +609,7 @@ impl DeviceRow {
             (reads.backlight, reading.backlight.state()),
             (reads.disabled_keys, reading.disabled_keys.state()),
             (reads.sidetone, reading.sidetone.state()),
+            (reads.power_off_timeout, reading.power_off_timeout.state()),
         ];
         if memory.reading_now() && answers.contains(&(true, Read::Unread)) {
             status.push(Entry::Note(t!("tray.reading").into_owned()));
@@ -731,6 +757,38 @@ impl DeviceRow {
             },
             checked: read.is_some_and(|level| level.percent() == percent),
             change: read.and_then(|_| self.live(Change::Sidetone(SidetoneLevel::clamped(percent)))),
+        }));
+        group
+    }
+
+    fn power_off_group(&self, reading: &Reading) -> Vec<Entry> {
+        if !self.controls.power_off_timeout
+            || reading.power_off_timeout.state() == Read::Unsupported
+        {
+            return Vec::new();
+        }
+        let read = reading.power_off_timeout.value();
+        // The settings app sets any minute; one between the steps joins them
+        // in its place, so the checkmark always shows what the headset holds.
+        let between = read
+            .map(PowerOffTimeout::minutes)
+            .filter(|minutes| !POWER_OFF_TIMEOUTS.contains(minutes));
+        let mut steps = POWER_OFF_TIMEOUTS.to_vec();
+        if let Some(minutes) = between {
+            steps.insert(steps.partition_point(|&step| step < minutes), minutes);
+        }
+        let mut group = vec![Entry::Header(t!("audio.power_off").into_owned())];
+        group.extend(steps.into_iter().map(|minutes| Entry::Choice {
+            title: if minutes == 0 {
+                t!("audio.power_off_never").into_owned()
+            } else {
+                t!("audio.power_off_minutes", minutes => minutes).into_owned()
+            },
+            checked: read.is_some_and(|timeout| timeout.minutes() == minutes),
+            // Picking the timeout between the steps again would change nothing.
+            change: read.filter(|_| between != Some(minutes)).and_then(|_| {
+                self.live(Change::PowerOffTimeout(PowerOffTimeout::clamped(minutes)))
+            }),
         }));
         group
     }

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use openlogi_core::hid::{
     BacklightState, DisableKeysState, DpiInfo, EasySwitchHosts, FnLockState, ForceSensingInfo,
-    OnboardState, PointerSpeed, ReportRateInfo, SidetoneLevel, SmartShiftStatus,
+    OnboardState, PointerSpeed, PowerOffTimeout, ReportRateInfo, SidetoneLevel, SmartShiftStatus,
 };
 
 /// State projected from an swr-backed device query: unqueried, in flight,
@@ -53,6 +53,9 @@ pub type PointerSpeedLoad = Load<Arc<PointerSpeed>>;
 /// Per-headset sidetone (`0x8300`) load state. See [`Load`]. The headset
 /// stores the level itself, so the read is the only record.
 pub type SidetoneLoad = Load<Arc<SidetoneLevel>>;
+/// Per-headset automatic power-off (`0x1F20`) load state. See [`Load`]. The
+/// headset stores the timeout itself, so the read is the only record.
+pub type PowerOffTimeoutLoad = Load<Arc<PowerOffTimeout>>;
 /// Per-device press-force (`0x19c0`) load state. See [`Load`]. The read is
 /// the force the button clicks at now, the range the device accepts, and
 /// whether software may change it.

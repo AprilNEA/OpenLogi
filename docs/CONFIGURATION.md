@@ -39,8 +39,8 @@ is saved and the device's submenu says so; choose the change again. The agent
 then reloads the file, and an open GUI picks up the change without a relaunch.
 A sleeping mouse's DPI preset and wheel mode, and whether OpenLogi manages a
 device, are saved and applied when the device reconnects; the other menu
-controls need the device online. The backlight and sidetone stay on the device
-and are not saved.
+controls need the device online. The backlight, the sidetone and a headset's
+automatic power-off timeout stay on the device and are not saved.
 
 Schema versions newer than the running build are rejected before their fields
 are parsed. v1 binding maps and the v2–v3 gesture-owner layout migrate on load.

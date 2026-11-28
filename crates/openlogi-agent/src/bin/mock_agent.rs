@@ -68,8 +68,9 @@ use openlogi_core::single_instance::{self, InstanceError, Role};
 use openlogi_fixture::{DeviceProfile, FixtureError, ProfileDeviceSettings, ProfileSetting};
 use openlogi_hid::{
     BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
-    ForceSensingInfo, LightCommand, OnboardState, PasskeyMethod, PointerSpeed, ReceiverSelector,
-    ReportRate, ReportRateInfo, ScrollWheelMode, SidetoneLevel, SmartShiftStatus, WriteError,
+    ForceSensingInfo, LightCommand, OnboardState, PasskeyMethod, PointerSpeed, PowerOffTimeout,
+    ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode, SidetoneLevel, SmartShiftStatus,
+    WriteError,
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
@@ -1602,6 +1603,32 @@ impl Agent for MockAgent {
         _session_id: u64,
     ) -> Result<(), ActionRingCommandError> {
         Err(ActionRingCommandError::SessionNotFound)
+    }
+    async fn read_power_off_timeout(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<PowerOffTimeout, WriteError> {
+        let state = self.state.lock().await;
+        profile_value(
+            &state.settings_for(&route)?.power_off_timeout,
+            &route,
+            0x1f20,
+        )
+        .copied()
+    }
+    async fn set_power_off_timeout(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        timeout: PowerOffTimeout,
+    ) -> Result<PowerOffTimeout, WriteError> {
+        let mut state = self.state.lock().await;
+        let settings = state.settings_for_mut(&route)?;
+        let stored = profile_value_mut(&mut settings.power_off_timeout, &route, 0x1f20)?;
+        *stored = timeout;
+        info!(%route, %timeout, "set_power_off_timeout");
+        Ok(timeout)
     }
 }
 

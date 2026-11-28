@@ -19,6 +19,7 @@ pub mod light;
 pub mod onboard;
 pub mod pairing;
 pub mod pointer_speed;
+pub mod power_off_timeout;
 pub mod report_rate;
 pub mod route;
 pub mod scroll;
@@ -39,6 +40,7 @@ pub use light::{LightCommand, commands_for_light_settings};
 pub use onboard::{OnboardMode, OnboardProfile, OnboardState, ProfileIndex};
 pub use pairing::{Click, PairingError, PasskeyMethod, ReceiverSelector};
 pub use pointer_speed::PointerSpeed;
+pub use power_off_timeout::PowerOffTimeout;
 pub use report_rate::{ReportRate, ReportRateInfo};
 pub use route::{
     DIRECT_DEVICE_INDEX, DeviceRoute, KeypadDescriptor, LOGITECH_VENDOR_ID, RECEIVERS,

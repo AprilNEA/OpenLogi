@@ -10,8 +10,8 @@ use openlogi_core::device::DeviceInventory;
 use openlogi_core::hid::{
     BacklightChange, BacklightControls, BacklightMode, BacklightState, BacklightStatus,
     DisableKeysMask, DisableKeysState, Dpi, DpiInfo, EasySwitchHosts, EasySwitchSlot, FnLockState,
-    ForceSensingInfo, HostConnection, LightCommand, PasskeyMethod, PointerSpeed, ReceiverSelector,
-    ReportRate, ReportRateInfo, ScrollWheelMode, SidetoneLevel, SmartShiftStatus,
+    ForceSensingInfo, HostConnection, LightCommand, PasskeyMethod, PointerSpeed, PowerOffTimeout,
+    ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode, SidetoneLevel, SmartShiftStatus,
 };
 use openlogi_fixture::{
     CANONICAL_DEVICE_PROFILE_JSON, SyntheticIdentityKind, classify_synthetic_identity_bytes,
@@ -49,6 +49,7 @@ enum ReadFamily {
     ForceSensing,
     DisableKeys,
     Sidetone,
+    PowerOffTimeout,
 }
 
 #[derive(Clone)]
@@ -525,6 +526,28 @@ impl Agent for TestAgent {
         _level: SidetoneLevel,
     ) -> Result<SidetoneLevel, WriteError> {
         unreachable!("profile capture must never write the sidetone")
+    }
+
+    async fn read_power_off_timeout(
+        self,
+        _: TarpcContext,
+        route: DeviceRoute,
+    ) -> Result<PowerOffTimeout, WriteError> {
+        self.read(
+            ReadFamily::PowerOffTimeout,
+            &route,
+            |settings| &settings.power_off_timeout,
+            0x1f20,
+        )
+    }
+
+    async fn set_power_off_timeout(
+        self,
+        _: TarpcContext,
+        _route: DeviceRoute,
+        _timeout: PowerOffTimeout,
+    ) -> Result<PowerOffTimeout, WriteError> {
+        unreachable!("profile capture must never write the power-off timeout")
     }
 
     async fn read_disable_keys(
@@ -1178,6 +1201,84 @@ async fn capture_reads_the_press_force_of_a_force_sensing_mouse() {
         .find_map(|settings| settings.force_sensing.value())
         .expect("captured press force");
     assert_eq!(*captured, force);
+}
+
+/// Advertise `0x1F20` on the synthetic mouse, which stands in for a headset:
+/// the capture keys on the capability, not the kind. Give it `timeout` as
+/// its power-off setting.
+fn power_off_agent(timeout: ProfileSetting<PowerOffTimeout>) -> TestAgent {
+    fixture_agent_with(move |profile| {
+        let mouse = profile.inventories[0]
+            .paired
+            .iter_mut()
+            .find(|device| device.slot == 1)
+            .expect("mouse");
+        mouse
+            .capabilities
+            .as_mut()
+            .expect("mouse capabilities")
+            .power_off_timeout = true;
+        let settings = profile
+            .settings
+            .iter_mut()
+            .find(|settings| matches!(settings.route, DeviceRoute::Bolt { slot: 1, .. }))
+            .expect("mouse settings");
+        settings.power_off_timeout = timeout;
+    })
+}
+
+async fn captured_power_off_timeout(
+    agent: TestAgent,
+) -> (ProfileSetting<PowerOffTimeout>, Vec<ReadFamily>) {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let output = directory.path().join("profile.json");
+    let inspection = agent.clone();
+    capture_connected(
+        args(output.clone(), Some("synthetic performance mouse")),
+        test_client(agent),
+    )
+    .await
+    .expect("semantic capture succeeds");
+    let profile: DeviceProfile =
+        serde_json::from_slice(&std::fs::read(output).expect("profile output"))
+            .expect("typed profile");
+    profile.validate().expect("published profile validates");
+    let setting = profile
+        .settings
+        .iter()
+        .find(|settings| matches!(settings.route, DeviceRoute::Bolt { slot: 1, .. }))
+        .expect("mouse settings")
+        .power_off_timeout
+        .clone();
+    let families = inspection
+        .calls
+        .lock()
+        .expect("calls lock")
+        .iter()
+        .map(|(family, _)| *family)
+        .collect();
+    (setting, families)
+}
+
+#[tokio::test]
+async fn capture_reads_the_power_off_timeout_when_advertised() {
+    let timeout = PowerOffTimeout::try_new(15).expect("a timeout in range");
+    let (setting, families) =
+        captured_power_off_timeout(power_off_agent(ProfileSetting::Supported(timeout))).await;
+
+    assert!(families.contains(&ReadFamily::PowerOffTimeout));
+    assert_eq!(setting, ProfileSetting::Supported(timeout));
+}
+
+#[tokio::test]
+async fn a_refused_power_off_read_is_recorded_unsupported() {
+    // `0x1F20` is listed for the battery, but the device refuses function 1,
+    // which the agent answers as an unsupported feature.
+    let (setting, families) =
+        captured_power_off_timeout(power_off_agent(ProfileSetting::Unsupported)).await;
+
+    assert!(families.contains(&ReadFamily::PowerOffTimeout));
+    assert_eq!(setting, ProfileSetting::Unsupported);
 }
 
 #[tokio::test]

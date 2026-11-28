@@ -12,6 +12,12 @@
 //! the link changes, which
 //! [`AdcMeasurementFeature::is_status_broadcast`] recognizes.
 //!
+//! Functions `1` and `2` read and write the headset's automatic power-off
+//! timeout in minutes, `0` meaning never. Solaar (`ADCPower`) documents them
+//! for version 2 and later; a G933 (`046d:0a5b`) answers both at version 0
+//! (measured on the device). A device that reports the feature without them
+//! answers function `1` with a HID++ error.
+//!
 //! The wire layout is not in a public Logitech spec: the voltage as a
 //! big-endian millivolt `u16` followed by one flags byte was
 //! reverse-engineered. The flag values follow the Linux kernel
@@ -62,6 +68,26 @@ impl AdcMeasurementFeature {
             Err(Hidpp20Error::Feature(ErrorType::LogitechInternal)) => Ok(AdcMeasurement::Unlinked),
             Err(e) => Err(e),
         }
+    }
+
+    /// Reads the automatic power-off timeout in minutes, `0` meaning never
+    /// (function `1`).
+    pub async fn get_power_off_timeout(&self) -> Result<u8, Hidpp20Error> {
+        Ok(self.endpoint.call(1, [0; 3]).await?.extend_payload()[0])
+    }
+
+    /// Sets the automatic power-off timeout in minutes, `0` meaning never
+    /// (function `2`), and returns the timeout the device echoes.
+    ///
+    /// The echo is the confirmation to use, as with the sidetone level: a
+    /// G933 echoes the value it stored, and reads it back afterwards
+    /// (measured on the device).
+    pub async fn set_power_off_timeout(&self, minutes: u8) -> Result<u8, Hidpp20Error> {
+        Ok(self
+            .endpoint
+            .call(2, [minutes, 0, 0])
+            .await?
+            .extend_payload()[0])
     }
 }
 
@@ -121,8 +147,79 @@ pub enum AdcChargingStatus {
 
 #[cfg(test)]
 mod tests {
-    use super::{AdcChargingStatus, AdcMeasurement};
-    use crate::protocol::v20::Hidpp20Error;
+    use std::sync::Arc;
+
+    use super::{AdcChargingStatus, AdcMeasurement, AdcMeasurementFeature};
+    use crate::{
+        channel::{
+            HidppMessage,
+            mock::{MockRawHidChannel, MockRawHidHandle, channel_with_reader},
+        },
+        feature::CreatableFeature,
+        nibble::U4,
+        protocol::v20::{ErrorType, Hidpp20Error, Message, MessageHeader},
+    };
+
+    /// The `0x1F20` feature index on a G933.
+    const ADC_INDEX: u8 = 8;
+
+    async fn device() -> (AdcMeasurementFeature, MockRawHidHandle) {
+        let (raw, handle) = MockRawHidChannel::new();
+        let channel = Arc::new(channel_with_reader(raw).await);
+        (AdcMeasurementFeature::new(channel, 0xff, ADC_INDEX), handle)
+    }
+
+    fn reply(function: u8, minutes: u8) -> Message {
+        let header = MessageHeader {
+            device_index: 0xff,
+            feature_index: ADC_INDEX,
+            function_id: U4::from_lo(function),
+            software_id: U4::from_lo(1),
+        };
+        Message::Short(header, [minutes, 0, 0])
+    }
+
+    #[test]
+    fn reads_the_power_off_timeout_with_function_one() {
+        futures::executor::block_on(async {
+            let (feature, handle) = device().await;
+            // A G933 set to 15 minutes answers `0f`.
+            handle.queue_response(reply(1, 0x0f).into());
+            assert_eq!(feature.get_power_off_timeout().await.unwrap(), 15);
+            assert_eq!(
+                handle.written_reports(),
+                [vec![0x10, 0xff, ADC_INDEX, 0x11, 0, 0, 0]]
+            );
+        });
+    }
+
+    #[test]
+    fn a_power_off_write_returns_the_timeout_the_device_echoes() {
+        futures::executor::block_on(async {
+            let (feature, handle) = device().await;
+            // The G933 echoed `1e` for a 30-minute write.
+            handle.queue_response(reply(2, 0x1e).into());
+            assert_eq!(feature.set_power_off_timeout(30).await.unwrap(), 30);
+            assert_eq!(
+                handle.written_reports(),
+                [vec![0x10, 0xff, ADC_INDEX, 0x21, 30, 0, 0]]
+            );
+        });
+    }
+
+    #[test]
+    fn a_device_without_the_power_off_functions_answers_an_error() {
+        futures::executor::block_on(async {
+            let (feature, handle) = device().await;
+            // The device rejects feature 8, function/software byte 0x11,
+            // with INVALID_FUNCTION_ID (0x07).
+            handle.queue_response(HidppMessage::Short([0xff, 0xff, ADC_INDEX, 0x11, 0x07, 0]));
+            assert!(matches!(
+                feature.get_power_off_timeout().await,
+                Err(Hidpp20Error::Feature(ErrorType::InvalidFunctionId))
+            ));
+        });
+    }
 
     /// Builds a 16-byte payload from the 3 meaningful bytes.
     fn payload(voltage_mv: u16, flags: u8) -> [u8; 16] {

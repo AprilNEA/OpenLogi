@@ -13,7 +13,9 @@ use std::rc::Rc;
 use gpui::{App, AppContext as _, Context, Entity, Subscription, Window};
 use gpui_kit::component::slider::{SliderEvent, SliderState};
 use openlogi_core::config::{ThumbwheelSensitivity, VerticalScrollSensitivity};
-use openlogi_core::hid::{Dpi, PointerSpeed, SidetoneLevel, SmartShiftThreshold, TunableTorque};
+use openlogi_core::hid::{
+    Dpi, PointerSpeed, PowerOffTimeout, SidetoneLevel, SmartShiftThreshold, TunableTorque,
+};
 
 /// A value a slider thumb can rest on.
 pub(crate) trait SliderUnit: Copy + PartialEq + 'static {
@@ -88,6 +90,17 @@ impl SliderUnit for PointerSpeed {
 impl SliderUnit for SidetoneLevel {
     fn to_slider(self) -> f32 {
         f32::from(self.percent())
+    }
+
+    fn from_slider(raw: f32) -> Self {
+        Self::clamped(u8::from_slider(raw))
+    }
+}
+
+/// An automatic power-off timeout rests on whole minutes, `0` being never.
+impl SliderUnit for PowerOffTimeout {
+    fn to_slider(self) -> f32 {
+        f32::from(self.minutes())
     }
 
     fn from_slider(raw: f32) -> Self {

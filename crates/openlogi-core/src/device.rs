@@ -247,6 +247,13 @@ pub struct Capabilities {
     /// identity.
     #[serde(default)]
     pub change_host: bool,
+    /// A headset's automatic power-off timeout can be read and changed —
+    /// functions `1`/`2` of HID++ `0x1F20 AdcMeasurement`. The feature
+    /// table cannot say whether a device answers them, so a read that the
+    /// device refuses reports the setting unsupported. Appended after
+    /// `change_host`: crosses the IPC and the persisted identity.
+    #[serde(default)]
+    pub power_off_timeout: bool,
 }
 
 impl Capabilities {
@@ -307,6 +314,7 @@ impl Capabilities {
             m_keys: ids.contains(&0x8020),
             macro_record: ids.contains(&0x8030),
             change_host: ids.contains(&0x1814),
+            power_off_timeout: ids.contains(&0x1f20),
         }
     }
 
@@ -937,6 +945,7 @@ mod tests {
                     m_keys: false,
                     macro_record: false,
                     change_host: false,
+                    power_off_timeout: false,
                 }),
                 settings_revision: 0,
                 hidpp10: false,
@@ -1066,6 +1075,7 @@ mod tests {
                 m_keys: false,
                 macro_record: false,
                 change_host: false,
+                power_off_timeout: false,
             }
         );
         assert!(!Capabilities::from_feature_ids(&[0x0003, 0x1b04]).thumbwheel);
@@ -1099,6 +1109,7 @@ mod tests {
                 m_keys: false,
                 macro_record: false,
                 change_host: false,
+                power_off_timeout: false,
             }
         );
         // A G713: the gaming-key features and onboard profiles, no
@@ -1140,6 +1151,10 @@ mod tests {
         // The G535's table: sidetone, and battery through 0x1f20.
         let headset = Capabilities::from_feature_ids(&[0x0001, 0x0003, 0x0005, 0x8300, 0x1f20]);
         assert!(headset.sidetone && !headset.buttons && !headset.pointer);
+        // 0x1f20 offers the power-off timeout until a read finds the device
+        // does not answer it; 0x8300 alone does not.
+        assert!(headset.power_off_timeout);
+        assert!(!Capabilities::from_feature_ids(&[0x0001, 0x8300]).power_off_timeout);
     }
 
     #[test]

@@ -573,9 +573,9 @@ mod controls {
     use openlogi_core::device_order::{DeviceStableId, PhysicalDeviceKey};
     use openlogi_core::hid::{
         BacklightChange, BacklightControls, BacklightMode, BacklightState, BacklightStatus,
-        DeviceRoute, DisableKeysMask, DisableKeysState, Dpi, LightCommand, SidetoneLevel,
-        SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, SmartShiftThreshold,
-        TunableTorque, WriteError,
+        DeviceRoute, DisableKeysMask, DisableKeysState, Dpi, LightCommand, PowerOffTimeout,
+        SidetoneLevel, SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus,
+        SmartShiftThreshold, TunableTorque, WriteError,
     };
     use openlogi_ipc::{AgentSnapshot, ObservedLight};
 
@@ -1112,6 +1112,80 @@ mod controls {
                 .iter()
                 .all(|(.., change)| change.is_none())
         );
+    }
+
+    #[test]
+    fn a_headset_offers_six_power_off_timeouts_while_it_answers() {
+        let capabilities = Capabilities {
+            power_off_timeout: true,
+            ..Capabilities::default()
+        };
+        let headset = bolt_device(DeviceKind::Headset, capabilities, true);
+        let row = row(headset, &Config::default());
+        assert_eq!(
+            row.reads(),
+            Reads {
+                power_off_timeout: true,
+                ..Reads::default()
+            },
+            "opening the submenu reads the timeout"
+        );
+        let mut memory = DeviceMemory::default();
+        memory.reading.power_off_timeout = Read::Value(PowerOffTimeout::clamped(15));
+        let entries = row.entries(&memory);
+        assert_eq!(headers(&entries), ["Automatic power-off"]);
+        let timeout = |minutes| Some(Change::PowerOffTimeout(PowerOffTimeout::clamped(minutes)));
+        assert_eq!(
+            choices(&entries),
+            [
+                ("Never".to_owned(), false, timeout(0)),
+                ("5 min".to_owned(), false, timeout(5)),
+                ("15 min".to_owned(), true, timeout(15)),
+                ("30 min".to_owned(), false, timeout(30)),
+                ("60 min".to_owned(), false, timeout(60)),
+                ("90 min".to_owned(), false, timeout(90)),
+            ],
+            "a headset is not managed, so the timeout is all it offers"
+        );
+
+        // A change the headset echoed shows at the next opening.
+        memory.changed(Ok(Some(Change::PowerOffTimeout(PowerOffTimeout::NEVER))));
+        let entries = row.entries(&memory);
+        assert_eq!(choice(&entries, "Never"), (true, timeout(0)));
+
+        // The settings app sets any minute. A timeout between the steps still
+        // shows, checked in its place, so the menu never hides what the
+        // headset holds; picking it again would change nothing, so it is
+        // greyed out.
+        memory.reading.power_off_timeout = Read::Value(PowerOffTimeout::clamped(20));
+        let entries = row.entries(&memory);
+        assert_eq!(
+            choices(&entries),
+            [
+                ("Never".to_owned(), false, timeout(0)),
+                ("5 min".to_owned(), false, timeout(5)),
+                ("15 min".to_owned(), false, timeout(15)),
+                ("20 min".to_owned(), true, None),
+                ("30 min".to_owned(), false, timeout(30)),
+                ("60 min".to_owned(), false, timeout(60)),
+                ("90 min".to_owned(), false, timeout(90)),
+            ]
+        );
+
+        // Unread or unanswered, nothing can be changed: there is no saved
+        // timeout to fall back on.
+        memory.reading.power_off_timeout = Read::Failed;
+        let entries = row.entries(&memory);
+        assert_eq!(notes(&entries), ["Couldn't read the device."]);
+        assert!(
+            choices(&entries)
+                .iter()
+                .all(|(_, checked, change)| !checked && change.is_none())
+        );
+
+        // A headset that lists the feature but refuses the read hides it.
+        memory.reading.power_off_timeout = Read::Unsupported;
+        assert!(row.entries(&memory).is_empty());
     }
 
     /// A Litra Glow, plugged in.

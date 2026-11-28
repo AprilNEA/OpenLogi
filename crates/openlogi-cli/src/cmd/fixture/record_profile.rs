@@ -350,6 +350,13 @@ async fn capture_hidpp_settings(
         agent::call(client.read_sidetone(context::current(), source_route.clone()))
     })
     .await?;
+    let power_off_timeout = gated_read(
+        "power-off timeout",
+        device.online,
+        capabilities.power_off_timeout,
+        || agent::call(client.read_power_off_timeout(context::current(), source_route.clone())),
+    )
+    .await?;
 
     Ok(ProfileDeviceSettings {
         route: profile_route,
@@ -364,6 +371,7 @@ async fn capture_hidpp_settings(
         force_sensing,
         disable_keys,
         sidetone,
+        power_off_timeout,
         lighting: profile_support(capabilities.lighting),
         light: ProfileSupport::Unsupported,
     })
@@ -446,6 +454,7 @@ fn capture_standalone(source: &StandaloneDevice) -> Result<ProfileCaptureParts> 
         force_sensing: ProfileSetting::Unsupported,
         disable_keys: ProfileSetting::Unsupported,
         sidetone: ProfileSetting::Unsupported,
+        power_off_timeout: ProfileSetting::Unsupported,
         lighting: ProfileSupport::Unsupported,
         light: profile_support(light_supported),
     };
