@@ -429,7 +429,15 @@ fn reconcile_item(current: &mut Item, generated: &Item) {
         return;
     }
     let decor = current.as_value().map(|value| value.decor().clone());
-    *current = generated.clone();
+    let mut replacement = generated.clone();
+    if decor.is_some() {
+        // Keep a value the user wrote inline, such as `Back = { … }`, inline.
+        // Swapping in the serializer's `[….Back]` table would sort it by the
+        // generated document's positions and print the key's own decor (its
+        // leading comment and the space before `=`) inside the brackets.
+        replacement.make_value();
+    }
+    *current = replacement;
     if let (Some(decor), Some(value)) = (decor, current.as_value_mut()) {
         *value.decor_mut() = decor;
     }
