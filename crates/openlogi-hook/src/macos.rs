@@ -310,7 +310,11 @@ fn wheel_scroll_to_invert(event: &HookEvent) -> bool {
             from_trackpad: false,
             device,
             ..
-        }) if delta.y() != 0.0 && crate::source_is_remappable(device.as_ref())
+        }) if delta.y() != 0.0
+            && crate::source_is_remappable(device.as_ref())
+            // A wheel the zoom gesture takes zooms the screen; reversing it
+            // here would reverse the zoom too, which Options+ never does.
+            && !openlogi_inject::zoom_gesture_engaged()
     )
 }
 
