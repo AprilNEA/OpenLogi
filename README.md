@@ -170,6 +170,7 @@ Feature coverage depends on what each device reports; the app shows only the con
 | Feature | macOS | Windows | Linux |
 | --- | --- | --- | --- |
 | Mouse button remapping and gestures | ✓ | ✓ | ✓ |
+| Dedicated keyboard keys (media, emoji, screenshot, …) | ✓ | ✓ | ✓ |
 | Keyboard F-key remapping | ✓ | ✓ | — |
 | MX Creative Console (keypad LCD keys, dialpad dial and roller) | ✓ | ✓ (no live volume value) | ✓ |
 | Per-application profiles | ✓ | ✓ | X11, wlroots (sway, Hyprland), GNOME with the [companion extension](crates/openlogi-hook/gnome-shell-extension/README.md) |
