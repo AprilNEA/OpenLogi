@@ -379,6 +379,15 @@ pub(crate) fn is_hidpp_node(device: &async_hid::Device) -> bool {
 /// Litra Glow intentionally uses the same BLE usage collection as Logitech
 /// HID++ peripherals, so the full product/usage tuple must be excluded here;
 /// the collection itself remains a valid HID++ candidate for other products.
+///
+/// A zero vendor id is also accepted: bluez does not forward the DIS PnP ID
+/// into the uhid device it creates for HID-over-GATT peripherals, so a
+/// Bluetooth-direct Logitech node can enumerate as `0005:0000:0000` (bus 5,
+/// no VID/PID) — see the unmerged bluez series "Fix zero VID&PID on HoG
+/// initial connection". The Logitech HID++ vendor collections matched below
+/// are specific enough on their own: no other vendor exposes `0xFF43`
+/// collections with these usages, so a zero-vendor node carrying one is
+/// treated as Logitech rather than dropped.
 fn is_hidpp_candidate(
     vendor_id: u16,
     product_id: u16,
@@ -386,7 +395,7 @@ fn is_hidpp_candidate(
     usage_id: u16,
     receiver_child: bool,
 ) -> bool {
-    vendor_id == LOGITECH_VENDOR_ID
+    (vendor_id == LOGITECH_VENDOR_ID || vendor_id == 0)
         && is_hidpp_long_collection(usage_page, usage_id)
         && !matches_litra(vendor_id, product_id, usage_page, usage_id)
         && !receiver_child
