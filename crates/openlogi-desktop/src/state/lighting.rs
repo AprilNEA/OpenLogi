@@ -63,6 +63,7 @@ impl AppState {
         if let Some(route) = target {
             self.send_ipc(crate::services::ipc::SetLighting { route, lighting });
         }
+        self.observe_battery_telemetry();
         events
     }
 }

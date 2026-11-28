@@ -1,0 +1,2898 @@
+//! Configuration-aware battery duration & health estimator with historical
+//! discharge learning (`~/.config/openlogi/battery-telemetry.json`).
+//!
+//! Computes an estimated remaining battery autonomy and battery health for
+//! each paired device based on:
+//! 1. Current battery percentage (`BatteryInfo`) and online/charging state.
+//! 2. Active hardware configuration (`BacklightState` on keyboards such as
+//!    MX Keys Mini, RGB `Lighting` on gaming mice/keyboards, `ReportRate` on
+//!    high-polling mice).
+//! 3. Historical discharge rate learned per `(config_key, config_signature)`
+//!    across real-world discharge cycles, persisted atomically to a sidecar
+//!    JSON file in `openlogi_core::paths::config_dir()` so `config.toml`'s
+//!    strict schema is never altered and render paths perform zero disk I/O.
+
+use std::collections::BTreeMap;
+use std::fs::{self, File};
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use openlogi_core::device::{BatteryInfo, BatteryLevel, BatteryStatus, DeviceKind};
+use openlogi_core::hid::backlight::max_backlight_level;
+use openlogi_core::hid::{BacklightMode, BacklightState, BacklightStatus};
+use serde::{Deserialize, Serialize};
+use tracing::warn;
+
+use crate::state::{AppState, BacklightLoad, DeviceRecord, ReportRateLoad};
+
+const TELEMETRY_FILE: &str = "battery-telemetry.json";
+/// Minimum elapsed discharging window (30 minutes) and minimum drop (1%) before
+/// updating the learned discharge rate EMA.
+const MIN_LEARN_WINDOW_SECS: u64 = 1_800;
+/// Maximum elapsed discharging window (14 days) before an anchor is considered
+/// expired and re-anchored to the current reading.
+const MAX_LEARN_WINDOW_SECS: u64 = 14 * 86_400;
+/// Minimum elapsed charging window (1 minute) and upward step (`>= 1%`) before
+/// confirming that a battery probe supplies live charging progress rather than
+/// a frozen pre-charge reading (`hold_percentage_while_charging`).
+const MIN_CHARGE_WINDOW_SECS: u64 = 60;
+/// Maximum elapsed charging window (6 hours) before re-anchoring a charging session.
+const MAX_CHARGE_WINDOW_SECS: u64 = 6 * 3_600;
+/// Minimum cumulative observed discharge percentage points (~1.5–2 full cycles)
+/// before reporting a calibrated battery health percentage.
+const MIN_HEALTH_DROP_PCT: u32 = 150;
+/// Minimum number of valid discharge intervals before reporting battery health.
+const MIN_HEALTH_SAMPLES: u32 = 5;
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct TelemetryStore {
+    #[serde(default)]
+    devices: BTreeMap<String, DeviceBatteryHistory>,
+}
+
+/// Explicit state machine tracking whether an active charging session supplies
+/// live upward percentage progress (`0x1004` Unified Battery) or a frozen
+/// pre-charge percentage held by `hold_percentage_while_charging` (`0x1000`,
+/// voltage `0x1001`, and ADC `0x1F20`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+#[serde(tag = "progress_state", rename_all = "snake_case")]
+pub(crate) enum ChargingProgress {
+    /// Charging is active, but the device lacks measured capabilities or an exact
+    /// `1..=99%` reading, so no live step anchor is active.
+    #[default]
+    Unmeasured,
+    /// Initial charging reading recorded; waiting for a live upward percentage
+    /// step (`percentage > anchor`) to prove the probe reports live progress.
+    AwaitingLiveStep { percentage: u8, timestamp_secs: u64 },
+    /// Live upward progress confirmed during the current charge session, with
+    /// measured pace in `minutes_per_pct`.
+    Live {
+        percentage: u8,
+        timestamp_secs: u64,
+        minutes_per_pct: f32,
+    },
+}
+
+/// Unified battery lifecycle state machine for a device.
+///
+/// Owns both discharging anchors and charging progress inside one enum with one
+/// transition owner (`impl BatteryPhase`), so `Unanchored` or `Discharging` can
+/// never coexist with live or waiting charging progress.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub(crate) enum BatteryPhase {
+    /// No valid exact-percentage discharging anchor is active (e.g., coarse
+    /// level-only device or newly created entry before first online reading).
+    #[default]
+    Unanchored,
+    /// Device is charging; any prior discharging anchor is invalidated and
+    /// charging progress is owned exclusively by this variant.
+    Charging {
+        #[serde(default)]
+        progress: ChargingProgress,
+    },
+    /// Device is actively discharging from an exact percentage anchor under `signature`.
+    Discharging {
+        percentage: u8,
+        timestamp_secs: u64,
+        signature: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DeviceBatteryHistory {
+    /// Unified discharge/charging phase and active anchor.
+    #[serde(default)]
+    phase: BatteryPhase,
+    /// Learned drain rate (`% per day`) per configuration signature.
+    #[serde(default)]
+    learned_drain_per_day: BTreeMap<String, LearnedDrain>,
+    /// Estimated battery health (`50..=100`), refined from full/partial discharge cycles.
+    #[serde(default = "default_health")]
+    estimated_health_pct: u8,
+    /// Total accumulated discharge percentage points observed across valid intervals.
+    #[serde(default)]
+    total_observed_drop_pct: u32,
+}
+
+impl Default for DeviceBatteryHistory {
+    fn default() -> Self {
+        Self {
+            phase: BatteryPhase::Unanchored,
+            learned_drain_per_day: BTreeMap::new(),
+            estimated_health_pct: default_health(),
+            total_observed_drop_pct: 0,
+        }
+    }
+}
+
+impl DeviceBatteryHistory {
+    fn calibrated_health(&self) -> Option<u8> {
+        let total_samples = self
+            .learned_drain_per_day
+            .values()
+            .map(|d| d.samples)
+            .fold(0u32, u32::saturating_add);
+        if self.total_observed_drop_pct >= MIN_HEALTH_DROP_PCT
+            && total_samples >= MIN_HEALTH_SAMPLES
+        {
+            Some(self.estimated_health_pct.clamp(50, 100))
+        } else {
+            None
+        }
+    }
+}
+
+const fn default_health() -> u8 {
+    100
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub(crate) struct LearnedDrain {
+    /// Exponential moving average of `% per day` under this configuration signature.
+    pub pct_per_day: f32,
+    /// Number of valid discharge intervals folded into this EMA.
+    pub samples: u32,
+}
+
+/// Owned battery telemetry state stored inside [`AppState`].
+///
+/// All disk reads happen once at `AppState::new` (when persistence is enabled)
+/// and atomic writes happen during state transitions (`observe_battery_telemetry`),
+/// keeping `Render::render` 100% pure and free of disk I/O.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct BatteryTelemetry {
+    store: TelemetryStore,
+    path: Option<PathBuf>,
+    dirty: bool,
+}
+
+impl BatteryTelemetry {
+    /// Load persisted telemetry when `persist` is `true`, or create an isolated
+    /// in-memory store for tests / read-only sessions.
+    #[must_use]
+    pub fn load(persist: bool) -> Self {
+        if !persist {
+            return Self::default();
+        }
+        let path = telemetry_path();
+        let store = path
+            .as_ref()
+            .and_then(|p| fs::read_to_string(p).ok())
+            .and_then(|raw| serde_json::from_str::<TelemetryStore>(&raw).ok())
+            .unwrap_or_default();
+        Self {
+            store,
+            path,
+            dirty: false,
+        }
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub fn with_path(path: PathBuf) -> Self {
+        let store = fs::read_to_string(&path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<TelemetryStore>(&raw).ok())
+            .unwrap_or_default();
+        Self {
+            store,
+            path: Some(path),
+            dirty: false,
+        }
+    }
+
+    /// Pure read of `(calibrated_health_pct, learned_drain_for_signature, profile_samples)`
+    /// for `config_key` and `signature`. Performs zero mutations and zero I/O.
+    ///
+    /// `calibrated_health_pct` is `None` until the device has accumulated at least
+    /// [`MIN_HEALTH_DROP_PCT`] percentage points across [`MIN_HEALTH_SAMPLES`] valid
+    /// discharge intervals (~1.5–2 cycles), avoiding premature `100%` claims.
+    #[must_use]
+    pub fn query(
+        &self,
+        config_key: &str,
+        signature: &str,
+    ) -> (Option<u8>, Option<LearnedDrain>, u32) {
+        let Some(entry) = self.store.devices.get(config_key) else {
+            return (None, None, 0);
+        };
+        let health_pct = entry.calibrated_health();
+        let learned = entry.learned_drain_per_day.get(signature).copied();
+        let learned_samples = learned.map_or(0, |d| d.samples);
+        (health_pct, learned, learned_samples)
+    }
+
+    /// Returns the measured charging pace (`minutes per 1%`) for `config_key`
+    /// only when the current charging session has demonstrated live upward
+    /// percentage progress. Frozen pre-charge readings return `None`.
+    #[must_use]
+    pub fn live_charging_rate(&self, config_key: &str) -> Option<f32> {
+        self.store
+            .devices
+            .get(config_key)?
+            .phase
+            .live_charging_rate()
+    }
+
+    /// Observe a single device's current battery and configuration state at `now_secs`.
+    ///
+    /// When `signature` is `None`, the device's power-affecting hardware settings
+    /// (such as `BacklightLoad` or `ReportRateLoad`) have not finished loading yet.
+    /// Charging transitions still immediately invalidate any prior discharging anchor,
+    /// while discharging readings preserve the existing anchor until settings arrive.
+    pub fn observe_device(
+        &mut self,
+        config_key: &str,
+        online: bool,
+        battery: Option<&BatteryInfo>,
+        signature: Option<&str>,
+        nominal_full_hours: u32,
+        now_secs: u64,
+    ) {
+        let Some(battery) = battery.filter(|_| online) else {
+            if let Some(entry) = self.store.devices.get_mut(config_key)
+                && entry.phase.observe_contact_lost()
+            {
+                self.dirty = true;
+            }
+            return;
+        };
+
+        let is_charging = matches!(
+            battery.status,
+            BatteryStatus::Charging | BatteryStatus::ChargingSlow
+        );
+
+        let entry = self
+            .store
+            .devices
+            .entry(config_key.to_owned())
+            .or_insert_with(|| {
+                self.dirty = true;
+                DeviceBatteryHistory::default()
+            });
+
+        // 1. Charging transitions always invalidate any prior discharging anchor immediately.
+        if is_charging {
+            if entry
+                .phase
+                .observe_charging(battery.percentage, signature.is_some(), now_secs)
+            {
+                self.dirty = true;
+            }
+            return;
+        }
+
+        // Leaving charging (including on a thermal/charging fault `BatteryStatus::Error`,
+        // a 0% cold reading, or while discharging settings are still pending) immediately
+        // clears any live or waiting charging progress inside `BatteryPhase` without
+        // discarding a valid `Discharging` anchor.
+        if entry.phase.clear_charging_on_non_charging() {
+            self.dirty = true;
+        }
+
+        if matches!(battery.status, BatteryStatus::Error) {
+            return;
+        }
+
+        // 2. Coarse level-only devices (no exact 0..=100 percentage) never feed
+        // guessed percentages into discharge learning or health calculation.
+        let Some(raw_pct) = battery.percentage else {
+            if entry.phase.observe_unanchored() {
+                self.dirty = true;
+            }
+            return;
+        };
+        let percentage = raw_pct.min(100);
+        if percentage == 0 {
+            return;
+        }
+
+        // 3. Wait for known hardware settings before anchoring or comparing discharge profiles.
+        let Some(signature) = signature else {
+            return;
+        };
+
+        if advance_discharging_entry(entry, percentage, signature, nominal_full_hours, now_secs) {
+            self.dirty = true;
+        }
+    }
+
+    /// Persist pending telemetry updates atomically via a sibling `.tmp` file,
+    /// `sync_all`, and `rename`. Retains `dirty = true` on failure so the next
+    /// observation retries.
+    pub fn flush(&mut self) {
+        if !self.dirty {
+            return;
+        }
+        let Some(path) = self.path.as_deref() else {
+            return;
+        };
+        match write_telemetry_atomic(path, &self.store) {
+            Ok(()) => {
+                self.dirty = false;
+            }
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    path = %path.display(),
+                    "could not persist battery telemetry"
+                );
+            }
+        }
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub fn phase_for(&self, config_key: &str) -> Option<&BatteryPhase> {
+        self.store.devices.get(config_key).map(|d| &d.phase)
+    }
+}
+
+impl BatteryPhase {
+    /// Returns the measured charging pace (`minutes per 1%`) only when the device
+    /// is in `BatteryPhase::Charging` with confirmed `ChargingProgress::Live`.
+    #[must_use]
+    pub fn live_charging_rate(&self) -> Option<f32> {
+        match self {
+            Self::Charging {
+                progress:
+                    ChargingProgress::Live {
+                        minutes_per_pct, ..
+                    },
+            } => Some(*minutes_per_pct),
+            Self::Unanchored
+            | Self::Discharging { .. }
+            | Self::Charging {
+                progress: ChargingProgress::Unmeasured | ChargingProgress::AwaitingLiveStep { .. },
+            } => None,
+        }
+    }
+
+    /// Transition to `Unanchored` (e.g. coarse battery reading), dropping any
+    /// prior discharging or charging progress state.
+    fn observe_unanchored(&mut self) -> bool {
+        if *self == Self::Unanchored {
+            false
+        } else {
+            *self = Self::Unanchored;
+            true
+        }
+    }
+
+    /// Clear any active or waiting charging progress when a non-charging status
+    /// (such as `BatteryStatus::Error` or `Discharging`) is observed, without
+    /// disturbing an existing `Discharging` anchor.
+    fn clear_charging_on_non_charging(&mut self) -> bool {
+        if matches!(self, Self::Charging { .. }) {
+            *self = Self::Unanchored;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Move `Charging` back to `ChargingProgress::Unmeasured` when contact is lost
+    /// (device goes offline or omits its battery reading), while preserving any
+    /// active `Discharging` anchor across wireless sleep/wake cycles.
+    fn observe_contact_lost(&mut self) -> bool {
+        match self {
+            Self::Charging {
+                progress: ChargingProgress::AwaitingLiveStep { .. } | ChargingProgress::Live { .. },
+            } => {
+                *self = Self::Charging {
+                    progress: ChargingProgress::Unmeasured,
+                };
+                true
+            }
+            Self::Unanchored
+            | Self::Discharging { .. }
+            | Self::Charging {
+                progress: ChargingProgress::Unmeasured,
+            } => false,
+        }
+    }
+
+    /// Advance the charging state machine inside `BatteryPhase::Charging`.
+    /// Equal timestamps (`now_secs == last_ts`) are treated as repeated
+    /// observations in the same second rather than broken sessions.
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "bounded charging elapsed seconds fit in f32"
+    )]
+    fn observe_charging(
+        &mut self,
+        raw_percentage: Option<u8>,
+        has_measured_support: bool,
+        now_secs: u64,
+    ) -> bool {
+        let valid_pct = has_measured_support
+            .then_some(raw_percentage)
+            .flatten()
+            .map(|p| p.min(100))
+            .filter(|&p| p > 0 && p < 100);
+
+        let Some(percentage) = valid_pct else {
+            let next = Self::Charging {
+                progress: ChargingProgress::Unmeasured,
+            };
+            if *self == next {
+                return false;
+            }
+            *self = next;
+            return true;
+        };
+
+        let current_progress = match *self {
+            Self::Charging { progress } => progress,
+            Self::Unanchored | Self::Discharging { .. } => {
+                *self = Self::charging_awaiting(percentage, now_secs);
+                return true;
+            }
+        };
+
+        match current_progress {
+            ChargingProgress::Unmeasured => {
+                *self = Self::charging_awaiting(percentage, now_secs);
+                true
+            }
+            ChargingProgress::AwaitingLiveStep {
+                percentage: last_pct,
+                timestamp_secs: last_ts,
+            } => {
+                if now_secs == last_ts && percentage == last_pct {
+                    return false;
+                }
+                let dt_secs = now_secs.saturating_sub(last_ts);
+                if percentage < last_pct || now_secs <= last_ts || dt_secs > MAX_CHARGE_WINDOW_SECS
+                {
+                    *self = Self::charging_awaiting(percentage, now_secs);
+                    return true;
+                }
+                if percentage > last_pct && dt_secs >= MIN_CHARGE_WINDOW_SECS {
+                    let rise = f32::from(percentage - last_pct);
+                    let pace = ((dt_secs as f32) / 60.0 / rise).clamp(0.25, 10.0);
+                    *self = Self::charging_live(percentage, now_secs, pace);
+                    return true;
+                }
+                false
+            }
+            ChargingProgress::Live {
+                percentage: last_pct,
+                timestamp_secs: last_ts,
+                minutes_per_pct: prev_rate,
+            } => {
+                if now_secs == last_ts && percentage >= last_pct {
+                    return false;
+                }
+                let dt_secs = now_secs.saturating_sub(last_ts);
+                if percentage < last_pct || now_secs < last_ts || dt_secs > MAX_CHARGE_WINDOW_SECS {
+                    *self = Self::charging_awaiting(percentage, now_secs);
+                    return true;
+                }
+                if percentage > last_pct && dt_secs >= MIN_CHARGE_WINDOW_SECS {
+                    let rise = f32::from(percentage - last_pct);
+                    let pace = ((dt_secs as f32) / 60.0 / rise).clamp(0.25, 10.0);
+                    let blended = (prev_rate * 0.6 + pace * 0.4).clamp(0.25, 10.0);
+                    *self = Self::charging_live(percentage, now_secs, blended);
+                    return true;
+                }
+                false
+            }
+        }
+    }
+
+    const fn charging_awaiting(percentage: u8, timestamp_secs: u64) -> Self {
+        Self::Charging {
+            progress: ChargingProgress::AwaitingLiveStep {
+                percentage,
+                timestamp_secs,
+            },
+        }
+    }
+
+    const fn charging_live(percentage: u8, timestamp_secs: u64, minutes_per_pct: f32) -> Self {
+        Self::Charging {
+            progress: ChargingProgress::Live {
+                percentage,
+                timestamp_secs,
+                minutes_per_pct,
+            },
+        }
+    }
+
+    /// Advance the discharging anchor inside `BatteryPhase`, returning `(phase_changed, completed_interval)`
+    /// where `completed_interval` is `Some((drop_pct, dt_secs))` when a qualifying discharge drop completes.
+    fn observe_discharging(
+        &mut self,
+        percentage: u8,
+        signature: &str,
+        now_secs: u64,
+    ) -> (bool, Option<(u8, u64)>) {
+        match self {
+            Self::Unanchored | Self::Charging { .. } => {
+                *self = Self::Discharging {
+                    percentage,
+                    timestamp_secs: now_secs,
+                    signature: signature.to_owned(),
+                };
+                (true, None)
+            }
+            Self::Discharging {
+                percentage: last_pct,
+                timestamp_secs: last_ts,
+                signature: last_sig,
+            } => {
+                let last_pct = *last_pct;
+                let last_ts = *last_ts;
+                if last_sig != signature || percentage > last_pct {
+                    *self = Self::Discharging {
+                        percentage,
+                        timestamp_secs: now_secs,
+                        signature: signature.to_owned(),
+                    };
+                    return (true, None);
+                }
+                if now_secs <= last_ts {
+                    return (false, None);
+                }
+                let dt_secs = now_secs.saturating_sub(last_ts);
+                if dt_secs > MAX_LEARN_WINDOW_SECS {
+                    *self = Self::Discharging {
+                        percentage,
+                        timestamp_secs: now_secs,
+                        signature: signature.to_owned(),
+                    };
+                    return (true, None);
+                }
+                if percentage < last_pct && dt_secs >= MIN_LEARN_WINDOW_SECS {
+                    let drop_pct = last_pct - percentage;
+                    *self = Self::Discharging {
+                        percentage,
+                        timestamp_secs: now_secs,
+                        signature: signature.to_owned(),
+                    };
+                    return (true, Some((drop_pct, dt_secs)));
+                }
+                (false, None)
+            }
+        }
+    }
+}
+
+#[expect(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "bounded battery percentages, hours, and EMA weights fit well within f32/u8/u32"
+)]
+fn advance_discharging_entry(
+    entry: &mut DeviceBatteryHistory,
+    percentage: u8,
+    signature: &str,
+    nominal_full_hours: u32,
+    now_secs: u64,
+) -> bool {
+    let (phase_changed, completed) = entry
+        .phase
+        .observe_discharging(percentage, signature, now_secs);
+    let Some((drop_pct, dt_secs)) = completed else {
+        return phase_changed;
+    };
+
+    let dt_days = (dt_secs as f32) / 86_400.0;
+    let observed_pct_per_day = (f32::from(drop_pct) / dt_days).clamp(0.15, 120.0);
+
+    let drain = entry
+        .learned_drain_per_day
+        .entry(signature.to_owned())
+        .or_insert(LearnedDrain {
+            pct_per_day: observed_pct_per_day,
+            samples: 0,
+        });
+    if drain.samples == 0 {
+        drain.pct_per_day = observed_pct_per_day;
+    } else {
+        drain.pct_per_day = drain.pct_per_day * 0.70 + observed_pct_per_day * 0.30;
+    }
+    drain.samples = drain.samples.saturating_add(1);
+
+    entry.total_observed_drop_pct = entry
+        .total_observed_drop_pct
+        .saturating_add(u32::from(drop_pct));
+
+    if entry.total_observed_drop_pct >= 20 {
+        let nominal_pct_per_day = (100.0 * 24.0) / (nominal_full_hours.max(1) as f32);
+        let plausible_drain = drain
+            .pct_per_day
+            .clamp(nominal_pct_per_day * 0.35, nominal_pct_per_day * 2.2);
+        let ratio = (nominal_pct_per_day / plausible_drain).clamp(0.50, 1.05);
+        let implied_health = (ratio * 100.0).round().clamp(50.0, 100.0) as u8;
+        entry.estimated_health_pct =
+            ((u16::from(entry.estimated_health_pct) * 4 + u16::from(implied_health)) / 5) as u8;
+    }
+
+    true
+}
+
+/// Numbers this process's telemetry staging files so two saves never share one.
+static TELEMETRY_STAGED_SEQ: AtomicU32 = AtomicU32::new(0);
+
+fn staged_telemetry_path(path: &Path) -> PathBuf {
+    let seq = TELEMETRY_STAGED_SEQ.fetch_add(1, Ordering::Relaxed);
+    next_staged_telemetry_path_for_seq(path, seq)
+}
+
+fn next_staged_telemetry_path_for_seq(path: &Path, seq: u32) -> PathBuf {
+    let mut staged = path.as_os_str().to_owned();
+    staged.push(format!(".{}-{seq}.tmp", std::process::id()));
+    PathBuf::from(staged)
+}
+
+fn write_telemetry_atomic(path: &Path, store: &TelemetryStore) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let json = serde_json::to_vec_pretty(store).map_err(std::io::Error::other)?;
+    let staging = staged_telemetry_path(path);
+    let written = (|| -> std::io::Result<()> {
+        let mut file = File::create(&staging)?;
+        file.write_all(&json)?;
+        file.sync_all()
+    })();
+    if let Err(err) = written {
+        let _ = fs::remove_file(&staging);
+        return Err(err);
+    }
+    if let Err(err) = fs::rename(&staging, path) {
+        let _ = fs::remove_file(&staging);
+        return Err(err);
+    }
+    Ok(())
+}
+
+/// Explicit operating mode of a [`BatteryEstimate`] so charging stages vs.
+/// discharging autonomy never rely on optional fields or implicit rules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EstimatePhase {
+    /// Device is discharging or full; displays remaining autonomy (`remaining_hours`).
+    Discharging,
+    /// Device is charging below 80% in the fast Constant-Current phase, reporting
+    /// both the 80% milestone and the 100% full-charge ETA (`minutes_to_100 > minutes_to_80 >= 1`).
+    ChargingTo80 {
+        minutes_to_80: u32,
+        minutes_to_100: u32,
+    },
+    /// Device is charging in the 80–99% Constant-Voltage trickle phase, reporting
+    /// the remaining minutes to 100% (`minutes_to_100 >= 1`).
+    ChargingTo100 { minutes_to_100: u32 },
+}
+
+impl EstimatePhase {
+    fn charging_to_80(minutes_to_80: u32, minutes_to_100: u32) -> Option<Self> {
+        if minutes_to_80 == 0 || minutes_to_100 <= minutes_to_80 {
+            return None;
+        }
+        Some(Self::ChargingTo80 {
+            minutes_to_80,
+            minutes_to_100,
+        })
+    }
+
+    fn charging_to_100(minutes_to_100: u32) -> Option<Self> {
+        if minutes_to_100 == 0 {
+            return None;
+        }
+        Some(Self::ChargingTo100 { minutes_to_100 })
+    }
+
+    /// Build a validated charging stage from the device's live measured charging pace
+    /// (`measured_min_per_pct`), without using any `DeviceKind` or unmeasured defaults.
+    ///
+    /// Because `measured_min_per_pct` is computed from real elapsed time per percentage
+    /// point during the active session, slow charging (`ChargingSlow`) is already
+    /// reflected in `measured_min_per_pct` and is never multiplied a second time.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "clamped positive minutes round into u32"
+    )]
+    fn from_live_charge_rate(charge_pct: u8, measured_min_per_pct: f32) -> Option<Self> {
+        if charge_pct == 0 || charge_pct >= 100 || !measured_min_per_pct.is_finite() {
+            return None;
+        }
+        let effective_rate = measured_min_per_pct.clamp(0.25, 10.0);
+
+        if (1..80).contains(&charge_pct) {
+            let fast_phase_mins = f32::from(80 - charge_pct) * effective_rate;
+            // Above 80%, Li-Po Constant-Voltage taper averages ~1.75x slower per percent
+            // than the Constant-Current phase.
+            let trickle_phase_mins = 20.0 * effective_rate * 1.75;
+            let m80 = (fast_phase_mins.round() as u32).max(1);
+            let m100 = ((fast_phase_mins + trickle_phase_mins).round() as u32).max(m80 + 5);
+            Self::charging_to_80(m80, m100)
+        } else {
+            let rem_pct = f32::from(100 - charge_pct);
+            let trickle_phase_mins = rem_pct * effective_rate;
+            let m100 = (trickle_phase_mins.round() as u32).max(1);
+            Self::charging_to_100(m100)
+        }
+    }
+}
+
+/// Complete battery duration, charging ETA, and health estimate for a single device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BatteryEstimate {
+    /// Active phase (discharging autonomy vs. two-stage charging ETA).
+    pub phase: EstimatePhase,
+    /// Estimated remaining hours of autonomy (`>= 1`).
+    pub remaining_hours: u32,
+    /// Estimated full-charge (100%) hours under the active configuration.
+    pub full_charge_hours: u32,
+    /// Calibrated battery health (`50..=100%`), or `None` while still accumulating
+    /// multi-cycle discharge intervals (`< 150%` cumulative drop or `< 5` samples).
+    pub health_pct: Option<u8>,
+    /// Number of historical discharge intervals learned for the active configuration signature.
+    pub learned_samples: u32,
+    /// Short localized summary of the active power profile (e.g. `"Brightness 4/7 · 15s"`).
+    pub config_note: Option<String>,
+}
+
+impl BatteryEstimate {
+    /// Compact label for the Home screen list row & grid card.
+    ///
+    /// Never includes battery health on the Home view; estimated health is
+    /// displayed exclusively inside the Device Details battery section.
+    #[must_use]
+    pub fn home_label(&self) -> String {
+        match self.phase {
+            EstimatePhase::ChargingTo80 {
+                minutes_to_80,
+                minutes_to_100,
+            } => {
+                let to_80 = format_charge_minutes(minutes_to_80);
+                let to_100 = format_charge_minutes(minutes_to_100);
+                tr!(
+                    "device.battery_charge_home_two_stage",
+                    to_80 => to_80,
+                    to_100 => to_100
+                )
+                .into()
+            }
+            EstimatePhase::ChargingTo100 { minutes_to_100 } => {
+                let to_100 = format_charge_minutes(minutes_to_100);
+                tr!("device.battery_charge_home_final", to_100 => to_100).into()
+            }
+            EstimatePhase::Discharging => {
+                let duration = format_duration_short(self.remaining_hours);
+                match &self.config_note {
+                    Some(note) => tr!(
+                        "device.battery_estimate_home_with_note",
+                        duration => duration,
+                        note => note.clone()
+                    )
+                    .into(),
+                    None => tr!("device.battery_estimate_home", duration => duration).into(),
+                }
+            }
+        }
+    }
+
+    /// Ultra-compact pill for the detail header bar or grid corner.
+    #[must_use]
+    pub fn inline_label(&self) -> String {
+        match self.phase {
+            EstimatePhase::ChargingTo80 { minutes_to_80, .. } => {
+                let to_80 = format_charge_minutes(minutes_to_80);
+                tr!("device.battery_charge_inline_80", to_80 => to_80).into()
+            }
+            EstimatePhase::ChargingTo100 { minutes_to_100 } => {
+                let to_100 = format_charge_minutes(minutes_to_100);
+                tr!("device.battery_charge_inline_100", to_100 => to_100).into()
+            }
+            EstimatePhase::Discharging => {
+                let duration = format_duration_compact(self.remaining_hours);
+                tr!("device.battery_estimate_inline", duration => duration).into()
+            }
+        }
+    }
+
+    /// Detailed multi-part summary for the Device Details card.
+    #[must_use]
+    pub fn detail_headline(&self) -> String {
+        match self.phase {
+            EstimatePhase::ChargingTo80 {
+                minutes_to_80,
+                minutes_to_100,
+            } => {
+                let to_80 = format_charge_minutes(minutes_to_80);
+                let to_100 = format_charge_minutes(minutes_to_100);
+                tr!(
+                    "device.battery_charge_headline_two_stage",
+                    to_80 => to_80,
+                    to_100 => to_100
+                )
+                .into()
+            }
+            EstimatePhase::ChargingTo100 { minutes_to_100 } => {
+                let to_100 = format_charge_minutes(minutes_to_100);
+                tr!("device.battery_charge_headline_final", to_100 => to_100).into()
+            }
+            EstimatePhase::Discharging => {
+                let duration = format_duration_short(self.remaining_hours);
+                match &self.config_note {
+                    Some(note) => tr!(
+                        "device.battery_estimate_headline_with_note",
+                        duration => duration,
+                        note => note.clone()
+                    )
+                    .into(),
+                    None => tr!("device.battery_estimate_headline", duration => duration).into(),
+                }
+            }
+        }
+    }
+
+    /// Secondary caption showing full-charge expectation, health (or calibrating state), and learning state.
+    #[must_use]
+    pub fn detail_subline(&self) -> String {
+        let full = format_duration_short(self.full_charge_hours);
+        let source: String = if self.learned_samples > 0 {
+            tr!(
+                "device.battery_estimate_source_learned",
+                samples => self.learned_samples
+            )
+            .into()
+        } else {
+            tr!("device.battery_estimate_source_config").into()
+        };
+        match self.health_pct {
+            Some(health) => tr!(
+                "device.battery_estimate_subline",
+                health => health,
+                full => full,
+                source => source
+            )
+            .into(),
+            None => tr!(
+                "device.battery_estimate_subline_calibrating",
+                full => full,
+                source => source
+            )
+            .into(),
+        }
+    }
+}
+
+fn format_charge_minutes(mins: u32) -> String {
+    let mins = mins.max(1);
+    if mins < 60 {
+        tr!("device.battery_charge_minutes", minutes => mins).into()
+    } else {
+        let hours = mins / 60;
+        let rem_mins = ((mins % 60 + 2) / 5) * 5;
+        if rem_mins == 0 || rem_mins >= 60 {
+            let adj_hours = if rem_mins >= 60 { hours + 1 } else { hours };
+            tr!("device.battery_duration_hours", hours => adj_hours).into()
+        } else {
+            tr!(
+                "device.battery_charge_hours_minutes",
+                hours => hours,
+                minutes => rem_mins
+            )
+            .into()
+        }
+    }
+}
+
+#[expect(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "bounded battery hours fit within f32 and round to positive u32 months"
+)]
+fn format_duration_compact(hours: u32) -> String {
+    if hours < 24 {
+        tr!("device.battery_duration_hours", hours => hours).into()
+    } else if hours < 24 * 60 {
+        let days = (hours + 12) / 24;
+        tr!("device.battery_duration_days", days => days).into()
+    } else {
+        let months = ((hours as f32) / (24.0 * 30.0)).round().max(1.0) as u32;
+        tr!("device.battery_duration_months_compact", months => months).into()
+    }
+}
+
+#[expect(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "bounded battery hours fit within f32 and round to positive u32 months"
+)]
+fn format_duration_short(hours: u32) -> String {
+    if hours < 24 {
+        tr!("device.battery_duration_hours", hours => hours).into()
+    } else if hours < 24 * 45 {
+        let days = (hours + 12) / 24;
+        tr!("device.battery_duration_days", days => days).into()
+    } else {
+        let months = (hours as f32 / (24.0 * 30.0) * 10.0).round() / 10.0;
+        let whole = (months.fract() - 0.0).abs() < 0.05;
+        let months_str = if whole {
+            format!("{}", months.round() as u32)
+        } else {
+            format!("{months:.1}")
+        };
+        tr!("device.battery_duration_months_short", months => months_str).into()
+    }
+}
+
+/// Observe all current devices in `AppState` and flush any telemetry updates.
+pub(crate) fn observe_state_telemetry(state: &mut AppState) {
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    observe_state_telemetry_at(state, now_secs);
+}
+
+struct DeviceObservation {
+    config_key: String,
+    online: bool,
+    battery: Option<BatteryInfo>,
+    signature: Option<String>,
+    nominal_full_hours: u32,
+}
+
+pub(crate) fn observe_state_telemetry_at(state: &mut AppState, now_secs: u64) {
+    let observations: Vec<DeviceObservation> = state
+        .devices()
+        .iter()
+        .filter(|record| record.persistent)
+        .map(|record| {
+            let (nominal_full_hours, signature, _) = nominal_profile_for_device(state, record);
+            let is_charging = record.battery.as_ref().is_some_and(|b| {
+                matches!(
+                    b.status,
+                    BatteryStatus::Charging | BatteryStatus::ChargingSlow
+                )
+            });
+            let known_sig = if is_charging && record.capabilities.is_none() {
+                None
+            } else {
+                (!device_has_pending_power_read(state, record)).then_some(signature)
+            };
+            DeviceObservation {
+                config_key: record.config_key.clone(),
+                online: record.is_online(),
+                battery: record.battery.clone(),
+                signature: known_sig,
+                nominal_full_hours,
+            }
+        })
+        .collect();
+
+    let telemetry = state.battery_telemetry_mut();
+    for obs in observations {
+        telemetry.observe_device(
+            &obs.config_key,
+            obs.online,
+            obs.battery.as_ref(),
+            obs.signature.as_deref(),
+            obs.nominal_full_hours,
+            now_secs,
+        );
+    }
+    telemetry.flush();
+}
+
+/// Returns `true` only when `record` is online, advertises a power-affecting
+/// capability (`backlight` or `report_rate`), and that read is still pending
+/// (`Unknown` or `Loading`). Devices that do not support the capability or
+/// whose read already resolved (`Ready`, `Failed`, or `Unsupported`) are not
+/// blocked from learning.
+fn device_has_pending_power_read(state: &AppState, record: &DeviceRecord) -> bool {
+    if !record.is_online() {
+        return false;
+    }
+    let Some(caps) = record.capabilities else {
+        return false;
+    };
+    let key = record.device_key();
+    let backlight_pending = caps.backlight
+        && matches!(
+            state.backlight_load_for(&key),
+            None | Some(BacklightLoad::Unknown | BacklightLoad::Loading)
+        );
+    let report_rate_pending = caps.report_rate
+        && matches!(
+            state.report_rate_load_for(&key),
+            None | Some(ReportRateLoad::Unknown | ReportRateLoad::Loading)
+        );
+    backlight_pending || report_rate_pending
+}
+
+/// Compute the battery duration & health estimate for `record` given current `AppState`.
+/// Pure in-memory calculation safe to call inside `Render::render`.
+#[must_use]
+#[expect(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "bounded battery percentages, hours, and EMA sample counts fit within f32/u32"
+)]
+pub(crate) fn estimate_for_device(
+    state: &AppState,
+    record: &DeviceRecord,
+) -> Option<BatteryEstimate> {
+    let battery = record.battery.as_ref()?;
+    if matches!(battery.status, BatteryStatus::Error) {
+        return None;
+    }
+    let is_charging = matches!(
+        battery.status,
+        BatteryStatus::Charging | BatteryStatus::ChargingSlow
+    );
+    let percentage = if is_charging {
+        // Offline devices, devices with unknown capabilities (`None`), and 0% cold-start
+        // `NoReading` states never produce charging estimates.
+        if !record.is_online() || record.capabilities.is_none() {
+            return None;
+        }
+        let pct = battery.percentage?.min(100);
+        if pct == 0 || pct >= 100 {
+            return None;
+        }
+        pct
+    } else {
+        let pct = effective_percentage(battery)?;
+        if pct == 0 {
+            return None;
+        }
+        pct
+    };
+
+    let (nominal_full_hours, signature, config_note) = nominal_profile_for_device(state, record);
+
+    let (health_pct, learned_drain, learned_samples) = state
+        .battery_telemetry()
+        .query(&record.config_key, &signature);
+
+    // Nominal % per day at 100% health:
+    let nominal_pct_per_day = (100.0 * 24.0) / (nominal_full_hours.max(1) as f32);
+    // Adjust nominal drain by calibrated battery health (or 100% baseline while calibrating):
+    let health_factor = f32::from(health_pct.unwrap_or(100).clamp(50, 100)) / 100.0;
+    let model_pct_per_day = nominal_pct_per_day / health_factor;
+
+    // Blend physics/config model with historical learned drain for this exact signature.
+    // Clamp learned drain around the profile's nominal duty-cycle rate (0.35x..2.2x) so a
+    // single 5% firmware quantization step right after changing settings cannot skew the
+    // estimate to an unrealistic multi-day drop.
+    let effective_pct_per_day = match learned_drain {
+        Some(learned) if learned.samples > 0 => {
+            let plausible_learned = learned
+                .pct_per_day
+                .clamp(model_pct_per_day * 0.35, model_pct_per_day * 2.2);
+            let weight = ((learned.samples as f32) * 0.20).clamp(0.20, 0.75);
+            model_pct_per_day * (1.0 - weight) + plausible_learned * weight
+        }
+        _ => model_pct_per_day,
+    }
+    .max(0.15);
+
+    let full_charge_days = 100.0 / effective_pct_per_day;
+    let remaining_days = f32::from(percentage) / effective_pct_per_day;
+
+    let full_charge_hours = (full_charge_days * 24.0).round().max(1.0) as u32;
+    let remaining_hours = (remaining_days * 24.0).round().max(1.0) as u32;
+
+    let phase = if is_charging {
+        let live_rate = state
+            .battery_telemetry()
+            .live_charging_rate(&record.config_key)?;
+        EstimatePhase::from_live_charge_rate(percentage, live_rate)?
+    } else {
+        EstimatePhase::Discharging
+    };
+
+    Some(BatteryEstimate {
+        phase,
+        remaining_hours,
+        full_charge_hours,
+        health_pct,
+        learned_samples,
+        config_note,
+    })
+}
+
+fn effective_percentage(battery: &BatteryInfo) -> Option<u8> {
+    if let Some(pct) = battery.percentage {
+        return Some(pct.min(100));
+    }
+    match battery.level {
+        BatteryLevel::Full => Some(100),
+        BatteryLevel::Good => Some(70),
+        BatteryLevel::Low => Some(20),
+        BatteryLevel::Critical => Some(5),
+        BatteryLevel::Unknown => None,
+    }
+}
+
+/// Evaluated RGB power state for a device, distinguishing unset onboard lighting
+/// from explicitly dark or lit saved settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RgbPowerState {
+    /// Device does not advertise `Capabilities::lighting`.
+    Unsupported,
+    /// Device supports `Capabilities::lighting`, but no saved `Lighting` preference
+    /// exists yet — hardware continues running its onboard lighting state.
+    Unknown,
+    /// Saved `Lighting` is disabled, has `brightness == 0`, or emits black (`0, 0, 0`).
+    Off,
+    /// Saved `Lighting` is enabled with non-zero brightness and a non-black color.
+    On,
+}
+
+impl RgbPowerState {
+    const fn token(self) -> &'static str {
+        match self {
+            Self::Unsupported | Self::Off => "off",
+            Self::Unknown => "unknown",
+            Self::On => "on",
+        }
+    }
+}
+
+fn lighting_emits_light(lighting: &openlogi_core::config::Lighting) -> bool {
+    let (r, g, b) = lighting.color.components();
+    lighting.enabled && lighting.brightness > 0 && (r != 0 || g != 0 || b != 0)
+}
+
+fn rgb_power_state_for_device(state: &AppState, record: &DeviceRecord) -> RgbPowerState {
+    let has_lighting_cap = record.capabilities.is_some_and(|c| c.lighting);
+    match state.lighting_for(&record.config_key, &record.route_key) {
+        Some(lighting) if lighting_emits_light(&lighting) => RgbPowerState::On,
+        Some(_) => RgbPowerState::Off,
+        None if has_lighting_cap => RgbPowerState::Unknown,
+        None => RgbPowerState::Unsupported,
+    }
+}
+
+/// Returns `(nominal_full_charge_hours, config_signature, localized_config_note)`.
+///
+/// Strictly gates on `record.capabilities` and `Load::Ready` so unprobed or
+/// failed reads never fabricate hardware settings.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "clamped positive base_hours rounds into u32"
+)]
+pub(crate) fn nominal_profile_for_device(
+    state: &AppState,
+    record: &DeviceRecord,
+) -> (u32, String, Option<String>) {
+    let model_lower = record.model_name.to_ascii_lowercase();
+    let key = record.device_key();
+
+    match record.kind {
+        DeviceKind::Keyboard => {
+            let has_backlight = record.capabilities.is_some_and(|c| c.backlight);
+
+            if has_backlight {
+                if let Some(BacklightLoad::Ready(bl)) = state.backlight_load_for(&key) {
+                    return keyboard_backlight_profile(&model_lower, **bl);
+                }
+                return (120 * 24, "kbd:unmeasured".to_owned(), None);
+            }
+
+            // Check RGB lighting for gaming keyboards
+            match rgb_power_state_for_device(state, record) {
+                RgbPowerState::On => {
+                    let note = tr!("device.battery_note_rgb_on").into();
+                    (40, "kbd:rgb-on".to_owned(), Some(note))
+                }
+                RgbPowerState::Off => {
+                    let note = tr!("device.battery_note_rgb_off").into();
+                    (180 * 24, "kbd:rgb-off".to_owned(), Some(note))
+                }
+                RgbPowerState::Unknown => (40, "kbd:rgb-unknown".to_owned(), None),
+                RgbPowerState::Unsupported => (120 * 24, "kbd:standard".to_owned(), None),
+            }
+        }
+        DeviceKind::Mouse | DeviceKind::Trackball | DeviceKind::Touchpad => {
+            let has_report_rate = record.capabilities.is_some_and(|c| c.report_rate);
+            let rate_hz = if has_report_rate {
+                match state.report_rate_load_for(&key) {
+                    Some(ReportRateLoad::Ready(info)) => Some(u16::from(info.current)),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            let rgb_state = rgb_power_state_for_device(state, record);
+
+            if model_lower.contains("mx master") {
+                return (70 * 24, "mouse:mx-master".to_owned(), None);
+            }
+            if model_lower.contains("mx anywhere") {
+                return (70 * 24, "mouse:mx-anywhere".to_owned(), None);
+            }
+            if model_lower.contains("mx vertical") || model_lower.contains("lift") {
+                return (120 * 24, "mouse:ergo".to_owned(), None);
+            }
+            if has_report_rate
+                || rgb_state != RgbPowerState::Unsupported
+                || model_lower.contains("g502")
+                || model_lower.contains("pro x")
+                || model_lower.contains("g pro")
+            {
+                let mut base_hours: f32 = match rgb_state {
+                    RgbPowerState::On => 45.0,
+                    RgbPowerState::Unknown => 90.0,
+                    RgbPowerState::Off | RgbPowerState::Unsupported => 130.0,
+                };
+                if let Some(hz) = rate_hz {
+                    if hz >= 2000 {
+                        base_hours *= 0.65;
+                    } else if hz <= 250 {
+                        base_hours *= 1.25;
+                    }
+                }
+                let note = match (rgb_state, rate_hz) {
+                    (RgbPowerState::On, Some(hz)) => {
+                        Some(tr!("device.battery_note_rgb_rate", hz => hz).into())
+                    }
+                    (_, Some(hz)) => Some(tr!("device.battery_note_rate", hz => hz).into()),
+                    (RgbPowerState::On, None) => Some(tr!("device.battery_note_rgb_on").into()),
+                    (RgbPowerState::Off, None) => Some(tr!("device.battery_note_rgb_off").into()),
+                    (RgbPowerState::Unknown | RgbPowerState::Unsupported, None) => None,
+                };
+                let rgb_token = rgb_state.token();
+                let hz_token = if has_report_rate {
+                    rate_hz.map_or_else(|| "unknown".to_owned(), |hz| hz.to_string())
+                } else {
+                    "fixed".to_owned()
+                };
+                let sig = format!("mouse:gaming:rgb={rgb_token}:hz={hz_token}");
+                return (base_hours.round().max(10.0) as u32, sig, note);
+            }
+
+            (65 * 24, "mouse:generic".to_owned(), None)
+        }
+        DeviceKind::Headset => (24, "headset:default".to_owned(), None),
+        _ => (30 * 24, "other:default".to_owned(), None),
+    }
+}
+
+#[expect(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "bounded backlight hours and drain factors fit within f32/u32"
+)]
+fn keyboard_backlight_profile(
+    model_lower: &str,
+    bl: BacklightState,
+) -> (u32, String, Option<String>) {
+    let off_hours: u32 = if model_lower.contains("mx keys") {
+        150 * 24
+    } else {
+        120 * 24
+    };
+
+    let effectively_off = !bl.enabled
+        || matches!(
+            bl.status,
+            BacklightStatus::DisabledBySoftware | BacklightStatus::DisabledByCriticalBattery
+        )
+        || (!bl.is_automatic() && bl.current_level == 0);
+
+    if effectively_off {
+        let note = tr!("device.battery_note_backlight_off").into();
+        return (off_hours, "kbd:bl-off".to_owned(), Some(note));
+    }
+
+    let max_level = max_backlight_level(bl.nb_levels).max(1);
+    let level = bl.current_level.min(max_level);
+    let timeout_secs = bl
+        .duration
+        .map_or(15, openlogi_core::hid::BacklightDuration::seconds)
+        .max(5);
+
+    let level_ratio = if bl.mode == BacklightMode::Automatic {
+        0.50
+    } else {
+        f32::from(level) / f32::from(max_level)
+    };
+    let level_drain_factor = 0.30 + 0.95 * level_ratio.powf(1.25);
+    let duration_drain_factor = (f32::from(timeout_secs) / 15.0).powf(0.32).clamp(0.68, 3.2);
+    let power_save_bonus = if bl.power_save { 0.92 } else { 1.0 };
+
+    let total_drain_factor = level_drain_factor * duration_drain_factor * power_save_bonus;
+    let estimated_hours = ((10.0 * 24.0) / total_drain_factor)
+        .round()
+        .clamp(48.0, (off_hours as f32) * 0.85) as u32;
+
+    let dur_str: String = if timeout_secs < 60 {
+        tr!("device.backlight_duration_seconds", seconds => timeout_secs).into()
+    } else if timeout_secs < 3600 {
+        tr!("device.backlight_duration_minutes", minutes => timeout_secs / 60).into()
+    } else {
+        tr!("device.backlight_duration_hours", hours => timeout_secs / 3600).into()
+    };
+
+    let note = if bl.mode == BacklightMode::Automatic {
+        tr!("device.battery_note_backlight_auto", duration => dur_str).into()
+    } else {
+        tr!(
+            "device.battery_note_backlight_level",
+            level => level,
+            max => max_level,
+            duration => dur_str
+        )
+        .into()
+    };
+
+    let sig = if bl.mode == BacklightMode::Automatic {
+        format!(
+            "kbd:bl-on:mode=Auto:dur={timeout_secs}:ps={}",
+            bl.power_save
+        )
+    } else {
+        format!(
+            "kbd:bl-on:mode={:?}:lvl={level}/{max_level}:dur={timeout_secs}:ps={}",
+            bl.mode, bl.power_save
+        )
+    };
+    (estimated_hours, sig, Some(note))
+}
+
+fn telemetry_path() -> Option<PathBuf> {
+    openlogi_core::paths::config_dir()
+        .ok()
+        .map(|dir| dir.join(TELEMETRY_FILE))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use openlogi_core::config::Config;
+    use openlogi_core::device::{
+        BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind,
+        DeviceModelInfo, DeviceTransports, PairedDevice, ReceiverInfo,
+    };
+    use openlogi_core::hid::{
+        BacklightControls, BacklightDuration, BacklightMode, BacklightState, BacklightStatus,
+        ReportRate, ReportRateInfo,
+    };
+
+    use super::{
+        BatteryPhase, BatteryTelemetry, ChargingProgress, EstimatePhase, MAX_LEARN_WINDOW_SECS,
+        MIN_HEALTH_DROP_PCT, MIN_HEALTH_SAMPLES, MIN_LEARN_WINDOW_SECS, Ordering,
+        TELEMETRY_STAGED_SEQ, estimate_for_device, next_staged_telemetry_path_for_seq,
+        nominal_profile_for_device, observe_state_telemetry_at, staged_telemetry_path,
+    };
+    use crate::services::assets::AssetResolver;
+    use crate::services::i18n::LOCALE_LOCK;
+    use crate::state::{AppState, Sources};
+
+    fn test_state_with_devices(paired: Vec<PairedDevice>) -> AppState {
+        let (commands, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let resolver = AssetResolver::new();
+        let inventory = DeviceInventory {
+            receiver: ReceiverInfo {
+                name: "Logi Bolt Receiver".into(),
+                vendor_id: 0x046d,
+                product_id: 0xc548,
+                unique_id: Some("bolt-1".into()),
+            },
+            paired,
+        };
+        AppState::new(Sources {
+            inventories: &[inventory],
+            ..Sources::in_memory(Config::ephemeral(), &resolver, commands)
+        })
+    }
+
+    fn mx_keys_mini_device(
+        capabilities: Option<Capabilities>,
+        battery: Option<BatteryInfo>,
+    ) -> PairedDevice {
+        PairedDevice {
+            slot: 1,
+            wpid: Some(0xb369),
+            kind: DeviceKind::Keyboard,
+            codename: Some("MX Keys Mini".into()),
+            online: true,
+            battery,
+            capabilities,
+            model_info: Some(DeviceModelInfo {
+                entity_count: 1,
+                serial_number: Some("2444CEB3PWH8".into()),
+                unit_id: [0x24, 0x44, 0xce, 0xb3],
+                transports: DeviceTransports::default(),
+                model_ids: [0xb369, 0, 0],
+                extended_model_id: 0,
+            }),
+            settings_revision: 0,
+            hidpp10: false,
+        }
+    }
+
+    fn gaming_mouse_device(
+        capabilities: Option<Capabilities>,
+        battery: Option<BatteryInfo>,
+    ) -> PairedDevice {
+        PairedDevice {
+            slot: 2,
+            wpid: Some(0x407f),
+            kind: DeviceKind::Mouse,
+            codename: Some("G502 X".into()),
+            online: true,
+            battery,
+            capabilities,
+            model_info: Some(DeviceModelInfo {
+                entity_count: 1,
+                serial_number: Some("G502SERIAL01".into()),
+                unit_id: [0x11, 0x22, 0x33, 0x44],
+                transports: DeviceTransports::default(),
+                model_ids: [0x407f, 0, 0],
+                extended_model_id: 0,
+            }),
+            settings_revision: 0,
+            hidpp10: false,
+        }
+    }
+
+    fn manual_backlight(level: u8, duration_secs: u16) -> BacklightState {
+        BacklightState {
+            enabled: true,
+            power_save: false,
+            mode: BacklightMode::PermanentManual,
+            controls: BacklightControls::AUTOMATIC
+                | BacklightControls::LEVEL
+                | BacklightControls::POWER_SAVE
+                | BacklightControls::DURATION,
+            status: BacklightStatus::PermanentManual,
+            current_level: level,
+            nb_levels: 8,
+            duration: Some(BacklightDuration::try_from(duration_secs).unwrap()),
+        }
+    }
+
+    #[test]
+    fn locale_switch_translates_all_estimate_labels_and_notes() {
+        let _lock = LOCALE_LOCK.lock().unwrap();
+        let caps = Capabilities {
+            backlight: true,
+            ..Default::default()
+        };
+        let battery = BatteryInfo {
+            percentage: Some(80),
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Discharging,
+        };
+        let mut state =
+            test_state_with_devices(vec![mx_keys_mini_device(Some(caps), Some(battery))]);
+        let record = state.devices()[0].clone();
+        state.device_reads_mut().set_backlight_load_for_test(
+            record.device_key(),
+            crate::state::BacklightLoad::Ready(Arc::new(manual_backlight(4, 15))),
+        );
+
+        rust_i18n::set_locale("en");
+        let en_est = estimate_for_device(&state, &record).expect("estimate in en");
+        assert!(
+            en_est
+                .config_note
+                .as_deref()
+                .unwrap()
+                .contains("Brightness 4/7"),
+            "unexpected en note: {:?}",
+            en_est.config_note
+        );
+        assert!(!en_est.home_label().contains("Health"));
+        assert!(en_est.home_label().contains("left"));
+        assert!(en_est.detail_headline().contains("remaining"));
+        assert!(
+            en_est
+                .detail_subline()
+                .contains("Est. health: calibrating…")
+        );
+        assert!(en_est.detail_subline().contains("Based on active config"));
+
+        rust_i18n::set_locale("pt-BR");
+        let pt_est = estimate_for_device(&state, &record).expect("estimate in pt-BR");
+        assert!(
+            pt_est
+                .config_note
+                .as_deref()
+                .unwrap()
+                .contains("Brilho 4/7"),
+            "unexpected pt-BR note: {:?}",
+            pt_est.config_note
+        );
+        assert!(!pt_est.home_label().contains("Saúde"));
+        assert!(pt_est.detail_headline().contains("restantes"));
+        assert!(
+            pt_est
+                .detail_subline()
+                .contains("Saúde estim.: calculando…")
+        );
+        assert!(pt_est.detail_subline().contains("Baseado na config"));
+
+        rust_i18n::set_locale("de");
+        let de_est = estimate_for_device(&state, &record).expect("estimate in de");
+        assert!(!de_est.home_label().contains("Zustand"));
+        assert!(de_est.detail_headline().contains("verbleibend"));
+        assert!(
+            de_est
+                .detail_subline()
+                .contains("Gesch. Zustand: wird kalibriert…")
+        );
+        assert!(de_est.detail_subline().contains("Basierend auf aktiver"));
+        rust_i18n::set_locale("en");
+    }
+
+    #[test]
+    fn absent_or_unready_backlight_never_fabricates_level_4_fallback() {
+        let _lock = LOCALE_LOCK.lock().unwrap();
+        rust_i18n::set_locale("en");
+        let battery = BatteryInfo {
+            percentage: Some(90),
+            level: BatteryLevel::Full,
+            status: BatteryStatus::Discharging,
+        };
+
+        // Case 1: capabilities == None on MX Keys Mini
+        let state_no_caps =
+            test_state_with_devices(vec![mx_keys_mini_device(None, Some(battery.clone()))]);
+        let rec_no_caps = &state_no_caps.devices()[0];
+        let (hours, sig, note) = nominal_profile_for_device(&state_no_caps, rec_no_caps);
+        assert_eq!(hours, 120 * 24);
+        assert_eq!(sig, "kbd:standard");
+        assert_eq!(note, None);
+
+        // Case 2: capabilities.backlight == true, but BacklightLoad is Unknown / not Ready
+        let caps = Capabilities {
+            backlight: true,
+            ..Default::default()
+        };
+        let state_unready =
+            test_state_with_devices(vec![mx_keys_mini_device(Some(caps), Some(battery))]);
+        let rec_unready = &state_unready.devices()[0];
+        let (hours2, sig2, note2) = nominal_profile_for_device(&state_unready, rec_unready);
+        assert_eq!(hours2, 120 * 24);
+        assert_eq!(sig2, "kbd:unmeasured");
+        assert_eq!(note2, None);
+    }
+
+    #[test]
+    fn charging_interruption_invalidates_anchor_and_learns_only_post_charge_drop() {
+        let mut telemetry = BatteryTelemetry::load(false);
+        let key = "serial:2444ceb3pwh8";
+        let sig = "kbd:bl-off";
+        let nominal_hours = 150 * 24;
+        let t0 = 1_700_000_000;
+
+        let discharging = |pct: u8| BatteryInfo {
+            percentage: Some(pct),
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Discharging,
+        };
+        let charging = |pct: u8| BatteryInfo {
+            percentage: Some(pct),
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Charging,
+        };
+
+        // 1. Anchor at 80% discharging
+        telemetry.observe_device(
+            key,
+            true,
+            Some(&discharging(80)),
+            Some(sig),
+            nominal_hours,
+            t0,
+        );
+        assert_eq!(
+            telemetry.phase_for(key),
+            Some(&BatteryPhase::Discharging {
+                percentage: 80,
+                timestamp_secs: t0,
+                signature: sig.to_owned(),
+            })
+        );
+
+        // 2. Partial charge observed at 75% -> must transition phase to Charging
+        let t1 = t0 + 3_600;
+        telemetry.observe_device(key, true, Some(&charging(75)), Some(sig), nominal_hours, t1);
+        assert_eq!(
+            telemetry.phase_for(key),
+            Some(&BatteryPhase::Charging {
+                progress: ChargingProgress::AwaitingLiveStep {
+                    percentage: 75,
+                    timestamp_secs: t1,
+                },
+            })
+        );
+
+        // 3. Unplugged at 75% discharging -> re-anchors at 75% without learning 80% -> 75%
+        let t2 = t1 + 600;
+        telemetry.observe_device(
+            key,
+            true,
+            Some(&discharging(75)),
+            Some(sig),
+            nominal_hours,
+            t2,
+        );
+        assert_eq!(
+            telemetry.query(key, sig).2,
+            0,
+            "no sample learned on unplug"
+        );
+        assert_eq!(
+            telemetry.phase_for(key),
+            Some(&BatteryPhase::Discharging {
+                percentage: 75,
+                timestamp_secs: t2,
+                signature: sig.to_owned(),
+            })
+        );
+
+        // 4. Subsequent 5% drop (75% -> 70%) over 2 days learns strictly from 5% / 2 days (2.5%/day)
+        let t3 = t2 + 2 * 86_400;
+        telemetry.observe_device(
+            key,
+            true,
+            Some(&discharging(70)),
+            Some(sig),
+            nominal_hours,
+            t3,
+        );
+        let (_, learned, samples) = telemetry.query(key, sig);
+        assert_eq!(samples, 1);
+        let drain = learned.expect("learned drain present");
+        assert!(
+            (drain.pct_per_day - 2.5).abs() < 0.01,
+            "expected 2.5%/day from 75->70% over 2d, got {}",
+            drain.pct_per_day
+        );
+    }
+
+    #[test]
+    fn expired_14_day_window_reanchors_so_subsequent_drop_learns() {
+        let mut telemetry = BatteryTelemetry::load(false);
+        let key = "serial:mouse1";
+        let sig = "mouse:mx-master";
+        let nominal_hours = 70 * 24;
+        let t0 = 1_700_000_000;
+
+        let discharging = |pct: u8| BatteryInfo {
+            percentage: Some(pct),
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Discharging,
+        };
+
+        telemetry.observe_device(
+            key,
+            true,
+            Some(&discharging(90)),
+            Some(sig),
+            nominal_hours,
+            t0,
+        );
+
+        // 15 days later (> MAX_LEARN_WINDOW_SECS) at 60%: must re-anchor without learning
+        let t_gap = t0 + MAX_LEARN_WINDOW_SECS + 86_400;
+        telemetry.observe_device(
+            key,
+            true,
+            Some(&discharging(60)),
+            Some(sig),
+            nominal_hours,
+            t_gap,
+        );
+        assert_eq!(telemetry.query(key, sig).2, 0);
+        assert_eq!(
+            telemetry.phase_for(key),
+            Some(&BatteryPhase::Discharging {
+                percentage: 60,
+                timestamp_secs: t_gap,
+                signature: sig.to_owned(),
+            })
+        );
+
+        // 2 hours later (>= MIN_LEARN_WINDOW_SECS) at 58%: now learns normally from 60% -> 58%
+        let t_next = t_gap + MIN_LEARN_WINDOW_SECS * 4;
+        telemetry.observe_device(
+            key,
+            true,
+            Some(&discharging(58)),
+            Some(sig),
+            nominal_hours,
+            t_next,
+        );
+        assert_eq!(telemetry.query(key, sig).2, 1);
+    }
+
+    #[test]
+    fn coarse_battery_level_returns_nominal_estimate_without_learning_or_health_mutation() {
+        let _lock = LOCALE_LOCK.lock().unwrap();
+        rust_i18n::set_locale("en");
+        let coarse_good = BatteryInfo {
+            percentage: None,
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Discharging,
+        };
+        let coarse_low = BatteryInfo {
+            percentage: None,
+            level: BatteryLevel::Low,
+            status: BatteryStatus::Discharging,
+        };
+
+        let mut state =
+            test_state_with_devices(vec![mx_keys_mini_device(None, Some(coarse_good.clone()))]);
+        let key = state.devices()[0].config_key.clone();
+        let t0 = 1_700_000_000;
+        observe_state_telemetry_at(&mut state, t0);
+        assert_eq!(
+            state.battery_telemetry().phase_for(&key),
+            Some(&BatteryPhase::Unanchored)
+        );
+
+        // Simulate drop to Low 2 days later: still Unanchored, 0 learned samples, 100% health
+        state.battery_telemetry_mut().observe_device(
+            &key,
+            true,
+            Some(&coarse_low),
+            Some("kbd:standard"),
+            120 * 24,
+            t0 + 2 * 86_400,
+        );
+        let (health, learned, samples) = state.battery_telemetry().query(&key, "kbd:standard");
+        assert_eq!(health, None);
+        assert_eq!(learned, None);
+        assert_eq!(samples, 0);
+
+        // Estimate still works from nominal model
+        let est = estimate_for_device(&state, &state.devices()[0]).expect("coarse estimate");
+        assert!(est.remaining_hours > 0);
+        assert_eq!(est.learned_samples, 0);
+    }
+
+    #[test]
+    fn unselected_mouse_report_rate_and_profile_specific_samples_are_accurate() {
+        let _lock = LOCALE_LOCK.lock().unwrap();
+        rust_i18n::set_locale("en");
+        let battery = BatteryInfo {
+            percentage: Some(80),
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Discharging,
+        };
+        let mouse_caps = Capabilities {
+            report_rate: true,
+            ..Default::default()
+        };
+
+        // Keyboard at index 0 (selected), gaming mouse at index 1 (unselected)
+        let mut state = test_state_with_devices(vec![
+            mx_keys_mini_device(None, Some(battery.clone())),
+            gaming_mouse_device(Some(mouse_caps), Some(battery.clone())),
+        ]);
+        let mouse_record = state.devices()[1].clone();
+
+        // Before report rate is Ready: signature uses hz=unknown (never unwrap_or(1000))
+        let (_, sig_unknown, note_unknown) = nominal_profile_for_device(&state, &mouse_record);
+        assert_eq!(sig_unknown, "mouse:gaming:rgb=off:hz=unknown");
+        assert_eq!(note_unknown, None);
+
+        // Once report rate is Ready at 2000Hz on the unselected mouse:
+        state.device_reads_mut().set_report_rate_load_for_test(
+            mouse_record.device_key(),
+            crate::state::ReportRateLoad::Ready(Arc::new(ReportRateInfo {
+                current: ReportRate::from(2000),
+                supported: vec![ReportRate::from(1000), ReportRate::from(2000)],
+            })),
+        );
+        let (hours_2k, sig_2k, note_2k) = nominal_profile_for_device(&state, &mouse_record);
+        assert_eq!(sig_2k, "mouse:gaming:rgb=off:hz=2000");
+        assert_eq!(note_2k.as_deref(), Some("2000Hz"));
+        assert!(hours_2k < 130);
+
+        // Learn 1 sample on 2000Hz profile, then switch to 1000Hz profile -> learned_samples must be 0
+        let t0 = 1_700_000_000;
+        observe_state_telemetry_at(&mut state, t0);
+        state.battery_telemetry_mut().observe_device(
+            &mouse_record.config_key,
+            true,
+            Some(&BatteryInfo {
+                percentage: Some(70),
+                ..battery
+            }),
+            Some(&sig_2k),
+            hours_2k,
+            t0 + 3_600 * 4,
+        );
+        let est_2k = estimate_for_device(&state, &mouse_record).unwrap();
+        assert_eq!(est_2k.learned_samples, 1);
+
+        state.device_reads_mut().set_report_rate_load_for_test(
+            mouse_record.device_key(),
+            crate::state::ReportRateLoad::Ready(Arc::new(ReportRateInfo {
+                current: ReportRate::from(1000),
+                supported: vec![ReportRate::from(1000), ReportRate::from(2000)],
+            })),
+        );
+        let est_1k = estimate_for_device(&state, &mouse_record).unwrap();
+        assert_eq!(
+            est_1k.learned_samples, 0,
+            "switching to an unlearned profile signature must report 0 samples"
+        );
+    }
+
+    #[test]
+    fn atomic_persistence_retains_dirty_on_failure_and_recovers() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("openlogi-battery-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let file_path = temp_dir.join("battery-telemetry.json");
+
+        // Each call to staged_telemetry_path uses a distinct per-call staging file.
+        let stage_a = staged_telemetry_path(&file_path);
+        let stage_b = staged_telemetry_path(&file_path);
+        assert_ne!(stage_a, stage_b, "every save must use its own staging path");
+
+        // 1. Persist initial readable history (85% @ t=1000 -> 75% @ t=4600, 1 learned sample).
+        let mut telemetry = BatteryTelemetry::with_path(file_path.clone());
+        let battery_85 = BatteryInfo {
+            percentage: Some(85),
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Discharging,
+        };
+        let battery_75 = BatteryInfo {
+            percentage: Some(75),
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Discharging,
+        };
+        telemetry.observe_device(
+            "serial:test",
+            true,
+            Some(&battery_85),
+            Some("kbd:standard"),
+            2880,
+            1_000,
+        );
+        telemetry.observe_device(
+            "serial:test",
+            true,
+            Some(&battery_75),
+            Some("kbd:standard"),
+            2880,
+            4_600,
+        );
+        telemetry.flush();
+        assert!(!telemetry.is_dirty());
+        assert!(file_path.exists());
+
+        // 2. Simulate an interrupted previous staging write left behind plus a failed save
+        // on the next sequence number (by placing a directory at the next per-call staging path).
+        std::fs::write(&stage_a, b"{\"devices\": {\"serial:test\": ").unwrap();
+        let next_seq = TELEMETRY_STAGED_SEQ.load(Ordering::Relaxed);
+        let blocked_staging = next_staged_telemetry_path_for_seq(&file_path, next_seq);
+        std::fs::create_dir_all(&blocked_staging).unwrap();
+
+        let battery_65 = BatteryInfo {
+            percentage: Some(65),
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Discharging,
+        };
+        telemetry.observe_device(
+            "serial:test",
+            true,
+            Some(&battery_65),
+            Some("kbd:standard"),
+            2880,
+            8_200,
+        );
+        assert!(telemetry.is_dirty());
+
+        // Flush fails on the blocked staging path -> dirty remains true AND the previous
+        // readable history on disk (75% @ t=4600, 1 sample) is preserved intact!
+        telemetry.flush();
+        assert!(
+            telemetry.is_dirty(),
+            "dirty flag must remain true when atomic write fails"
+        );
+        let preserved = BatteryTelemetry::with_path(file_path.clone());
+        assert_eq!(
+            preserved.phase_for("serial:test"),
+            Some(&BatteryPhase::Discharging {
+                percentage: 75,
+                timestamp_secs: 4_600,
+                signature: "kbd:standard".into(),
+            }),
+            "interrupted or failed save must preserve the previous readable history on disk"
+        );
+        assert_eq!(preserved.query("serial:test", "kbd:standard").2, 1);
+
+        // 3. Subsequent flush uses the next per-call staging file (`next_seq + 1`), so it
+        // succeeds automatically even without removing `blocked_staging`, and clears dirty!
+        telemetry.flush();
+        assert!(!telemetry.is_dirty());
+
+        let reloaded = BatteryTelemetry::with_path(file_path);
+        assert_eq!(
+            reloaded.phase_for("serial:test"),
+            Some(&BatteryPhase::Discharging {
+                percentage: 65,
+                timestamp_secs: 8_200,
+                signature: "kbd:standard".into(),
+            })
+        );
+        assert_eq!(reloaded.query("serial:test", "kbd:standard").2, 2);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn restart_preserves_discharge_interval_until_async_settings_reply_arrives() {
+        let caps = Capabilities {
+            backlight: true,
+            ..Default::default()
+        };
+        let battery_80 = BatteryInfo {
+            percentage: Some(80),
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Discharging,
+        };
+        let mut state =
+            test_state_with_devices(vec![mx_keys_mini_device(Some(caps), Some(battery_80))]);
+        let dev_key = state.devices()[0].device_key();
+        let cfg_key = state.devices()[0].config_key.clone();
+        let t0 = 1_700_000_000;
+
+        // Session 1: Backlight is Ready -> anchors at 80% with kbd:bl-on:...
+        state.device_reads_mut().set_backlight_load_for_test(
+            dev_key.clone(),
+            crate::state::BacklightLoad::Ready(Arc::new(manual_backlight(4, 15))),
+        );
+        observe_state_telemetry_at(&mut state, t0);
+        let (_, expected_sig, _) = nominal_profile_for_device(&state, &state.devices()[0]);
+        assert_eq!(
+            state.battery_telemetry().phase_for(&cfg_key),
+            Some(&BatteryPhase::Discharging {
+                percentage: 80,
+                timestamp_secs: t0,
+                signature: expected_sig.clone(),
+            })
+        );
+
+        // Simulate app restart 2 hours later: battery is now 75%, but BacklightLoad is Unknown
+        // when the first inventory update arrives before `load_all_backlights` replies.
+        let t_restart = t0 + 2 * 3_600;
+        state
+            .device_reads_mut()
+            .set_backlight_load_for_test(dev_key.clone(), crate::state::BacklightLoad::Unknown);
+        let battery_75 = BatteryInfo {
+            percentage: Some(75),
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Discharging,
+        };
+        let inv = DeviceInventory {
+            receiver: ReceiverInfo {
+                name: "Logi Bolt Receiver".into(),
+                vendor_id: 0x046d,
+                product_id: 0xc548,
+                unique_id: Some("bolt-1".into()),
+            },
+            paired: vec![mx_keys_mini_device(Some(caps), Some(battery_75))],
+        };
+        let resolver = AssetResolver::new();
+        let _ = state.refresh_inventories(&[inv], &[], &resolver, &[]);
+        observe_state_telemetry_at(&mut state, t_restart);
+
+        // Anchor must STILL be the 80% @ t0 reading (not overwritten by kbd:unmeasured)!
+        assert_eq!(
+            state.battery_telemetry().phase_for(&cfg_key),
+            Some(&BatteryPhase::Discharging {
+                percentage: 80,
+                timestamp_secs: t0,
+                signature: expected_sig.clone(),
+            })
+        );
+
+        // Now the async backlight read completes at t_restart + 1s:
+        // The 80% -> 75% interval is preserved and learned!
+        state.device_reads_mut().set_backlight_load_for_test(
+            dev_key,
+            crate::state::BacklightLoad::Ready(Arc::new(manual_backlight(4, 15))),
+        );
+        observe_state_telemetry_at(&mut state, t_restart + 1);
+        let (_, _, samples) = state.battery_telemetry().query(&cfg_key, &expected_sig);
+        assert_eq!(
+            samples, 1,
+            "restart must preserve the prior anchor until settings reply arrives"
+        );
+    }
+
+    #[test]
+    fn automatic_brightness_sensor_changes_preserve_learning_window() {
+        let caps = Capabilities {
+            backlight: true,
+            ..Default::default()
+        };
+        let battery_90 = BatteryInfo {
+            percentage: Some(90),
+            level: BatteryLevel::Full,
+            status: BatteryStatus::Discharging,
+        };
+        let mut state =
+            test_state_with_devices(vec![mx_keys_mini_device(Some(caps), Some(battery_90))]);
+        let dev_key = state.devices()[0].device_key();
+        let cfg_key = state.devices()[0].config_key.clone();
+        let t0 = 1_700_000_000;
+
+        let auto_bl = |level: u8| BacklightState {
+            enabled: true,
+            power_save: false,
+            mode: BacklightMode::Automatic,
+            controls: BacklightControls::AUTOMATIC | BacklightControls::DURATION,
+            status: BacklightStatus::AlsAutomatic,
+            current_level: level,
+            nb_levels: 8,
+            duration: Some(BacklightDuration::try_from(15u16).unwrap()),
+        };
+
+        // 1. Anchor at 90% in Automatic mode with ambient sensor level 2
+        state.device_reads_mut().set_backlight_load_for_test(
+            dev_key.clone(),
+            crate::state::BacklightLoad::Ready(Arc::new(auto_bl(2))),
+        );
+        observe_state_telemetry_at(&mut state, t0);
+        let (_, sig_lvl2, _) = nominal_profile_for_device(&state, &state.devices()[0]);
+
+        // 2. 10 minutes later, ambient room light changes sensor current_level to 6 (still 90%)
+        state.device_reads_mut().set_backlight_load_for_test(
+            dev_key.clone(),
+            crate::state::BacklightLoad::Ready(Arc::new(auto_bl(6))),
+        );
+        let (_, sig_lvl6, _) = nominal_profile_for_device(&state, &state.devices()[0]);
+        assert_eq!(
+            sig_lvl2, sig_lvl6,
+            "automatic mode signature must not depend on transient ambient sensor level"
+        );
+        observe_state_telemetry_at(&mut state, t0 + 600);
+        assert_eq!(
+            state.battery_telemetry().phase_for(&cfg_key),
+            Some(&BatteryPhase::Discharging {
+                percentage: 90,
+                timestamp_secs: t0,
+                signature: sig_lvl2.clone(),
+            }),
+            "ambient sensor change must not reset the discharge anchor timestamp"
+        );
+
+        // 3. At t0 + 40 minutes (>= 30m window), battery drops to 88% with sensor at level 5 -> learns!
+        let battery_88 = BatteryInfo {
+            percentage: Some(88),
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Discharging,
+        };
+        state.device_reads_mut().set_backlight_load_for_test(
+            dev_key,
+            crate::state::BacklightLoad::Ready(Arc::new(auto_bl(5))),
+        );
+        let (hours_lvl5, sig_lvl5, _) = nominal_profile_for_device(&state, &state.devices()[0]);
+        state.battery_telemetry_mut().observe_device(
+            &cfg_key,
+            true,
+            Some(&battery_88),
+            Some(&sig_lvl5),
+            hours_lvl5,
+            t0 + 2_400,
+        );
+        assert_eq!(state.battery_telemetry().query(&cfg_key, &sig_lvl2).2, 1);
+    }
+
+    #[test]
+    fn unset_rgb_and_zero_brightness_or_black_color_select_correct_profiles() {
+        let _lock = LOCALE_LOCK.lock().unwrap();
+        rust_i18n::set_locale("en");
+        let battery = BatteryInfo {
+            percentage: Some(80),
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Discharging,
+        };
+        let rgb_kbd_caps = Capabilities {
+            lighting: true,
+            ..Default::default()
+        };
+        let mut g915 = mx_keys_mini_device(Some(rgb_kbd_caps), Some(battery));
+        g915.codename = Some("G915 TKL".into());
+
+        let mut state = test_state_with_devices(vec![g915]);
+        let record = state.devices()[0].clone();
+
+        // 1. Fresh RGB keyboard with `lighting: None` -> unknown lighting profile (40h, kbd:rgb-unknown), NOT kbd:standard
+        let (hours_unset, sig_unset, note_unset) = nominal_profile_for_device(&state, &record);
+        assert_eq!(hours_unset, 40);
+        assert_eq!(sig_unset, "kbd:rgb-unknown");
+        assert_eq!(note_unset, None);
+
+        // 2. Saved lighting with enabled: true, brightness: 80, white -> lit profile (40h, kbd:rgb-on)
+        let _ = state.commit_lighting(openlogi_core::config::Lighting {
+            enabled: true,
+            color: openlogi_core::color::Rgb::WHITE,
+            brightness: 80,
+        });
+        let (hours_on, sig_on, note_on) = nominal_profile_for_device(&state, &record);
+        assert_eq!(hours_on, 40);
+        assert_eq!(sig_on, "kbd:rgb-on");
+        assert_eq!(note_on.as_deref(), Some("RGB on"));
+
+        // 3. Saved lighting with enabled: true, brightness: 0 -> dark profile (180d, kbd:rgb-off)
+        let _ = state.commit_lighting(openlogi_core::config::Lighting {
+            enabled: true,
+            color: openlogi_core::color::Rgb::WHITE,
+            brightness: 0,
+        });
+        let (hours_zero, sig_zero, note_zero) = nominal_profile_for_device(&state, &record);
+        assert_eq!(hours_zero, 180 * 24);
+        assert_eq!(sig_zero, "kbd:rgb-off");
+        assert_eq!(note_zero.as_deref(), Some("RGB off"));
+
+        // 4. Saved lighting with enabled: true, brightness: 100, color: 000000 (black) -> dark profile
+        let _ = state.commit_lighting(openlogi_core::config::Lighting {
+            enabled: true,
+            color: openlogi_core::color::Rgb::new(0, 0, 0),
+            brightness: 100,
+        });
+        let (hours_black, sig_black, note_black) = nominal_profile_for_device(&state, &record);
+        assert_eq!(hours_black, 180 * 24);
+        assert_eq!(sig_black, "kbd:rgb-off");
+        assert_eq!(note_black.as_deref(), Some("RGB off"));
+    }
+
+    #[test]
+    fn rgb_mouse_without_report_rate_capability_learns_discharge_interval() {
+        let battery_80 = BatteryInfo {
+            percentage: Some(80),
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Discharging,
+        };
+        // RGB gaming mouse that supports lighting (`lighting: true`) but NOT adjustable report rate (`report_rate: false`)
+        let rgb_only_mouse_caps = Capabilities {
+            lighting: true,
+            report_rate: false,
+            ..Default::default()
+        };
+        let mut state = test_state_with_devices(vec![gaming_mouse_device(
+            Some(rgb_only_mouse_caps),
+            Some(battery_80),
+        )]);
+        let cfg_key = state.devices()[0].config_key.clone();
+
+        // 1. Anchor at 80% on initial state creation — even though report_rate is unsupported,
+        // learning must NOT be blocked and the device immediately enters Discharging phase!
+        let (nominal_hours, sig, _) = nominal_profile_for_device(&state, &state.devices()[0]);
+        assert_eq!(sig, "mouse:gaming:rgb=unknown:hz=fixed");
+        let Some(BatteryPhase::Discharging {
+            percentage: 80,
+            timestamp_secs: t0,
+            signature: anchored_sig,
+        }) = state.battery_telemetry().phase_for(&cfg_key).cloned()
+        else {
+            panic!(
+                "expected Discharging anchor at 80%, got {:?}",
+                state.battery_telemetry().phase_for(&cfg_key)
+            );
+        };
+        assert_eq!(anchored_sig, sig);
+
+        // 2. Observe a valid discharge interval (80% -> 74% over 3 hours) -> learns 1 sample!
+        let battery_74 = BatteryInfo {
+            percentage: Some(74),
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Discharging,
+        };
+        state.battery_telemetry_mut().observe_device(
+            &cfg_key,
+            true,
+            Some(&battery_74),
+            Some(&sig),
+            nominal_hours,
+            t0 + 3 * 3_600,
+        );
+
+        let (_, learned, samples) = state.battery_telemetry().query(&cfg_key, &sig);
+        assert_eq!(
+            samples, 1,
+            "RGB mouse without report_rate capability must learn discharge intervals (nominal_hours={nominal_hours})"
+        );
+        assert!(learned.is_some());
+    }
+
+    #[test]
+    fn charging_phase_constructors_validate_milestones_and_reject_invalid_states() {
+        let _lock = LOCALE_LOCK.lock().unwrap();
+        rust_i18n::set_locale("en");
+
+        // 1. Private EstimatePhase constructors refuse zero or reversed milestones,
+        // and split 79% vs 80% cleanly between ChargingTo80 and ChargingTo100.
+        assert_eq!(EstimatePhase::charging_to_80(0, 20), None);
+        assert_eq!(EstimatePhase::charging_to_80(20, 20), None);
+        assert_eq!(EstimatePhase::charging_to_80(25, 15), None);
+        assert_eq!(EstimatePhase::charging_to_100(0), None);
+        assert!(matches!(
+            EstimatePhase::from_live_charge_rate(79, 1.0),
+            Some(EstimatePhase::ChargingTo80 {
+                minutes_to_80: 1,
+                minutes_to_100: 36,
+            })
+        ));
+        assert!(matches!(
+            EstimatePhase::from_live_charge_rate(80, 2.0),
+            Some(EstimatePhase::ChargingTo100 { minutes_to_100: 40 })
+        ));
+
+        let caps = Capabilities::default();
+        let t0 = 4_000_000_000_u64;
+
+        // 2. Frozen pre-charge reading (`hold_percentage_while_charging` on 0x1000, voltage,
+        // and ADC sources): percentage stays at 65% across multiple polls -> never produces
+        // a charging estimate, keeping the plain charging label.
+        let frozen_65 = BatteryInfo {
+            percentage: Some(65),
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Charging,
+        };
+        let mut state_frozen = test_state_with_devices(vec![mx_keys_mini_device(
+            Some(caps),
+            Some(frozen_65.clone()),
+        )]);
+        let frozen_key = state_frozen.devices()[0].config_key.clone();
+        for dt in [0_u64, 600, 1_800, 3_600] {
+            state_frozen.battery_telemetry_mut().observe_device(
+                &frozen_key,
+                true,
+                Some(&frozen_65),
+                Some("kbd:standard"),
+                120 * 24,
+                t0 + dt,
+            );
+            assert_eq!(
+                estimate_for_device(&state_frozen, &state_frozen.devices()[0]),
+                None,
+                "frozen pre-charge percentage must never produce a charging ETA (dt={dt})"
+            );
+        }
+
+        // 3. Cold-start 0% while charging, 100% while charging, coarse-level charging,
+        // and offline cached charging all return None.
+        for invalid in [
+            BatteryInfo {
+                percentage: Some(0),
+                level: BatteryLevel::Unknown,
+                status: BatteryStatus::Charging,
+            },
+            BatteryInfo {
+                percentage: Some(100),
+                level: BatteryLevel::Full,
+                status: BatteryStatus::Charging,
+            },
+            BatteryInfo {
+                percentage: None,
+                level: BatteryLevel::Good,
+                status: BatteryStatus::Charging,
+            },
+        ] {
+            let st = test_state_with_devices(vec![mx_keys_mini_device(Some(caps), Some(invalid))]);
+            assert_eq!(estimate_for_device(&st, &st.devices()[0]), None);
+        }
+
+        let mut offline_dev = mx_keys_mini_device(
+            Some(caps),
+            Some(BatteryInfo {
+                percentage: Some(60),
+                level: BatteryLevel::Good,
+                status: BatteryStatus::Charging,
+            }),
+        );
+        offline_dev.online = false;
+        let st_offline = test_state_with_devices(vec![offline_dev]);
+        assert_eq!(
+            estimate_for_device(&st_offline, &st_offline.devices()[0]),
+            None
+        );
+    }
+
+    #[test]
+    fn charging_estimate_requires_live_progress_and_measured_capabilities() {
+        let _lock = LOCALE_LOCK.lock().unwrap();
+        rust_i18n::set_locale("en");
+
+        let caps = Capabilities::default();
+        let t0 = 4_000_000_000_u64;
+
+        // 1. Unknown capabilities (`None`): even if percentage rises from 50% to 55%,
+        // no charging estimate is produced.
+        let charging_50 = BatteryInfo {
+            percentage: Some(50),
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Charging,
+        };
+        let charging_55 = BatteryInfo {
+            percentage: Some(55),
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Charging,
+        };
+        let mut state_unknown_caps =
+            test_state_with_devices(vec![mx_keys_mini_device(None, Some(charging_55.clone()))]);
+        observe_state_telemetry_at(&mut state_unknown_caps, t0);
+        observe_state_telemetry_at(&mut state_unknown_caps, t0 + 300);
+        assert_eq!(
+            estimate_for_device(&state_unknown_caps, &state_unknown_caps.devices()[0]),
+            None,
+            "unknown capabilities (None) must not produce charging estimates"
+        );
+
+        // 2. Live charging progress (50% -> 55% over 5 minutes = 1.0 min/%) with measured
+        // capabilities produces ChargingTo80, and is independent of DeviceKind.
+        let mut state_50 = test_state_with_devices(vec![mx_keys_mini_device(
+            Some(caps),
+            Some(charging_55.clone()),
+        )]);
+        let key_50 = state_50.devices()[0].config_key.clone();
+        state_50.battery_telemetry_mut().observe_device(
+            &key_50,
+            true,
+            Some(&charging_50),
+            Some("kbd:standard"),
+            120 * 24,
+            t0,
+        );
+        state_50.battery_telemetry_mut().observe_device(
+            &key_50,
+            true,
+            Some(&charging_55),
+            Some("kbd:standard"),
+            120 * 24,
+            t0 + 300,
+        );
+        let est_55 = estimate_for_device(&state_50, &state_50.devices()[0]).unwrap();
+        assert_eq!(
+            est_55.phase,
+            EstimatePhase::ChargingTo80 {
+                minutes_to_80: 25,
+                minutes_to_100: 60,
+            }
+        );
+        assert!(est_55.home_label().contains("to 80%"));
+        assert!(est_55.home_label().contains("to 100%"));
+        assert!(est_55.inline_label().contains("→ 80%"));
+
+        // Verify DeviceKind independence: a Trackball with the same live charging step
+        // produces the exact same charging phase as a Keyboard.
+        let mut trackball = mx_keys_mini_device(Some(caps), Some(charging_55.clone()));
+        trackball.kind = DeviceKind::Trackball;
+        let mut state_tb = test_state_with_devices(vec![trackball]);
+        let tb_key = state_tb.devices()[0].config_key.clone();
+        state_tb.battery_telemetry_mut().observe_device(
+            &tb_key,
+            true,
+            Some(&charging_50),
+            Some("other:standard"),
+            90 * 24,
+            t0,
+        );
+        state_tb.battery_telemetry_mut().observe_device(
+            &tb_key,
+            true,
+            Some(&charging_55),
+            Some("other:standard"),
+            90 * 24,
+            t0 + 300,
+        );
+        let est_tb = estimate_for_device(&state_tb, &state_tb.devices()[0]).unwrap();
+        assert_eq!(est_tb.phase, est_55.phase);
+    }
+
+    #[test]
+    fn charging_estimate_above_80_uses_single_stage_100_target() {
+        let _lock = LOCALE_LOCK.lock().unwrap();
+        rust_i18n::set_locale("en");
+
+        let caps = Capabilities::default();
+        let t0 = 4_000_000_000_u64;
+
+        // Between 80% and 99% (85% -> 90% over 12.5 minutes = 2.5 min/%): ChargingTo100.
+        let charging_85 = BatteryInfo {
+            percentage: Some(85),
+            level: BatteryLevel::Full,
+            status: BatteryStatus::Charging,
+        };
+        let charging_90 = BatteryInfo {
+            percentage: Some(90),
+            level: BatteryLevel::Full,
+            status: BatteryStatus::Charging,
+        };
+        let mut state_90 = test_state_with_devices(vec![mx_keys_mini_device(
+            Some(caps),
+            Some(charging_90.clone()),
+        )]);
+        let key_90 = state_90.devices()[0].config_key.clone();
+        state_90.battery_telemetry_mut().observe_device(
+            &key_90,
+            true,
+            Some(&charging_85),
+            Some("kbd:standard"),
+            120 * 24,
+            t0,
+        );
+        state_90.battery_telemetry_mut().observe_device(
+            &key_90,
+            true,
+            Some(&charging_90),
+            Some("kbd:standard"),
+            120 * 24,
+            t0 + 750,
+        );
+        let est_90 = estimate_for_device(&state_90, &state_90.devices()[0]).unwrap();
+        assert_eq!(
+            est_90.phase,
+            EstimatePhase::ChargingTo100 { minutes_to_100: 25 }
+        );
+        assert_eq!(est_90.home_label(), "~25m to 100%");
+        assert_eq!(est_90.inline_label(), "~25m → 100%");
+        assert!(est_90.detail_headline().contains("80–100% slow phase"));
+    }
+
+    #[test]
+    fn charging_slow_uses_measured_pace_once() {
+        let _lock = LOCALE_LOCK.lock().unwrap();
+        rust_i18n::set_locale("en");
+
+        let caps = Capabilities::default();
+        let t0 = 4_000_000_000_u64;
+
+        // Rising from 85% to 90% in 10 minutes (600s) under ChargingSlow is 2.0 min/%.
+        // With 10% remaining (90% -> 100%), the measured pace yields 20 minutes, not 30.
+        let slow_85 = BatteryInfo {
+            percentage: Some(85),
+            level: BatteryLevel::Full,
+            status: BatteryStatus::ChargingSlow,
+        };
+        let slow_90 = BatteryInfo {
+            percentage: Some(90),
+            level: BatteryLevel::Full,
+            status: BatteryStatus::ChargingSlow,
+        };
+        let mut state =
+            test_state_with_devices(vec![mx_keys_mini_device(Some(caps), Some(slow_90.clone()))]);
+        let key = state.devices()[0].config_key.clone();
+        state.battery_telemetry_mut().observe_device(
+            &key,
+            true,
+            Some(&slow_85),
+            Some("kbd:standard"),
+            120 * 24,
+            t0,
+        );
+        state.battery_telemetry_mut().observe_device(
+            &key,
+            true,
+            Some(&slow_90),
+            Some("kbd:standard"),
+            120 * 24,
+            t0 + 600,
+        );
+
+        let est = estimate_for_device(&state, &state.devices()[0]).expect("ChargingSlow estimate");
+        assert_eq!(
+            est.phase,
+            EstimatePhase::ChargingTo100 { minutes_to_100: 20 }
+        );
+        assert_eq!(est.home_label(), "~20m to 100%");
+    }
+
+    #[test]
+    fn same_second_observation_preserves_live_charge_rate() {
+        let _lock = LOCALE_LOCK.lock().unwrap();
+        rust_i18n::set_locale("en");
+
+        let caps = Capabilities::default();
+        let t0 = 4_000_000_000_u64;
+        let charging_50 = BatteryInfo {
+            percentage: Some(50),
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Charging,
+        };
+        let charging_55 = BatteryInfo {
+            percentage: Some(55),
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Charging,
+        };
+        let mut state = test_state_with_devices(vec![mx_keys_mini_device(
+            Some(caps),
+            Some(charging_55.clone()),
+        )]);
+        let key = state.devices()[0].config_key.clone();
+
+        state.battery_telemetry_mut().observe_device(
+            &key,
+            true,
+            Some(&charging_50),
+            Some("kbd:standard"),
+            120 * 24,
+            t0,
+        );
+        state.battery_telemetry_mut().observe_device(
+            &key,
+            true,
+            Some(&charging_55),
+            Some("kbd:standard"),
+            120 * 24,
+            t0 + 300,
+        );
+        assert_eq!(
+            state.battery_telemetry().live_charging_rate(&key),
+            Some(1.0)
+        );
+
+        // A setting reply arriving in the same second (`t0 + 300`) re-observes the device:
+        // the live charging rate and estimate must remain intact.
+        observe_state_telemetry_at(&mut state, t0 + 300);
+        assert_eq!(
+            state.battery_telemetry().live_charging_rate(&key),
+            Some(1.0)
+        );
+        let est = estimate_for_device(&state, &state.devices()[0])
+            .expect("estimate preserved after same-second observation");
+        assert_eq!(
+            est.phase,
+            EstimatePhase::ChargingTo80 {
+                minutes_to_80: 25,
+                minutes_to_100: 60,
+            }
+        );
+
+        //Leaving charging (to Discharging or coarse Unanchored) inside the single
+        // BatteryPhase enum drops all live or waiting charging progress.
+        let discharging_55 = BatteryInfo {
+            percentage: Some(55),
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Discharging,
+        };
+        state.battery_telemetry_mut().observe_device(
+            &key,
+            true,
+            Some(&discharging_55),
+            Some("kbd:standard"),
+            120 * 24,
+            t0 + 360,
+        );
+        assert_eq!(state.battery_telemetry().live_charging_rate(&key), None);
+        assert!(matches!(
+            state.battery_telemetry().phase_for(&key),
+            Some(BatteryPhase::Discharging { percentage: 55, .. })
+        ));
+    }
+
+    #[test]
+    fn charging_fault_requires_fresh_live_step() {
+        let _lock = LOCALE_LOCK.lock().unwrap();
+        rust_i18n::set_locale("en");
+
+        let caps = Capabilities::default();
+        let t0 = 4_000_000_000_u64;
+        let charging_50 = BatteryInfo {
+            percentage: Some(50),
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Charging,
+        };
+        let charging_55 = BatteryInfo {
+            percentage: Some(55),
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Charging,
+        };
+        let fault_55 = BatteryInfo {
+            percentage: Some(55),
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Error,
+        };
+        let charging_56 = BatteryInfo {
+            percentage: Some(56),
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Charging,
+        };
+
+        let mut state = test_state_with_devices(vec![mx_keys_mini_device(
+            Some(caps),
+            Some(charging_55.clone()),
+        )]);
+        let key = state.devices()[0].config_key.clone();
+
+        // 1. Reach `ChargingProgress::Live` (50% -> 55% over 5 minutes = 1.0 min/%).
+        state.battery_telemetry_mut().observe_device(
+            &key,
+            true,
+            Some(&charging_50),
+            Some("kbd:standard"),
+            120 * 24,
+            t0,
+        );
+        state.battery_telemetry_mut().observe_device(
+            &key,
+            true,
+            Some(&charging_55),
+            Some("kbd:standard"),
+            120 * 24,
+            t0 + 300,
+        );
+        assert_eq!(
+            state.battery_telemetry().live_charging_rate(&key),
+            Some(1.0)
+        );
+
+        // 2. Thermal/charging fault (`BatteryStatus::Error`) occurs at t0 + 600:
+        // must clear charging progress immediately.
+        state.battery_telemetry_mut().observe_device(
+            &key,
+            true,
+            Some(&fault_55),
+            Some("kbd:standard"),
+            120 * 24,
+            t0 + 600,
+        );
+        assert_eq!(state.battery_telemetry().live_charging_rate(&key), None);
+        assert_eq!(
+            state.battery_telemetry().phase_for(&key),
+            Some(&BatteryPhase::Unanchored)
+        );
+
+        // 3. Charging resumes at the same 55% 1 hour later (`t0 + 3_900`):
+        // must re-enter `AwaitingLiveStep` (no stale rate reused) and must not count
+        // the paused fault hour into the next 55% -> 56% step 2 minutes later (`t0 + 4_020`).
+        state.battery_telemetry_mut().observe_device(
+            &key,
+            true,
+            Some(&charging_55),
+            Some("kbd:standard"),
+            120 * 24,
+            t0 + 3_900,
+        );
+        assert_eq!(
+            state.battery_telemetry().live_charging_rate(&key),
+            None,
+            "resuming at the same percentage after a fault must wait for a fresh live step"
+        );
+        assert_eq!(estimate_for_device(&state, &state.devices()[0]), None);
+
+        state.battery_telemetry_mut().observe_device(
+            &key,
+            true,
+            Some(&charging_56),
+            Some("kbd:standard"),
+            120 * 24,
+            t0 + 4_020,
+        );
+        // 1% over 120s (t0+3900 -> t0+4020) = 2.0 min/%, NOT 62 minutes from t0+300!
+        assert_eq!(
+            state.battery_telemetry().live_charging_rate(&key),
+            Some(2.0)
+        );
+    }
+
+    #[test]
+    fn multi_cycle_health_calibration_omits_home_health_and_shows_calibrating_until_ready() {
+        let _lock = LOCALE_LOCK.lock().unwrap();
+        rust_i18n::set_locale("en");
+
+        let battery_90 = BatteryInfo {
+            percentage: Some(90),
+            level: BatteryLevel::Full,
+            status: BatteryStatus::Discharging,
+        };
+        let mut state = test_state_with_devices(vec![mx_keys_mini_device(None, Some(battery_90))]);
+        let cfg_key = state.devices()[0].config_key.clone();
+        let sig = "kbd:standard";
+        let nominal_hours = 120 * 24;
+        let mut now = 4_000_000_000_u64;
+
+        // Before MIN_HEALTH_DROP_PCT (150%) and MIN_HEALTH_SAMPLES (5), health_pct is None.
+        let est_initial = estimate_for_device(&state, &state.devices()[0]).unwrap();
+        assert_eq!(est_initial.health_pct, None);
+        assert!(
+            est_initial
+                .detail_subline()
+                .contains("Est. health: calibrating…")
+        );
+
+        // Feed 5 discharge intervals totaling 150% drop (30% drop each over 10 days).
+        for _ in 0..MIN_HEALTH_SAMPLES {
+            state.battery_telemetry_mut().observe_device(
+                &cfg_key,
+                true,
+                Some(&BatteryInfo {
+                    percentage: Some(90),
+                    level: BatteryLevel::Full,
+                    status: BatteryStatus::Discharging,
+                }),
+                Some(sig),
+                nominal_hours,
+                now,
+            );
+            now += 10 * 86_400;
+            state.battery_telemetry_mut().observe_device(
+                &cfg_key,
+                true,
+                Some(&BatteryInfo {
+                    percentage: Some(60),
+                    level: BatteryLevel::Good,
+                    status: BatteryStatus::Discharging,
+                }),
+                Some(sig),
+                nominal_hours,
+                now,
+            );
+            now += 3_600;
+        }
+
+        let (calibrated, _, samples) = state.battery_telemetry().query(&cfg_key, sig);
+        assert_eq!(samples, MIN_HEALTH_SAMPLES);
+        assert!(
+            calibrated.is_some(),
+            "expected calibrated health after >= {MIN_HEALTH_DROP_PCT}% drop and {MIN_HEALTH_SAMPLES} samples"
+        );
+
+        let est_calibrated = estimate_for_device(&state, &state.devices()[0]).unwrap();
+        assert!(est_calibrated.health_pct.is_some());
+        assert!(
+            !est_calibrated.home_label().contains("Health"),
+            "Home label must never display health"
+        );
+        assert!(
+            est_calibrated.detail_subline().contains("Est. health: ~"),
+            "Detail subline must display Est. health once calibrated: {}",
+            est_calibrated.detail_subline()
+        );
+    }
+
+    #[test]
+    fn charging_disconnect_requires_fresh_live_step() {
+        let mut telemetry = BatteryTelemetry::default();
+        let key = "unit:disconnect-charge";
+        let sig = Some("mouse:standard");
+        let mut now = 5_000_000_u64;
+
+        // 1. Reach `ChargingProgress::Live` (50% -> 55% over 10 min => 2.0 min/%).
+        telemetry.observe_device(
+            key,
+            true,
+            Some(&BatteryInfo {
+                percentage: Some(50),
+                level: BatteryLevel::Good,
+                status: BatteryStatus::Charging,
+            }),
+            sig,
+            1680,
+            now,
+        );
+        now += 600;
+        telemetry.observe_device(
+            key,
+            true,
+            Some(&BatteryInfo {
+                percentage: Some(55),
+                level: BatteryLevel::Good,
+                status: BatteryStatus::Charging,
+            }),
+            sig,
+            1680,
+            now,
+        );
+        assert!(telemetry.live_charging_rate(key).is_some());
+
+        // 2. Device disconnects (`online = false`) for 2 hours, then reconnects
+        // charging at the same 55%. It must NOT reuse the pre-disconnect pace or
+        // count the 2 hours of disconnected time as charging time.
+        now += 60;
+        telemetry.observe_device(key, false, None, sig, 1680, now);
+        assert_eq!(
+            telemetry.phase_for(key),
+            Some(&BatteryPhase::Charging {
+                progress: ChargingProgress::Unmeasured
+            })
+        );
+        assert_eq!(telemetry.live_charging_rate(key), None);
+
+        now += 7_200;
+        telemetry.observe_device(
+            key,
+            true,
+            Some(&BatteryInfo {
+                percentage: Some(55),
+                level: BatteryLevel::Good,
+                status: BatteryStatus::Charging,
+            }),
+            sig,
+            1680,
+            now,
+        );
+        assert_eq!(
+            telemetry.live_charging_rate(key),
+            None,
+            "reconnecting at the same percentage must wait for a fresh live step"
+        );
+
+        // 3. A 5% step 10 minutes after reconnect measures 2.0 min/% (not ~26 min/% from the 2h disconnect!).
+        now += 600;
+        telemetry.observe_device(
+            key,
+            true,
+            Some(&BatteryInfo {
+                percentage: Some(60),
+                level: BatteryLevel::Good,
+                status: BatteryStatus::Charging,
+            }),
+            sig,
+            1680,
+            now,
+        );
+        let rate = telemetry
+            .live_charging_rate(key)
+            .expect("fresh live step after reconnect");
+        assert!((rate - 2.0).abs() < 0.05, "expected ~2.0 min/%, got {rate}");
+
+        // 4. Verify a Discharging anchor is preserved across an offline sleep/wake cycle.
+        let discharge_key = "unit:sleep-discharge";
+        telemetry.observe_device(
+            discharge_key,
+            true,
+            Some(&BatteryInfo {
+                percentage: Some(80),
+                level: BatteryLevel::Full,
+                status: BatteryStatus::Discharging,
+            }),
+            sig,
+            1680,
+            now,
+        );
+        let anchor_before = telemetry.phase_for(discharge_key).cloned();
+        telemetry.observe_device(discharge_key, false, None, sig, 1680, now + 300);
+        assert_eq!(telemetry.phase_for(discharge_key), anchor_before.as_ref());
+    }
+}

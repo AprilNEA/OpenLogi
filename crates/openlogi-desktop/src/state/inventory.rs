@@ -131,6 +131,7 @@ impl AppState {
                 .all(|(new, old)| new.shows_as(old))
         {
             self.devices.records = merged_list;
+            self.observe_battery_telemetry();
             return StateEvents::none();
         }
 
@@ -190,6 +191,8 @@ impl AppState {
             self.pointer_speed_reconnected(key);
             self.sidetone_reconnected(key);
             self.force_sensing_reconnected(key);
+            self.report_rate_reconnected(key);
+            self.backlight_reconnected(key);
         }
         for key in &disable_keys_invalidated {
             self.invalidate_disable_keys(key);
@@ -210,6 +213,7 @@ impl AppState {
         // tracks the now-current device rather than the old one.
         self.pointer.dpi = self.dpi_for_current();
         self.refresh_binding_projections();
+        self.observe_battery_telemetry();
         // Display state only — the agent runs its own inventory watcher and
         // rebuilds the live binding/DPI maps itself.
         StateEvent::InventoryChanged.into()

@@ -2175,3 +2175,106 @@ fn a_gaming_keyboard_gets_no_keys_or_mouse_tabs() {
     assert!(!tabs.contains(&DetailTab::Buttons) && !tabs.contains(&DetailTab::ActionsRing));
     assert!(tabs.contains(&DetailTab::Lighting));
 }
+
+/// In List mode at 125% (`UiScale::ExtraLarge`) inside a 720px-wide window,
+/// a device with a long battery estimate caption truncates its estimate so the
+/// row's menu button stays inside the list row bounds.
+#[gpui::test]
+fn device_list_row_keeps_menu_button_inside_row_at_extra_large_scale(
+    cx: &mut gpui::TestAppContext,
+) {
+    use std::sync::Arc;
+    use std::{cell::RefCell, rc::Rc};
+
+    use gpui::{AppContext as _, px, size};
+    use gpui_kit::component::Root;
+    use openlogi_core::config::{DeviceViewMode, UiScale};
+    use openlogi_core::hid::{
+        BacklightControls, BacklightDuration, BacklightMode, BacklightState, BacklightStatus,
+    };
+
+    use super::AppView;
+    use crate::services::{assets::AssetResolver, i18n::LOCALE_LOCK};
+    use crate::state::tests::direct_inventory;
+    use crate::state::{AgentLink, AppState, BacklightLoad, Sources};
+
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("pt-BR");
+    cx.update(gpui_kit::component::init);
+    cx.update(|cx| {
+        let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let resolver = AssetResolver::new();
+        let mut inv = direct_inventory([0x24, 0x44, 0xce, 0xb3]);
+        inv.paired[0].kind = DeviceKind::Keyboard;
+        inv.paired[0].codename = Some("MX Keys Mini Wireless Illuminated Keyboard".into());
+        inv.paired[0].battery = Some(BatteryInfo {
+            percentage: Some(85),
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Discharging,
+        });
+        inv.paired[0]
+            .capabilities
+            .as_mut()
+            .expect("capabilities")
+            .backlight = true;
+        let inventories = [inv];
+        let state = cx.new(|_| {
+            let mut state = AppState::new(Sources {
+                inventories: &inventories,
+                ..Sources::in_memory(
+                    openlogi_core::config::Config::ephemeral(),
+                    &resolver,
+                    commands,
+                )
+            });
+            let key = state.devices()[0].device_key();
+            state.device_reads_mut().set_backlight_load_for_test(
+                key,
+                BacklightLoad::Ready(Arc::new(BacklightState {
+                    enabled: true,
+                    mode: BacklightMode::PermanentManual,
+                    status: BacklightStatus::PermanentManual,
+                    current_level: 4,
+                    nb_levels: 8,
+                    power_save: false,
+                    controls: BacklightControls::LEVEL | BacklightControls::DURATION,
+                    duration: Some(BacklightDuration::try_from(15).unwrap()),
+                })),
+            );
+            let _ = state.commit_device_view_mode(DeviceViewMode::List);
+            let _ = state.commit_ui_scale(UiScale::ExtraLarge);
+            let _ = state.set_agent_link(AgentLink::Ready(status_with(
+                openlogi_ipc::SecureInput::Off,
+            )));
+            state
+        });
+        AppState::set_global(state, cx);
+    });
+    let hosted = Rc::new(RefCell::new(None));
+    let slot = Rc::clone(&hosted);
+    let (_, cx) = cx.add_window_view(move |window, cx| {
+        crate::ui::theme::apply_scale(window, UiScale::ExtraLarge);
+        let view = cx.new(|cx| AppView::new(window, cx));
+        *slot.borrow_mut() = Some(view.clone());
+        Root::new(view, window, cx)
+    });
+    cx.simulate_resize(size(px(720.), px(600.)));
+    cx.update(|window, cx| {
+        crate::ui::theme::apply_scale(window, UiScale::ExtraLarge);
+        window.draw(cx).clear(cx);
+    });
+
+    let row_bounds = cx
+        .debug_bounds("device-list-row")
+        .expect("list row painted");
+    let menu_bounds = cx
+        .debug_bounds("device-menu")
+        .expect("device menu button painted");
+    assert!(
+        menu_bounds.right() <= row_bounds.right() + px(1.0),
+        "menu button right {:?} must stay inside row right {:?}",
+        menu_bounds.right(),
+        row_bounds.right()
+    );
+    rust_i18n::set_locale("en");
+}

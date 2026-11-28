@@ -89,6 +89,10 @@ pub(crate) struct DeviceReads {
     host_renames: BTreeMap<DeviceKey, HostRenames>,
     next_host_rename: u64,
     onboard: BTreeMap<DeviceKey, DeviceRead<OnboardState>>,
+    #[cfg(test)]
+    test_backlight: BTreeMap<DeviceKey, BacklightLoad>,
+    #[cfg(test)]
+    test_report_rate: BTreeMap<DeviceKey, ReportRateLoad>,
 }
 
 /// The Easy-Switch host renames sent to one device that have not been
@@ -536,6 +540,7 @@ impl DeviceReads {
                 .device_reads_mut()
                 .update_report_rate(&observed_key, flight, load)
             {
+                state.observe_battery_telemetry();
                 cx.emit(StateEvent::ReportRateChanged(observed_key.clone()));
             }
         });
@@ -613,10 +618,31 @@ impl DeviceReads {
         read.query.revalidate();
     }
 
+    /// Retry `key`'s report-rate query on reconnect when a previous attempt
+    /// while sleeping or unreachable settled in [`Load::Failed`].
+    pub(crate) fn retry_report_rate_if_failed(&mut self, key: &DeviceKey) {
+        if self
+            .report_rate
+            .get(key)
+            .is_some_and(|read| matches!(read.load, Load::Failed(_)))
+        {
+            self.retry_report_rate(key);
+        }
+    }
+
     /// `key`'s report-rate load, or `None` while nothing has subscribed to it.
     #[must_use]
     pub(crate) fn report_rate_load(&self, key: &DeviceKey) -> Option<&ReportRateLoad> {
+        #[cfg(test)]
+        if let Some(load) = self.test_report_rate.get(key) {
+            return Some(load);
+        }
         self.report_rate.get(key).map(|read| &read.load)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_report_rate_load_for_test(&mut self, key: DeviceKey, load: ReportRateLoad) {
+        self.test_report_rate.insert(key, load);
     }
 
     /// Start the pointer-speed query unless the same mouse route is already
@@ -998,6 +1024,7 @@ impl DeviceReads {
                 .device_reads_mut()
                 .update_backlight(&observed_key, flight, load)
             {
+                state.observe_battery_telemetry();
                 cx.emit(StateEvent::BacklightChanged(observed_key.clone()));
             }
         });
@@ -1116,10 +1143,31 @@ impl DeviceReads {
         read.query.revalidate();
     }
 
+    /// Retry `key`'s backlight query on reconnect when a previous attempt
+    /// while sleeping or unreachable settled in [`Load::Failed`].
+    pub(crate) fn retry_backlight_if_failed(&mut self, key: &DeviceKey) {
+        if self
+            .backlight
+            .get(key)
+            .is_some_and(|read| matches!(read.load, Load::Failed(_)))
+        {
+            self.retry_backlight(key);
+        }
+    }
+
     /// `key`'s backlight load, or `None` while nothing has subscribed to it.
     #[must_use]
     pub(crate) fn backlight_load(&self, key: &DeviceKey) -> Option<&BacklightLoad> {
+        #[cfg(test)]
+        if let Some(load) = self.test_backlight.get(key) {
+            return Some(load);
+        }
         self.backlight.get(key).map(|read| &read.load)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_backlight_load_for_test(&mut self, key: DeviceKey, load: BacklightLoad) {
+        self.test_backlight.insert(key, load);
     }
 
     /// Start the Easy-Switch host query unless the same device route is

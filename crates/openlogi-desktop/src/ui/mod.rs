@@ -2,6 +2,7 @@
 
 pub(crate) mod action;
 pub(crate) mod battery;
+pub(crate) mod battery_estimate;
 pub(crate) mod callouts;
 pub(crate) mod carousel;
 pub(crate) mod choice_card;

@@ -85,7 +85,7 @@ Things OpenLogi does that Options+ won't:
 
 ### Devices
 
-- Logi Bolt and Unifying receivers, Bluetooth, and wired connections, with battery level and charge state
+- Logi Bolt and Unifying receivers, Bluetooth, and wired connections, with battery level, charge state, and configuration-aware battery duration and health estimates
 - Low-battery notices at the bottom of the screen, once per discharge, with no OS notification permission
 - An on-screen indicator when a keyboard turns Caps Lock on or off, plus Num Lock and Scroll Lock on Windows and Linux
 - On macOS, a menu-bar menu that lists each device with its battery or light state, flags a missing permission, and changes the settings you reach for most without opening the app: DPI preset, wheel mode, Fn lock, backlight, disabled keys, headset sidetone, and a light's power, brightness, and color temperature. Hold ⌥ to see how each device connects
