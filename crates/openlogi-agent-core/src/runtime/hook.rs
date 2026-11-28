@@ -5,6 +5,8 @@
 
 mod diverted;
 
+use openlogi_core::config::GestureRepeatDistance;
+
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::mpsc;
@@ -44,6 +46,8 @@ pub struct HookMaps {
     /// gesture mode), so a hold+swipe resolves to a bound action. HID++
     /// gesture sources use the gesture watcher's separate map instead.
     pub gestures: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
+    /// Repeat spacing captured by each newly admitted gesture hold.
+    pub gesture_repeat_distance: GestureRepeatDistance,
     /// The pointer context that selected this snapshot, or `None` for the
     /// focused policy.
     pub(crate) pointer: Option<PointerSelection>,
@@ -167,8 +171,8 @@ struct GestureHold {
 
 impl GestureHold {
     /// Hold the press the accepted lifecycle `Down` returned.
-    fn new(press: PressToken, now: Instant) -> Self {
-        let mut swipe = SwipeAccumulator::default();
+    fn new(press: PressToken, now: Instant, repeat_distance: GestureRepeatDistance) -> Self {
+        let mut swipe = SwipeAccumulator::with_repeat_distance(repeat_distance);
         swipe.begin();
         Self {
             started_at: now,
@@ -444,16 +448,19 @@ fn handle_button(
     }
     // `try_read` only: a blocking read on the tap thread freezes every pointer
     // event while a config rebuild holds the write lock. Fail open if unavailable.
-    let (binding, is_gesture, pointer, diverted) =
-        hooks.try_read().map_or((None, false, None, None), |maps| {
+    let (binding, is_gesture, pointer, diverted, repeat_distance) = hooks.try_read().map_or(
+        (None, false, None, None, GestureRepeatDistance::DEFAULT),
+        |maps| {
             let (binding, is_gesture) = maps.press_binding(id);
             (
                 binding,
                 is_gesture,
                 maps.pointer_press(id),
                 maps.diverted_press(id, device),
+                maps.gesture_repeat_distance,
             )
-        });
+        },
+    );
     let phase = match diverted {
         Some(diverted) => PressPhase::Diverted(diverted),
         None => start_press(
@@ -462,6 +469,7 @@ fn handle_button(
             is_gesture,
             ActionDispatchTarget::for_pointer(pointer, capture_safari_pid),
             dispatcher,
+            repeat_distance,
         ),
     };
     let disposition = phase.disposition();
@@ -487,6 +495,7 @@ fn start_press(
     is_gesture: bool,
     target: ActionDispatchTarget,
     dispatcher: &ActionDispatcher,
+    repeat_distance: GestureRepeatDistance,
 ) -> PressPhase {
     if is_gesture {
         // A refused admission — a second gesture button pressed mid-hold —
@@ -502,7 +511,7 @@ fn start_press(
                 return dispatcher.try_hook_button_down(id, None, target).map_or(
                     PressPhase::Passthrough,
                     |press| PressPhase::HeldAsGesture {
-                        hold: GestureHold::new(press, now),
+                        hold: GestureHold::new(press, now, repeat_distance),
                     },
                 );
             }

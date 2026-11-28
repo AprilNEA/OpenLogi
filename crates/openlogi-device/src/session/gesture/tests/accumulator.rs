@@ -903,3 +903,58 @@ fn raw_wheel_that_cannot_be_attributed_or_scaled_is_dropped() {
     );
     assert_eq!(held_wheel(&mut rx), []);
 }
+
+#[test]
+fn raw_xy_gestures_repeat_at_the_configured_distance() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::new(GestureRepeatDistance::try_new(20).unwrap());
+    handle_reprog(&mut acc, press(), GESTURE, &[], &[], &tx);
+    stale_report(&mut acc, &tx);
+    acc.backdate_hold_for_test();
+    handle_reprog(
+        &mut acc,
+        RawControlEvent::RawXy { dx: 100, dy: 0 },
+        GESTURE,
+        &[],
+        &[],
+        &tx,
+    );
+    assert_eq!(
+        next_gesture(&mut rx),
+        Ok(CapturedInput::Gesture(
+            ButtonId::GestureButton,
+            GestureDirection::Right
+        ))
+    );
+    for _ in 0..100 {
+        handle_reprog(
+            &mut acc,
+            RawControlEvent::RawXy { dx: 19, dy: 0 },
+            GESTURE,
+            &[],
+            &[],
+            &tx,
+        );
+        assert!(next_gesture(&mut rx).is_err(), "19 units must not repeat");
+        handle_reprog(
+            &mut acc,
+            RawControlEvent::RawXy { dx: 1, dy: 0 },
+            GESTURE,
+            &[],
+            &[],
+            &tx,
+        );
+        assert_eq!(
+            next_gesture(&mut rx),
+            Ok(CapturedInput::Gesture(
+                ButtonId::GestureButton,
+                GestureDirection::Right
+            ))
+        );
+    }
+    handle_reprog(&mut acc, release(), GESTURE, &[], &[], &tx);
+    assert!(
+        next_gesture(&mut rx).is_err(),
+        "release must not also click"
+    );
+}

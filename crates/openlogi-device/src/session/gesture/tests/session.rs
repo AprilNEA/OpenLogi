@@ -1689,3 +1689,11 @@ async fn zero_slots_write_no_mapping() {
         [(SET_MODE_SEEN, vec![MODE_ONBOARD, 0, 0])]
     );
 }
+
+#[test]
+fn resetting_capture_preserves_repeat_configuration() {
+    let distance = GestureRepeatDistance::try_new(20).unwrap();
+    let capture = GestureCapture::new(ArmedControls::default(), distance);
+    capture.reset_input_state();
+    assert_eq!(capture.accum.lock().unwrap().repeat_distance(), distance);
+}

@@ -8,9 +8,9 @@ use serde::{Deserialize, Serialize};
 
 use super::button_map::{deserialize_button_map, deserialize_button_maps_by_app};
 use super::settings::{
-    CameraControls, CameraStreamMode, GKeyOwner, GamingKeyMode, GestureOwner, LightSettings,
-    Lighting, MomentumScrolling, OnboardMemory, ScrollResolution, SmartShift,
-    ThumbwheelSensitivity, deserialize_gesture_owner,
+    CameraControls, CameraStreamMode, GKeyOwner, GamingKeyMode, GestureOwner,
+    GestureRepeatDistance, LightSettings, Lighting, MomentumScrolling, OnboardMemory,
+    ScrollResolution, SmartShift, ThumbwheelSensitivity, deserialize_gesture_owner,
 };
 use crate::binding::{
     Action, ActionRingConfig, Binding, ButtonId, GKeyProfile, GestureDirection, KeypadPage,
@@ -340,6 +340,11 @@ pub struct DeviceConfig {
     /// The GUI clears it when the device is set back to the app-wide value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub momentum_scrolling: Option<MomentumScrolling>,
+    /// Travel between repeated actions in a held gesture, in raw movement
+    /// units. Omitted uses 600. Applies to both HID++ and OS-hook gestures;
+    /// changing it re-arms capture and does not change the initial swipe gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gesture_repeat_distance: Option<GestureRepeatDistance>,
     /// Physical config keys of pointing devices that follow this keyboard's
     /// host switch channel. The relationship is keyboard-initiated: pressing
     /// one of this device's host keys switches every listed target first, then
@@ -514,6 +519,7 @@ impl Default for DeviceConfig {
             scroll_resolution: None,
             smooth_wheel: false,
             momentum_scrolling: None,
+            gesture_repeat_distance: None,
             host_switch_targets: Vec::new(),
             fn_lock: None,
             keep_os_layout: None,
@@ -680,6 +686,8 @@ struct RawDeviceConfig {
     #[serde(default)]
     momentum_scrolling: Option<MomentumScrolling>,
     #[serde(default)]
+    gesture_repeat_distance: Option<GestureRepeatDistance>,
+    #[serde(default)]
     host_switch_targets: Vec<String>,
     #[serde(default)]
     fn_lock: Option<bool>,
@@ -764,6 +772,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             scroll_resolution: raw.scroll_resolution,
             smooth_wheel: raw.smooth_wheel,
             momentum_scrolling: raw.momentum_scrolling,
+            gesture_repeat_distance: raw.gesture_repeat_distance,
             host_switch_targets: raw.host_switch_targets,
             fn_lock: raw.fn_lock,
             keep_os_layout: raw.keep_os_layout,
@@ -786,6 +795,34 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::{DeviceConfig, DisableKey, KeypadPage};
+
+    #[test]
+    fn gesture_repeat_distance_rejects_zero_and_negative_values() {
+        for text in [
+            "gesture_repeat_distance = 0",
+            "gesture_repeat_distance = -1",
+            "gesture_repeat_distance = 2147483648",
+        ] {
+            toml::from_str::<DeviceConfig>(text).unwrap_err();
+        }
+        let config = DeviceConfig::default();
+        assert!(
+            !toml::to_string(&config)
+                .unwrap()
+                .contains("gesture_repeat_distance")
+        );
+    }
+
+    #[test]
+    fn gesture_repeat_distance_configuration_round_trips() {
+        let config: DeviceConfig = toml::from_str("gesture_repeat_distance = 20")
+            .expect("repeat distance should be configurable");
+        assert!(
+            toml::to_string(&config)
+                .unwrap()
+                .contains("gesture_repeat_distance = 20")
+        );
+    }
 
     #[test]
     fn host_switch_targets_round_trip_as_physical_keys() -> Result<(), Box<dyn std::error::Error>> {

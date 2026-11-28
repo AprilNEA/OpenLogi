@@ -344,6 +344,7 @@ pub(super) fn fold(device: &mut DeviceConfig, mut legacy: DeviceConfig, route_ke
     fold_option_field!(camera_stream_mode);
     fold_option_field!(thumbwheel_sensitivity);
     fold_option_field!(momentum_scrolling);
+    fold_option_field!(gesture_repeat_distance);
     fold_option_field!(fn_lock);
     fold_option_field!(keep_os_layout);
     fold_option_field!(onboard_memory);
@@ -771,6 +772,9 @@ mod tests {
         // cable — that is the user-visible bug this whole change exists for.
         let mut config = Config::default();
         let legacy = DeviceConfig {
+            gesture_repeat_distance: Some(
+                super::super::GestureRepeatDistance::try_new(20).unwrap(),
+            ),
             lighting: Some(Lighting::default()),
             ..DeviceConfig::default()
         };
@@ -786,6 +790,7 @@ mod tests {
 
         let device = &config.devices["unit:6be9d300"];
         assert!(device.lighting.is_some(), "lighting moved to device level");
+        assert_eq!(device.gesture_repeat_distance.unwrap().into_inner(), 20);
         assert!(device.links.contains_key("receiver:82839805:slot:1"));
         assert!(
             !config.devices.contains_key("receiver:82839805:slot:1"),

@@ -5,6 +5,7 @@
 use std::num::NonZeroU8;
 
 use openlogi_core::binding::{ButtonId, GestureDirection, SwipeAccumulator};
+use openlogi_core::config::GestureRepeatDistance;
 use tokio::sync::mpsc;
 use tracing::{debug, trace};
 
@@ -44,8 +45,14 @@ enum HoldState {
 }
 
 /// Begin a hold for `cid`, its swipe accumulator started fresh.
-fn begin_hold(cid: u16, button: ButtonId, overlap: bool, skip_first_raw_xy: bool) -> HoldState {
-    let mut swipe = SwipeAccumulator::default();
+fn begin_hold(
+    cid: u16,
+    button: ButtonId,
+    overlap: bool,
+    skip_first_raw_xy: bool,
+    repeat_distance: GestureRepeatDistance,
+) -> HoldState {
+    let mut swipe = SwipeAccumulator::with_repeat_distance(repeat_distance);
     swipe.begin();
     HoldState::Holding {
         cid,
@@ -72,6 +79,20 @@ pub(super) struct CaptureAccum {
     /// Diverted standard-button and wheel-hold CIDs held in the last event,
     /// in press order.
     buttons_down: Vec<u16>,
+    repeat_distance: GestureRepeatDistance,
+}
+
+impl CaptureAccum {
+    pub(super) fn new(repeat_distance: GestureRepeatDistance) -> Self {
+        Self {
+            repeat_distance,
+            ..Self::default()
+        }
+    }
+
+    pub(super) fn repeat_distance(&self) -> GestureRepeatDistance {
+        self.repeat_distance
+    }
 }
 
 #[cfg(test)]
@@ -177,6 +198,7 @@ impl CaptureAccum {
                                 button,
                                 held.len() > 1,
                                 !self.gestures_down.contains(&cid),
+                                self.repeat_distance,
                             ),
                             None => HoldState::Idle,
                         }

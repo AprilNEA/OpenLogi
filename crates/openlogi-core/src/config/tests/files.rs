@@ -581,3 +581,19 @@ fn a_saved_file_reads_back_at_the_revision_of_its_save() {
     let (_, reader) = ConfigFile::load_from_path(&path).expect("load the edit");
     assert_ne!(reader.revision(), writer.revision());
 }
+
+#[test]
+fn saving_without_repeat_override_preserves_schema_eleven_compatibility() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    fs::write(&path, "schema_version = 11\n[devices.mouse]\n").unwrap();
+    let (config, mut file) = ConfigFile::load_from_path(&path).unwrap();
+    file.save(&config).unwrap();
+    let saved: toml::Value = toml::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+    assert_eq!(saved["schema_version"].as_integer(), Some(11));
+    assert!(
+        saved["devices"]["mouse"]
+            .get("gesture_repeat_distance")
+            .is_none()
+    );
+}
