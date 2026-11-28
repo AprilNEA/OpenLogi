@@ -114,11 +114,10 @@ pub fn default_binding_on(layout: Option<&GamingLayout>, button: ButtonId) -> Ac
 #[must_use]
 pub fn default_gesture_binding(direction: GestureDirection) -> Action {
     match direction {
-        GestureDirection::Up => Action::MissionControl,
-        GestureDirection::Down => Action::ShowDesktop,
-        GestureDirection::Left => Action::PrevTab,
-        GestureDirection::Right => Action::NextTab,
-        GestureDirection::Click => Action::AppExpose,
+        GestureDirection::Up | GestureDirection::Click => Action::MissionControl,
+        GestureDirection::Down => Action::LaunchpadShow,
+        GestureDirection::Left => Action::PreviousDesktop,
+        GestureDirection::Right => Action::NextDesktop,
     }
 }
 

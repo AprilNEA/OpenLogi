@@ -648,6 +648,7 @@ fn press_key(mods: &[KeyCode], key: KeyCode) {
     super::with_held_output(|held| {
         let mods = unheld_modifiers(mods, held);
         emit(&key_phase_events(&mods, key, KeyPhase::Down));
+        std::thread::sleep(Duration::from_millis(25));
         emit(&key_phase_events(&mods, key, KeyPhase::Up));
     });
 }
