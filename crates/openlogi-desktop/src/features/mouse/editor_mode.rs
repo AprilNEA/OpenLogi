@@ -7,6 +7,7 @@ use openlogi_core::binding::{ButtonId, GestureDirection};
 use super::force_sensing::ForceSensingSlider;
 use super::hotspots::MouseControlId;
 use super::inspector::{InvalidDrafts, ShortcutMode};
+use super::thumbwheel::ThumbwheelDirection;
 use crate::features::binding_editor::ShortcutRecorder;
 
 /// The binding editor's mode. Transitions consume the mode and return the
@@ -228,10 +229,12 @@ impl Selection {
 }
 
 /// What the open picker's custom-action editors hold besides their text:
-/// the Tap / Hold choice and which editors rejected their last Add. A newly
-/// opened picker starts from the default.
+/// the Tap / Hold choice, the thumb-wheel direction a custom action binds,
+/// and which editors rejected their last Add. A newly opened picker starts
+/// from the default.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct PickerDrafts {
     pub shortcut_mode: ShortcutMode,
+    pub wheel_direction: ThumbwheelDirection,
     pub invalid: InvalidDrafts,
 }

@@ -2,7 +2,7 @@
 
 use super::super::hotspots::MouseControlId;
 use super::super::leader_lines::{Label, Side};
-use super::super::thumbwheel::ThumbwheelPreset;
+use super::super::thumbwheel::{ThumbwheelPreset, custom_pair_label};
 use crate::features::binding_editor::{GESTURE_BUTTON_ICON, action_icon_path};
 use crate::ui::action::localized_action_label;
 use crate::ui::theme::FocusRingStyle as _;
@@ -360,7 +360,7 @@ pub(super) fn binding_label_for_control(
                 }
             } else {
                 BindingLabel {
-                    text: tr!("common.custom"),
+                    text: custom_pair_label(&backward, &forward),
                     icon: Some("action-icons/chevrons-right.svg"),
                 }
             }

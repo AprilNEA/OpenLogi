@@ -4,7 +4,40 @@
 //! `ThumbwheelScrollDown` and `ThumbwheelScrollUp` entries. This module only
 //! groups exact pairs into the presets displayed by the mouse diagram.
 
-use openlogi_core::binding::Action;
+use openlogi_core::binding::{Action, ButtonId};
+
+/// What a pair no preset matches shows: each direction's own action, up
+/// first, so a custom pair reads as what it does instead of a bare "Custom".
+#[must_use]
+pub(crate) fn custom_pair_label(backward: &Action, forward: &Action) -> gpui::SharedString {
+    format!(
+        "↑ {} · ↓ {}",
+        crate::ui::action::localized_action_label(forward),
+        crate::ui::action::localized_action_label(backward)
+    )
+    .into()
+}
+
+/// The thumb-wheel direction the picker's custom editor binds on its own.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum ThumbwheelDirection {
+    #[default]
+    Up,
+    Down,
+}
+
+impl ThumbwheelDirection {
+    pub(crate) const ALL: [Self; 2] = [Self::Up, Self::Down];
+
+    /// The persisted binding this direction fires.
+    #[must_use]
+    pub(crate) const fn button(self) -> ButtonId {
+        match self {
+            Self::Up => ButtonId::ThumbwheelScrollUp,
+            Self::Down => ButtonId::ThumbwheelScrollDown,
+        }
+    }
+}
 
 /// Actions fired when the thumb wheel moves backward/down and forward/up.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -135,6 +168,15 @@ mod tests {
     use openlogi_core::binding::{ButtonId, default_binding};
 
     use super::*;
+
+    #[test]
+    fn a_custom_direction_binds_its_own_half_of_the_wheel() {
+        assert_eq!(ThumbwheelDirection::default(), ThumbwheelDirection::Up);
+        assert_eq!(
+            ThumbwheelDirection::ALL.map(ThumbwheelDirection::button),
+            [ButtonId::ThumbwheelScrollUp, ButtonId::ThumbwheelScrollDown]
+        );
+    }
 
     #[test]
     fn presets_map_backward_and_forward_in_physical_direction() {

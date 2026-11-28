@@ -13,6 +13,7 @@ use super::*;
 use crate::features::mouse::editor_mode::Selection;
 use crate::features::mouse::inspector::{InvalidDrafts, ShortcutMode};
 use crate::features::mouse::leader_lines::Side;
+use crate::features::mouse::thumbwheel::ThumbwheelDirection;
 use crate::services::assets::AssetResolver;
 use crate::services::i18n::LOCALE_LOCK;
 use crate::state::Sources;
@@ -579,6 +580,7 @@ fn a_selected_gesture_can_render_in_the_binding_inspector(cx: &mut TestAppContex
                 application_input: &view.custom_application_input,
                 command_input: &view.custom_command_input,
                 shortcut_mode: ShortcutMode::Tap,
+                wheel_direction: ThumbwheelDirection::Up,
                 shortcut_recording: false,
                 shortcut_record_focus: &view.shortcut_record_focus,
                 invalid: InvalidDrafts::default(),
@@ -626,6 +628,7 @@ fn reopening_the_picker_clears_every_custom_action_draft(cx: &mut TestAppContext
     cx.run_until_parked();
     let held = PickerDrafts {
         shortcut_mode: ShortcutMode::Hold,
+        wheel_direction: ThumbwheelDirection::Down,
         invalid: InvalidDrafts {
             shortcut: Some(ShiftedSymbol),
             application: true,
