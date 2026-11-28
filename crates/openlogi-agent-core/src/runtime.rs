@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex, PoisonError, RwLock, mpsc};
 use std::time::{Duration, Instant};
 
 use openlogi_core::binding::{Action, Binding, ButtonId};
+use openlogi_core::hid::HostTarget;
 use tracing::{debug, info, warn};
 
 use self::button::{
@@ -82,13 +83,13 @@ pub enum ActionRequest {
         /// Which way.
         turn: PageTurn,
     },
-    /// Move the pressing device to Easy-Switch `slot`
-    /// ([`Action::easy_switch_host`]).
+    /// Move the pressing device to Easy-Switch channel `host`
+    /// ([`Action::easy_switch_target`]).
     SwitchHost {
         /// The pressing device.
         device_key: Option<String>,
-        /// The zero-based channel.
-        slot: u8,
+        /// The channel.
+        host: HostTarget,
     },
     /// A DPI or pointer-speed write an action made to the mouse at `route`
     /// settled. The mouse broadcasts nothing for a host write, so the agent
@@ -220,8 +221,8 @@ fn agent_request(action: &Action, device_key: Option<&str>) -> Option<ActionRequ
             turn: PageTurn::Next,
         }),
         _ => action
-            .easy_switch_host()
-            .map(|slot| ActionRequest::SwitchHost { device_key, slot }),
+            .easy_switch_target()
+            .map(|host| ActionRequest::SwitchHost { device_key, host }),
     }
 }
 
@@ -1325,6 +1326,50 @@ mod tests {
                     device_key: Some("keypad".to_owned()),
                     turn,
                 })
+            );
+        }
+    }
+
+    /// Easy-Switch actions go to the agent, keyed by the pressing device,
+    /// which they move: no pointer target gates them.
+    #[test]
+    fn easy_switch_actions_reach_the_agent_as_host_switches() {
+        use openlogi_core::hid::HostTarget;
+
+        let (_signal, device_io) = openlogi_hid::device_io_channel();
+        let (requests, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let executor = ActionExecutor {
+            dpi_cycle: Arc::default(),
+            pointer_speeds: Arc::default(),
+            access: DeviceAccess {
+                channel: openlogi_hid::CaptureChannelSlot::default(),
+                registry: openlogi_hid::ChannelRegistry::default(),
+                receiver_access: crate::receiver_access::ReceiverAccess::default(),
+                device_io,
+                transport_turns: crate::hardware::TransportTurns::default(),
+            },
+            requests,
+        };
+        let unavailable = || {
+            ActionDispatchTarget::for_pointer(
+                Some(PointerPress::distinct(
+                    openlogi_hook::PointerTarget::Unavailable,
+                )),
+                || None,
+            )
+        };
+        for (action, host) in [
+            (Action::EasySwitchChannel2, HostTarget::Slot(1)),
+            (Action::NextEasySwitchChannel, HostTarget::Next),
+        ] {
+            executor.dispatch_to(&action, Some("mouse"), unavailable());
+            assert_eq!(
+                received.try_recv(),
+                Ok(ActionRequest::SwitchHost {
+                    device_key: Some("mouse".to_owned()),
+                    host,
+                }),
+                "{action:?}"
             );
         }
     }

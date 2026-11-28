@@ -193,7 +193,9 @@ pub use succession::Identity;
 ///      `Action::{EasySwitchChannel1, EasySwitchChannel2, EasySwitchChannel3}`
 ///      and `ActionRingIcon::{Channel1, Channel2, Channel3}` appended after
 ///      them — a device's move to another Easy-Switch channel, bound to a
-///      button or an Actions Ring slot.
+///      button or an Actions Ring slot. `Action::NextEasySwitchChannel` and
+///      `ActionRingIcon::NextChannel` appended after those — the move to the
+///      device's next paired channel.
 pub const PROTOCOL_VERSION: u32 = 46;
 
 /// Environment variable through which the agent hands a supervised helper the

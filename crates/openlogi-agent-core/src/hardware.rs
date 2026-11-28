@@ -24,6 +24,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::Duration;
 
 use openlogi_core::config::Lighting;
+use openlogi_core::hid::HostTarget;
 #[cfg(test)]
 use openlogi_hid::DisableKeysMask;
 use openlogi_hid::{
@@ -761,7 +762,7 @@ pub fn toggle_smartshift_in_background(op: DeviceOp) {
     );
 }
 
-/// Move `op`'s device to Easy-Switch `slot` in the background via
+/// Move `op`'s device to Easy-Switch channel `host` in the background via
 /// [`openlogi_hid::switch_host_on_unit`], in the order of `ticket` and
 /// skipping none: a device that leaves this computer on the first switch must
 /// not have a later request land before it. Returns immediately.
@@ -773,7 +774,7 @@ pub fn toggle_smartshift_in_background(op: DeviceOp) {
 pub(crate) fn switch_host_in_background(
     op: DeviceOp,
     ticket: WriteTicket,
-    slot: u8,
+    host: HostTarget,
     unit_id: [u8; 4],
 ) {
     let index = op.route.device_index();
@@ -785,7 +786,7 @@ pub(crate) fn switch_host_in_background(
             after_transport_turn(&turn, async {
                 tokio::time::timeout(WRITE_TIMEOUT, async {
                     let shared = op.resolve()?;
-                    Ok(openlogi_hid::switch_host_on_unit(&shared, slot, unit_id).await?)
+                    Ok(openlogi_hid::switch_host_on_unit(&shared, host, unit_id).await?)
                 })
                 .await
             })
@@ -794,9 +795,9 @@ pub(crate) fn switch_host_in_background(
         move |result| {
             log_outcome(index, "Easy-Switch host switch", result, |sent| {
                 if sent {
-                    info!(index, slot, "Easy-Switch host switch sent");
+                    info!(index, ?host, "Easy-Switch host switch sent");
                 } else {
-                    debug!(index, slot, "device already on the channel — nothing sent");
+                    debug!(index, ?host, "device stays on its channel — nothing sent");
                 }
             });
         },

@@ -28,6 +28,7 @@ use openlogi_core::device::{
     LightState, StandaloneDevice, prettify_codename,
 };
 use openlogi_core::device_order::{DeviceIdentity, DeviceStableId, PhysicalDeviceKey};
+use openlogi_core::hid::HostTarget;
 use openlogi_hid::{
     BacklightChange, BacklightState, CaptureChannelSlot, ChannelPool, ChannelRegistry,
     DeviceIoGate, DeviceRoute, DisableKeysMask, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
@@ -1265,18 +1266,18 @@ impl Orchestrator {
         self.publish_device_runtime();
     }
 
-    /// Move the device that fired an Easy-Switch action to `slot`, as its own
+    /// Move the device that fired an Easy-Switch action to `host`, as its own
     /// channel key would. A keyboard with linked pointing devices, or a
     /// device linked to a keyboard, moves with the rest of its link, as when
-    /// the keyboard's host key is pressed: `slot` is then the keyboard's.
+    /// the keyboard's host key is pressed: `host` is then the keyboard's.
     ///
     /// A press the OS input hook delivers names no device: the hook's maps
     /// are the selected device's, so the selected device is the one that
     /// fired. A global function key reaches the hook too, but its binding
     /// never carries these actions (`Action::needs_firing_device`).
-    pub fn switch_host_for_action(&self, device_key: Option<&str>, slot: u8) {
+    pub fn switch_host_for_action(&self, device_key: Option<&str>, host: HostTarget) {
         let Some(key) = device_key.or_else(|| self.current_key()) else {
-            debug!(slot, "Easy-Switch action without a device — ignored");
+            debug!(?host, "Easy-Switch action without a device — ignored");
             return;
         };
         let Some((route, unit_id)) = self
@@ -1287,20 +1288,21 @@ impl Orchestrator {
         else {
             debug!(
                 key,
-                slot, "Easy-Switch action for an offline device — ignored"
+                ?host,
+                "Easy-Switch action for an offline device — ignored"
             );
             return;
         };
-        if self.shared.linked_host_switch.request(&route, slot) {
-            info!(key, slot, "Easy-Switch action → switching linked devices");
+        if self.shared.linked_host_switch.request(&route, host) {
+            info!(key, ?host, "Easy-Switch action → switching linked devices");
             return;
         }
-        debug!(key, slot, "Easy-Switch action → switching host");
+        debug!(key, ?host, "Easy-Switch action → switching host");
         let ticket = self.shared.host_switch_order.request(&route);
         crate::hardware::switch_host_in_background(
             self.shared.device(&route),
             ticket,
-            slot,
+            host,
             unit_id,
         );
     }

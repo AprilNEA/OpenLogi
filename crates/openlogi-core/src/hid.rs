@@ -31,7 +31,9 @@ pub use backlight::{
 };
 pub use disable_keys::{DisableKeysMask, DisableKeysState};
 pub use dpi::{Dpi, DpiCapabilities, DpiInfo};
-pub use easy_switch::{EasySwitchHosts, EasySwitchSlot, HostConnection, HostOsInfo, HostOsKind};
+pub use easy_switch::{
+    EasySwitchHosts, EasySwitchSlot, HostConnection, HostOsInfo, HostOsKind, HostTarget,
+};
 pub use error::{HidppFeatureErrorKind, HidppOperation, WriteError};
 pub use fn_lock::FnLockState;
 pub use force_sensing::ForceSensingInfo;

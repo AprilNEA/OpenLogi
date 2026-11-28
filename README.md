@@ -93,7 +93,7 @@ Things OpenLogi does that Options+ won't:
 <table>
     <tr>
         <td width="50%"><img src="https://assets.openlogi.org/screenshots/macos/light/cards/easy-switch.png" width="400" alt="Easy-Switch card listing three paired computers"></td>
-        <td width="50%"><b>Easy-Switch</b><ul><li>See which computer is paired on each channel, with its OS and connection</li><li>Rename a channel on devices that allow it</li><li>Bind a button or Actions Ring slot to move the device to another channel</li></ul></td>
+        <td width="50%"><b>Easy-Switch</b><ul><li>See which computer is paired on each channel, with its OS and connection</li><li>Rename a channel on devices that allow it</li><li>Bind a button or Actions Ring slot to move the device to a given channel or the next paired one</li></ul></td>
     </tr>
 </table>
 

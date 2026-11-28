@@ -510,6 +510,7 @@ open_named_target = "開啟 %{name}"
 easy_switch_channel_1 = "Easy-Switch 頻道 1"
 easy_switch_channel_2 = "Easy-Switch 頻道 2"
 easy_switch_channel_3 = "Easy-Switch 頻道 3"
+next_easy_switch_channel = "Easy-Switch 下一個頻道"
 
 [pairing]
 choose_receiver = "Choose a receiver"

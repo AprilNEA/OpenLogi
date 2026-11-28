@@ -463,6 +463,7 @@ fn persisted_action_variant_names_are_stable() {
         "NewTab",
         "NextDesktop",
         "NextDpiPreset",
+        "NextEasySwitchChannel",
         "NextKeypadPage",
         "NextTab",
         "NextTrack",
