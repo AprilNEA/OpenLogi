@@ -357,7 +357,6 @@ smooth_wheel_unsupported = "Цей пристрій не підтримує пл
 smooth_wheel_other_connection = "Пристрій підтримує плавне коліщатко за іншого типу з'єднання, але не за поточного."
 smartshift = "SmartShift"
 momentum_title = "Інерційне прокручування"
-momentum_macos_only = "Перевірено лише в macOS"
 momentum = "Ковзання при вільному обертанні"
 momentum_description = "Коли SmartShift дає коліщатку обертатися вільно, сторінка ковзає разом із ним і зупиняється, щойно ви торкаєтеся коліщатка."
 momentum_needs_smooth_wheel = "Увімкніть «Плавне коліщатко» для цієї миші, щоб скористатися цією функцією."

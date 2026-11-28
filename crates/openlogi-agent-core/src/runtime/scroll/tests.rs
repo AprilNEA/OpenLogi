@@ -804,6 +804,46 @@ fn drive_wheel_toward(
 }
 
 #[test]
+fn windows_momentum_keeps_scrolling_during_a_sustained_spin() {
+    let mut engine = momentum_engine_with(|settings| settings.max_glide_speed = 15000);
+    engine.report_driven_momentum = true;
+    let source = hidpp_source("mouse", 1);
+    let start = Instant::now();
+    let mut frames = Vec::new();
+    let end = drive_wheel(
+        &mut engine,
+        &source,
+        start,
+        |_| 180.0,
+        Duration::from_secs(2),
+        &mut frames,
+    );
+    frames.clear();
+    let stopped = drive_wheel(
+        &mut engine,
+        &source,
+        end,
+        |_| 180.0,
+        Duration::from_millis(80),
+        &mut frames,
+    );
+    assert!(
+        frames.iter().map(in_ticks).sum::<f64>() > 34.0,
+        "a sustained fast spin must still scroll farther than its ~29 input ticks"
+    );
+    assert!(frames.iter().all(|frame| frame.kind == FrameKind::Eased));
+    let settled = run_on(&mut engine, stopped, Duration::from_millis(80), &mut frames);
+    frames.clear();
+    run_on(
+        &mut engine,
+        settled,
+        Duration::from_millis(100),
+        &mut frames,
+    );
+    assert!(frames.is_empty(), "output must stop once the wheel stops");
+}
+
+#[test]
 fn ratchet_wheel_scrolling_eases_as_before() {
     let mut engine = momentum_engine();
     let source = hidpp_source("mouse", 1);
@@ -877,6 +917,42 @@ fn a_free_spin_scrolls_by_momentum_and_a_finger_stop_ends_it_at_once() {
         settling.push(f);
     });
     assert!(settling.is_empty(), "settling tick scrolled: {settling:?}");
+}
+
+#[test]
+fn windows_momentum_ignores_settling_and_accepts_the_next_push() {
+    let mut engine = momentum_engine();
+    engine.report_driven_momentum = true;
+    let source = hidpp_source("mouse", 1);
+    let mut frames = Vec::new();
+    let caught = drive_wheel(
+        &mut engine,
+        &source,
+        Instant::now(),
+        |_| 200.0,
+        Duration::from_millis(600),
+        &mut frames,
+    );
+    let settling = run_on(&mut engine, caught, Duration::from_millis(60), &mut frames);
+    assert!(matches!(
+        engine.wheels[&source].detector.phase(),
+        WheelPhase::Stopped(_)
+    ));
+    frames.clear();
+    engine.wheel_impulse(source.clone(), wheel(0.0, 1.0), 1.0, settling, &mut |f| {
+        frames.push(f);
+    });
+    let push = run_on(&mut engine, settling, Duration::from_millis(8), &mut frames);
+    assert!(frames.is_empty(), "settling report scrolled: {frames:?}");
+
+    engine.wheel_impulse(source, wheel(0.0, 1.0), 1.0, push, &mut |f| {
+        frames.push(f);
+    });
+    run_on(&mut engine, push, Duration::from_millis(48), &mut frames);
+    assert_delta(
+        wheel(0.0, frames.iter().map(in_ticks).sum()),
+        wheel(0.0, 1.0),
+    );
 }
 
 /// A finger catches a free spin to flick it again: the catch ends the glide

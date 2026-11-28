@@ -13,6 +13,8 @@
 //! scrolling from a SmartShift free spin, the page glides off at the speed
 //! the wheel was spun (the `glide` model) and slows along one
 //! [`GlideCurve`], and a finger stopping the wheel ends the glide at once.
+//! On Windows the same curve shapes a gain applied to incoming wheel reports.
+//! The wheel keeps scrolling after the curve ends if reports are still arriving.
 //! Off, the wheel eases exactly as any other wheel does.
 
 mod free_spin;
@@ -472,6 +474,9 @@ struct ScrollEngine {
     /// Smoothed main wheels under momentum scrolling, each with its device's
     /// settings, its free-spin detector and, while it glides, its glide.
     wheels: HashMap<ScrollSource, WheelState>,
+    /// Keep Windows wheel output tied to physical reports. The glide tracks
+    /// the boost without posting a second stream of fractional wheel events.
+    report_driven_momentum: bool,
 }
 
 /// One smoothed main wheel's momentum-scrolling state.
@@ -673,9 +678,13 @@ impl Glide {
 
     /// Its speed at `at`, px/s.
     fn speed(&self, at: Instant) -> f64 {
+        self.speed_with_floor(at, 0.0)
+    }
+
+    fn speed_with_floor(&self, at: Instant, floor: f64) -> f64 {
         let elapsed = at.saturating_duration_since(self.began);
         let shortfall = self.rise * (-elapsed.as_secs_f64() / glide::RISE_S).exp();
-        (self.curve.speed_at(elapsed) - shortfall).max(0.0)
+        (self.curve.speed_at(elapsed).max(floor) - shortfall).max(0.0)
     }
 
     /// How far it has glided along its current curve by `at`.
@@ -815,9 +824,47 @@ impl ScrollEngine {
         }
     }
 
-    /// One admitted main-wheel tick: eased while ratcheting, a glide once
-    /// the wheel spins freely, swallowed after a finger stop.
+    /// One admitted main-wheel report. Windows eases each report and uses
+    /// the glide as an acceleration envelope over the measured wheel speed.
     fn wheel_tick(
+        &mut self,
+        source: &ScrollSource,
+        tick: WheelTick,
+        at: Instant,
+        momentum: MomentumParams,
+        emit: &mut impl FnMut(ScrollFrame),
+    ) {
+        let WheelTick { impulse, notches } = tick;
+        self.update_glide(source, tick, at, momentum, emit);
+        if self.report_driven_momentum {
+            let gain = self.wheels.get(source).and_then(|state| {
+                match state.detector.phase() {
+                    WheelPhase::Stopped(_) => return None,
+                    WheelPhase::Ratchet => return Some(1.0),
+                    WheelPhase::FreeSpin => {}
+                }
+                let speed = state.detector.speed(at);
+                let sensitivity = (impulse.y / notches).abs();
+                let pace = glide::pace(speed, sensitivity, &momentum);
+                if pace <= 0.0 {
+                    return Some(1.0);
+                }
+                let sustained = glide::launch_speed(speed, sensitivity, &momentum);
+                let (desired, repeat) = state.gliding().map_or((sustained, 1.0), |glide| {
+                    (glide.speed_with_floor(at, sustained), glide.boost)
+                });
+                // A decelerating wheel can report much less motion than the
+                // curve predicts. Bound the boost by the current spin speed.
+                Some((desired / pace).clamp(1.0, glide::flick_response(speed) * repeat))
+            });
+            if let Some(gain) = gain {
+                self.impulse(source.clone(), impulse.scale(gain), at, emit);
+            }
+        }
+    }
+
+    /// Update the free-spin detector and the glide from an admitted report.
+    fn update_glide(
         &mut self,
         source: &ScrollSource,
         WheelTick { impulse, notches }: WheelTick,
@@ -844,7 +891,9 @@ impl ScrollEngine {
             if let GlideState::Gliding(glide) = &mut state.glide
                 && let Flick::Peaked = glide.flick
             {
-                if let Some(frame) = glide.advance(at, momentum.pixels_per_notch()) {
+                if !self.report_driven_momentum
+                    && let Some(frame) = glide.advance(at, momentum.pixels_per_notch())
+                {
                     emit(frame);
                 }
                 state.chain += 1;
@@ -861,7 +910,9 @@ impl ScrollEngine {
                 if let GlideState::Spent { last, .. } = state.glide {
                     state.glide = GlideState::Idle { last: Some(last) };
                 }
-                self.impulse(source.clone(), impulse, at, emit);
+                if !self.report_driven_momentum {
+                    self.impulse(source.clone(), impulse, at, emit);
+                }
             }
             (WheelPhase::FreeSpin, &GlideState::Idle { last }, Some(direction)) => {
                 // `notches` is the raw count in the same direction as
@@ -894,7 +945,9 @@ impl ScrollEngine {
                 ));
                 // The glide takes over from here: the eased tail still in
                 // flight would double up with its first frames.
-                self.drop_motion(source, emit);
+                if !self.report_driven_momentum {
+                    self.drop_motion(source, emit);
+                }
             }
             (WheelPhase::FreeSpin, ..) => {}
             (WheelPhase::Stopped(_), ..) => self.stop_wheel(source, at, emit),
@@ -913,7 +966,9 @@ impl ScrollEngine {
         if let Some(state) = self.wheels.get_mut(source) {
             state.end_glide(at, GlideStop::Touched);
         }
-        self.drop_motion(source, emit);
+        if !self.report_driven_momentum {
+            self.drop_motion(source, emit);
+        }
     }
 
     /// Drop `source`'s eased motion unfinished, cancelling the shared stream
@@ -982,7 +1037,9 @@ impl ScrollEngine {
                 continue;
             }
             glide.next_frame = at + FRAME_PERIOD;
-            if let Some(frame) = glide.advance(at, per_tick) {
+            if !self.report_driven_momentum
+                && let Some(frame) = glide.advance(at, per_tick)
+            {
                 emit(frame);
             }
             // While the spin still speeds up, the glide launches off its
