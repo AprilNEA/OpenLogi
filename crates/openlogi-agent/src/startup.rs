@@ -64,6 +64,8 @@ pub(crate) async fn bootstrap(config: Config) -> Option<Core> {
     )));
     let shared = orchestrator.lock().await.shared();
     let inputs = InputServices::start(&shared)?;
+    #[cfg(target_os = "windows")]
+    crate::notifications_windows::start(&shared.dpi_notifications(), &orchestrator);
     let backlight_overlay = BacklightOverlayManager::default();
 
     // Shared between the hook callback (which mirrors events into it) and

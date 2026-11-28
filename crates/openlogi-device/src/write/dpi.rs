@@ -1,4 +1,6 @@
+use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 
 use hidpp::{
     device::Device,
@@ -10,6 +12,8 @@ use hidpp::{
     },
     protocol::v20::{ErrorType, Hidpp20Error},
 };
+use tokio::sync::watch;
+use tokio::time::{Instant, error::Elapsed};
 use tracing::debug;
 
 use crate::SharedChannel;
@@ -27,6 +31,64 @@ pub use openlogi_core::hid::dpi::{Dpi, DpiCapabilities, DpiInfo};
 /// per device, and every Logitech pointing device reports its pointer sensor
 /// first.
 const SENSOR: u8 = 0;
+const CHANGE_PROBE_TIMEOUT: Duration = Duration::from_millis(200);
+
+/// Tracks the time spent on an optional sensor read separately from a DPI
+/// write's ordinary timeout. One timer belongs to one write.
+pub struct DpiProbeTime(watch::Sender<Duration>);
+
+impl Default for DpiProbeTime {
+    fn default() -> Self {
+        Self(watch::channel(Duration::ZERO).0)
+    }
+}
+
+impl DpiProbeTime {
+    /// Adjust a write's start for follow-up deadlines after the write returns.
+    /// The optional read spends its own time rather than that of the follow-up.
+    #[must_use]
+    pub fn exclude_from(&self, started: Instant) -> Instant {
+        started + *self.0.borrow()
+    }
+
+    /// Run the write with its full ordinary budget plus only the time spent
+    /// in the optional read. Required sensor reads spend the ordinary budget.
+    pub async fn within_write_budget<T>(
+        &self,
+        budget: Duration,
+        write: impl Future<Output = T>,
+    ) -> Result<T, Elapsed> {
+        let base = Instant::now() + budget;
+        let mut extra = self.0.subscribe();
+        tokio::pin!(write);
+        loop {
+            let deadline = base + *extra.borrow_and_update();
+            tokio::select! {
+                biased;
+                _ = extra.changed() => {},
+                result = tokio::time::timeout_at(deadline, &mut write) => {
+                    if result.is_ok() || !extra.has_changed().unwrap_or(false) {
+                        return result;
+                    }
+                }
+            }
+        }
+    }
+
+    async fn read(&self, feature: &DpiFeature) -> Option<Dpi> {
+        let started = Instant::now();
+        let grace = hidpp::channel::STALE_REPLY_GRACE;
+        self.0.send_replace(CHANGE_PROBE_TIMEOUT + grace);
+        let reading = tokio::time::timeout(CHANGE_PROBE_TIMEOUT, feature.current_dpi()).await;
+        if matches!(&reading, Err(_) | Ok(Err(Hidpp20Error::Channel(_)))) {
+            // A lost reply or failed transport write can quarantine the
+            // verification GET. Spend that grace in the optional phase.
+            tokio::time::sleep(grace).await;
+        }
+        self.0.send_replace(started.elapsed());
+        reading.ok().and_then(Result::ok)
+    }
+}
 
 /// Whichever DPI feature a device actually exposes.
 ///
@@ -135,11 +197,15 @@ impl DpiFeature {
         }
     }
 
-    /// Sets [`SENSOR`]'s DPI.
-    async fn set_dpi(&self, dpi: Dpi) -> Result<(), Hidpp20Error> {
+    /// Sets [`SENSOR`]'s DPI and returns any previous value the write already
+    /// had to read to preserve the sensor's other parameters.
+    async fn set_dpi(&self, dpi: Dpi) -> Result<Option<Dpi>, Hidpp20Error> {
         let dpi = dpi.into();
         match self {
-            Self::Adjustable { feature, .. } => feature.set_sensor_dpi(SENSOR, dpi).await,
+            Self::Adjustable { feature, .. } => {
+                feature.set_sensor_dpi(SENSOR, dpi).await?;
+                Ok(None)
+            }
             Self::Extended(feature) => {
                 // `setSensorDpiParameters` writes DPI X, DPI Y and lift-off
                 // distance in one packet with no "leave unchanged" encoding.
@@ -155,7 +221,8 @@ impl DpiFeature {
                         SENSOR,
                         SetDpiParameters::for_sensor(capabilities, dpi, dpi, current.lod),
                     )
-                    .await
+                    .await?;
+                Ok(Some(current.dpi_x.into()))
             }
         }
     }
@@ -333,19 +400,38 @@ pub(super) async fn set_dpi_on_channel(
     index: u8,
     dpi: Dpi,
 ) -> Result<(), WriteError> {
-    set_dpi_target_on_channel(channel, index, DpiTarget::Value(dpi))
+    write_dpi_target(channel, index, DpiTarget::Value(dpi), None)
         .await
         .map(|_| ())
+}
+
+/// The source of the sensor reading before a tracked write.
+#[derive(Clone, Copy)]
+pub enum DpiChangeSource<'a> {
+    /// A reading already taken in the same transport turn.
+    Known(Dpi),
+    /// Read older sensors that do not already report the value during a write.
+    Probe(&'a DpiProbeTime),
+}
+
+/// What a DPI write requested and which change was confirmed by the sensor.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct DpiWriteOutcome {
+    /// The value written, including acknowledged writes with no read-back.
+    pub written: Option<Dpi>,
+    /// The new value when both sensor readings confirm a change.
+    pub changed: Option<Dpi>,
 }
 
 /// The DPI write behind [`set_dpi_on_channel`] and [`set_dpi_target_on`]:
 /// resolve `target` against the sensor, write it and return the DPI written,
 /// or `None` when [`DpiTarget::Default`] finds no default.
-async fn set_dpi_target_on_channel(
+async fn write_dpi_target(
     channel: &Arc<hidpp::channel::HidppChannel>,
     index: u8,
     target: DpiTarget,
-) -> Result<Option<Dpi>, WriteError> {
+    tracking: Option<DpiChangeSource<'_>>,
+) -> Result<DpiWriteOutcome, WriteError> {
     let mut device = Device::new(Arc::clone(channel), index)
         .await
         .map_err(|_| WriteError::DeviceUnreachable { index })?;
@@ -364,7 +450,7 @@ async fn set_dpi_target_on_channel(
         DpiTarget::Default => {
             let Some(default) = feature.default_dpi().await.map_err(write_error)? else {
                 debug!(index, "sensor reports no default DPI — nothing written");
-                return Ok(None);
+                return Ok(DpiWriteOutcome::default());
             };
             supported.nearest(default)
         }
@@ -372,7 +458,21 @@ async fn set_dpi_target_on_channel(
     if !supported.contains(dpi) {
         return Err(WriteError::DpiUnsupported { requested: dpi });
     }
-    feature.set_dpi(dpi).await.map_err(write_error)?;
+    // Bound the optional pre-read independently. A missing reading can
+    // suppress feedback, but must not prevent the user's write from running.
+    let previous = match (tracking, &feature) {
+        (Some(DpiChangeSource::Known(dpi)), _) => Some(dpi),
+        (Some(DpiChangeSource::Probe(time)), DpiFeature::Adjustable { .. }) => {
+            time.read(&feature).await
+        }
+        _ => None,
+    };
+    let before_write = feature.set_dpi(dpi).await.map_err(write_error)?;
+    let previous = tracking.and_then(|_| before_write.or(previous));
+    let outcome = |confirmed: Option<Dpi>| DpiWriteOutcome {
+        written: Some(dpi),
+        changed: confirmed.filter(|&actual| previous.is_some_and(|before| before != actual)),
+    };
     // Read back to confirm the firmware accepted the value. A mismatch is a
     // silent failure mode that's otherwise invisible — a device in a low-power
     // state can ACK the write yet keep the old value. A single re-write
@@ -382,13 +482,13 @@ async fn set_dpi_target_on_channel(
     // A failed read-back leaves the acknowledged write standing.
     let Ok(actual) = feature.current_dpi().await else {
         debug!(index, %dpi, "wrote DPI (read-back skipped)");
-        return Ok(Some(dpi));
+        return Ok(outcome(None));
     };
     if actual == dpi {
         debug!(index, %dpi, "wrote DPI (verified)");
-        return Ok(Some(dpi));
+        return Ok(outcome(Some(actual)));
     }
-    feature.set_dpi(dpi).await.map_err(write_error)?;
+    let _ = feature.set_dpi(dpi).await.map_err(write_error)?;
     match feature.current_dpi().await {
         Ok(retried) if retried == dpi => {
             tracing::info!(
@@ -398,7 +498,7 @@ async fn set_dpi_target_on_channel(
                 "DPI write landed on retry — first write was ACKed but dropped \
                  (device likely mid link re-establishment)"
             );
-            Ok(Some(dpi))
+            Ok(outcome(Some(retried)))
         }
         Ok(retried) => Err(WriteError::DpiNotApplied {
             requested: dpi,
@@ -406,7 +506,7 @@ async fn set_dpi_target_on_channel(
         }),
         Err(_) => {
             debug!(index, %dpi, "re-wrote DPI (read-back skipped)");
-            Ok(Some(dpi))
+            Ok(outcome(None))
         }
     }
 }
@@ -424,7 +524,26 @@ pub async fn set_dpi_target_on(
     shared: &SharedChannel,
     target: DpiTarget,
 ) -> Result<Option<Dpi>, WriteError> {
-    set_dpi_target_on_channel(shared.channel(), shared.device_index(), target).await
+    write_dpi_target(shared.channel(), shared.device_index(), target, None)
+        .await
+        .map(|outcome| outcome.written)
+}
+
+/// As [`set_dpi_target_on`], also reporting whether the sensor confirmed a
+/// change from its previous setting. An unavailable reading suppresses the
+/// change report without changing the write's result.
+pub async fn set_dpi_target_tracking_change_on(
+    shared: &SharedChannel,
+    target: DpiTarget,
+    source: DpiChangeSource<'_>,
+) -> Result<DpiWriteOutcome, WriteError> {
+    write_dpi_target(
+        shared.channel(),
+        shared.device_index(),
+        target,
+        Some(source),
+    )
+    .await
 }
 
 /// Read current DPI and supported values on an already-open [`SharedChannel`].

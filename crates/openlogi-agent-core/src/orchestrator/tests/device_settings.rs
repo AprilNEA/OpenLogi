@@ -2,14 +2,17 @@
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
+use openlogi_core::device_order::PhysicalDeviceKey;
 use openlogi_core::hid::{HidppOperation, WriteError};
+use openlogi_fixture::RequestMatch;
 use openlogi_hid::reprog_controls::BACK_CIDS;
 use openlogi_hid::session::gesture::MainWheelDivert;
 
 use super::*;
 use crate::receiver_access::ExclusiveAccessReason;
-use crate::test_support::publish_dpi_mouse;
+use crate::test_support::{publish_dpi_mouse, publish_dpi_mouse_with_handle};
 
 /// A wheel-hold button scrolls sideways the way its main wheel scrolls: with
 /// the native invert bit, as the link it is reached by is set; without it, as
@@ -742,6 +745,192 @@ async fn a_panel_dpi_write_is_where_a_dpi_shift_returns() {
     };
     assert_eq!(dpi.by_key["mouse"].current, Some(Dpi::new(1600)));
     assert_eq!(dpi.by_key["mouse"].index, 1);
+}
+
+#[tokio::test]
+async fn dpi_panel_notifications_follow_the_reloaded_preference() {
+    let mouse = dev("mouse", 1, true);
+    let route = mouse.route.clone().unwrap();
+    let mut config = Config::default();
+    let mut orch = orchestrator(config.clone());
+    orch.devices = vec![mouse];
+    orch.rebuild();
+    publish_dpi_mouse(&orch.shared.channel_registry, route.clone(), || true).await;
+    let notifications = orch.shared.dpi_notifications();
+    let mut notices = notifications.subscribe();
+
+    orch.shared.set_dpi(&route, Dpi::new(1600)).await.unwrap();
+    assert!(notices.try_recv().is_err());
+
+    config.app_settings.dpi_notifications = true;
+    orch.reload_config(config.clone());
+    orch.shared.set_dpi(&route, Dpi::new(800)).await.unwrap();
+    let notice = notices.try_recv().unwrap();
+    assert_eq!(notice.route, route);
+    assert_eq!(notice.dpi, Dpi::new(800));
+    let observed_at = Instant::now();
+    assert!(notice.is_current(observed_at));
+    orch.shared.set_dpi(&route, Dpi::new(800)).await.unwrap();
+    assert!(notices.try_recv().is_err());
+    assert!(
+        !notice.is_current(observed_at),
+        "a queued banner must not outlive a newer write"
+    );
+
+    config.app_settings.dpi_notifications = false;
+    orch.reload_config(config);
+    orch.shared.set_dpi(&route, Dpi::new(1600)).await.unwrap();
+    assert!(notices.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn dpi_notifications_without_a_backend_do_not_read_before_the_write() {
+    let route = dev("mouse", 1, true).route.unwrap();
+    let mut config = Config::default();
+    config.app_settings.dpi_notifications = true;
+    let orch = orchestrator(config);
+    let (_, handle) =
+        publish_dpi_mouse_with_handle(&orch.shared.channel_registry, route.clone(), || true).await;
+
+    orch.shared.set_dpi(&route, Dpi::new(1600)).await.unwrap();
+
+    assert_eq!(
+        handle
+            .written_reports()
+            .iter()
+            .filter(|report| report[2] == 4 && report[3] >> 4 == 2)
+            .count(),
+        1,
+        "only the ordinary post-write verification reads the sensor"
+    );
+}
+
+#[test]
+fn dpi_notification_labels_use_user_names_and_distinguish_unnamed_slots() {
+    let mut inventory = direct_inventory(None, [1, 2, 3, 4]);
+    inventory.receiver.product_id = 0xc548;
+    inventory.receiver.unique_id = Some("AA00".into());
+    inventory.paired[0].slot = 1;
+    inventory.paired[0].codename = None;
+    let mut unnamed = inventory.paired[0].clone();
+    unnamed.slot = 2;
+    unnamed.model_info = None;
+    inventory.paired.push(unnamed);
+    let first_route = DeviceRoute::for_slot(&inventory, 1).unwrap();
+    let second_route = DeviceRoute::for_slot(&inventory, 2).unwrap();
+    let mut config = Config::default();
+    let legacy = "receiver:aa00:slot:1";
+    config.set_device_custom_name(legacy, Some("Desk mouse".into()));
+    let mut orch = orchestrator(config.clone());
+    orch.observable.set_inventory(
+        openlogi_ipc::InventoryHealth::Ready,
+        &[inventory],
+        &[],
+        false,
+    );
+    let fallback = |slot| format!("Slot {slot}");
+
+    assert_eq!(
+        orch.dpi_notification_label(&first_route, fallback)
+            .as_deref(),
+        Some("Desk mouse")
+    );
+    assert_eq!(
+        orch.dpi_notification_label(&second_route, fallback)
+            .as_deref(),
+        Some("Slot 2")
+    );
+    let physical = PhysicalDeviceKey::parse("unit:01020304").unwrap();
+    assert!(config.adopt_route(&physical, legacy, None));
+    config.set_device_custom_name(physical.as_str(), Some("Main mouse".into()));
+    orch.reload_config(config);
+    assert_eq!(
+        orch.dpi_notification_label(&first_route, fallback)
+            .as_deref(),
+        Some("Main mouse")
+    );
+    orch.config.set_device_custom_name(physical.as_str(), None);
+    assert_eq!(
+        orch.dpi_notification_label(&first_route, fallback)
+            .as_deref(),
+        Some("Slot 1")
+    );
+}
+
+// The scripted channel delivers replies on a native reader thread. Tokio's
+// paused clock can auto-advance past a reply the reader has not delivered yet.
+#[tokio::test]
+async fn dpi_notification_probe_keeps_the_normal_write_budget() {
+    let run = async |enabled, drop_previous: bool, drop_verification: bool| {
+        let barrier_timeout = Duration::from_secs(3);
+        let mouse = dev("mouse", 1, true);
+        let route = mouse.route.unwrap();
+        let mut config = Config::default();
+        config.app_settings.dpi_notifications = enabled;
+        let orch = orchestrator(config);
+        let (_, handle) =
+            publish_dpi_mouse_with_handle(&orch.shared.channel_registry, route.clone(), || true)
+                .await;
+        let notifications = orch.shared.dpi_notifications();
+        let mut notices = notifications.subscribe();
+        let previous = drop_previous.then(|| {
+            handle.hold_next_response(RequestMatch::Hidpp20, &[0x10, 1, 4, 0x20, 0, 0, 0])
+        });
+        let delayed =
+            handle.hold_next_response(RequestMatch::Hidpp20, &[0x10, 1, 4, 0x30, 0, 0x06, 0x40]);
+        let shared = orch.shared.clone();
+        let write = tokio::spawn(async move { shared.set_dpi(&route, Dpi::new(1600)).await });
+        if let Some(previous) = &previous {
+            tokio::time::timeout(barrier_timeout, previous.request_written())
+                .await
+                .expect("the optional read reached the mouse");
+        }
+        tokio::time::timeout(barrier_timeout, delayed.request_written())
+            .await
+            .expect("the SET reached the mouse");
+        let verification = drop_verification.then(|| {
+            handle.hold_next_response(RequestMatch::Hidpp20, &[0x10, 1, 4, 0x20, 0, 0, 0])
+        });
+        let margin = std::time::Duration::from_millis(500);
+        let set_delay = if drop_verification {
+            margin
+        } else {
+            crate::hardware::WRITE_TIMEOUT.saturating_sub(margin)
+        };
+        tokio::time::sleep(set_delay).await;
+        delayed.release();
+        let expected = if let Some(verification) = &verification {
+            tokio::time::timeout(barrier_timeout, verification.request_written())
+                .await
+                .expect("the verification read reached the mouse");
+            Err(WriteError::RequestTimedOut {
+                operation: HidppOperation::WriteDpi,
+            })
+        } else {
+            Ok(())
+        };
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(7), write)
+                .await
+                .expect("the DPI write task finished before the test deadline")
+                .unwrap(),
+            expected,
+            "notifications set to {enabled}, verification lost: {drop_verification}"
+        );
+        assert!(notices.try_recv().is_err());
+        let readings = handle
+            .written_reports()
+            .iter()
+            .filter(|report| report[2] == 4 && report[3] >> 4 == 2)
+            .count();
+        assert_eq!(readings, if enabled { 2 } else { 1 });
+    };
+    tokio::join!(
+        run(false, false, false),
+        run(true, true, false),
+        run(false, false, true),
+        run(true, false, true),
+    );
 }
 
 /// A panel write the mouse rejects is not where a DPI shift returns. The

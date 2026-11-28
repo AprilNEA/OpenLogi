@@ -54,8 +54,9 @@ pub use disable_keys::{
     set_disable_keys_write_through_on,
 };
 pub use dpi::{
-    Dpi, DpiCapabilities, DpiInfo, DpiTarget, get_dpi, get_dpi_info, get_dpi_info_on, set_dpi,
-    set_dpi_on, set_dpi_target_on,
+    Dpi, DpiCapabilities, DpiChangeSource, DpiInfo, DpiProbeTime, DpiTarget, DpiWriteOutcome,
+    get_dpi, get_dpi_info, get_dpi_info_on, set_dpi, set_dpi_on, set_dpi_target_on,
+    set_dpi_target_tracking_change_on,
 };
 pub use dpi_led::{DpiLed, set_dpi_led_on};
 pub(crate) use easy_switch::read_name as read_host_friendly_name;

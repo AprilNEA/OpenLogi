@@ -45,6 +45,8 @@ rust_i18n::i18n!("../openlogi-ui/locales", fallback = "en");
 
 use anyhow::Result;
 use openlogi_core::brand::DeeplinkCommand;
+#[cfg(target_os = "windows")]
+use openlogi_core::brand::{APP_ID, APP_NAME};
 use openlogi_core::config::{Config, ConfigFile};
 use tracing::{info, warn};
 
@@ -135,6 +137,9 @@ fn main() -> Result<()> {
     app.on_reopen(windows::main_window::open);
 
     app.run(move |cx| {
+        // Match the Start menu shortcut used for native DPI notifications.
+        #[cfg(target_os = "windows")]
+        cx.set_app_identity(APP_ID, APP_NAME);
         gpui_kit::init(cx);
         theme::register_builtin_themes(cx);
         theme::sync_scrollbar_mode(cx);

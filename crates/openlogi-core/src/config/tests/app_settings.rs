@@ -197,6 +197,19 @@ fn lock_key_notifications_stay_on_unless_turned_off() {
 }
 
 #[test]
+fn dpi_notifications_are_opt_in() {
+    assert!(!Config::default().app_settings.dpi_notifications);
+    let existing: Config =
+        toml::from_str("schema_version = 11\n[app_settings]\nlock_key_notifications = true\n")
+            .expect("config without a DPI notification preference loads");
+    assert!(!existing.app_settings.dpi_notifications);
+
+    let mut edited = existing;
+    edited.app_settings.dpi_notifications = true;
+    assert!(write_and_read(&edited).app_settings.dpi_notifications);
+}
+
+#[test]
 fn desktop_switches_slide_unless_turned_off() {
     assert!(Config::default().app_settings.animate_desktop_switch);
 

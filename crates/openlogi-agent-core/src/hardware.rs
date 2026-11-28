@@ -37,6 +37,7 @@ use tracing::{debug, info, warn};
 
 use crate::capture_plan::SharedCapturePlans;
 use crate::dpi::DpiBeforeShift;
+use crate::dpi_notifications::DpiNotifications;
 use crate::pointer_speed::SpeedTarget;
 use crate::receiver_access::ReceiverAccess;
 
@@ -259,6 +260,7 @@ impl DeviceAccess {
             access: self.clone(),
             route: route.clone(),
             unit: None,
+            dpi_notifications: None,
         }
     }
 }
@@ -279,10 +281,16 @@ pub(crate) fn known_unit(unit: [u8; 4]) -> Option<[u8; 4]> {
 pub struct DeviceOp {
     access: DeviceAccess,
     route: DeviceRoute,
+    dpi_notifications: Option<DpiFeedback>,
     /// The `0x0003` unit ID the device on the route must report for the op
     /// to reach it (see [`Self::confirming`]); `None` reaches whichever
     /// device is there.
     unit: Option<[u8; 4]>,
+}
+
+struct DpiFeedback {
+    notifications: Arc<DpiNotifications>,
+    probe_time: Option<openlogi_hid::write::DpiProbeTime>,
 }
 
 /// Why a device operation has no channel to write through right now.
@@ -315,6 +323,78 @@ impl From<Unresolved> for WriteError {
 }
 
 impl DeviceOp {
+    /// A DPI step already reads the sensor to choose its target.
+    pub(crate) fn notifying_dpi_changes(mut self, notifications: &Arc<DpiNotifications>) -> Self {
+        self.dpi_notifications = notifications.enabled().then(|| DpiFeedback {
+            notifications: Arc::clone(notifications),
+            probe_time: None,
+        });
+        self
+    }
+
+    /// A direct DPI write may need a separately budgeted sensor reading.
+    pub(crate) fn notifying_dpi_changes_with_probe(
+        self,
+        notifications: &Arc<DpiNotifications>,
+    ) -> Self {
+        let mut op = self.notifying_dpi_changes(notifications);
+        if let Some(feedback) = op.dpi_notifications.as_mut() {
+            feedback.probe_time = Some(openlogi_hid::write::DpiProbeTime::default());
+        }
+        op
+    }
+
+    fn dpi_probe_time(&self) -> Option<&openlogi_hid::write::DpiProbeTime> {
+        self.dpi_notifications
+            .as_ref()
+            .and_then(|feedback| feedback.probe_time.as_ref())
+    }
+
+    /// Give the precision LED its ordinary budget after an optional DPI read.
+    pub(crate) async fn show_precision_led_after_write(
+        &self,
+        channel: &SharedChannel,
+        on: bool,
+        started: tokio::time::Instant,
+    ) {
+        let started = self
+            .dpi_probe_time()
+            .map_or(started, |probe| probe.exclude_from(started));
+        show_precision_led(channel, on, started).await;
+    }
+
+    /// Runs inside the transport turn, so the before/after readings describe
+    /// this write and a stale result cannot publish after a newer write.
+    pub(crate) async fn write_dpi(
+        &self,
+        channel: &SharedChannel,
+        ticket: &WriteTicket,
+        target: openlogi_hid::DpiTarget,
+        previous: Option<Dpi>,
+    ) -> Result<Option<Dpi>, WriteError> {
+        use openlogi_hid::write::DpiChangeSource;
+
+        if let Some(feedback) = self
+            .dpi_notifications
+            .as_ref()
+            .filter(|feedback| feedback.notifications.enabled())
+            && let Some(source) = previous
+                .map(DpiChangeSource::Known)
+                .or_else(|| feedback.probe_time.as_ref().map(DpiChangeSource::Probe))
+        {
+            let result =
+                openlogi_hid::write::set_dpi_target_tracking_change_on(channel, target, source)
+                    .await?;
+            if let Some(dpi) = result.changed {
+                feedback
+                    .notifications
+                    .publish(channel, &self.access.registry, dpi, ticket);
+            }
+            return Ok(result.written);
+        }
+        openlogi_hid::set_dpi_target_on(channel, target).await
+    }
+
     /// Reach only the device on the route that reports `unit` through HID++
     /// `0x0003`, as `None` reaches any. [`Self::run`], [`Self::run_in_turn`],
     /// [`Self::run_in_order`] and the manual Disable Keys write read the unit
@@ -410,7 +490,7 @@ impl DeviceOp {
     /// that write gives up. Resolving after the wait keeps [`Self::run`]'s
     /// rule of never queueing on an already-resolved channel.
     pub(crate) async fn run_in_turn<V, W, WriteFut, S, SupersededFut, T>(
-        self,
+        &self,
         op: HidppOperation,
         ticket: &WriteTicket<V>,
         write: W,
@@ -427,9 +507,10 @@ impl DeviceOp {
         }
         let turn = self.access.transport_turns.turn_for(&self.route);
         let _lease = self.access.receiver_access.acquire_for_io().await;
-        within_turn(
+        within_turn_with_dpi_probe(
             ticket,
             &turn,
+            self.dpi_probe_time(),
             || async { write(self.reach(op).await?).await },
             || async { superseded(self.reach(op).await?).await },
         )
@@ -722,10 +803,31 @@ where
     S: FnOnce() -> SupersededFut,
     SupersededFut: Future<Output = T>,
 {
+    within_turn_with_dpi_probe(ticket, transport, None, write, superseded).await
+}
+
+async fn within_turn_with_dpi_probe<V, T, W, WriteFut, S, SupersededFut>(
+    ticket: &WriteTicket<V>,
+    transport: &TransportTurn,
+    probe: Option<&openlogi_hid::write::DpiProbeTime>,
+    write: W,
+    superseded: S,
+) -> Result<T, Elapsed>
+where
+    W: FnOnce() -> WriteFut,
+    WriteFut: Future<Output = T>,
+    S: FnOnce() -> SupersededFut,
+    SupersededFut: Future<Output = T>,
+{
     ticket
         .write_or(
             transport.lock(),
-            || async { tokio::time::timeout(WRITE_TIMEOUT, write()).await },
+            || async {
+                match probe {
+                    Some(probe) => probe.within_write_budget(WRITE_TIMEOUT, write()).await,
+                    None => tokio::time::timeout(WRITE_TIMEOUT, write()).await,
+                }
+            },
             || async { tokio::time::timeout(WRITE_TIMEOUT, superseded()).await },
         )
         .await
@@ -912,9 +1014,10 @@ pub(crate) fn write_pointer_speed_in_background(
     op.spawn_timed_write(
         "pointer-speed write",
         move |op| async move {
-            within_turn(
+            within_turn_with_dpi_probe(
                 &ticket,
                 &turn,
+                op.dpi_probe_time(),
                 || async {
                     let started = tokio::time::Instant::now();
                     let shared = op.resolve()?;
@@ -927,12 +1030,12 @@ pub(crate) fn write_pointer_speed_in_background(
                         SpeedTarget::Scaled(speed) => openlogi_hid::set_pointer_speed_on(&shared, speed)
                             .await
                             .map(Landed::Speed)?,
-                        SpeedTarget::Dpi(dpi) => openlogi_hid::set_dpi_target_on(&shared, dpi)
+                        SpeedTarget::Dpi(dpi) => op.write_dpi(&shared, &ticket, dpi, None)
                             .await?
                             .map_or(Landed::NoDefaultDpi, Landed::Dpi),
                     };
                     if let Some(on) = led {
-                        show_precision_led(&shared, on, started).await;
+                        op.show_precision_led_after_write(&shared, on, started).await;
                     }
                     Ok(Some(landed))
                 },
@@ -1335,6 +1438,7 @@ pub(crate) fn reapply_mouse_volatile_in_background(
                 access,
                 route,
                 unit: None,
+                dpi_notifications: None,
             };
             let turn = op.access.transport_turns.turn_for(&op.route);
             if let Some(change) = wheel {
@@ -1572,7 +1676,13 @@ pub(crate) fn step_dpi_in_background(
                     *picked_by_step
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner) = Some(dpi);
-                    openlogi_hid::set_dpi_on(&shared, dpi).await?;
+                    op.write_dpi(
+                        &shared,
+                        &recheck,
+                        openlogi_hid::DpiTarget::Value(dpi),
+                        Some(reading),
+                    )
+                    .await?;
                     if let Some(on) = led {
                         show_precision_led(&shared, on, started).await;
                     }

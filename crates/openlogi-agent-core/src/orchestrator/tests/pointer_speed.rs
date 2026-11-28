@@ -1,12 +1,16 @@
 //! Pointer speed and precision mode as the orchestrator drives them: which
 //! mice get the saved speed, and which reloads end precision mode.
 
+use std::time::Duration;
+
 use openlogi_core::hid::PointerSpeed;
+use openlogi_fixture::RequestMatch;
 use openlogi_hid::DpiTarget;
 
 use super::super::{assignments_changed, saved_speed};
 use super::*;
 use crate::pointer_speed::{PrecisionPress, SavedSpeed, SpeedTarget};
+use crate::test_support::{DPI_MOUSE_LED_INDEX, publish_dpi_mouse_with_led};
 
 fn speed(raw: u16) -> PointerSpeed {
     PointerSpeed::try_new(raw).expect("a speed in range")
@@ -49,6 +53,57 @@ fn orchestrator_with_precision_on(config: Config, mouse: AgentDevice) -> Orchest
         .expect("an online mouse whose speed OpenLogi sets");
     assert!(on);
     orch
+}
+
+// The scripted reader runs on a native thread, so paused Tokio time can
+// advance before the thread delivers a ready reply.
+#[tokio::test]
+async fn a_dpi_notification_probe_keeps_the_precision_led_budget() {
+    let apply = async |enabled| {
+        let mouse = dpi_mouse();
+        let route = mouse.route.clone().unwrap();
+        let mut config = Config::default();
+        config.app_settings.dpi_notifications = enabled;
+        let orch = orchestrator_with_precision_on(config, mouse);
+        let fixture =
+            publish_dpi_mouse_with_led(&orch.shared.channel_registry, route.clone()).await;
+        let _notices = orch.shared.dpi_notifications().subscribe();
+        let previous = enabled.then(|| {
+            fixture.hold_next_response(RequestMatch::Hidpp20, &[0x10, 1, 4, 0x20, 0, 0, 0])
+        });
+        let write_ack =
+            fixture.hold_next_response(RequestMatch::Hidpp20, &[0x10, 1, 4, 0x30, 0, 0x06, 0x40]);
+        let write = tokio::spawn(async move { orch.shared.set_dpi(&route, Dpi::new(1600)).await });
+        let barrier_timeout = Duration::from_secs(3);
+        if let Some(previous) = &previous {
+            tokio::time::timeout(barrier_timeout, previous.request_written())
+                .await
+                .expect("the optional sensor read was sent");
+        }
+        tokio::time::timeout(barrier_timeout, write_ack.request_written())
+            .await
+            .expect("the DPI write was sent");
+        // This leaves part of the ordinary LED budget available but exceeds
+        // it if the optional read and the stale-reply grace count against it.
+        tokio::time::sleep(Duration::from_millis(3200)).await;
+        write_ack.release();
+        tokio::time::timeout(barrier_timeout, write)
+            .await
+            .expect("the DPI write and LED update finished before the test deadline")
+            .unwrap()
+            .unwrap();
+
+        fixture.written_reports().iter().any(|report| {
+            report[2] == DPI_MOUSE_LED_INDEX && report[3] >> 4 == 5 && report[4..7] == [0, 0, 1]
+        })
+    };
+
+    let (disabled, enabled) = tokio::join!(apply(false), apply(true));
+    assert!(disabled, "the DPI write normally turns off the LED");
+    assert!(
+        enabled,
+        "a lost optional read must not prevent turning off the LED"
+    );
 }
 
 #[test]
