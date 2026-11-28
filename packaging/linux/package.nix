@@ -198,8 +198,13 @@ rustPlatform.buildRustPackage {
     runHook postInstall
   '';
 
+  # openlogi-overlay links against the same GPUI runtime libraries as
+  # openlogi-desktop, so it needs the same rpath. Without it the overlay
+  # panics on every start and the agent respawns it once a minute.
   postFixup = ''
-    patchelf --add-rpath "${runtimeLibs}" "$out/bin/openlogi-desktop"
+    for binary in openlogi-desktop openlogi-overlay; do
+      patchelf --add-rpath "${runtimeLibs}" "$out/bin/$binary"
+    done
   '';
 
   doInstallCheck = true;
