@@ -7,7 +7,7 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::sync::{
     LazyLock, Mutex,
     atomic::{AtomicBool, Ordering},
@@ -1246,6 +1246,282 @@ fn try_mpris_command(command: &str) -> Option<()> {
     }
 }
 
+/// What an "Open application" target should do on Linux.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Launch {
+    /// Hand it to the desktop opener (`xdg-open`): URLs, folders, and
+    /// documents.
+    Opener,
+    /// Activate a desktop entry: a `.desktop` file, or the entry an
+    /// application name such as `Dolphin` names. `xdg-open` cannot be trusted
+    /// with these: KDE opens a `.desktop` file as text (#2525).
+    Entry(PathBuf),
+    /// Run it as a program: an executable file path, or a bare command name
+    /// resolved on `PATH`.
+    Program(PathBuf),
+}
+
+/// Decide how `target` should be launched.
+///
+/// `is_executable`, `on_path` and `find_entry` are injected so the decision
+/// table is testable without touching the real filesystem or `PATH`.
+fn classify(
+    target: &str,
+    is_executable: &dyn Fn(&Path) -> bool,
+    on_path: &dyn Fn(&str) -> Option<PathBuf>,
+    find_entry: &dyn Fn(&str) -> Option<PathBuf>,
+) -> Launch {
+    if target.contains("://") {
+        return Launch::Opener;
+    }
+    // A desktop entry is activated, not spawned: activation reads Exec= and
+    // applies the entry's Terminal / StartupNotify keys.
+    if Path::new(target)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("desktop"))
+    {
+        return Launch::Entry(PathBuf::from(target));
+    }
+    if target.contains('/') {
+        let path = Path::new(target);
+        return if is_executable(path) {
+            Launch::Program(path.to_path_buf())
+        } else {
+            Launch::Opener
+        };
+    }
+    // A bare name: a command on `PATH`, else the application it names, as
+    // the GUI's free-text field invites ("Dolphin" for `dolphin`).
+    on_path(target)
+        .map(Launch::Program)
+        .or_else(|| find_entry(target).map(Launch::Entry))
+        .unwrap_or(Launch::Opener)
+}
+
+/// The `applications` directories desktop entries live in, most preferred
+/// first: `$XDG_DATA_HOME` (default `~/.local/share`), then each of
+/// `$XDG_DATA_DIRS` (default `/usr/local/share:/usr/share`).
+fn application_dirs() -> Vec<PathBuf> {
+    let home = std::env::var_os("XDG_DATA_HOME")
+        .filter(|dir| !dir.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| Path::new(&home).join(".local/share")));
+    let data_dirs = std::env::var_os("XDG_DATA_DIRS")
+        .filter(|dirs| !dirs.is_empty())
+        .unwrap_or_else(|| "/usr/local/share:/usr/share".into());
+    home.into_iter()
+        .chain(std::env::split_paths(&data_dirs))
+        .map(|dir| dir.join("applications"))
+        .collect()
+}
+
+/// The desktop entry an application `name` refers to, searching `dirs` in
+/// order. An entry matches, ignoring case, by its file name
+/// (`dolphin.desktop`), the last part of a reverse-DNS one
+/// (`org.kde.dolphin.desktop`), or its untranslated `Name=` (`Dolphin`).
+fn find_entry_in(dirs: &[PathBuf], name: &str) -> Option<PathBuf> {
+    dirs.iter().find_map(|dir| {
+        let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
+            .ok()?
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path.extension().is_some_and(|ext| ext == "desktop"))
+            .collect();
+        // read_dir order is arbitrary; sort so the same name always picks
+        // the same entry.
+        entries.sort();
+        entries.into_iter().find(|path| entry_matches(path, name))
+    })
+}
+
+/// Whether the desktop entry at `path` is the application `name`.
+fn entry_matches(path: &Path, name: &str) -> bool {
+    let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+        return false;
+    };
+    let last = stem.rsplit('.').next().unwrap_or(stem);
+    if stem.eq_ignore_ascii_case(name) || last.eq_ignore_ascii_case(name) {
+        return true;
+    }
+    std::fs::read_to_string(path).is_ok_and(|text| {
+        text.lines()
+            .find_map(|line| line.strip_prefix("Name="))
+            .is_some_and(|entry_name| entry_name.trim().eq_ignore_ascii_case(name.trim()))
+    })
+}
+
+/// The desktop entry an application `name` refers to on this system.
+fn find_entry(name: &str) -> Option<PathBuf> {
+    find_entry_in(&application_dirs(), name)
+}
+
+/// Activate the desktop entry at `entry` with the first launcher installed:
+/// GLib's `gio launch`, then KDE's `kioclient exec` (`kioclient5` on Plasma
+/// 5). `false` when none is, so the caller falls back to the opener.
+fn launch_entry(entry: &Path) -> bool {
+    launch_entry_with(entry, on_path)
+}
+
+/// [`launch_entry`] with the launcher lookup injected, so tests can point it
+/// at stand-in launchers.
+fn launch_entry_with(entry: &Path, find: impl Fn(&str) -> Option<PathBuf>) -> bool {
+    const LAUNCHERS: &[(&str, &str)] = &[
+        ("gio", "launch"),
+        ("kioclient", "exec"),
+        ("kioclient5", "exec"),
+    ];
+    for (launcher, verb) in LAUNCHERS {
+        let Some(program) = find(launcher) else {
+            continue;
+        };
+        match std::process::Command::new(&program)
+            .arg(verb)
+            .arg(entry)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(mut child) => {
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
+                return true;
+            }
+            Err(error) => tracing::warn!(
+                %error,
+                launcher = %program.display(),
+                entry = %entry.display(),
+                "could not start the desktop-entry launcher"
+            ),
+        }
+    }
+    false
+}
+
+/// Whether `path` is a regular file with any execute bit set.
+///
+/// A mode check, not an effective-permission one: a file executable only by
+/// another user still answers `true` here. That is deliberate — this decides
+/// *classification*, and the exec itself is the authority on whether the
+/// program can actually run, so [`launch_program`] falls back to the opener
+/// when the spawn is refused.
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    std::fs::metadata(path)
+        .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+}
+
+/// Every executable named `name` on `PATH`, in `PATH` order.
+fn path_matches(name: &str) -> Vec<PathBuf> {
+    std::env::var_os("PATH").map_or_else(Vec::new, |paths| {
+        std::env::split_paths(&paths)
+            .map(|dir| dir.join(name))
+            .filter(|candidate| is_executable(candidate))
+            .collect()
+    })
+}
+
+/// First executable named `name` on `PATH`.
+fn on_path(name: &str) -> Option<PathBuf> {
+    path_matches(name).into_iter().next()
+}
+
+/// Outcome of trying to spawn a program from a list of candidates.
+#[derive(Debug, PartialEq, Eq)]
+enum Spawn {
+    Started(PathBuf),
+    /// Every candidate was refused for permissions.
+    PermissionDenied,
+    /// No candidate started and at least one was refused for a reason other
+    /// than permissions.
+    NotRunnable,
+}
+
+/// Spawn the first candidate the kernel will run, moving past any it refuses
+/// — the mode check behind [`is_executable`] cannot tell a file executable
+/// only by another user, or a script whose interpreter is missing, from one
+/// this user can run, so an earlier `PATH` match must not shadow a runnable
+/// later one.
+fn spawn_first(candidates: impl IntoIterator<Item = PathBuf>) -> Spawn {
+    let mut outcome = Spawn::PermissionDenied;
+    for program in candidates {
+        match std::process::Command::new(&program)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(mut child) => {
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
+                return Spawn::Started(program);
+            }
+            Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+                tracing::warn!(
+                    %error,
+                    program = %program.display(),
+                    "the configured application is not executable by this user"
+                );
+            }
+            // Any other refusal means the mode bit was misleading — a data
+            // file with the bit set, a script with no interpreter, a path
+            // that vanished. If no later candidate starts, those are the
+            // desktop opener's business after all.
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    program = %program.display(),
+                    "not a runnable program"
+                );
+                outcome = Spawn::NotRunnable;
+            }
+        }
+    }
+    outcome
+}
+
+/// Run an "Open application" target as a program when that is what it is,
+/// reporting whether it was handled here.
+///
+/// `xdg-open` — what `opener` calls on Linux — *opens* a file: handed
+/// `/usr/bin/nautilus` it looks for something claiming
+/// `application/x-executable` and, finding nothing, does nothing at all
+/// (#775). A path to an executable, or a bare command name on `PATH`, has to
+/// be spawned instead. A `.desktop` file, or an application name such as
+/// `Dolphin` that matches one, is activated through a desktop-entry launcher:
+/// KDE's `xdg-open` opens the file as text and sends a bare name to the
+/// browser (#2525). URLs, folders and documents return `false` and stay with
+/// the opener.
+///
+/// The spawn runs on the calling thread so its result decides the return
+/// value; only the wait is detached, because a long-lived GUI app would
+/// otherwise linger as a zombie for the agent's whole lifetime.
+///
+/// `Command::spawn` reports a failed `exec` — the target is not executable by
+/// this user, is not a valid binary, or vanished between the check and the
+/// call — rather than succeeding and failing later, so a refused spawn is
+/// reported as unhandled here and the caller falls through to the opener.
+/// Without that, a file whose execute bit belongs to another user classified
+/// as a program, failed to start, and activating the slot did nothing at all.
+pub(super) fn launch_program(target: &str) -> bool {
+    let program = match classify(target, &is_executable, &on_path, &find_entry) {
+        Launch::Opener => return false,
+        Launch::Entry(entry) => return launch_entry(&entry),
+        Launch::Program(program) => program,
+    };
+    let candidates = if target.contains('/') {
+        vec![program]
+    } else {
+        path_matches(target)
+    };
+    // Not executable *by this user*: the opener cannot run it either, and
+    // handing a binary to `xdg-open` risks it landing in a text editor.
+    // Report it handled so nothing else is tried.
+    !matches!(spawn_first(candidates), Spawn::NotRunnable)
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -1254,12 +1530,19 @@ mod tests {
     use evdev::{KeyCode, RelativeAxisCode};
     use openlogi_core::binding::{HeldKeys, KeyCombo, KeyboardUsage, NativeAction, Shortcut};
 
+    use std::path::PathBuf;
+    use std::process::Stdio;
+
+    use std::os::unix::fs::PermissionsExt as _;
+
     use super::{
-        HELPER_PREFIXES, KEY_CAPABILITIES, ScrollOutput, action_scroll, capture_region_mods, combo,
-        desktop_switch_mods, generic_linux_lock_fallback_chord, hid_usage_to_linux,
-        hyprland_helper, hyprland_lock_fallback_chord, hyprland_lock_helper,
-        hyprland_session_from_signature, key_ev, key_phase_events, modifiers_to_keycodes, rel_ev,
-        resolve_allowlisted_under, scroll_events, syn, unheld_modifiers, wait_with_retry,
+        HELPER_PREFIXES, KEY_CAPABILITIES, Launch, ScrollOutput, Spawn, action_scroll,
+        capture_region_mods, classify, combo, desktop_switch_mods, find_entry_in,
+        generic_linux_lock_fallback_chord, hid_usage_to_linux, hyprland_helper,
+        hyprland_lock_fallback_chord, hyprland_lock_helper, hyprland_session_from_signature,
+        is_executable, key_ev, key_phase_events, launch_entry_with, launch_program,
+        modifiers_to_keycodes, on_path, rel_ev, resolve_allowlisted_under, scroll_events,
+        spawn_first, syn, unheld_modifiers, wait_with_retry,
     };
     use crate::inject::{HeldChordKind, HeldOutput, KeyPhase};
 
@@ -1313,6 +1596,39 @@ mod tests {
         );
     }
 
+    /// #775: configuring `/usr/bin/nautilus` (or bare `nautilus`) did
+    /// nothing, because `xdg-open` opens files rather than running them.
+    #[test]
+    fn executables_are_run_and_everything_else_goes_to_the_opener() {
+        let executable = |p: &Path| p == Path::new("/usr/bin/nautilus");
+        let on_path = |name: &str| (name == "nautilus").then(|| PathBuf::from("/usr/bin/nautilus"));
+        let no_entry = |_: &str| None;
+
+        assert_eq!(
+            classify("/usr/bin/nautilus", &executable, &on_path, &no_entry),
+            Launch::Program(PathBuf::from("/usr/bin/nautilus")),
+            "an executable path is a program to run"
+        );
+        assert_eq!(
+            classify("nautilus", &executable, &on_path, &no_entry),
+            Launch::Program(PathBuf::from("/usr/bin/nautilus")),
+            "a bare command name resolves through PATH"
+        );
+
+        for opener in [
+            "https://example.com",
+            "/home/u/Documents",
+            "/home/u/notes.txt",
+            "definitely-not-on-path",
+        ] {
+            assert_eq!(
+                classify(opener, &executable, &on_path, &no_entry),
+                Launch::Opener,
+                "{opener} belongs to the desktop opener"
+            );
+        }
+    }
+
     /// libinput reads only the hi-res axes of a device that has them, so a
     /// scroll action without them does nothing.
     #[test]
@@ -1337,6 +1653,290 @@ mod tests {
                 "scroll ({dx}, {dy})"
             );
         }
+    }
+
+    /// A path that classifies as a program but cannot be exec'd must report
+    /// itself unhandled, so the caller still hands it to the desktop opener.
+    /// A regular file with no execute bit for *this* user is the case the
+    /// mode-based classification cannot see (#839 review).
+    #[test]
+    fn a_refused_spawn_is_reported_as_unhandled() {
+        let dir = TempDir::new("launch");
+        let path = dir.0.join("not-a-binary");
+        std::fs::write(&path, b"\x7fELF this is not a loadable binary").expect("write file");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("set mode");
+
+        let target = path.to_str().expect("utf-8 temp path");
+        assert_eq!(
+            classify(target, &is_executable, &on_path, &|_: &str| None),
+            Launch::Program(path.clone()),
+            "the mode check classifies it as a program"
+        );
+        assert!(
+            !launch_program(target),
+            "an exec the kernel refuses must fall through to the opener"
+        );
+    }
+
+    /// A file whose execute bit belongs to someone else classifies as a
+    /// program but cannot be run here — and the desktop opener cannot run it
+    /// either, so falling through to it would only repeat the failure with a
+    /// binary in a text editor as the best case. Report it handled instead.
+    #[test]
+    fn an_unexecutable_program_is_not_passed_to_the_opener() {
+        let dir = TempDir::new("eacces");
+        let path = dir.0.join("no-permission");
+        std::fs::write(&path, b"#!/bin/sh\ntrue\n").expect("write file");
+        // Executable for group and other, never for the owner running this.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o011)).expect("set mode");
+
+        if !exec_denied(&path) {
+            return;
+        }
+
+        let target = path.to_str().expect("utf-8 temp path");
+        assert_eq!(
+            classify(target, &is_executable, &on_path, &|_: &str| None),
+            Launch::Program(path.clone()),
+            "the mode check still sees an execute bit"
+        );
+        assert!(
+            launch_program(target),
+            "an exec refused for permissions must not fall through to the opener"
+        );
+    }
+
+    /// An earlier `PATH` match this user cannot run must not shadow a
+    /// runnable later one.
+    #[test]
+    fn a_permission_refusal_moves_on_to_the_next_candidate() {
+        let dir = TempDir::new("shadow");
+        let denied = dir.0.join("true");
+        std::fs::write(&denied, b"#!/bin/sh\ntrue\n").expect("write file");
+        std::fs::set_permissions(&denied, std::fs::Permissions::from_mode(0o011))
+            .expect("set mode");
+        if !exec_denied(&denied) {
+            return;
+        }
+        let runnable = on_path("true").expect("true is on PATH");
+
+        assert_eq!(
+            spawn_first([denied.clone(), runnable.clone()]),
+            Spawn::Started(runnable)
+        );
+        assert_eq!(spawn_first([denied]), Spawn::PermissionDenied);
+    }
+
+    /// An earlier `PATH` match whose interpreter is missing must not shadow
+    /// a runnable later one; with nothing after it, it still falls back to
+    /// the opener.
+    #[test]
+    fn a_missing_interpreter_moves_on_to_the_next_candidate() {
+        let dir = TempDir::new("interp");
+        let broken = dir.0.join("true");
+        std::fs::write(&broken, b"#!/nonexistent/openlogi-interpreter\n").expect("write file");
+        std::fs::set_permissions(&broken, std::fs::Permissions::from_mode(0o755))
+            .expect("set mode");
+        let runnable = on_path("true").expect("true is on PATH");
+
+        assert_eq!(
+            spawn_first([broken.clone(), runnable.clone()]),
+            Spawn::Started(runnable)
+        );
+        assert_eq!(spawn_first([broken]), Spawn::NotRunnable);
+    }
+
+    /// Whether the kernel refuses to exec `path` for permissions. Root (or
+    /// any process with `CAP_DAC_OVERRIDE`) can run a file with only group
+    /// and other execute bits, so permission-denial tests skip there.
+    fn exec_denied(path: &Path) -> bool {
+        match std::process::Command::new(path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(mut child) => {
+                let _ = child.wait();
+                false
+            }
+            Err(error) => error.kind() == std::io::ErrorKind::PermissionDenied,
+        }
+    }
+
+    /// A fresh `0o700` directory, created exclusively so a pre-planted path or
+    /// symlink fails the test instead of redirecting it; removed on drop.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            use std::os::unix::fs::DirBuilderExt as _;
+            use std::sync::atomic::{AtomicU32, Ordering};
+
+            static COUNTER: AtomicU32 = AtomicU32::new(0);
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_nanos());
+            let dir = std::env::temp_dir().join(format!(
+                "openlogi-{tag}-{}-{}-{nanos}",
+                std::process::id(),
+                COUNTER.fetch_add(1, Ordering::Relaxed),
+            ));
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&dir)
+                .expect("create temp dir");
+            Self(dir)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).ok();
+        }
+    }
+
+    /// The fakes above pin the decision table; this pins the two real probes
+    /// they stand in for against the filesystem. `sh` is on `PATH` and
+    /// executable on every Linux host.
+    #[test]
+    fn the_real_probes_resolve_a_shell_on_path() {
+        let resolved = on_path("sh").expect("sh is on PATH");
+        assert!(
+            is_executable(&resolved),
+            "{} is executable",
+            resolved.display()
+        );
+        assert_eq!(
+            classify("sh", &is_executable, &on_path, &|_: &str| None),
+            Launch::Program(resolved)
+        );
+        assert_eq!(
+            classify("/", &is_executable, &on_path, &|_: &str| None),
+            Launch::Opener
+        );
+    }
+
+    /// A `.desktop` entry is executable often enough that the extension check
+    /// has to come first: activating the entry reads its `Exec=` and honours
+    /// `Terminal=` and `StartupNotify=`, which spawning the file itself would
+    /// not.
+    #[test]
+    fn an_executable_desktop_entry_is_activated_not_spawned() {
+        assert_eq!(
+            classify(
+                "/usr/share/applications/foo.desktop",
+                &|_: &Path| true,
+                &|_: &str| None,
+                &|_: &str| None
+            ),
+            Launch::Entry(PathBuf::from("/usr/share/applications/foo.desktop"))
+        );
+    }
+
+    /// #2525: the GUI saves what the user typed, often the application's
+    /// display name. A name not on `PATH` resolves to its desktop entry.
+    #[test]
+    fn an_application_name_resolves_to_its_desktop_entry() {
+        let entry = PathBuf::from("/usr/share/applications/org.kde.dolphin.desktop");
+        let find_entry = |name: &str| (name == "Dolphin").then(|| entry.clone());
+        assert_eq!(
+            classify("Dolphin", &|_: &Path| false, &|_: &str| None, &find_entry),
+            Launch::Entry(entry.clone())
+        );
+        assert_eq!(
+            classify("Nothing", &|_: &Path| false, &|_: &str| None, &find_entry),
+            Launch::Opener
+        );
+    }
+
+    /// An entry matches by file name, by the last part of a reverse-DNS file
+    /// name, or by its untranslated `Name=`, ignoring case; earlier
+    /// directories win.
+    #[test]
+    fn desktop_entries_match_by_file_name_or_name_key() {
+        let user = TempDir::new("apps-user");
+        let system = TempDir::new("apps-system");
+        let write = |dir: &Path, file: &str, name: &str| {
+            let path = dir.join(file);
+            std::fs::write(
+                &path,
+                format!("[Desktop Entry]\nType=Application\nName={name}\nName[de]=Anders\n"),
+            )
+            .expect("write entry");
+            path
+        };
+        let dolphin = write(&system.0, "org.kde.dolphin.desktop", "Dolphin");
+        let editor = write(&system.0, "org.example.Writer.desktop", "Text Editor");
+        let shadow = write(&user.0, "dolphin.desktop", "My Dolphin");
+        let dirs = [user.0.clone(), system.0.clone()];
+        let only_system = [system.0.clone()];
+
+        assert_eq!(
+            find_entry_in(&only_system, "dolphin"),
+            Some(dolphin.clone())
+        );
+        assert_eq!(find_entry_in(&only_system, "Dolphin"), Some(dolphin));
+        assert_eq!(find_entry_in(&only_system, "text editor"), Some(editor));
+        assert_eq!(
+            find_entry_in(&only_system, "Anders"),
+            None,
+            "translations are ignored"
+        );
+        assert_eq!(
+            find_entry_in(&dirs, "Dolphin"),
+            Some(shadow),
+            "the user's entry wins"
+        );
+        assert_eq!(find_entry_in(&dirs, "konsole"), None);
+    }
+
+    /// A desktop entry is handed to the first launcher installed — `gio
+    /// launch`, else `kioclient exec` — and with none the caller is told to
+    /// fall back to the opener.
+    #[test]
+    fn a_desktop_entry_goes_to_the_first_installed_launcher() {
+        let bin = TempDir::new("launchers");
+        let log = bin.0.join("ran");
+        for name in ["gio", "kioclient"] {
+            let path = bin.0.join(name);
+            std::fs::write(
+                &path,
+                format!(
+                    "#!/bin/sh\nprintf '%s %s %s' \"$(basename \"$0\")\" \"$1\" \"$2\" > {}\n",
+                    log.display()
+                ),
+            )
+            .expect("write launcher");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("make launcher executable");
+        }
+        let entry = Path::new("/usr/share/applications/org.kde.dolphin.desktop");
+        let ran = || {
+            for _ in 0..100 {
+                if let Ok(text) = std::fs::read_to_string(&log)
+                    && !text.is_empty()
+                {
+                    std::fs::remove_file(&log).ok();
+                    return text;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            panic!("no launcher ran");
+        };
+
+        let installed = |names: &'static [&'static str]| {
+            let bin = bin.0.clone();
+            move |name: &str| names.contains(&name).then(|| bin.join(name))
+        };
+        assert!(launch_entry_with(entry, installed(&["gio", "kioclient"])));
+        assert_eq!(ran(), format!("gio launch {}", entry.display()));
+        assert!(launch_entry_with(entry, installed(&["kioclient"])));
+        assert_eq!(ran(), format!("kioclient exec {}", entry.display()));
+        assert!(
+            !launch_entry_with(entry, installed(&[])),
+            "no launcher sends the entry to the opener"
+        );
     }
 
     #[test]
