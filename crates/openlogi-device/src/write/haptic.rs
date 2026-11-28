@@ -1067,6 +1067,10 @@ mod tests {
     /// How long the hover tests let a play's acknowledgement take.
     const HOVER_REPLY: Duration = Duration::from_millis(250);
 
+    /// How long the hover tests wait for a held request to be written before
+    /// failing instead of hanging.
+    const REQUEST_WAIT: Duration = Duration::from_secs(2);
+
     /// A hover play's short request as the scripted device sees it, software
     /// id cleared.
     fn hover_play_request(waveform: HapticWaveform) -> [u8; 7] {
@@ -1092,11 +1096,15 @@ mod tests {
                 play_hover_haptic_on(&shared, HapticWaveform::SubtleCollision, false, reply).await
             }
         });
-        slow.request_written().await;
+        tokio::time::timeout(REQUEST_WAIT, slow.request_written())
+            .await
+            .expect("the cold open sends the capability read within 2 s");
         tokio::time::sleep(reply * 4).await;
         slow.release();
 
-        play.await
+        tokio::time::timeout(REQUEST_WAIT, play)
+            .await
+            .expect("the slow discovery finishes within 2 s of its reply")
             .expect("the play task joins")
             .expect("a slow discovery still plays");
         assert!(
@@ -1130,7 +1138,9 @@ mod tests {
         play_hover_haptic_on(&shared, hover, false, Duration::from_millis(20))
             .await
             .expect("an unanswered tick still counts as sent");
-        late.request_written().await;
+        tokio::time::timeout(REQUEST_WAIT, late.request_written())
+            .await
+            .expect("the late tick's play request is written within 2 s");
 
         let ring_play = tokio::spawn({
             let shared = shared.clone();
@@ -1148,8 +1158,9 @@ mod tests {
         );
 
         late.release();
-        ring_play
+        tokio::time::timeout(REQUEST_WAIT, ring_play)
             .await
+            .expect("the ring play finishes within 2 s of the late reply")
             .expect("the ring task joins")
             .expect("the ring play gets its own reply");
         assert_eq!(
