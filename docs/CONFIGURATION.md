@@ -182,6 +182,16 @@ Common device fields are:
   `Thumbwheel` is the thumb wheel's capacitive tap — it has no GUI control and
   stays inert unless bound here, because the wheel reports taps from incidental
   thumb contact as well as from deliberate ones.
+  `ThumbwheelScrollUp` and `ThumbwheelScrollDown` are the thumb wheel's two
+  directions and take any one-shot action each, e.g.
+  `ThumbwheelScrollUp = { CustomShortcut = "Tab" }`; a turn past the
+  sensitivity threshold fires it once. In the desktop's Buttons tab, the thumb
+  wheel's picker offers the pairs as presets, and its **Custom** section binds
+  one direction at a time: pick **Thumb Wheel Up** or **Thumb Wheel Down**,
+  then an action. In an app profile the pick is that app's override of that
+  direction only; the other direction keeps inheriting the default profile.
+  Actions that last as long as a press (**DPI Shift**, **G-Shift**, a held
+  shortcut) are not offered there, because a wheel turn has no release.
   Keyboard keys are named by their HID++ `0x1b04` control: a catalog name such
   as `KeyScreenCapture`, `KeyCalculator` or `KeyLock`, or `control:0x<cid>` for
   any control `openlogi diag controls` reports as divertable. A bound key is
