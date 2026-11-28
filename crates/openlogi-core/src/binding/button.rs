@@ -87,6 +87,15 @@ pub enum ButtonId {
     G8,
     /// G-series button G9.
     G9,
+    /// Turning a dialpad's large dial counter-clockwise (negative `0x4610`
+    /// rotation). Diverted over HID++ while bound; see [`Rotary`].
+    DialLeft,
+    /// Turning a dialpad's large dial clockwise (positive `0x4610` rotation).
+    DialRight,
+    /// Turning a dialpad's small roller up (positive `0x4610` rotation).
+    RollerUp,
+    /// Turning a dialpad's small roller down (negative `0x4610` rotation).
+    RollerDown,
     /// A key on a keypad's 3×3 LCD grid, on one of the keypad's binding pages.
     /// These keys report through a vendor report rather than `0x1b04`, so they
     /// have no control ID and no divertable state: bound or not, they emit
@@ -258,7 +267,7 @@ impl ButtonId {
     /// string form read this one table; `unit_name` is a match without a
     /// wildcard over the unit variants, so a new variant that is missing here
     /// fails to compile rather than failing to parse.
-    const UNIT_NAMES: [(ButtonId, &'static str); 17] = [
+    const UNIT_NAMES: [(ButtonId, &'static str); 21] = [
         (ButtonId::LeftClick, "LeftClick"),
         (ButtonId::RightClick, "RightClick"),
         (ButtonId::MiddleClick, "MiddleClick"),
@@ -276,6 +285,10 @@ impl ButtonId {
         (ButtonId::G7, "G7"),
         (ButtonId::G8, "G8"),
         (ButtonId::G9, "G9"),
+        (ButtonId::DialLeft, "DialLeft"),
+        (ButtonId::DialRight, "DialRight"),
+        (ButtonId::RollerUp, "RollerUp"),
+        (ButtonId::RollerDown, "RollerDown"),
     ];
 
     /// The name a mouse button is persisted under. Keyboard controls have no
@@ -299,6 +312,10 @@ impl ButtonId {
             ButtonId::G7 => Self::UNIT_NAMES[14].1,
             ButtonId::G8 => Self::UNIT_NAMES[15].1,
             ButtonId::G9 => Self::UNIT_NAMES[16].1,
+            ButtonId::DialLeft => Self::UNIT_NAMES[17].1,
+            ButtonId::DialRight => Self::UNIT_NAMES[18].1,
+            ButtonId::RollerUp => Self::UNIT_NAMES[19].1,
+            ButtonId::RollerDown => Self::UNIT_NAMES[20].1,
             // Grid keys, keyboard controls and gaming keys have no fixed name
             // in this table; see [`GridKey::config_name`],
             // [`Cid::config_name`], [`GKeySlot::config_name`] and
@@ -342,6 +359,10 @@ impl ButtonId {
             ButtonId::G7 => "G7",
             ButtonId::G8 => "G8",
             ButtonId::G9 => "G9",
+            ButtonId::DialLeft => "Dial Left",
+            ButtonId::DialRight => "Dial Right",
+            ButtonId::RollerUp => "Roller Up",
+            ButtonId::RollerDown => "Roller Down",
             ButtonId::Grid(slot) => return slot.label(),
             ButtonId::Control(cid) => return cid.label(),
             ButtonId::GKey(slot) => return slot.label(),
@@ -370,6 +391,10 @@ impl ButtonId {
             ButtonId::G7 => "actions.g7",
             ButtonId::G8 => "actions.g8",
             ButtonId::G9 => "actions.g9",
+            ButtonId::DialLeft => "dialpad.dial_left",
+            ButtonId::DialRight => "dialpad.dial_right",
+            ButtonId::RollerUp => "dialpad.roller_up",
+            ButtonId::RollerDown => "dialpad.roller_down",
             // The page is context the caller shows beside the key, not part
             // of the key's name.
             ButtonId::Grid(slot) => slot.key.translation_key(),
@@ -377,6 +402,57 @@ impl ButtonId {
             // Like a grid key's page, the profile is shown beside the key.
             ButtonId::GKey(slot) => slot.key.translation_key(),
             ButtonId::ModeKey(key) => key.translation_key(),
+        }
+    }
+}
+
+/// A rotary control of a dialpad. Each direction binds as its own
+/// [`ButtonId`], the way the thumb wheel's do; turning fires the direction's
+/// action once per accumulated step (see the agent's rotary dispatch).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Rotary {
+    /// The large dial.
+    Dial,
+    /// The small roller.
+    Roller,
+}
+
+impl Rotary {
+    /// Both rotary controls.
+    pub const ALL: [Rotary; 2] = [Rotary::Dial, Rotary::Roller];
+
+    /// The binding key for positive rotation (dial clockwise, roller up).
+    #[must_use]
+    pub const fn positive(self) -> ButtonId {
+        match self {
+            Rotary::Dial => ButtonId::DialRight,
+            Rotary::Roller => ButtonId::RollerUp,
+        }
+    }
+
+    /// The binding key for negative rotation (dial counter-clockwise,
+    /// roller down).
+    #[must_use]
+    pub const fn negative(self) -> ButtonId {
+        match self {
+            Rotary::Dial => ButtonId::DialLeft,
+            Rotary::Roller => ButtonId::RollerDown,
+        }
+    }
+
+    /// Both direction keys, positive first.
+    #[must_use]
+    pub const fn buttons(self) -> [ButtonId; 2] {
+        [self.positive(), self.negative()]
+    }
+
+    /// The rotary control `button` is a direction of, if any.
+    #[must_use]
+    pub const fn of(button: ButtonId) -> Option<Rotary> {
+        match button {
+            ButtonId::DialLeft | ButtonId::DialRight => Some(Rotary::Dial),
+            ButtonId::RollerUp | ButtonId::RollerDown => Some(Rotary::Roller),
+            _ => None,
         }
     }
 }

@@ -23,6 +23,10 @@ tracing-subscriber = { workspace = true }
 [lints]
 workspace = true
 
+# `kill(2)` on a shell command's process group (`inject/shell_tree.rs`).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = { workspace = true }
 zbus = "5"
@@ -55,8 +59,15 @@ mach2 = "0.5"
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     # `CREATE_NO_WINDOW`, so the `cmd /C` behind `RunShellCommand` opens no
-    # console window.
+    # console window; `CREATE_SUSPENDED` and `ResumeThread`, so a shell runs
+    # only once its job holds it (`inject/shell_tree.rs`).
     "Win32_System_Threading",
+    # A job object that ends a shell command with every process it started,
+    # and the thread snapshot that finds the suspended shell's thread
+    # (`inject/shell_tree.rs`).
+    "Win32_Security",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_JobObjects",
     "Win32_UI_Input_KeyboardAndMouse",
     # The foreground window's thread, whose keyboard layout translates the
     # keys `SendInput` posts.

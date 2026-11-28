@@ -17,6 +17,7 @@ mod dpi;
 pub mod event_monitor;
 pub mod flow;
 pub mod hardware;
+pub mod live_keys;
 pub mod lock_keys;
 pub mod notices;
 pub mod observable;

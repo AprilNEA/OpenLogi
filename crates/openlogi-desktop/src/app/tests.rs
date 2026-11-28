@@ -1317,6 +1317,7 @@ fn tabs_prefer_buttons_when_a_keyboard_kind_measures_a_pointer() {
         m_keys: false,
         macro_record: false,
         change_host: false,
+        key_brightness: false,
     });
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
     assert!(
@@ -1360,6 +1361,7 @@ fn tabs_follow_capabilities_not_kind() {
         m_keys: false,
         macro_record: false,
         change_host: false,
+        key_brightness: false,
     });
     // After 0x0005 kind-correction the record has kind=Mouse, not Keyboard.
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Mouse, caps));
@@ -1450,6 +1452,7 @@ fn keyboard_without_asset_hides_buttons_tab() {
         m_keys: false,
         macro_record: false,
         change_host: false,
+        key_brightness: false,
     });
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
     assert!(
@@ -1487,6 +1490,7 @@ fn keyboard_with_buttons_shows_keys_tab() {
         m_keys: false,
         macro_record: false,
         change_host: false,
+        key_brightness: false,
     });
     let keyboard = record(DeviceKind::Keyboard, caps);
     let tabs = DetailTab::tabs_for(&keyboard);
@@ -1618,6 +1622,16 @@ fn hidpp10_device_gets_only_host_side_tabs() {
 fn unprobed_unknown_device_shows_only_device_tab() {
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Unknown, None));
     assert_eq!(tabs, vec![DetailTab::Device]);
+}
+
+/// A keypad's and a dialpad's controls bind per app profile, so the Keys
+/// tab offers the profile selector for both.
+#[test]
+fn the_console_keys_tabs_edit_app_profiles() {
+    let (dialpad, _commands) = crate::state::tests::dialpad::dialpad_state();
+    assert!(DetailTab::Keys.edits_app_profiles(&dialpad));
+    let (keypad, _commands) = crate::state::tests::keypad_pages::keypad_state();
+    assert!(DetailTab::Keys.edits_app_profiles(&keypad));
 }
 
 mod corpus;

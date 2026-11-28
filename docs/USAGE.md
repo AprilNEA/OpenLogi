@@ -106,6 +106,7 @@ openlogi api smartshift --device "$DEVICE_ID" --mode ratchet --auto-disengage 25
 openlogi api fn-lock --device "$DEVICE_ID"
 openlogi api fn-lock --device "$DEVICE_ID" --set on
 openlogi api os-layout --device "$DEVICE_ID" --set off --save
+openlogi api key-brightness --device "$DEVICE_ID" --set 60 --save
 openlogi api report-rate --device "$DEVICE_ID"
 openlogi api report-rate --device "$DEVICE_ID" --set 1000 --save
 openlogi api easy-switch --device "$DEVICE_ID"
@@ -141,6 +142,7 @@ stdout cannot provide a JSON envelope.
 | `smartshift` | `device`, `persistence`, `mode` (`free` or `ratchet`), `auto_disengage` (integer), `tunable_torque` (1–100, percent of the wheel's maximum force, or null) |
 | `fn-lock` | `device`, `persistence`, `fn_lock`, `default_fn_lock` (boolean, or null when the keyboard reports no firmware default) |
 | `os-layout` | `device`, `persistence`, `keep_os_layout` (boolean) |
+| `key-brightness` | `device`, `persistence`, `key_brightness` (integer, 1–100 percent) |
 | `report-rate` | `device`, `persistence`, `current` (integer, hertz), `supported` (array of integers in hertz, for the current connection) |
 | `easy-switch` | `device`, `persistence`, `current_channel` (integer from 1, or null), `can_rename` (boolean), `channels`: array of `channel` (integer from 1), `paired` (boolean), `connection` (`unknown`, `unifying`, `usb`, `bluetooth`, or `bolt`), `name` (string or null), `name_max_len` (integer, UTF-8 bytes), `os` (string such as `macOS 15.2`, or null) |
 
@@ -193,6 +195,12 @@ when the keyboard connects, when the setting turns on, and after the keyboard
 reports that a layout shortcut switched it. `off` leaves the keyboard's layout
 as it is; it does not restore an earlier layout. A keyboard whose measured
 capabilities lack `os_layout` returns `unsupported_feature`.
+
+`key-brightness` is an agent setting the same way: it requires `--save`, and
+the agent writes the saved level to a keypad's LCD keys (HID++ `0x8040`) after
+the reload and on every reconnect. The percentage is scaled onto the range the
+keypad reports and never reaches its bottom value. A device that is not a
+keypad with LCD keys returns `unsupported_feature`.
 
 `report-rate --set` accepts only a rate in `supported`. That list belongs to
 the device's current connection — a gaming mouse can offer more rates over its

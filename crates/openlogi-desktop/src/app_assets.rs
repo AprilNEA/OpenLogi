@@ -1,9 +1,11 @@
 //! The settings app's GPUI [`AssetSource`].
 //!
 //! Composes the ring glyphs every frontend shares ([`openlogi_ui::action_icons`])
-//! with the two sources only this app draws from: its embedded logo, and
-//! gpui-component's bundled lucide set behind `IconName`. The overlay links
-//! neither, which is why they live here and not in the shared crate.
+//! with the sources only this app draws from: its embedded logo, the full
+//! Lucide catalog a keypad key's symbol is picked from
+//! ([`openlogi_ui::lucide`], under `lucide/<name>.svg`), and gpui-component's
+//! bundled lucide set behind `IconName`. The overlay links none of these,
+//! which is why they live here and not in the shared crate.
 
 use std::borrow::Cow;
 
@@ -25,7 +27,8 @@ const LOGO_BYTES: &[u8] = include_bytes!(concat!(
     "/../../design/icon/openlogi-512.png"
 ));
 
-/// GPUI asset source: the app logo, the shared ring glyphs, then
+/// GPUI asset source: the app logo, the shared ring glyphs, the keypad
+/// symbol catalog under [`openlogi_ui::lucide::ASSET_PREFIX`], then
 /// gpui-component's bundled icons for everything else.
 pub struct AppAssets;
 
@@ -36,6 +39,9 @@ impl AssetSource for AppAssets {
         }
         if let Some(bytes) = ActionIcons.load(path)? {
             return Ok(Some(bytes));
+        }
+        if path.starts_with(openlogi_ui::lucide::ASSET_PREFIX) {
+            return Ok(openlogi_ui::lucide::svg_for_asset(path));
         }
         gpui_kit::assets::Assets.load(path)
     }
@@ -50,7 +56,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn logo_ring_and_kit_assets_remain_available() {
+    fn logo_ring_lucide_and_kit_assets_remain_available() {
         let logo = AppAssets.load(LOGO).unwrap().unwrap();
         assert!(logo.starts_with(b"\x89PNG\r\n\x1a\n"));
 
@@ -59,6 +65,7 @@ mod tests {
             "icons/check.svg",
             "icons/chevron-down.svg",
             crate::features::audio::AUDIO_ICON,
+            "lucide/camera.svg",
         ] {
             let bytes = AppAssets.load(path).unwrap().unwrap();
             assert!(
@@ -66,5 +73,10 @@ mod tests {
                 "missing SVG content for {path}"
             );
         }
+    }
+
+    #[test]
+    fn an_unknown_keypad_symbol_resolves_to_nothing() {
+        assert!(AppAssets.load("lucide/no-such-icon.svg").unwrap().is_none());
     }
 }

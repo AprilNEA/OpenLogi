@@ -61,6 +61,8 @@ pub(crate) enum StateEvent {
     SidetoneChanged(DeviceKey),
     /// The device's press-force read landed or changed.
     ForceSensingChanged(DeviceKey),
+    /// The keypad's display-key brightness read landed or changed.
+    KeyBrightnessChanged(DeviceKey),
     /// The keyboard's backlight read landed or changed.
     BacklightChanged(DeviceKey),
     /// The device's Easy-Switch host read landed or changed.
@@ -107,6 +109,7 @@ impl StateEvent {
             | Self::PointerSpeedChanged(key)
             | Self::SidetoneChanged(key)
             | Self::ForceSensingChanged(key)
+            | Self::KeyBrightnessChanged(key)
             | Self::BacklightChanged(key)
             | Self::EasySwitchChanged(key)
             | Self::DisableKeysChanged(key)
@@ -268,6 +271,7 @@ impl AppState {
             | StateEvent::PointerSpeedChanged(_)
             | StateEvent::SidetoneChanged(_)
             | StateEvent::ForceSensingChanged(_)
+            | StateEvent::KeyBrightnessChanged(_)
             | StateEvent::BacklightChanged(_)
             | StateEvent::EasySwitchChanged(_)
             | StateEvent::DisableKeysChanged(_)

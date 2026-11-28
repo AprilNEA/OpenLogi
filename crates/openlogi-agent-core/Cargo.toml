@@ -18,18 +18,23 @@ openlogi-inject = { path = "../openlogi-inject" }
 openlogi-hid = { path = "../openlogi-hid" }
 openlogi-hook = { path = "../openlogi-hook" }
 openlogi-ipc = { path = "../openlogi-ipc" }
-# The embedded action icons only — not the GPUI asset source.
-openlogi-ui = { path = "../openlogi-ui", default-features = false }
+# The embedded action icons and the Lucide catalog — not the GPUI asset source.
+openlogi-ui = { path = "../openlogi-ui", default-features = false, features = ["lucide"] }
 futures-lite = { workspace = true }
 # The keypad LCD watcher's doubling retry delay.
 backon = { workspace = true }
-# Keypad LCD tiles: rasterize an action icon's SVG and encode it as the JPEG
-# the keypad's image write carries. resvg matches the version gpui links.
-image = { version = "0.25", default-features = false, features = ["jpeg"] }
-resvg = { version = "0.46", default-features = false }
+# Keypad LCD tiles: rasterize an action icon's SVG, a key face's label, symbol
+# and picture, and encode it as the JPEG the keypad's image write carries.
+# resvg matches the version gpui links; its text features lay out labels and
+# emoji with the system fonts.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+resvg = { version = "0.46", default-features = false, features = ["text", "system-fonts", "raster-images"] }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+# Live keypad keys: the clock source, and a command's JSON value.
+chrono = { version = "0.4.44", default-features = false, features = ["clock"] }
+serde_json = { workspace = true }
 # The machine name Flow peers show for this computer.
 gethostname = "1.1.0"
 

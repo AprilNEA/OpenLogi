@@ -1,0 +1,24 @@
+# Owner: openlogi_core::hid::DeviceRoute::dialpad — which known dialpad, if
+# any, a route reaches.
+id: core-dialpad-route-owner
+language: rust
+severity: error
+message: DeviceRoute::dialpad() (openlogi-core hid/route.rs) decides which known dialpad a route reaches; call it instead of looking the route's identity up in the dialpad registry here.
+note: |
+  The device session (which 0x4610 roller is the dial) and the settings app
+  (where each key sits) both need "is this that dialpad"; one owner keeps the
+  answer from diverging, as the keypad's did. See "Single source of truth"
+  in AGENTS.md.
+files:
+  - crates/**/*.rs
+  - xtask/**/*.rs
+ignores:
+  - crates/openlogi-device-registry/**
+  - crates/openlogi-core/src/hid/route.rs
+  # Enumeration names a direct device's kind from its bare USB identity,
+  # before any route exists.
+  - crates/openlogi-device/src/inventory/mappings.rs
+rule:
+  any:
+    - pattern: find_dialpad($$$ARGS)
+    - pattern: $PATH::find_dialpad($$$ARGS)

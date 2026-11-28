@@ -22,6 +22,7 @@ mod binary_watch;
 #[cfg(target_os = "macos")]
 mod input_monitoring;
 mod lifecycle;
+mod live_keys;
 mod logging;
 mod overlay;
 mod pairing;

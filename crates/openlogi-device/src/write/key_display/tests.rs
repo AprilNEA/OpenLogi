@@ -10,6 +10,17 @@ const KEYPAD: DeviceRoute = DeviceRoute::Direct {
     product_id: 0xc354,
 };
 
+/// How long a test waits for a report, a reply or a task it expects before
+/// it fails, instead of hanging the run.
+const DEADLINE: Duration = Duration::from_secs(5);
+
+/// `future`'s output, or a failure naming `what` once [`DEADLINE`] passes.
+async fn within<F: std::future::Future>(future: F, what: &str) -> F::Output {
+    tokio::time::timeout(DEADLINE, future)
+        .await
+        .unwrap_or_else(|_| panic!("expected {what} within {DEADLINE:?}"))
+}
+
 fn display() -> KeyDisplay {
     key_display_for(&KEYPAD).expect("the MX Creative Keypad's keys are displays")
 }
@@ -179,9 +190,15 @@ fn an_ack_with_any_other_status_is_a_refusal() {
 async fn a_tile_the_device_refuses_fails_instead_of_counting_as_written() {
     let (shared, _handle) = answering(Some(ack_with_status([0x01, 0x00]))).await;
 
-    let error = write_key_image_on(&shared, display(), GridKey::TopLeft, &jpeg(900))
-        .await
-        .unwrap_err();
+    let error = write_key_image_on(
+        &shared,
+        display(),
+        GridKey::TopLeft,
+        &jpeg(900),
+        &KeyImageWrites::default(),
+    )
+    .await
+    .unwrap_err();
 
     assert!(matches!(error, WriteError::Hidpp(message) if message.contains("01 00")));
 }
@@ -190,9 +207,15 @@ async fn a_tile_the_device_refuses_fails_instead_of_counting_as_written() {
 async fn a_written_tile_lands_at_its_key_and_completes_on_the_ack() {
     let (shared, handle) = keypad(true).await;
 
-    write_key_image_on(&shared, display(), GridKey::BottomMiddle, &jpeg(900))
-        .await
-        .unwrap();
+    write_key_image_on(
+        &shared,
+        display(),
+        GridKey::BottomMiddle,
+        &jpeg(900),
+        &KeyImageWrites::default(),
+    )
+    .await
+    .unwrap();
 
     let images: Vec<_> = handle
         .written_reports()
@@ -208,9 +231,15 @@ async fn a_written_tile_lands_at_its_key_and_completes_on_the_ack() {
 async fn a_tile_the_device_never_acknowledges_times_out() {
     let (shared, _handle) = keypad(false).await;
 
-    let error = write_key_image_on(&shared, display(), GridKey::TopLeft, &jpeg(900))
-        .await
-        .unwrap_err();
+    let error = write_key_image_on(
+        &shared,
+        display(),
+        GridKey::TopLeft,
+        &jpeg(900),
+        &KeyImageWrites::default(),
+    )
+    .await
+    .unwrap_err();
 
     assert!(matches!(
         error,
@@ -228,9 +257,15 @@ async fn a_key_off_the_panel_writes_nothing() {
         ..display()
     };
 
-    let error = write_key_image_on(&shared, one_key, GridKey::Middle, &jpeg(10))
-        .await
-        .unwrap_err();
+    let error = write_key_image_on(
+        &shared,
+        one_key,
+        GridKey::Middle,
+        &jpeg(10),
+        &KeyImageWrites::default(),
+    )
+    .await
+    .unwrap_err();
 
     assert!(matches!(error, WriteError::Hidpp(_)));
     assert!(
@@ -239,4 +274,178 @@ async fn a_key_off_the_panel_writes_nothing() {
             .iter()
             .any(|report| report.first() == Some(&IMAGE_HEADER[0]))
     );
+}
+
+/// An image waits for the HID++ request in flight: the keypad drops a request
+/// that is in flight when an image arrives, and can restart a few seconds
+/// later (#2281).
+#[tokio::test]
+async fn an_image_waits_for_the_request_in_flight() {
+    use std::sync::Arc;
+
+    use hidpp::channel::HidppMessage;
+    use openlogi_fixture::RequestMatch;
+
+    use crate::channel::scripted::ping_reply;
+
+    let (raw, handle) = ScriptedRawHidChannel::with_dynamic_responder(|request| {
+        if request.first() == Some(&IMAGE_HEADER[0]) {
+            Some(hardware_ack())
+        } else {
+            ping_reply(request)
+        }
+    });
+    let channel = scripted_channel(raw).await;
+    let shared = SharedChannel::new(Arc::clone(&channel), KEYPAD);
+    let ping = [0xff, 0x00, 0x11, 0x00, 0x00, 0x5a];
+    let held = handle.hold_next_response(
+        RequestMatch::Hidpp20,
+        &[0x10, ping[0], ping[1], ping[2], ping[3], ping[4], ping[5]],
+    );
+    let request = tokio::spawn({
+        let channel = Arc::clone(&channel);
+        async move {
+            channel
+                .send(
+                    HidppMessage::Short(ping),
+                    |reply| matches!(reply, HidppMessage::Short(bytes) if bytes[1] == 0x00),
+                )
+                .await
+        }
+    });
+    within(held.request_written(), "the ping reached the keypad").await;
+    let image = tokio::spawn(async move {
+        write_key_image_on(
+            &shared,
+            display(),
+            GridKey::TopLeft,
+            &jpeg(900),
+            &KeyImageWrites::default(),
+        )
+        .await
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let is_image = |report: &Vec<u8>| report.first() == Some(&IMAGE_HEADER[0]);
+    assert!(
+        !handle.written_reports().iter().any(is_image),
+        "the image went out while a request awaited its reply"
+    );
+
+    held.release();
+    within(request, "the ping got its reply")
+        .await
+        .unwrap()
+        .unwrap();
+    within(image, "the image was written after the ping")
+        .await
+        .unwrap()
+        .unwrap();
+    let written = handle.written_reports();
+    let ping_at = written.iter().position(|report| report[2] == 0x00).unwrap();
+    let image_at = written.iter().position(is_image).unwrap();
+    assert!(ping_at < image_at);
+}
+
+/// A caller that gives up after the packets went out does not end the
+/// pause: requests still wait until the image is acknowledged or its
+/// acknowledgement times out.
+#[tokio::test(start_paused = true)]
+async fn a_cancelled_image_holds_requests_until_its_ack_times_out() {
+    use std::sync::Arc;
+
+    use hidpp::channel::HidppMessage;
+
+    use crate::channel::scripted::ping_reply;
+
+    // Never acknowledges an image; answers the protocol ping.
+    let (raw, handle) = ScriptedRawHidChannel::with_dynamic_responder(|request| {
+        (request.first() != Some(&IMAGE_HEADER[0]))
+            .then(|| ping_reply(request))
+            .flatten()
+    });
+    let channel = scripted_channel(raw).await;
+    let shared = SharedChannel::new(Arc::clone(&channel), KEYPAD);
+    let is_image = |report: &Vec<u8>| report.first() == Some(&IMAGE_HEADER[0]);
+    let is_ping = |report: &Vec<u8>| report[2] == 0x00;
+
+    let cancelled = tokio::time::timeout(
+        Duration::from_millis(100),
+        write_key_image_on(
+            &shared,
+            display(),
+            GridKey::TopLeft,
+            &jpeg(900),
+            &KeyImageWrites::default(),
+        ),
+    )
+    .await;
+    assert!(cancelled.is_err(), "the image is still awaiting its ack");
+    assert!(handle.written_reports().iter().any(is_image));
+
+    let request = tokio::spawn({
+        let channel = Arc::clone(&channel);
+        async move {
+            channel
+                .send(
+                    HidppMessage::Short([0xff, 0x00, 0x11, 0x00, 0x00, 0x5a]),
+                    |reply| matches!(reply, HidppMessage::Short(bytes) if bytes[1] == 0x00),
+                )
+                .await
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        !handle.written_reports().iter().any(is_ping),
+        "a request went out before the image's ack timed out"
+    );
+
+    tokio::time::sleep(ACK_TIMEOUT).await;
+    // Bounded by the request's own response timeout, which runs on real
+    // time: a Tokio deadline here would fire at once, since the paused clock
+    // skips ahead while the reply comes from the scripted channel's thread.
+    request.await.unwrap().unwrap();
+    assert!(handle.written_reports().iter().any(is_ping));
+}
+
+/// An owner shutting down waits for an image whose caller already gave up:
+/// it holds the request pause until the keypad acknowledges it or its
+/// deadline passes, and dropping the runtime before then would cancel it
+/// and release the pause early. With nothing running, there is nothing to
+/// wait for.
+#[tokio::test(start_paused = true)]
+async fn key_display_shutdown_keeps_pause_until_ack() {
+    use std::sync::Arc;
+
+    use crate::channel::scripted::ping_reply;
+
+    let writes = KeyImageWrites::default();
+    tokio::time::timeout(Duration::from_millis(1), writes.settled())
+        .await
+        .expect("nothing running settles at once");
+
+    // Never acknowledges an image; answers the protocol ping.
+    let (raw, _handle) = ScriptedRawHidChannel::with_dynamic_responder(|request| {
+        (request.first() != Some(&IMAGE_HEADER[0]))
+            .then(|| ping_reply(request))
+            .flatten()
+    });
+    let channel = scripted_channel(raw).await;
+    let shared = SharedChannel::new(Arc::clone(&channel), KEYPAD);
+    let cancelled = tokio::time::timeout(
+        Duration::from_millis(100),
+        write_key_image_on(&shared, display(), GridKey::TopLeft, &jpeg(900), &writes),
+    )
+    .await;
+    assert!(cancelled.is_err(), "the image is still awaiting its ack");
+
+    let mut settled = std::pin::pin!(writes.settled());
+    assert!(
+        tokio::time::timeout(ACK_TIMEOUT / 2, &mut settled)
+            .await
+            .is_err(),
+        "shutdown waits while the image holds the pause"
+    );
+    tokio::time::timeout(ACK_TIMEOUT, settled)
+        .await
+        .expect("the image ends at its acknowledgement deadline");
 }

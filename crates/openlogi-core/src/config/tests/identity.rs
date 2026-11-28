@@ -38,6 +38,7 @@ fn device_identity_roundtrips_and_is_iterable() {
             m_keys: false,
             macro_record: false,
             change_host: false,
+            key_brightness: false,
         },
         light_capabilities: None,
         driver_id: None,

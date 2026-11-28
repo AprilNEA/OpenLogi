@@ -13,7 +13,8 @@ use openlogi_core::device_order::{
     DeviceIdentity as RouteIdentity, DeviceStableId, PhysicalDeviceKey,
 };
 use openlogi_core::hid::{
-    DeviceRoute, KeypadDescriptor, LOGITECH_VENDOR_ID, ReceiverBrand, find_receiver,
+    DeviceRoute, DialpadDescriptor, KeypadDescriptor, LOGITECH_VENDOR_ID, ReceiverBrand,
+    find_receiver,
 };
 use tracing::debug;
 
@@ -199,9 +200,25 @@ impl super::AppState {
     /// keypad keeps its keys and app profiles.
     #[must_use]
     pub fn current_keypad(&self) -> Option<&'static KeypadDescriptor> {
+        self.current_route_identity(DeviceRoute::keypad)
+    }
+
+    /// The known dialpad the selected device is ([`DeviceRoute::dialpad`]),
+    /// or `None` for any other device. Like [`Self::current_keypad`], an
+    /// offline dialpad is still recognized through its saved links, so it
+    /// keeps its dial, roller, and keys while it sleeps.
+    #[must_use]
+    pub fn current_dialpad(&self) -> Option<&'static DialpadDescriptor> {
+        self.current_route_identity(DeviceRoute::dialpad)
+    }
+
+    /// What `identify` says the selected device is: asked of its live route
+    /// online, or of the direct routes its saved entry's `links` record while
+    /// it is offline.
+    fn current_route_identity<T>(&self, identify: impl Fn(&DeviceRoute) -> Option<T>) -> Option<T> {
         let record = self.current_record()?;
         if let Some(route) = &record.route {
-            return route.keypad();
+            return identify(route);
         }
         self.config
             .devices
@@ -209,7 +226,7 @@ impl super::AppState {
             .links
             .keys()
             .filter_map(|key| DeviceStableId::direct_route_of_key(key))
-            .find_map(|route| route.keypad())
+            .find_map(|route| identify(&route))
     }
 
     /// Presentation-only connection mode last observed for an offline device.

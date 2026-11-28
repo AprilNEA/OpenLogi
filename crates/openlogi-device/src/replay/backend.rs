@@ -10,7 +10,9 @@ use tokio::sync::mpsc;
 use crate::backend::{BackendError, HidBackend, HotplugEvent, HotplugStream, NodeId, NodeInfo};
 
 use super::ReplayError;
-use super::barrier::{ReplayResponseBarrier, ResponseGates, WriteCompletionGates};
+use super::barrier::{
+    ReplayResponseBarrier, ReplayWriteBarrier, ResponseGates, WriteCompletionGates,
+};
 use super::channel::{
     CassetteState, ReplayChannelParts, ReplayCompletion, ReplayRawHidChannel, ReplayRawWriter,
     ReplayRawWriterHandle,
@@ -245,6 +247,31 @@ impl ReplayBackend {
             .validate_report(request)
             .map_err(|error| ReplayError::invalid("replay response barrier", error.to_string()))?;
         Ok(runtime.response_gates.hold(request_match, request))
+    }
+
+    /// Hold the native completion of the next matching raw write on
+    /// `channel` after the transport accepts its report.
+    ///
+    /// The report still counts as written and consumes its cassette exchange;
+    /// only the Rust `write_report` future stays pending until
+    /// [`ReplayWriteBarrier::release`]. This models a native write that keeps
+    /// running after a caller would have given up on it.
+    pub fn hold_next_write_completion(
+        &self,
+        channel: &str,
+        request_match: RequestMatch,
+        request: &[u8],
+    ) -> Result<ReplayWriteBarrier, ReplayError> {
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let runtime = state
+            .channels
+            .get(channel)
+            .ok_or_else(|| ReplayError::UnknownChannel(channel.to_string()))?;
+        runtime
+            .report_support
+            .validate_report(request)
+            .map_err(|error| ReplayError::invalid("replay write barrier", error.to_string()))?;
+        Ok(runtime.write_completion_gates.hold(request_match, request))
     }
 
     /// Deliver an unsolicited report to every connected lifetime of `channel`.

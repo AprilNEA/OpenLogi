@@ -1124,7 +1124,9 @@ const fn kind_symbol(kind: DeviceKind) -> &'static str {
     match kind {
         DeviceKind::Mouse | DeviceKind::Trackball => "computermouse",
         // The keyboard family returned above.
-        DeviceKind::Keyboard | DeviceKind::Numpad | DeviceKind::Unknown => "questionmark.circle",
+        DeviceKind::Keyboard | DeviceKind::Numpad | DeviceKind::Dialpad | DeviceKind::Unknown => {
+            "questionmark.circle"
+        }
         DeviceKind::Presenter | DeviceKind::Remote => "av.remote",
         DeviceKind::Touchpad => "hand.point.up.left",
         DeviceKind::Tablet => "pencil.tip",

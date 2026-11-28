@@ -18,7 +18,7 @@ path = "src/main.rs"
 [dependencies]
 appcatalog = "0.1.1"
 openlogi-core = { path = "../openlogi-core", features = ["logging", "worker"] }
-openlogi-ui = { path = "../openlogi-ui" }
+openlogi-ui = { path = "../openlogi-ui", features = ["lucide"] }
 openlogi-camera = { path = "../openlogi-camera" }
 openlogi-hook = { path = "../openlogi-hook" }
 openlogi-assets = { path = "../openlogi-assets" }

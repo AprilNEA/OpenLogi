@@ -12,6 +12,7 @@ use hidpp::feature::CreatableFeature as _;
 use hidpp::feature::gaming_g_keys::GamingGKeysFeature;
 use hidpp::feature::gestures2::Gestures2Feature;
 use hidpp::feature::hires_wheel::{HiResWheelFeature, WheelResolution};
+use hidpp::feature::multi_roller::{MultiRollerFeature, RollerId, RollerReportingMode};
 use hidpp::feature::root::RootFeature;
 use hidpp::protocol::v20::Hidpp20Error;
 use thiserror::Error;
@@ -331,6 +332,25 @@ impl GKeysRestore {
     }
 }
 
+/// The `0x4610` rollers a capture session diverted. Teardown selects native
+/// reporting for each, like a `0x1b04` control: a roller found diverted
+/// before arming is left over from a session that never tore down (or
+/// another host app), and handing it back keeps it working natively.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RollerRestore {
+    feature_index: u8,
+    rollers: Vec<RollerId>,
+}
+
+impl RollerRestore {
+    pub(crate) fn new(feature_index: u8, rollers: Vec<RollerId>) -> Option<Self> {
+        (!rollers.is_empty()).then_some(Self {
+            feature_index,
+            rollers,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CaptureStop {
     /// The owner deliberately requested teardown.
@@ -346,7 +366,7 @@ pub(crate) enum CaptureStop {
 
 /// What a capture session writes to hand its controls back: every diverted
 /// `0x1b04` control's reporting, the thumb wheel's, the main wheel's, host
-/// mode, and a keyboard's G-key row.
+/// mode, a keyboard's G-key row, and a dialpad's `0x4610` rollers.
 ///
 /// One untimed attempt per control; a failed one leaves the whole plan owed.
 pub struct CaptureRestorePlan {
@@ -355,6 +375,7 @@ pub struct CaptureRestorePlan {
     main_wheel: Option<HiResWheelRestore>,
     spy: Option<SpyRestore>,
     g_keys: Option<GKeysRestore>,
+    rollers: Option<RollerRestore>,
 }
 
 impl fmt::Debug for CaptureRestorePlan {
@@ -371,6 +392,10 @@ impl fmt::Debug for CaptureRestorePlan {
             .field("has_main_wheel", &self.main_wheel.is_some())
             .field("host_mode", &self.spy.is_some())
             .field("g_key_row", &self.g_keys.is_some())
+            .field(
+                "roller_count",
+                &self.rollers.as_ref().map_or(0, |r| r.rollers.len()),
+            )
             .finish()
     }
 }
@@ -415,6 +440,16 @@ impl RestorePlan for CaptureRestorePlan {
         if let Some(spy) = &self.spy {
             restored &= spy.restore_on(&channel, device_index).await;
         }
+        if let Some(rollers) = &self.rollers {
+            let feature =
+                MultiRollerFeature::new(channel.clone(), device_index, rollers.feature_index);
+            for &roller in &rollers.rollers {
+                restored &= restore_result(
+                    feature.set_mode(roller, RollerReportingMode::Native).await,
+                    "dialpad roller",
+                );
+            }
+        }
         if let Some(g_keys) = self.g_keys {
             let feature = GamingGKeysFeature::new(channel, device_index, g_keys.feature_index);
             restored &= restore_result(feature.release_row().await, "G-key row");
@@ -446,12 +481,14 @@ impl PendingCaptureRestore {
                 main_wheel: None,
                 spy: None,
                 g_keys: None,
+                rollers: None,
             },
         )
     }
 
-    /// The restore owed for `reprog`, the two wheels, host mode and the
-    /// G-key row, or `None` when the session diverted nothing.
+    /// The restore owed for `reprog`, the two wheels, host mode, the G-key
+    /// row and a dialpad's rollers, or `None` when the session diverted
+    /// nothing.
     pub(crate) fn new(
         retired: &SharedChannel,
         reprog: Option<ReprogRestore>,
@@ -459,12 +496,14 @@ impl PendingCaptureRestore {
         main_wheel: Option<HiResWheelRestore>,
         spy: Option<SpyRestore>,
         g_keys: Option<GKeysRestore>,
+        rollers: Option<RollerRestore>,
     ) -> Option<Self> {
         if reprog.is_none()
             && thumb.is_none()
             && main_wheel.is_none()
             && spy.is_none()
             && g_keys.is_none()
+            && rollers.is_none()
         {
             return None;
         }
@@ -476,6 +515,7 @@ impl PendingCaptureRestore {
                 main_wheel,
                 spy,
                 g_keys,
+                rollers,
             },
         ))
     }

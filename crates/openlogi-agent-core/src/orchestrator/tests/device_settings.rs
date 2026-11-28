@@ -314,6 +314,40 @@ fn a_reload_writes_a_changed_force_only_to_an_online_enabled_device() {
     );
 }
 
+/// A display-key brightness is written only to a device that measured
+/// `0x8040`: a keypad whose feature table is not known yet, or one without
+/// the feature, keeps its own level whatever is saved.
+#[test]
+fn key_brightness_requires_measured_support() {
+    let level = openlogi_core::config::KeyDisplayBrightness::try_new(40).expect("valid level");
+    let mut config = Config::default();
+    config.set_key_display_brightness("pad", Some(level));
+    let mut keypad = dev("pad", 1, true);
+
+    keypad.capabilities = None;
+    assert_eq!(configured_key_brightness(&config, &keypad), None);
+    keypad.capabilities = Some(Capabilities::default());
+    assert_eq!(configured_key_brightness(&config, &keypad), None);
+    keypad.capabilities = Some(Capabilities {
+        key_brightness: true,
+        ..Capabilities::default()
+    });
+    assert_eq!(configured_key_brightness(&config, &keypad), Some(level));
+
+    let unmeasured = {
+        let mut device = dev("unmeasured", 2, true);
+        device.capabilities = None;
+        device
+    };
+    let mut both = config.clone();
+    both.set_key_display_brightness("unmeasured", Some(level));
+    assert_eq!(
+        changed_key_brightness(&Config::default(), &both, &[keypad, unmeasured]),
+        vec![(bolt(1), level)],
+        "only the measured keypad is written"
+    );
+}
+
 fn bolt(slot: u8) -> DeviceRoute {
     DeviceRoute::Bolt {
         receiver_uid: "AA00".into(),
@@ -1258,6 +1292,64 @@ fn keypad_key_faces_follow_the_bound_actions() {
     assert_eq!(spec.display.key_size, 118);
 }
 
+/// Making the keypad's faces touches no file: a picture's version is only
+/// looked up, as last read by the watcher outside the orchestrator's lock,
+/// so a picture on a stalled share cannot hold up device updates. Handing in
+/// a newly read version repaints the key; an unchanged one publishes
+/// nothing.
+#[test]
+fn picture_revision_reads_do_not_block_device_updates() {
+    use crate::watchers::key_display::{KeyFace, KeyPicture};
+    use openlogi_core::config::{KeyFaceStyle, PictureRevisions};
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("key.png");
+    std::fs::write(&path, b"first").expect("picture written");
+    let mut config = Config::default();
+    config.set_key_face_style(
+        "keypad",
+        ButtonId::grid(GridKey::Middle),
+        Some(KeyFaceStyle {
+            image: Some(path.clone()),
+            ..KeyFaceStyle::default()
+        }),
+    );
+    let mut orch = orchestrator(config);
+    orch.devices = vec![wired_keypad("keypad", true)];
+    let picture_of = |orch: &Orchestrator| {
+        let specs = orch.key_display_specs_for();
+        let [spec] = specs.as_slice() else {
+            panic!("one keypad publishes one spec: {specs:?}");
+        };
+        match &spec.faces[&GridKey::Middle] {
+            KeyFace::Styled(face) => face.image.clone().expect("the face has its picture"),
+            other => panic!("a styled face, got {other:?}"),
+        }
+    };
+
+    assert_eq!(orch.key_picture_paths(), BTreeSet::from([path.clone()]));
+    assert_eq!(
+        picture_of(&orch),
+        KeyPicture::of(&path, &PictureRevisions::default()),
+        "no version is read while making the faces"
+    );
+
+    let read = PictureRevisions::read(orch.key_picture_paths());
+    orch.set_picture_revisions(read.clone());
+    let first = picture_of(&orch);
+    assert_eq!(first, KeyPicture::of(&path, &read));
+    assert_ne!(first, KeyPicture::of(&path, &PictureRevisions::default()));
+
+    std::fs::write(&path, b"replaced, and longer").expect("picture replaced");
+    assert_eq!(picture_of(&orch), first, "still no file access of its own");
+    orch.set_picture_revisions(PictureRevisions::read(orch.key_picture_paths()));
+    assert_ne!(
+        picture_of(&orch),
+        first,
+        "the replaced picture is a new face"
+    );
+}
+
 /// Only a device whose panel the registry describes gets a spec — a bound
 /// numpad-kind device on another route does not — and a keypad that is
 /// offline or disabled publishes nothing to paint.
@@ -1469,7 +1561,7 @@ fn the_lcd_follows_the_current_page_and_turns_wrap() {
     use crate::watchers::key_display::KeyFace;
     use openlogi_core::binding::ActionRingIcon;
     let mut orch = paged_keypad();
-    let face = |orch: &Orchestrator, key| orch.key_display_specs_for()[0].faces[&key];
+    let face = |orch: &Orchestrator, key| orch.key_display_specs_for()[0].faces[&key].clone();
     let icon = |action: Action| KeyFace::Icon(ActionRingIcon::for_action(&action));
 
     assert_eq!(face(&orch, GridKey::Middle), icon(Action::Copy));
@@ -1507,4 +1599,135 @@ fn page_turns_need_pages_and_a_removed_page_falls_back_to_the_first() {
     assert_eq!(orch.keypad_page("keypad"), page(2));
     orch.config.set_keypad_pages("keypad", page(1));
     assert_eq!(orch.keypad_page("keypad"), page(1));
+}
+
+/// A live key's press activates it and runs its press action; the page keys
+/// then adjust it instead of turning the page, and a second press ends it.
+#[test]
+fn a_live_key_takes_over_the_page_keys_while_active() {
+    use crate::runtime::PageTurn;
+    use openlogi_core::binding::{GridSlot, KeypadPage};
+    use openlogi_core::config::{LiveKey, LiveSource};
+    let slot = ButtonId::Grid(GridSlot {
+        page: KeypadPage::FIRST,
+        key: GridKey::Middle,
+    });
+    let mut volume = LiveKey::new(LiveSource::Volume);
+    volume.on_press = Some(Action::MuteVolume);
+    let mut config = Config::default();
+    config
+        .devices
+        .entry("pad".into())
+        .or_default()
+        .live_keys
+        .insert(slot, volume);
+    let mut orch = orchestrator(config);
+    let now = std::time::Instant::now();
+
+    assert_eq!(orch.turn_keypad_page(Some("pad"), PageTurn::Next), None);
+    assert_eq!(
+        orch.press_live_key(Some("pad"), slot, now),
+        Some(Action::MuteVolume)
+    );
+    assert_eq!(
+        orch.turn_keypad_page(Some("pad"), PageTurn::Next),
+        Some(Action::VolumeUp)
+    );
+    assert_eq!(
+        orch.turn_keypad_page(Some("pad"), PageTurn::Previous),
+        Some(Action::VolumeDown)
+    );
+    assert_eq!(orch.press_live_key(Some("pad"), slot, now), None);
+    assert_eq!(orch.turn_keypad_page(Some("pad"), PageTurn::Next), None);
+    assert_eq!(
+        orch.press_live_key(Some("pad"), ButtonId::Back, now),
+        None,
+        "no live key there"
+    );
+}
+/// A single-page keypad whose only configuration is a live key still gets a
+/// capture session: the key must reach the agent to activate, and the paging
+/// buttons to adjust it. Its face is the live value, not the binding's icon.
+#[test]
+fn a_keypad_with_only_a_live_key_is_captured() {
+    use openlogi_core::binding::{Cid, GridSlot, KeypadPage};
+    use openlogi_core::config::{LiveKey, LiveSource};
+    let slot = ButtonId::Grid(GridSlot {
+        page: KeypadPage::FIRST,
+        key: GridKey::Middle,
+    });
+    let mut config = Config::default();
+    config
+        .devices
+        .entry("keypad".into())
+        .or_default()
+        .live_keys
+        .insert(slot, LiveKey::new(LiveSource::Clock));
+    let mut orch = orchestrator(config);
+    orch.devices = vec![wired_keypad("keypad", true)];
+
+    let spec = sole_keyboard_spec(&orch).expect("a live key alone publishes a spec");
+    assert!(spec.grid.contains_key(&GridKey::Middle.index()));
+    for paging in Cid::PAGING {
+        assert!(
+            spec.wanted.contains_key(&paging.raw()),
+            "{paging:?} not captured"
+        );
+    }
+    assert_eq!(
+        spec.bindings.get(&ButtonId::grid(GridKey::Middle)),
+        Some(&Binding::Single(Action::ActivateLiveKey(slot)))
+    );
+}
+
+/// A keypad without live keys keeps exactly the capture it had: on one page
+/// its paging buttons stay native and nothing unbound is captured.
+#[test]
+fn a_single_page_keypad_without_live_keys_leaves_its_paging_keys_native() {
+    use openlogi_core::binding::Cid;
+    let mut config = Config::default();
+    config.set_binding(
+        "keypad",
+        ButtonId::grid(GridKey::Middle),
+        Binding::Single(Action::Copy),
+    );
+    let mut orch = orchestrator(config);
+    orch.devices = vec![wired_keypad("keypad", true)];
+
+    let spec = sole_keyboard_spec(&orch).expect("a bound key publishes a spec");
+    for paging in Cid::PAGING {
+        assert!(!spec.wanted.contains_key(&paging.raw()));
+    }
+    assert_eq!(spec.grid.len(), 1);
+}
+
+/// A dialpad diverts exactly the rotary controls with a stored direction,
+/// at the device's thumb-wheel speed.
+#[test]
+fn a_dialpad_diverts_only_the_rotary_controls_it_binds() {
+    use openlogi_core::binding::Rotary;
+    let dialpad = &openlogi_device_registry::dialpad::DIALPADS[0];
+    let mut config = Config::default();
+    config.set_binding(
+        "dialpad",
+        ButtonId::DialRight,
+        Binding::Single(Action::VolumeUp),
+    );
+    let mut orch = orchestrator(config);
+    orch.devices = vec![AgentDevice {
+        route: Some(DeviceRoute::Direct {
+            vendor_id: dialpad.vendor_id,
+            product_id: dialpad.product_id,
+        }),
+        slot: DIRECT_DEVICE_INDEX,
+        kind: DeviceKind::Dialpad,
+        ..dev("dialpad", DIRECT_DEVICE_INDEX, true)
+    }];
+
+    let spec = sole_keyboard_spec(&orch).expect("a bound direction publishes a spec");
+    assert_eq!(
+        spec.rotary,
+        std::collections::BTreeSet::from([Rotary::Dial])
+    );
+    assert!(spec.wanted.is_empty());
 }

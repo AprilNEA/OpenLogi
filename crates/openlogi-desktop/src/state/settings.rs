@@ -6,8 +6,9 @@ use super::{AppState, StateEvent};
 use crate::platform::app_icon::AppIconExt as _;
 use gpui_kit::component::ThemeMode;
 use openlogi_core::config::{
-    AppIcon, AppSettings, Appearance, AssetSourcePreference, DeviceViewMode, MomentumScrolling,
-    MouseProfileTarget, ThumbwheelSensitivity, UiScale, VerticalScrollSensitivity,
+    AppIcon, AppSettings, Appearance, AssetSourcePreference, DeviceViewMode, KeyDisplayBrightness,
+    MomentumScrolling, MouseProfileTarget, ThumbwheelSensitivity, UiScale,
+    VerticalScrollSensitivity,
 };
 use openlogi_core::update_feed::UpdateChannel;
 
@@ -271,6 +272,13 @@ impl AppState {
         });
         self.persist_and_reload("device thumbwheel sensitivity");
         events
+    }
+
+    /// The keypad LCD brightness the user set for `key`, or `None` while
+    /// OpenLogi leaves the panel at whatever level it already shows.
+    #[must_use]
+    pub fn device_key_display_brightness(&self, key: &str) -> Option<KeyDisplayBrightness> {
+        self.config.key_display_brightness(key)
     }
 
     /// Set the app-wide default thumb-wheel sensitivity and persist it —

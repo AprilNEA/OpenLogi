@@ -38,7 +38,7 @@ use openlogi_core::binding::{
     GridKey, GridSlot, KeyCombo, KeypadPage, ModeKey,
 };
 use openlogi_core::config::{
-    ConfigRevision, FlowPeerName, FlowPublicKey, Lighting, ScrollResolution,
+    ConfigRevision, FlowPeerName, FlowPublicKey, KeyDisplayBrightness, Lighting, ScrollResolution,
 };
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, ChangedOnLight, DeviceInventory,
@@ -119,7 +119,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// unreleased version and leave this pin alone (`crates/openlogi-ipc/AGENTS.md`).
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 46);
+    assert_eq!(PROTOCOL_VERSION, 47);
 }
 
 #[test]
@@ -391,6 +391,8 @@ fn sidetone_calls() {
     let level = SidetoneLevel::try_new(40).expect("a level in range");
     assert_wire(&HidppOperation::ReadSidetone, "1f");
     assert_wire(&HidppOperation::WriteSidetone, "20");
+    // `WriteKeyBrightness` was appended after `WriteSidetone`.
+    assert_wire(&HidppOperation::WriteKeyBrightness, "21");
     assert_wire(&level, "28");
     assert_wire(&Ok::<SidetoneLevel, WriteError>(level), "0028");
     assert_wire(
@@ -404,6 +406,30 @@ fn sidetone_calls() {
         "3202fb6d04fbc40a28",
     );
     assert_wire(&AgentResponse::SetSidetone(Ok(level)), "320028");
+}
+
+/// The display-key brightness calls were appended after
+/// `action_ring_unhover` and carry the brightness as one percent byte.
+#[test]
+fn key_brightness_calls() {
+    let route = DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xc354,
+    };
+    let brightness = KeyDisplayBrightness::try_new(40).expect("a level in range");
+    assert_wire(&HidppOperation::ReadKeyBrightness, "22");
+    assert_wire(&brightness, "28");
+    assert_wire(
+        &AgentRequest::ReadKeyBrightness {
+            route: route.clone(),
+        },
+        "3a02fb6d04fb54c3",
+    );
+    assert_wire(
+        &AgentRequest::SetKeyBrightness { route, brightness },
+        "3b02fb6d04fb54c328",
+    );
+    assert_wire(&AgentResponse::SetKeyBrightness(Ok(brightness)), "3b0028");
 }
 
 /// The overlay long-polls the backlight indicator by generation, like
@@ -527,6 +553,20 @@ fn easy_switch_channel_icons() {
     assert_wire(&ActionRingIcon::Channel1, "36");
     assert_wire(&ActionRingIcon::Channel2, "37");
     assert_wire(&ActionRingIcon::Channel3, "38");
+}
+
+/// A live keypad key's activation crosses the wire as its appended variant
+/// index (after the Easy-Switch channels) and the key's persisted name.
+#[test]
+fn activate_live_key() {
+    use openlogi_core::binding::Action;
+    assert_wire(
+        &Action::ActivateLiveKey(ButtonId::Grid(GridSlot {
+            page: KeypadPage::new(2).expect("page 2 exists"),
+            key: GridKey::Middle,
+        })),
+        "411070616765323a677269644d6964646c65",
+    );
 }
 
 /// The agent identity is frozen: a helper from any build has to be able to
@@ -909,6 +949,10 @@ fn device_inventory() {
     // `Light` was appended after `Unknown`; preserve every existing kind's
     // bincode discriminant.
     assert_wire(&DeviceKind::Light, "0d");
+    // `Dialpad` was appended after `Light`.
+    assert_wire(&DeviceKind::Dialpad, "0e");
+    // A dialpad rotation direction rides as its config name.
+    assert_wire(&ButtonId::DialLeft, "084469616c4c656674");
     // A level-only battery (no state-of-charge gauge) carries no percentage.
     assert_wire(
         &BatteryInfo {
@@ -975,6 +1019,7 @@ fn device_inventory() {
                 m_keys: false,
                 macro_record: false,
                 change_host: false,
+                key_brightness: false,
             }),
             settings_revision: 7,
             hidpp10: false,
@@ -982,7 +1027,7 @@ fn device_inventory() {
     }];
     assert_wire(
         &inventory,
-        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b01010100000101010101000101010101010100000001000000000700",
+        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b0101010000010101010100010101010101010000000100000000000700",
     );
 }
 

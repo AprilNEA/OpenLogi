@@ -343,6 +343,7 @@ pub(super) fn fold(device: &mut DeviceConfig, mut legacy: DeviceConfig, route_ke
     fold_option_field!(camera_profile);
     fold_option_field!(camera_stream_mode);
     fold_option_field!(thumbwheel_sensitivity);
+    fold_option_field!(key_display_brightness);
     fold_option_field!(momentum_scrolling);
     fold_option_field!(fn_lock);
     fold_option_field!(keep_os_layout);
@@ -432,6 +433,8 @@ fn fold_maps(device: &mut DeviceConfig, legacy: &mut DeviceConfig, route_key: &s
     fold_map_field!(disabled_gestures);
     fold_map_field!(per_app_bindings);
     fold_map_field!(camera_profiles);
+    fold_map_field!(key_faces);
+    fold_map_field!(live_keys);
     fold_map_field!(g_key_profile_names);
 }
 

@@ -21,7 +21,9 @@ mod flow;
 mod function_key;
 mod gestures;
 mod identity;
+mod key_face;
 mod key_trigger;
+mod live_key;
 mod migrate;
 mod per_app;
 mod per_device;
@@ -50,15 +52,20 @@ pub use flow::{
 };
 pub use function_key::FunctionKey;
 pub use identity::canonical_device_key;
+pub use key_face::{
+    FileRevision, GradientDirection, KeyFaceStyle, KeyGradient, KeySymbol, PictureRevisions,
+    is_local_picture_path,
+};
 pub use key_trigger::{KeyModifiers, KeyTrigger, KeyboardConfig, ParseTriggerError};
+pub use live_key::{LiveKey, LiveSource};
 pub use revision::ConfigRevision;
 pub use settings::LightSettings;
 pub use settings::{
     AppIcon, AppSettings, Appearance, AssetSourcePreference, CameraControls, CameraStreamMode,
-    DeviceViewMode, GKeyOwner, GamingKeyMode, GlideShape, Lighting, MomentumParams,
-    MomentumScrolling, MouseProfileTarget, OnboardMemory, SMARTSHIFT_AUTO_DISENGAGE_DEFAULT,
-    SMARTSHIFT_MIN_AUTO_DISENGAGE, ScrollResolution, SmartShift, ThumbwheelSensitivity, UiScale,
-    VerticalScrollSensitivity, WheelMode,
+    DeviceViewMode, GKeyOwner, GamingKeyMode, GlideShape, KeyDisplayBrightness, Lighting,
+    MomentumParams, MomentumScrolling, MouseProfileTarget, OnboardMemory,
+    SMARTSHIFT_AUTO_DISENGAGE_DEFAULT, SMARTSHIFT_MIN_AUTO_DISENGAGE, ScrollResolution, SmartShift,
+    ThumbwheelSensitivity, UiScale, VerticalScrollSensitivity, WheelMode,
 };
 
 use crate::app::AppAliases;
@@ -68,6 +75,15 @@ use crate::binding::{Binding, ButtonId, GestureDirection};
 /// The schema version the current build produces. Bumped whenever the
 /// persisted shape or enum vocabulary changes; readers inspect this value
 /// before consuming the rest of the file.
+///
+/// The MX Creative Keypad's per-device LCD settings —
+/// [`DeviceConfig::key_display_brightness`], the styled faces of its LCD keys
+/// ([`DeviceConfig::key_faces`]) and the keys that show a live value
+/// ([`DeviceConfig::live_keys`]) — are optional and did not require a version
+/// bump: each is omitted while unset, and a file without them leaves the panel
+/// as the device holds it and draws each key's action icon. A file that never
+/// sets one stays readable by every v11 build; an older build that meets one
+/// fails on the unknown field rather than dropping it.
 ///
 /// v11 adds the `[flow]` section for cross-machine device handoff. Nothing
 /// older needs migrating, and a file without it loads as disabled Flow. The

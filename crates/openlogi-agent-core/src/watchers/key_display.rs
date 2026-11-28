@@ -24,7 +24,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use openlogi_core::binding::GridKey;
-use openlogi_hid::{DeviceRoute, HidppOperation, KeyDisplay, KeyImageJpeg, write_key_image_on};
+use openlogi_hid::{
+    DeviceRoute, HidppOperation, KeyDisplay, KeyImageJpeg, KeyImageWrites, write_key_image_on,
+};
 use tokio::sync::{oneshot, watch};
 use tokio::time::Instant;
 use tracing::{debug, warn};
@@ -37,7 +39,7 @@ use crate::hardware::DeviceAccess;
 
 pub mod render;
 
-pub use render::KeyFace;
+pub use render::{KeyFace, KeyPicture, StyledFace};
 use render::{RenderError, render_tile};
 
 /// What one keypad's LCD keys should show.
@@ -63,7 +65,7 @@ pub type SharedKeyDisplaySpecs = watch::Receiver<Arc<Vec<KeyDisplaySpec>>>;
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
 
 /// One key to paint, on the panel `spec` describes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Paint<'a> {
     spec: &'a KeyDisplaySpec,
     key: GridKey,
@@ -99,7 +101,7 @@ fn unpainted<'a>(
         .map(move |(key, face)| Paint {
             spec,
             key: *key,
-            face: *face,
+            face: face.clone(),
         })
 }
 
@@ -175,7 +177,7 @@ impl Painted {
             .find(|panel| panel.route == spec.route)
         {
             Some(panel) if panel.generation == spec.generation => {
-                panel.faces.insert(paint.key, paint.face);
+                panel.faces.insert(paint.key, paint.face.clone());
             }
             // A newer generation was planned meanwhile: this paint predates a
             // reset, so it proves nothing about the panel now.
@@ -183,7 +185,7 @@ impl Painted {
             None => self.panels.push(PaintedPanel {
                 route: spec.route.clone(),
                 generation: spec.generation,
-                faces: BTreeMap::from([(paint.key, paint.face)]),
+                faces: BTreeMap::from([(paint.key, paint.face.clone())]),
             }),
         }
     }
@@ -242,13 +244,23 @@ struct Tiles {
     rendered: HashMap<(KeyFace, u16), Arc<KeyImageJpeg>>,
 }
 
+/// The most tiles [`Tiles`] keeps. A live key's face carries its changing
+/// value, so a clock or a counter would otherwise add a tile per value for as
+/// long as the agent runs; full, the cache starts over and keeps only what
+/// is painted from then on. Far above what a few keypads' pages show at once.
+const MAX_TILES: usize = 512;
+
 impl Tiles {
-    fn get(&mut self, face: KeyFace, size: u16) -> Result<Arc<KeyImageJpeg>, RenderError> {
-        if let Some(tile) = self.rendered.get(&(face, size)) {
+    fn get(&mut self, face: &KeyFace, size: u16) -> Result<Arc<KeyImageJpeg>, RenderError> {
+        let key = (face.clone(), size);
+        if let Some(tile) = self.rendered.get(&key) {
             return Ok(Arc::clone(tile));
         }
         let tile = Arc::new(render_tile(face, size)?);
-        self.rendered.insert((face, size), Arc::clone(&tile));
+        if self.rendered.len() >= MAX_TILES {
+            self.rendered.clear();
+        }
+        self.rendered.insert(key, Arc::clone(&tile));
         Ok(tile)
     }
 
@@ -259,12 +271,12 @@ impl Tiles {
     /// A render failure is a defect in the artwork, not the device: rendering
     /// again cannot fix it, so the blank stands in for `face` until the
     /// binding changes.
-    fn get_or_blank(&mut self, face: KeyFace, size: u16) -> Option<Arc<KeyImageJpeg>> {
+    fn get_or_blank(&mut self, face: &KeyFace, size: u16) -> Option<Arc<KeyImageJpeg>> {
         match self.get(face, size) {
             Ok(tile) => Some(tile),
             Err(error) => {
                 warn!(%error, ?face, "key image could not be rendered — showing it blank");
-                self.get(KeyFace::Blank, size)
+                self.get(&KeyFace::Blank, size)
                     .inspect_err(|error| warn!(%error, "blank key image could not be rendered"))
                     .ok()
             }
@@ -288,24 +300,33 @@ async fn manage(
 ) -> ManagerCompletion {
     let mut painted = Painted::default();
     let mut tiles = Tiles::default();
-    loop {
+    let writes = KeyImageWrites::default();
+    let completion = loop {
         let wanted = Arc::clone(&specs.borrow_and_update());
         let pending = painted.plan(&wanted, Instant::now());
         tokio::select! {
-            () = paint_all(&pending, &mut painted, &mut tiles, &access) => {}
-            _ = &mut shutdown => return ManagerCompletion::Graceful,
+            () = paint_all(&pending, &mut painted, &mut tiles, &access, &writes) => {}
+            _ = &mut shutdown => break ManagerCompletion::Graceful,
         }
         let retry = painted.next_retry();
         tokio::select! {
             changed = specs.changed() => {
                 if changed.is_err() {
-                    return ManagerCompletion::Unexpected;
+                    break ManagerCompletion::Unexpected;
                 }
             }
             () = wait_for_deadline(retry) => {}
-            _ = &mut shutdown => return ManagerCompletion::Graceful,
+            _ = &mut shutdown => break ManagerCompletion::Graceful,
         }
-    }
+    };
+    // An image that stopped being awaited still holds the channel's request
+    // pause until the keypad acknowledges it or its deadline passes, on a
+    // task of this worker's runtime. The runtime is dropped once this
+    // returns, which would cancel that task and release the pause early —
+    // letting teardown's HID++ requests reach a keypad still taking the
+    // image. Every image ends first.
+    writes.settled().await;
+    completion
 }
 
 /// Paint every key in `pending`, recording each acknowledged one and each
@@ -319,6 +340,7 @@ async fn paint_all(
     painted: &mut Painted,
     tiles: &mut Tiles,
     access: &DeviceAccess,
+    writes: &KeyImageWrites,
 ) {
     let mut failed: Vec<&DeviceRoute> = Vec::new();
     for paint in pending {
@@ -326,14 +348,14 @@ async fn paint_all(
         if failed.contains(&route) {
             continue;
         }
-        let Some(tile) = tiles.get_or_blank(paint.face, paint.spec.display.key_size) else {
+        let Some(tile) = tiles.get_or_blank(&paint.face, paint.spec.display.key_size) else {
             continue;
         };
         let (display, key) = (paint.spec.display, paint.key);
         let result = access
             .op(route)
             .run(HidppOperation::WriteKeyImage, |channel| async move {
-                write_key_image_on(&channel, display, key, &tile).await
+                write_key_image_on(&channel, display, key, &tile, writes).await
             })
             .await;
         match result {
