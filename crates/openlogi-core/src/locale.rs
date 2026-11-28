@@ -36,6 +36,7 @@ pub const SUPPORTED: &[(&str, &str)] = &[
     ("es", "Español"),
     ("fr", "Français"),
     ("it", "Italiano"),
+    ("lt", "Lietuvių"),
     ("nl", "Nederlands"),
     ("nb", "Norsk"),
     ("pl", "Polski"),
@@ -163,6 +164,9 @@ mod tests {
         assert_eq!(match_supported("cs"), Some("cs"));
         assert_eq!(match_supported("cs-CZ"), Some("cs"));
         assert_eq!(match_supported("cs_CZ"), Some("cs"));
+        assert_eq!(match_supported("lt"), Some("lt"));
+        assert_eq!(match_supported("lt-LT"), Some("lt"));
+        assert_eq!(match_supported("lt_LT"), Some("lt"));
         assert_eq!(match_supported("ja"), Some("ja"));
         assert_eq!(match_supported("ja-JP"), Some("ja"));
         assert_eq!(match_supported("ru"), Some("ru"));
@@ -192,6 +196,7 @@ mod tests {
     fn explicit_setting_wins_over_system() {
         assert_eq!(resolve(Some("zh-CN")), "zh-CN");
         assert_eq!(resolve(Some("cs")), "cs");
+        assert_eq!(resolve(Some("lt")), "lt");
         // An unknown stored code falls through to system/`en`, never panics.
         assert!(
             SUPPORTED
