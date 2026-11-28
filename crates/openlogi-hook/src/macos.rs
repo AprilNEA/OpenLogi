@@ -173,10 +173,17 @@ impl HookBackend for Backend {
     /// trust read short-circuits the probe for a process that was never granted.
     /// While the tap is live, [`ProbeCue`] decides when this runs at all.
     fn has_accessibility() -> bool {
+        Self::accessibility_trusted() && can_filter_events()
+    }
+
+    /// The bare trust bit — the crate's only `AXIsProcessTrusted()` read —
+    /// without the throwaway tap, and without the tap's leak when the create
+    /// comes back denied (#2623). See
+    /// [`super::HookBackend::accessibility_trusted`].
+    fn accessibility_trusted() -> bool {
         // SAFETY: takes no arguments and only reads the current trust state — the
         // non-prompting counterpart of `AXIsProcessTrustedWithOptions`.
-        let trusted = unsafe { AXIsProcessTrusted() };
-        trusted && can_filter_events()
+        unsafe { AXIsProcessTrusted() }
     }
 
     /// Raise the Accessibility prompt + register the process. See

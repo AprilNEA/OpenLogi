@@ -644,16 +644,28 @@ switching it on post both; removing the row posts only the Darwin one.
 
 - **Probe on cue.** `grant::ProbeCue` raises a flag from the watch's handler,
   and the tap thread probes only on a raised flag; the two agent-core grant
-  watchers read on the same wakes. Detection latency for an announced edit is
-  unchanged (one slice); an unannounced one is bounded by the heartbeat.
-- **Keep the heartbeat and the probe.** The notifications are undocumented, and
-  a missing run loop, a code-signing rule or a future macOS can swallow them;
-  the reconciled probe remains the authority, at 5 s instead of 500 ms. A watch
-  that cannot start falls back to the old cadence with a warning, never
-  silently.
+  watchers sample on the same wakes. What each costs per heartbeat differs by
+  what a denied read leaves behind — see the next bullet. Detection latency
+  for an announced edit is unchanged (one slice); an unannounced one is bounded
+  by the heartbeat.
+- **Keep the heartbeat; full probe per heartbeat only where it is affordable.**
+  The notifications are undocumented, and a missing run loop, a code-signing
+  rule or a future macOS can swallow them, so a heartbeat backstop stays. The
+  live tap can afford a full probe on it (5 s instead of 500 ms): the tap is
+  installed, so the probe passes. The accessibility watcher cannot: a *denied*
+  `CGEventTapCreate` leaks inside CoreGraphics/TCC, and one probe per heartbeat
+  grew the agent past 3 GB in days (#2623). Its heartbeat reads the trust bit
+  alone, and the full check runs on start, on a notification, on the bit's
+  rising edge, and once per bounded retry of the denied state — the retry is
+  what recovers a re-grant whose notifications never arrived, since the bit
+  stays `true` across a row deletion (#674). The Input Monitoring watcher
+  bounds its costly read (a fresh process launch) to once a minute instead.
+  A watch that cannot start falls back to the heartbeat cadence with a warning,
+  never silently.
 - **Rejected: `AXIsProcessTrusted` alone on wake.** It stays `true` after the
   row is removed — the very edit only the Darwin notification announces — so
-  the read cannot replace the probe.
+  the read cannot replace the probe. It can stand in for it between the
+  probe's reasons, which is what the accessibility watcher's heartbeat does.
 - **Not changed: `TAP_PROBE_BUDGET`.** Rarer probes make a collision with a
   sleep transition rarer, not impossible; shrinking the budget waits for a
   measured revoke→teardown on hardware.
