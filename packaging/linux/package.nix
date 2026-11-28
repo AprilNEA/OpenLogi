@@ -39,6 +39,7 @@
   wayland,
   vulkan-loader,
   libxcb,
+  zstd,
 }:
 
 let
@@ -140,6 +141,7 @@ rustPlatform.buildRustPackage {
     wayland # wayland-sys
     vulkan-loader # GPUI's primary Linux renderer
     libxcb # xcb / x11rb — the hook and GPUI's X11 backend
+    zstd # zstd-sys
   ];
 
   # Select production binaries explicitly: selecting the agent package alone
