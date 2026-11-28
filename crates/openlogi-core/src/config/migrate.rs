@@ -272,4 +272,15 @@ impl Config {
             }
         }
     }
+
+    /// Turn the backlight indicator off in a file written before v12.
+    ///
+    /// The indicator shipped in 0.8.15 without a setting, so nobody who
+    /// upgraded chose it. v12 adds the setting, so a pre-v12 file never holds
+    /// the key and its absence says nothing about what the user wants. A fresh
+    /// config, and a v12 file without the key, keep the default.
+    #[cfg(feature = "fs")]
+    pub(super) fn migrate_backlight_notifications_off(&mut self) {
+        self.app_settings.backlight_notifications = false;
+    }
 }

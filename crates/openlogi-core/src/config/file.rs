@@ -339,6 +339,11 @@ fn parse_config(path: &Path, source: &str) -> Result<(Config, u32), ConfigError>
     if header.schema_version <= 6 {
         config.migrate_thumbwheel_native_direction();
     }
+    // v12 is the schema `backlight_notifications` ships in, so no released
+    // file at v11 or below holds the key.
+    if header.schema_version <= 11 {
+        config.migrate_backlight_notifications_off();
+    }
     config.repair_duplicate_routes();
     if let Some((device, key)) = config.undefined_app_alias() {
         return Err(ConfigError::UndefinedAppAlias {

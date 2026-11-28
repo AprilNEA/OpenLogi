@@ -54,10 +54,12 @@ v10 adds the per-device `disabled_keys` policy. Older readers reject a v10
 header before parsing its fields. A v9 file without the policy still loads.
 v11 adds the `[flow]` section. Older readers reject a v11 header before
 parsing its fields. A v10 file without the section loads with Flow disabled.
+v12 adds `backlight_notifications` under `[app_settings]`. Older readers reject
+a v12 header before parsing its fields. A v11 or older file loads with it off.
 
 ## Shape
 
-`schema_version` is required and currently `11`. `selected_device` is an
+`schema_version` is required and currently `12`. `selected_device` is an
 optional physical device key.
 
 `[app_settings]` contains application-wide preferences:
@@ -132,6 +134,13 @@ optional physical device key.
   one on screen. The state a keyboard reports when it connects is not
   announced. With the setting off the agent shows nothing, and an indicator
   already on screen still closes on its own. Fn Lock is not shown.
+- `backlight_notifications` (default `true`): when a keyboard reports a new
+  backlight level, for example after its backlight keys are pressed, the agent
+  shows the level in the centre of the screen for 1.5 seconds. A change
+  replaces the one on screen. With the setting off the agent shows nothing,
+  and an indicator already on screen still closes on its own. The keyboard
+  still changes its backlight either way. A config from before schema v12
+  loads with the setting off, because the indicator had no setting until then.
 - `animate_desktop_switch` (default `true`, macOS only): Previous Desktop and
   Next Desktop slide to the neighbouring Space. The agent types the "Move left
   a space" or "Move right a space" shortcut from System Settings → Keyboard →

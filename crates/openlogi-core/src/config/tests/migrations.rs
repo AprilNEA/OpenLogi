@@ -1,4 +1,4 @@
-//! Schema migrations, v1 through the current version: bindings, thumb-wheel pairs, gesture owners, direct-route keys and host-switch targets.
+//! Schema migrations, v1 through the current version: bindings, thumb-wheel pairs, gesture owners, direct-route keys, host-switch targets and the backlight indicator.
 
 use super::*;
 
@@ -674,4 +674,56 @@ fn migrating_leaves_a_direct_key_with_no_physical_identity_untouched() {
         "a non-physical identity is left keyed exactly as it was loaded"
     );
     assert!(!config.devices.contains_key("unit:00000000"));
+}
+
+#[test]
+fn a_pre_v12_config_starts_with_the_backlight_indicator_off() {
+    for body in [
+        "schema_version = 11\n",
+        "schema_version = 9\n\n[app_settings]\nlock_key_notifications = true\n",
+    ] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        fs::write(&path, body).expect("write");
+
+        let cfg = Config::load_from_path(&path).expect("load a pre-v12 config");
+        assert!(!cfg.app_settings.backlight_notifications, "from: {body}");
+
+        // The first save stamps the current schema and keeps the choice, so
+        // the next load does not migrate it again.
+        let saved = toml::to_string_pretty(&cfg).expect("serialize");
+        assert!(
+            saved.contains(&format!("schema_version = {SCHEMA_VERSION}")),
+            "got: {saved}"
+        );
+        assert!(
+            saved.contains("backlight_notifications = false"),
+            "got: {saved}"
+        );
+        fs::write(&path, saved).expect("write");
+        let reloaded = Config::load_from_path(&path).expect("reload");
+        assert!(!reloaded.app_settings.backlight_notifications);
+    }
+}
+
+#[test]
+fn a_current_config_keeps_the_backlight_indicator_as_it_says() {
+    assert!(Config::default().app_settings.backlight_notifications);
+
+    for (app_settings, expected) in [
+        ("", true),
+        ("\n[app_settings]\nbacklight_notifications = true\n", true),
+        ("\n[app_settings]\nbacklight_notifications = false\n", false),
+    ] {
+        let body = format!("schema_version = {SCHEMA_VERSION}\n{app_settings}");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        fs::write(&path, &body).expect("write");
+
+        let cfg = Config::load_from_path(&path).expect("load a current config");
+        assert_eq!(
+            cfg.app_settings.backlight_notifications, expected,
+            "from: {body}"
+        );
+    }
 }
