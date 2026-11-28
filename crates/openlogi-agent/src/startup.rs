@@ -259,6 +259,9 @@ pub(crate) enum WatcherEvent {
     InputMonitoring(watchers::input_monitoring::InputMonitoring),
     /// macOS Secure Event Input turned on or off, or moved to another app.
     SecureInput(openlogi_ipc::SecureInput),
+    /// Universal Control moved the pointer to another device (`true`) or
+    /// back.
+    PointerElsewhere(bool),
     /// A standalone light was read, or announced a change.
     Light(watchers::light::LightEvent),
     /// A watcher's channel closed (its thread died). Emitted once; the
@@ -277,6 +280,7 @@ pub(crate) enum Watcher {
     Accessibility,
     InputMonitoring,
     SecureInput,
+    UniversalControl,
     Light,
 }
 
@@ -362,6 +366,11 @@ pub(crate) fn spawn_state_watchers(
             watchers::secure_input::spawn(watchers::secure_input::PERIOD),
             Watcher::SecureInput,
             WatcherEvent::SecureInput,
+        ),
+        tagged(
+            watchers::universal_control::spawn(watchers::universal_control::PERIOD),
+            Watcher::UniversalControl,
+            WatcherEvent::PointerElsewhere,
         ),
         stream::unfold((lights, light_watcher), |(mut rx, watcher)| async move {
             let event = rx.recv().await?;
