@@ -172,6 +172,7 @@ impl InputDispatcher {
         )
     }
 
+    #[cfg(test)]
     pub(super) fn holds_input(&self, session: &HidppSessionId) -> bool {
         self.held_presses
             .tokens

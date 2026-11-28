@@ -282,11 +282,12 @@ mod tests {
 
     use super::*;
     use crate::app::tests::click_control;
-    use crate::services::assets::AssetResolver;
+    use crate::services::{assets::AssetResolver, i18n::LOCALE_LOCK};
     use crate::state::Sources;
 
     #[gpui::test]
     fn a_late_slider_release_cannot_overwrite_the_new_profile(cx: &mut TestAppContext) {
+        let _locale = LOCALE_LOCK.lock().unwrap();
         let old = Rc::new(OnceCell::new());
         let _observer = cx.update(|cx| {
             gpui_kit::init(cx);

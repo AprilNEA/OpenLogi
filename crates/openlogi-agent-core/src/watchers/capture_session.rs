@@ -206,6 +206,19 @@ impl<Target, Dispatch, Stop> CaptureSession<Target, Dispatch, Stop> {
         &self.target
     }
 
+    /// Adopt a target the caller has verified this active task can reconfigure
+    /// in place. Draining owners keep their original target until completion.
+    pub(super) fn retarget_in_place(&mut self, target: &Target) -> bool
+    where
+        Target: Clone,
+    {
+        if !self.is_active() {
+            return false;
+        }
+        self.target.clone_from(target);
+        true
+    }
+
     /// Dispatch state owned by this epoch.
     pub(super) fn dispatch(&self) -> &Dispatch {
         &self.dispatch
@@ -242,7 +255,7 @@ impl<Target, Dispatch, Stop> CaptureSession<Target, Dispatch, Stop> {
 }
 
 impl<Target: PartialEq, Dispatch: Clone + PartialEq, Stop> CaptureSession<Target, Dispatch, Stop> {
-    /// Update dispatch while an active hardware owner safely defers rearming.
+    /// Update dispatch while preserving the active hardware owner.
     pub(super) fn refresh_dispatch(&mut self, dispatch: &Dispatch) -> ReconcileAction {
         if !self.is_active() || self.dispatch == *dispatch {
             return ReconcileAction::None;
@@ -306,6 +319,21 @@ mod tests {
         );
         assert!(session.is_active());
         assert_eq!(session.dispatch(), &"new");
+    }
+
+    #[test]
+    fn an_in_place_target_can_change_only_while_active() {
+        let mut session = session();
+        assert!(session.retarget_in_place(&2));
+        assert_eq!(session.target(), &2);
+        assert_eq!(session.dispatch(), &"old");
+        assert!(session.is_active());
+        assert_eq!(
+            session.reconcile_with(None, |_, _| ()),
+            ReconcileAction::Retiring
+        );
+        assert!(!session.retarget_in_place(&3));
+        assert_eq!(session.target(), &2);
     }
 
     #[test]

@@ -269,6 +269,25 @@ pub(crate) enum ThumbwheelRestore {
 }
 
 impl ThumbwheelRestore {
+    /// Hand this wheel back without changing another captured control.
+    pub(crate) async fn restore_on(
+        self,
+        channel: Arc<HidppChannel>,
+        device_index: u8,
+    ) -> Result<(), Hidpp20Error> {
+        match self {
+            Self::Thumbwheel {
+                feature_index,
+                status,
+            } => {
+                Thumbwheel::new(channel, device_index, feature_index)
+                    .restore(status)
+                    .await
+            }
+            Self::Gesture46 => restore_gesture46(channel, device_index).await,
+        }
+    }
+
     /// Teardown writes the reporting mode and rotation sign
     /// [`thumbwheel::status_to_restore`] derives from the status read before
     /// arming.
@@ -397,19 +416,7 @@ impl RestorePlan for CaptureRestorePlan {
             );
         }
         if let Some(thumb) = self.thumb {
-            let result = match thumb {
-                ThumbwheelRestore::Thumbwheel {
-                    feature_index,
-                    status,
-                } => {
-                    Thumbwheel::new(channel.clone(), device_index, feature_index)
-                        .restore(status)
-                        .await
-                }
-                ThumbwheelRestore::Gesture46 => {
-                    restore_gesture46(channel.clone(), device_index).await
-                }
-            };
+            let result = thumb.restore_on(channel.clone(), device_index).await;
             restored &= restore_result(result, "thumb wheel");
         }
         if let Some(spy) = &self.spy {

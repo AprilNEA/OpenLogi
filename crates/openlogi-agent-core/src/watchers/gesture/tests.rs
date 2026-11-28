@@ -448,7 +448,9 @@ async fn session_done_waits_for_a_listener_already_copied_by_the_read_loop() {
     );
     listener.emit(CapturedInput::ButtonUp(ButtonId::GestureButton));
     drop(listener);
-    completion.await;
+    tokio::time::timeout(Duration::from_secs(1), completion)
+        .await
+        .expect("completion must drain after the last listener is released");
     assert!(matches!(
         queued.try_recv().unwrap(),
         SessionEvent::Input(CapturedEvent {
@@ -982,6 +984,7 @@ async fn a_pointer_only_plan_refresh_keeps_a_held_gesture() {
         &mut session,
         Some((&moved.target, &moved.dispatch)),
         &mut dispatcher,
+        &watch::Sender::new(false),
     );
     assert!(
         dispatcher.holds_gesture_press(&id, ButtonId::GestureButton),
@@ -998,6 +1001,7 @@ async fn a_pointer_only_plan_refresh_keeps_a_held_gesture() {
         &mut session,
         Some((&rebound.target, &rebound.dispatch)),
         &mut dispatcher,
+        &watch::Sender::new(false),
     );
     assert!(!dispatcher.holds_gesture_press(&id, ButtonId::GestureButton));
 
@@ -1006,7 +1010,7 @@ async fn a_pointer_only_plan_refresh_keeps_a_held_gesture() {
 }
 
 #[tokio::test]
-async fn thumbwheel_rearming_waits_for_independent_accepted_buttons_to_finish() {
+async fn thumbwheel_retarget_preserves_independent_buttons_after_release() {
     use openlogi_core::binding::LongPressBinding;
     for starting_captured in [false, true] {
         for button in [ButtonId::GestureButton, ButtonId::Back] {
@@ -1032,6 +1036,7 @@ async fn thumbwheel_rearming_waits_for_independent_accepted_buttons_to_finish() 
                     )),
                 );
             }
+            let thumbwheel = watch::Sender::new(starting_captured);
             let mut session = live_session_from_plan(7, held.clone());
             let id = session.id().clone();
             dispatcher.dispatch(&id, session.dispatch(), CapturedInput::ButtonDown(button));
@@ -1048,16 +1053,17 @@ async fn thumbwheel_rearming_waits_for_independent_accepted_buttons_to_finish() 
                 &mut session,
                 Some((&switched.target, &switched.dispatch)),
                 &mut dispatcher,
+                &thumbwheel,
             );
             assert!(
                 session.is_active(),
-                "a wheel-only hardware change must wait for the admitted {button}"
+                "a wheel-only hardware change must preserve the admitted {button}"
             );
             assert!(dispatcher.holds_input(&id));
             assert_eq!(
                 session.dispatch().thumbwheel_sensitivity,
                 switched.dispatch.thumbwheel_sensitivity,
-                "new App scaling applies while hardware rearming waits"
+                "new App scaling applies while thumb reporting changes"
             );
             dispatcher.dispatch(&id, session.dispatch(), CapturedInput::ButtonUp(button));
             assert!(!dispatcher.holds_input(&id));
@@ -1065,15 +1071,92 @@ async fn thumbwheel_rearming_waits_for_independent_accepted_buttons_to_finish() 
                 &mut session,
                 Some((&switched.target, &switched.dispatch)),
                 &mut dispatcher,
+                &thumbwheel,
             );
             assert!(
-                !session.is_active(),
-                "release lets normal restore/rearm finish the native/capture transition"
+                session.is_active(),
+                "release must not retire unrelated reporting during a thumb-only transition"
             );
+            assert_eq!(session.target(), &switched.target);
+            assert_eq!(*thumbwheel.borrow(), !starting_captured);
+            assert!(session.id().same_epoch(&id));
+            dispatcher.dispatch(&id, session.dispatch(), CapturedInput::ButtonDown(button));
+            assert!(
+                dispatcher.holds_input(&id),
+                "new presses retain their owner"
+            );
+            dispatcher.dispatch(&id, session.dispatch(), CapturedInput::ButtonUp(button));
+            assert!(!dispatcher.holds_input(&id));
             scroll.shutdown();
             actions.shutdown();
         }
     }
+}
+
+#[tokio::test]
+async fn rapid_thumb_only_retargets_keep_the_session_and_publish_without_dispatch_changes() {
+    let (mut actions, mut scroll, mut dispatcher, _requests) = dispatch_fixture();
+    let first = plan();
+    let initial = first.target.spec.capture_thumbwheel;
+    let thumbwheel = watch::Sender::new(initial);
+    let mut requests = thumbwheel.subscribe();
+    let (stop, mut stopped) = oneshot::channel();
+    let mut session = CaptureSession::active(
+        session_id(7),
+        first.target.clone(),
+        first.dispatch.clone(),
+        stop,
+    );
+    let mut next = first.clone();
+    for capture in [!initial, initial, !initial] {
+        next.target.spec.capture_thumbwheel = capture;
+        reconcile_session(
+            &mut session,
+            Some((&next.target, &next.dispatch)),
+            &mut dispatcher,
+            &thumbwheel,
+        );
+        assert!(session.is_active());
+        assert_eq!(session.target(), &next.target);
+        assert_eq!(session.dispatch(), &first.dispatch);
+        assert_eq!(*requests.borrow_and_update(), capture);
+        assert!(matches!(
+            stopped.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+    }
+    let adopted = next.target.clone();
+    next.target.rearm_generation += 1;
+    next.target.spec.capture_thumbwheel = initial;
+    reconcile_session(
+        &mut session,
+        Some((&next.target, &next.dispatch)),
+        &mut dispatcher,
+        &thumbwheel,
+    );
+    assert!(matches!(
+        stopped.try_recv(),
+        Ok(CaptureSessionStop::Shutdown)
+    ));
+    assert!(
+        !session.is_active(),
+        "other hardware changes still retire normally"
+    );
+    reconcile_session(
+        &mut session,
+        Some((&first.target, &first.dispatch)),
+        &mut dispatcher,
+        &thumbwheel,
+    );
+    assert_eq!(
+        session.target(),
+        &adopted,
+        "draining sessions cannot retarget"
+    );
+    assert_eq!(*requests.borrow_and_update(), !initial);
+    assert!(!requests.has_changed().unwrap());
+    scroll.shutdown();
+    actions.shutdown();
 }
 
 #[tokio::test]
@@ -1119,7 +1202,7 @@ async fn captured_thumbwheel_uses_the_app_scale_in_the_real_scroll_worker() {
 }
 
 #[tokio::test]
-async fn draining_thumbwheel_reports_use_the_new_native_app_policy() {
+async fn retargeting_thumbwheel_reports_use_the_new_native_app_policy() {
     use crate::runtime::scroll::{ScrollPreferences, ScrollRuntime};
     let (mut actions, mut unused_scroll, _, _requests) = dispatch_fixture();
     let preferences = Arc::new(ScrollPreferences::new(
@@ -1164,6 +1247,7 @@ async fn draining_thumbwheel_reports_use_the_new_native_app_policy() {
             Arc::default(),
         )),
         lease: std::sync::Weak::new(),
+        thumbwheel: HashMap::new(),
     };
     let access = ReceiverAccess::default();
     let requests = access.subscribe_requests();
@@ -1179,7 +1263,7 @@ async fn draining_thumbwheel_reports_use_the_new_native_app_policy() {
         "the old App's queued tick is discarded"
     );
     assert!(
-        !manager.slots[&physical_key()]
+        manager.slots[&physical_key()]
             .session()
             .unwrap()
             .is_active()
@@ -1190,7 +1274,7 @@ async fn draining_thumbwheel_reports_use_the_new_native_app_policy() {
     assert_eq!(
         delta,
         ScrollDelta::wheel_ticks(-1.0, 0.0),
-        "new reports during restoration use the new App's 14, not the frozen old 28"
+        "reports during thumb reconfiguration use the new App's 14, not the old 28"
     );
     scroll.shutdown();
     unused_scroll.shutdown();
@@ -1242,6 +1326,7 @@ async fn thumbwheel_notifications_and_action_thresholds_follow_exact_app_epochs(
         )]),
         input_dispatcher: dispatcher,
         lease: std::sync::Weak::new(),
+        thumbwheel: HashMap::new(),
     };
     let access = ReceiverAccess::default();
     let receiver_requests = access.subscribe_requests();
@@ -1323,6 +1408,7 @@ async fn buffered_thumbwheel_reports_are_not_reinterpreted_as_a_new_binding() {
         )]),
         input_dispatcher: dispatcher,
         lease: std::sync::Weak::new(),
+        thumbwheel: HashMap::new(),
     };
     let access = ReceiverAccess::default();
     let receiver_requests = access.subscribe_requests();

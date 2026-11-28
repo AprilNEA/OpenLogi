@@ -1,0 +1,20 @@
+# Owner: session::capture_restore::ThumbwheelRestore::restore_on. Live thumb
+# changes and session teardown must use the same captured restoration debt.
+id: device-thumb-restore-owner
+language: rust
+severity: error
+message: ThumbwheelRestore::restore_on owns thumb restoration; use the recorded restore debt rather than restoring the hardware here.
+note: |
+  Live thumb-only changes and capture teardown share the original reporting
+  mode/direction policy and Gesture46 feature rediscovery. Duplicating either
+  recipe can discard original state or write a stale feature index.
+files:
+  - crates/openlogi-device/src/session/**/*.rs
+ignores:
+  - crates/openlogi-device/src/session/capture_restore.rs
+  - "**/tests.rs"
+  - "**/tests/**"
+rule:
+  any:
+    - pattern: Thumbwheel::new($$$ARGS).restore($STATUS)
+    - pattern: $FEATURE.set_thumbwheel_diverted(false)

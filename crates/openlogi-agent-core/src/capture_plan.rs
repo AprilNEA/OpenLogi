@@ -31,8 +31,9 @@ use crate::runtime::scroll::WheelProfileEpoch;
 
 /// Hardware identity of one HID++ capture session.
 ///
-/// Equality is the rearm contract: changing any field requires restoring the
-/// old firmware diversion before a replacement session may start.
+/// Changes require restoring the old firmware diversion before replacement,
+/// except thumb-wheel-only reporting changes: the gesture watcher can retarget
+/// those in place while keeping unrelated button bindings and reporting.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CaptureTarget {
     /// Physical identity used to serialize firmware ownership even when the
@@ -98,7 +99,7 @@ pub struct DispatchPlan {
 /// One device's independently versioned hardware target and dispatch plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceCapturePlan {
-    /// Hardware state whose changes require a capture-session restart.
+    /// Hardware state reconciled by the capture owner; see [`CaptureTarget`].
     pub target: CaptureTarget,
     /// Hot-replaceable action resolution for input from that target.
     pub dispatch: DispatchPlan,

@@ -61,7 +61,7 @@ pub use pairing::{
 pub use session::gesture::{
     CaptureChannelSlot, CaptureError, CaptureHost, CaptureInputSink, CaptureSessionFailure,
     CaptureSessionOutcome, CaptureSessionStop, CapturedInput, PendingCaptureRestore,
-    run_capture_session,
+    run_capture_session, run_capture_session_with_thumbwheel,
 };
 pub use session::host_switch::{
     FollowerLink, FollowerRelease, HELD_KEY_RELEASE_TIMEOUT, HostSwitchError, HostSwitchFollowUp,

@@ -1,9 +1,9 @@
 //! Background HID++ control-capture watcher, one session per online device.
 //!
-//! Runs [`openlogi_hid::run_capture_session`] concurrently for every device in
-//! the shared capture-plan list (not just the GUI's selection), restarts a
-//! session when its device's plan — route, diverted controls, thumb-wheel
-//! arming — changes, and dispatches each captured input against the binding
+//! Runs [`openlogi_hid::run_capture_session_with_thumbwheel`] for every device
+//! in the shared capture-plan list (not just the GUI's selection), restarts a
+//! session when its device's route or diverted controls change, retargets
+//! thumb-wheel capture in place, and dispatches each input against the binding
 //! maps of the device it arrived on:
 //!
 //! - a gesture swipe through the gesture binding map,
@@ -31,7 +31,7 @@ use openlogi_core::device_order::PhysicalDeviceKey;
 use openlogi_core::scroll::ScrollDelta;
 use openlogi_hid::{
     CaptureHost, CaptureSessionOutcome, CaptureSessionStop, CapturedInput, DeviceRoute,
-    PendingCaptureRestore, run_capture_session,
+    PendingCaptureRestore, run_capture_session_with_thumbwheel,
 };
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
@@ -209,6 +209,17 @@ struct GestureManagerState {
     slots: HashMap<PhysicalDeviceKey, GestureSlot>,
     input_dispatcher: InputDispatcher,
     lease: std::sync::Weak<SessionReceiverLease>,
+    /// The current thumb capture request for each tracked physical device.
+    thumbwheel: HashMap<PhysicalDeviceKey, watch::Sender<bool>>,
+}
+
+fn thumbwheel_request<'a>(
+    requests: &'a mut HashMap<PhysicalDeviceKey, watch::Sender<bool>>,
+    session: &RunningSession,
+) -> &'a watch::Sender<bool> {
+    requests
+        .entry(session.target().physical_key.clone())
+        .or_insert_with(|| watch::Sender::new(session.target().spec.capture_thumbwheel))
 }
 
 #[derive(Clone)]
@@ -391,6 +402,7 @@ fn reconcile_session(
     session: &mut RunningSession,
     wanted: Option<(&CaptureTarget, &DispatchPlan)>,
     dispatcher: &mut InputDispatcher,
+    thumbwheel: &watch::Sender<bool>,
 ) {
     // A swipe that switches desktops moves the pointer onto another window,
     // republishing an otherwise identical plan. Keep the hold so the same
@@ -400,19 +412,18 @@ fn reconcile_session(
         WheelConfiguration::for_plan(session.dispatch()) != WheelConfiguration::for_plan(plan)
             || session.dispatch().wheel_profile_epoch != plan.wheel_profile_epoch
     });
-    let deferred = wanted.filter(|(target, _)| {
+    let thumb_only = wanted.filter(|(target, _)| {
         let current = session.target();
         let mut comparable = (*target).clone();
         comparable.spec.capture_thumbwheel = current.spec.capture_thumbwheel;
-        current != *target
-            && *current == comparable
-            && pointer_only
-            && dispatcher.holds_input(session.id())
+        current != *target && *current == comparable && pointer_only && session.is_active()
     });
-    let change = if let Some((_, dispatch)) = deferred {
-        // Thumb reporting shares a firmware session with independent gesture
-        // buttons. Finish an admitted hold before restoring that session;
-        // wheel dispatch adopts the new App policy during the short deferral.
+    let change = if let Some((target, dispatch)) = thumb_only {
+        // Thumb reporting has its own live retarget path. Keep the gesture
+        // listener and firmware button reporting armed, including for presses
+        // that begin while the thumb write is awaiting its acknowledgement.
+        session.retarget_in_place(target);
+        thumbwheel.send_replace(target.spec.capture_thumbwheel);
         session.refresh_dispatch(dispatch)
     } else {
         session.reconcile_with(wanted, stop_for_target_change)
@@ -453,9 +464,10 @@ fn reconcile_published_session(
     receiver_requests: &watch::Receiver<ReceiverRequestState>,
     capture_plans: &SharedCapturePlans,
     dispatcher: &mut InputDispatcher,
+    thumbwheel: &watch::Sender<bool>,
 ) {
     if receiver_requests.borrow().any() {
-        reconcile_session(session, None, dispatcher);
+        reconcile_session(session, None, dispatcher, thumbwheel);
     } else {
         let published = capture_plans.borrow();
         let wanted = published
@@ -463,7 +475,7 @@ fn reconcile_published_session(
             .iter()
             .find(|plan| plan.target.physical_key == *key)
             .map(|plan| (&plan.target, &plan.dispatch));
-        reconcile_session(session, wanted, dispatcher);
+        reconcile_session(session, wanted, dispatcher, thumbwheel);
     }
 }
 
@@ -547,6 +559,7 @@ impl GestureManagerState {
             slots: HashMap::new(),
             input_dispatcher: InputDispatcher::new(outputs),
             lease: std::sync::Weak::new(),
+            thumbwheel: HashMap::new(),
         }
     }
 
@@ -602,7 +615,8 @@ impl GestureManagerState {
                 .iter()
                 .find(|plan| plan.target.physical_key == *key)
                 .map(|plan| (&plan.target, &plan.dispatch));
-            reconcile_session(session, wanted, &mut self.input_dispatcher);
+            let thumbwheel = thumbwheel_request(&mut self.thumbwheel, session);
+            reconcile_session(session, wanted, &mut self.input_dispatcher, thumbwheel);
         }
         self.slots.retain(|key, slot| {
             let Some(recovery) = slot.recovery_mut() else {
@@ -617,6 +631,9 @@ impl GestureManagerState {
             }
             !recovery.is_empty()
         });
+
+        self.thumbwheel
+            .retain(|key, _| self.slots.contains_key(key));
 
         // Firmware ownership outlives the desired plan. Keep the strong lease
         // through successor spawning so restore→rearm is uninterrupted.
@@ -652,7 +669,11 @@ impl GestureManagerState {
                 continue;
             };
             let id = HidppSessionId::new(&plan.dispatch.config_key);
-            let session = spawn_session(id, plan.clone(), session_lease, channels);
+            let thumbwheel = self
+                .thumbwheel
+                .entry(key.clone())
+                .or_insert_with(|| watch::Sender::new(plan.target.spec.capture_thumbwheel));
+            let session = spawn_session(id, plan.clone(), session_lease, channels, thumbwheel);
             self.slots
                 .insert(key.clone(), GestureSlot::running(session));
         }
@@ -673,12 +694,14 @@ impl GestureManagerState {
                     && let Some(session) =
                         self.slots.get_mut(key).and_then(GestureSlot::session_mut)
                 {
+                    let thumbwheel = thumbwheel_request(&mut self.thumbwheel, session);
                     reconcile_published_session(
                         key,
                         session,
                         receiver_requests,
                         capture_plans,
                         &mut self.input_dispatcher,
+                        thumbwheel,
                     );
                 }
                 let live = self.slots.get(key).and_then(GestureSlot::session);
@@ -743,6 +766,7 @@ impl GestureManagerState {
                 }
                 if recovery_finished {
                     self.slots.remove(key);
+                    self.thumbwheel.remove(key);
                 }
                 true
             }
@@ -765,7 +789,8 @@ async fn drain_for_shutdown(
         .values_mut()
         .filter_map(GestureSlot::session_mut)
     {
-        reconcile_session(session, None, &mut state.input_dispatcher);
+        let thumbwheel = thumbwheel_request(&mut state.thumbwheel, session);
+        reconcile_session(session, None, &mut state.input_dispatcher, thumbwheel);
     }
     while state.slots.values().any(|slot| slot.session().is_some()) {
         let Some(event) = event_rx.recv().await else {
@@ -921,6 +946,7 @@ fn spawn_session(
     plan: DeviceCapturePlan,
     lease: Arc<SessionReceiverLease>,
     channels: &SessionChannels,
+    thumbwheel: &watch::Sender<bool>,
 ) -> RunningSession {
     let DeviceCapturePlan {
         target, dispatch, ..
@@ -948,6 +974,8 @@ fn spawn_session(
     let done_key = physical_key;
     let session_route = target.route.clone();
     let session_spec = target.spec.clone();
+    thumbwheel.send_replace(session_spec.capture_thumbwheel);
+    let wanted_thumbwheel = thumbwheel.subscribe();
     let slot = Arc::clone(&channels.access.channel);
     let registry = channels.access.registry.clone();
     let device_io = channels.access.device_io.clone();
@@ -955,9 +983,10 @@ fn spawn_session(
     // still reaches the completion report below (`settle_capture_task`).
     let session_task = tokio::spawn(async move {
         let _lease = lease;
-        match run_capture_session(
+        match run_capture_session_with_thumbwheel(
             session_route,
             session_spec,
+            wanted_thumbwheel,
             CaptureHost {
                 sink,
                 shutdown: stop_rx,
