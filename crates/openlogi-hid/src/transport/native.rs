@@ -7,21 +7,23 @@
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
-use async_hid::{AsyncHidWrite as _, Device, DeviceWriter};
+use async_hid::{AsyncHidWrite as _, Device, DeviceEvent, DeviceId, DeviceWriter};
+use futures_lite::StreamExt as _;
 use hidpp::async_trait;
 use hidpp::channel::HidppChannel;
 
 use openlogi_device::DeviceIoGate;
 use openlogi_device::backend::{
-    BackendError, HidBackend, HotplugStream, NodeId, NodeInfo, RawWriter,
+    BackendError, HidBackend, HotplugEvent, HotplugStream, NodeId, NodeInfo, RawWriter,
 };
 
 use crate::recording::{
     RecordedChannelOpenOutcome, RecordedRawWriterOpenOutcome, RecordingRawWriter, RecordingSink,
 };
 
+use super::hotplug::LogitechNodes;
 use super::{
-    device_io_gate, enumerate_devices, is_hidpp_node, open_hidpp_channel,
+    device_io_gate, enumerate_devices, is_hidpp_node, node_vendor_ids, open_hidpp_channel,
     open_hidpp_channel_with_observer, watch_nodes,
 };
 
@@ -89,6 +91,11 @@ pub(crate) struct NativeBackend {
     /// than looking them up again. Held behind an `Arc` so an open can borrow
     /// one without keeping the map locked across its await.
     nodes: Mutex<HashMap<HandleKey, Arc<Device>>>,
+    /// Filled by enumerations and arrivals, emptied by the removals the
+    /// hotplug stream reads. A removal is read once, so a second subscriber
+    /// would miss the ones the first read; the inventory worker is the only
+    /// subscriber.
+    logitech_nodes: Arc<LogitechNodes<DeviceId>>,
     device_io: DeviceIoGate,
     recording: Option<RecordingSink>,
 }
@@ -97,6 +104,7 @@ impl Default for NativeBackend {
     fn default() -> Self {
         Self {
             nodes: Mutex::new(HashMap::new()),
+            logitech_nodes: Arc::default(),
             device_io: device_io_gate(),
             recording: None,
         }
@@ -106,9 +114,8 @@ impl Default for NativeBackend {
 impl NativeBackend {
     fn with_recording(recording: RecordingSink) -> Self {
         Self {
-            nodes: Mutex::new(HashMap::new()),
-            device_io: device_io_gate(),
             recording: Some(recording),
+            ..Self::default()
         }
     }
 
@@ -126,6 +133,11 @@ impl NativeBackend {
             .map(|device| (HandleKey::for_device(device), Arc::clone(device)))
             .collect();
         *self.nodes.lock().unwrap_or_else(PoisonError::into_inner) = handles;
+        self.logitech_nodes.enumerated(
+            devices
+                .iter()
+                .map(|device| (device.id.clone(), device.vendor_id)),
+        );
         Ok(devices)
     }
 
@@ -231,8 +243,33 @@ impl HidBackend for NativeBackend {
         }
     }
 
+    /// Only Logitech nodes raise events (see `docs/DECISIONS.md`).
+    ///
+    /// The node identity `async-hid` attaches is dropped once that is decided:
+    /// every consumer reacts by re-enumerating, so carrying it would only
+    /// invite someone to trust it.
     fn watch(&self) -> Result<HotplugStream, BackendError> {
-        Ok(Box::new(watch_nodes()?))
+        let nodes = Arc::clone(&self.logitech_nodes);
+        let events = watch_nodes()?
+            .then(move |event| logitech_event(event, Arc::clone(&nodes)))
+            .filter_map(|event| event);
+        Ok(Box::new(Box::pin(events)))
+    }
+}
+
+/// `event` as a [`HotplugEvent`] when it concerns a Logitech node.
+async fn logitech_event(
+    event: DeviceEvent,
+    nodes: Arc<LogitechNodes<DeviceId>>,
+) -> Option<HotplugEvent> {
+    match event {
+        DeviceEvent::Connected(id) => {
+            let vendor_ids = node_vendor_ids(&id).await;
+            nodes
+                .arrived(id, vendor_ids)
+                .then_some(HotplugEvent::Connected)
+        }
+        DeviceEvent::Disconnected(id) => nodes.departed(&id).then_some(HotplugEvent::Disconnected),
     }
 }
 
@@ -303,9 +340,9 @@ mod tests {
             .expect_err("a suspended gate refuses device I/O")
             .to_string();
         let backend = NativeBackend {
-            nodes: Mutex::new(HashMap::new()),
             device_io,
             recording: Some(recorder.sink()),
+            ..NativeBackend::default()
         };
         let node = NodeInfo {
             id: NodeId::from("suspended-test-node".to_owned()),

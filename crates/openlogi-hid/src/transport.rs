@@ -28,7 +28,7 @@ use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
 use crate::LOGITECH_VENDOR_ID;
-use openlogi_device::backend::{BackendError, HotplugEvent, NodeId, NodeInfo};
+use openlogi_device::backend::{BackendError, NodeId, NodeInfo};
 use openlogi_device::host_lock;
 use openlogi_device::write::matches_litra;
 use openlogi_device::{DeviceIoGate, DeviceIoSignal, device_io_channel};
@@ -222,6 +222,7 @@ impl Drop for SwIdLease {
 /// the condition is per-host, not per-open.
 static SW_ID_LOCK_FALLBACK_REPORTED: AtomicBool = AtomicBool::new(false);
 
+mod hotplug;
 mod native;
 pub(crate) use native::{native_backend, recording_backend};
 
@@ -320,18 +321,24 @@ pub(crate) fn device_io_gate() -> DeviceIoGate {
     DEVICE_IO.1.clone()
 }
 
-/// Subscribe to the backend's node connect/disconnect events, restated as the
-/// backend-agnostic [`HotplugEvent`].
-///
-/// The node identity `async-hid` attaches is dropped: every consumer reacts by
-/// re-enumerating, so carrying it would only invite someone to trust it.
-pub(crate) fn watch_nodes() -> Result<impl Stream<Item = HotplugEvent> + Send + Unpin, BackendError>
-{
-    let stream = HID_BACKEND.watch().map_err(backend_error)?;
-    Ok(stream.map(|event| match event {
-        async_hid::DeviceEvent::Connected(_) => HotplugEvent::Connected,
-        async_hid::DeviceEvent::Disconnected(_) => HotplugEvent::Disconnected,
-    }))
+/// Subscribe to the backend's node connect/disconnect events.
+pub(crate) fn watch_nodes()
+-> Result<impl Stream<Item = async_hid::DeviceEvent> + Send + Unpin, BackendError> {
+    HID_BACKEND.watch().map_err(backend_error)
+}
+
+/// The vendor ids of the devices behind the node `id` names, or `None` when it
+/// could not be queried.
+pub(crate) async fn node_vendor_ids(
+    id: &async_hid::DeviceId,
+) -> Option<impl Iterator<Item = u16> + use<>> {
+    match HID_BACKEND.query_devices(id).await {
+        Ok(devices) => Some(devices.map(|device| device.vendor_id)),
+        Err(error) => {
+            debug!(%error, "arriving HID node could not be queried");
+            None
+        }
+    }
 }
 
 pub(crate) async fn enumerate_devices() -> Result<Vec<async_hid::Device>, BackendError> {
