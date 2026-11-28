@@ -96,9 +96,12 @@ fn configured_wheel_mode_gates_resolution_and_inversion_independently() {
         scroll_inversion: true,
         ..Capabilities::default()
     });
+    // The wheel's own invert bit is never written: it would reverse the zoom
+    // macOS reads from the same signal. The change still clears it, in case an
+    // earlier build left it set.
     assert_eq!(
         configured_wheel_mode(&config, &device, true),
-        Some(WheelModeChange::Inversion(true))
+        Some(WheelModeChange::Inversion(false))
     );
 
     device.capabilities = None;
@@ -167,11 +170,13 @@ fn the_main_wheel_is_diverted_only_with_every_gate_open() {
     // Without the hook nothing may post the scrolling: the wheel stays
     // native and the re-apply writes its mode as before.
     assert_eq!(main_wheel_divert(&config, &device, false), None);
+    // Still the wheel mode, still not the invert bit: the hook reverses the
+    // wheel in software so a zooming wheel keeps its own direction.
     assert_eq!(
         configured_wheel_mode(&config, &device, false),
         Some(WheelModeChange::ResolutionAndInversion {
             resolution: ScrollResolution::High,
-            inverted: true,
+            inverted: false,
         })
     );
 

@@ -71,6 +71,17 @@ impl WheelEventKind {
     }
 }
 
+/// Whether the keys held right now make a wheel turn zoom the screen: the
+/// gesture Accessibility Zoom is configured with is engaged.
+///
+/// Software scroll inversion leaves those turns alone. Options+ reverses wheel
+/// scrolling and still zooms the direction Accessibility Zoom expects, because
+/// the zoom is read from the same signal the reversal would flip.
+#[must_use]
+pub fn zoom_gesture_engaged() -> bool {
+    WheelEventKind::current() == WheelEventKind::Zoom
+}
+
 /// Accessibility Zoom's "Use scroll gesture with modifier keys to zoom": the
 /// modifiers that make a wheel zoom the screen.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

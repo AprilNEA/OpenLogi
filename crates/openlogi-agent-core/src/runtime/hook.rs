@@ -177,11 +177,10 @@ impl GestureHold {
         }
     }
 
-    /// End the hold, returning its exact token and whether it was a click. A
-    /// hold that committed a swipe returns `false`.
-    fn end(mut self) -> (PressToken, bool) {
-        let was_click = self.swipe.end();
-        (self.press, was_click)
+    /// End the hold, returning its token and any action still due on release.
+    fn end(mut self) -> (PressToken, Option<GestureDirection>) {
+        let direction = self.swipe.end();
+        (self.press, direction)
     }
 }
 
@@ -535,12 +534,12 @@ fn end_press(
     let disposition = phase.disposition();
     match phase {
         PressPhase::HeldAsGesture { hold } => {
-            let (press, was_click) = hold.end();
-            if was_click {
+            let (press, direction) = hold.end();
+            if let Some(direction) = direction {
                 let action = hooks
                     .try_read()
                     .ok()
-                    .map(|m| resolve_gesture_click(&m.gestures, id));
+                    .map(|m| resolve_gesture_action(&m.gestures, id, direction));
                 if let Some(action) = action {
                     dispatcher.try_dispatch_while_pressed(&press, &action);
                 }
@@ -582,12 +581,10 @@ fn handle_moved(
 ) -> EventDisposition {
     let commit = PRESSES.with_borrow_mut(|presses| presses.accumulate(delta_x, delta_y));
     if let Some((press, button, dir)) = commit {
-        let action = hooks.try_read().ok().map(|m| {
-            m.gestures
-                .get(&button)
-                .and_then(|dirs| dirs.get(&dir).cloned())
-                .unwrap_or_else(|| resolve_gesture_click(&m.gestures, button))
-        });
+        let action = hooks
+            .try_read()
+            .ok()
+            .map(|m| resolve_gesture_action(&m.gestures, button, dir));
         if let Some(action) = action {
             debug!(button = %button, ?dir, "gesture swipe committed");
             dispatcher.try_dispatch_while_pressed(&press, &action);
@@ -744,19 +741,20 @@ pub fn start(
     }
 }
 
-/// The action a gesture button's plain (no-swipe) click should fire: its
-/// explicit [`GestureDirection::Click`] entry — honoring an explicit
-/// [`Action::None`] ("Do Nothing") — or the button's [`default_binding`] when
-/// the gesture map has no `Click` key (a sparse / hand-edited map, or the button
-/// left the gesture set mid-hold). The fallback guarantees a gesture button's
-/// suppressed press is never swallowed into nothing.
-fn resolve_gesture_click(
+/// Resolve a gesture, preserving the click/default fallback for sparse maps
+/// and honoring an explicit [`Action::None`].
+fn resolve_gesture_action(
     gestures: &BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
     id: ButtonId,
+    direction: GestureDirection,
 ) -> Action {
     gestures
         .get(&id)
-        .and_then(|m| m.get(&GestureDirection::Click).cloned())
+        .and_then(|m| {
+            m.get(&direction)
+                .or_else(|| m.get(&GestureDirection::Click))
+                .cloned()
+        })
         .unwrap_or_else(|| default_binding(id))
 }
 

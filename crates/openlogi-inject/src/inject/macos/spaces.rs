@@ -35,11 +35,18 @@ use objc2_foundation::{
 
 use super::super::DesktopSwitch;
 use super::super::space_switch::{
-    self, Backend, Direction, Failure, Lease, Pace, PostGate, SlideFrame, SlidePhase, SpaceState,
+    self, Backend, CONFIRMATION_POLL, Direction, Failure, Lease, Pace, PostGate, SlideFrame,
+    SlidePhase, SpaceState,
 };
 use super::{app_services, app_services_symbol};
 
 static BUSY: AtomicBool = AtomicBool::new(false);
+/// How long a new switch waits for the previous one's frames to finish posting.
+/// Two switches must not interleave their frames, but their *animations* may
+/// overlap: the wait is tens of milliseconds, not the slide it belongs to.
+const POST_WAIT: Duration = Duration::from_millis(250);
+/// How often that wait retries.
+const POST_POLL: Duration = Duration::from_millis(2);
 /// Whether a switch slides. The host publishes the user's choice here
 /// through [`set_desktop_switch`]; until it does, switches stay instant.
 static SLIDE: AtomicBool = AtomicBool::new(false);
@@ -64,10 +71,6 @@ pub(super) fn next_desktop() {
 }
 
 fn start(direction: Direction) {
-    let Some(lease) = Lease::acquire(&BUSY) else {
-        tracing::debug!(?direction, "Space switch already pending — skipped");
-        return;
-    };
     // Capture the display before scheduling. A moved cursor must not retarget
     // a delayed action to another monitor; `post` checks it again.
     let Some(display_id) = cursor_display() else {
@@ -76,8 +79,15 @@ fn start(direction: Direction) {
     };
     // Read once: a setting changed mid-switch applies to the next one.
     let switch = desktop_switch();
+    // Wait only for the previous switch's frames to finish posting. Its slide
+    // is still on screen and that is deliberate: a new gesture interrupts it
+    // and moves on from wherever the Dock has got to, the way pressing the
+    // Space shortcut again mid-slide does. Waiting for its confirmation here is
+    // what made a second flick do nothing until the animation ended.
+    let Some(lease) = acquire_post_slot(direction) else {
+        return;
+    };
     let result = space_switch::spawn_ordered(move |gate| {
-        let _lease = lease;
         autoreleasepool(|_| {
             let result = Native::new(display_id, switch)
                 .and_then(|mut native| space_switch::run(&mut native, direction, gate));
@@ -100,8 +110,30 @@ fn start(direction: Direction) {
             }
         });
     });
+    // The frames are out by the time `spawn_ordered` returns, so the slot is
+    // free for the next flick even though this switch still has to be
+    // confirmed. Confirmation stays detached.
+    drop(lease);
     if let Err(error) = result {
         tracing::warn!(?error, "Space switch preparation failed — no retry");
+    }
+}
+
+/// Take the posting slot, waiting for the previous switch's frames to finish.
+fn acquire_post_slot(direction: Direction) -> Option<Lease<'static>> {
+    let deadline = Instant::now() + POST_WAIT;
+    loop {
+        if let Some(lease) = Lease::acquire(&BUSY) {
+            return Some(lease);
+        }
+        if Instant::now() >= deadline {
+            tracing::warn!(
+                ?direction,
+                "Space switch: previous post still in flight — skipped"
+            );
+            return None;
+        }
+        std::thread::sleep(POST_POLL);
     }
 }
 
@@ -270,8 +302,13 @@ impl Backend for Native {
     }
 
     fn wait_for_change(&mut self, remaining: Duration) {
-        // Deadline wakeup is cleanup/reconciliation, never evidence of success.
-        let _ = self.changed.recv_timeout(remaining);
+        // The active-Space notification is not posted for every switch (a
+        // DockSwipe or symbolic-hotkey switch can change Spaces silently), so
+        // never block out the whole confirmation window: wake on the poll
+        // interval and let the transaction re-read the state. Without this a
+        // settled switch parked on the deadline, which also delayed every
+        // queued flick behind it by the full timeout.
+        let _ = self.changed.recv_timeout(remaining.min(CONFIRMATION_POLL));
     }
 }
 
