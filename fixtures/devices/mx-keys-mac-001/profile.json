@@ -1,0 +1,175 @@
+{
+  "schema_version": 1,
+  "id": "mx-keys-mac-001-profile",
+  "name": "MX Keys for Mac",
+  "inventories": [
+    {
+      "receiver": {
+        "name": "Unifying Receiver",
+        "vendor_id": 1133,
+        "product_id": 50475,
+        "unique_id": "4F4C5201"
+      },
+      "paired": [
+        {
+          "slot": 2,
+          "codename": "MX Keys for Mac",
+          "wpid": 16530,
+          "kind": "keyboard",
+          "online": true,
+          "battery": {
+            "percentage": 100,
+            "level": "full",
+            "status": "discharging"
+          },
+          "model_info": {
+            "entity_count": 3,
+            "serial_number": null,
+            "unit_id": [
+              79,
+              76,
+              68,
+              2
+            ],
+            "transports": {
+              "usb": false,
+              "equad": true,
+              "btle": true,
+              "bluetooth": false
+            },
+            "model_ids": [
+              45921,
+              16530,
+              0
+            ],
+            "extended_model_id": 2
+          },
+          "capabilities": {
+            "buttons": true,
+            "pointer": false,
+            "lighting": false,
+            "scroll_inversion": false,
+            "hires_wheel": false,
+            "thumbwheel": false,
+            "haptic_feedback": false,
+            "haptic_panel": false,
+            "dpi_gestures": false,
+            "fn_lock": true,
+            "os_layout": true,
+            "report_rate": false,
+            "backlight": true,
+            "easy_switch": true,
+            "virtual_thumbwheel": false,
+            "pointer_scaling": false,
+            "force_sensing": false,
+            "disable_keys": true,
+            "onboard_profiles": false,
+            "button_spy": false,
+            "sidetone": false
+          },
+          "settings_revision": 0,
+          "hidpp10": false
+        }
+      ]
+    }
+  ],
+  "standalone": [],
+  "settings": [
+    {
+      "route": {
+        "Unifying": {
+          "receiver_uid": "4F4C5201",
+          "slot": 2
+        }
+      },
+      "dpi": {
+        "support": "unsupported"
+      },
+      "smartshift": {
+        "support": "unsupported"
+      },
+      "wheel": {
+        "support": "unsupported"
+      },
+      "backlight": {
+        "support": "supported",
+        "value": {
+          "enabled": true,
+          "mode": "None",
+          "status": "AlsAutomatic",
+          "current_level": 2,
+          "nb_levels": 8,
+          "power_save": true,
+          "controls": {
+            "automatic": false,
+            "level": false,
+            "power_save": true,
+            "duration": false
+          },
+          "duration": null
+        }
+      },
+      "fn_lock": {
+        "support": "supported",
+        "value": {
+          "fn_lock": false,
+          "default_fn_lock": false
+        }
+      },
+      "report_rate": {
+        "support": "unsupported"
+      },
+      "easy_switch": {
+        "support": "supported",
+        "value": {
+          "current": 0,
+          "slots": [
+            {
+              "index": 0,
+              "paired": true,
+              "connection": "Unifying",
+              "name": "Computer 1",
+              "name_max_len": 24,
+              "os": null
+            },
+            {
+              "index": 1,
+              "paired": true,
+              "connection": "Bluetooth",
+              "name": "Computer 2",
+              "name_max_len": 24,
+              "os": null
+            },
+            {
+              "index": 2,
+              "paired": true,
+              "connection": "Bluetooth",
+              "name": "Computer 3",
+              "name_max_len": 24,
+              "os": null
+            }
+          ],
+          "can_rename": true
+        }
+      },
+      "pointer_speed": {
+        "support": "unsupported"
+      },
+      "force_sensing": {
+        "support": "unsupported"
+      },
+      "disable_keys": {
+        "support": "supported",
+        "value": {
+          "supported": 1,
+          "disabled": 0
+        }
+      },
+      "sidetone": {
+        "support": "unsupported"
+      },
+      "lighting": "unsupported",
+      "light": "unsupported"
+    }
+  ]
+}
