@@ -87,6 +87,41 @@ async fn the_notice_names_the_device_as_the_user_does() {
 }
 
 #[tokio::test]
+async fn the_notice_prefers_the_persisted_product_name() {
+    let mut config = Config::default();
+    config.set_device_identity(
+        KEY,
+        openlogi_core::config::DeviceIdentity {
+            display_name: "MX Master 3S".to_owned(),
+            model_info: None,
+            codename: Some("Synthetic Performance Mouse".to_owned()),
+            kind: DeviceKind::Mouse,
+            capabilities: openlogi_core::device::Capabilities::default(),
+            light_capabilities: None,
+            driver_id: None,
+            registry_model_id: None,
+        },
+    );
+    let (mut orch, observable) = wired(config);
+    refresh(
+        &mut orch,
+        discharging(10),
+        true,
+        "Synthetic Performance Mouse",
+    );
+    let posted = notices(&observable).await;
+    assert_eq!(posted.len(), 1);
+    assert_eq!(
+        posted[0].kind,
+        NoticeKind::LowBattery {
+            name: Some("MX Master 3S".to_owned()),
+            kind: DeviceKind::Mouse,
+            battery: discharging(10),
+        }
+    );
+}
+
+#[tokio::test]
 async fn a_shouted_device_name_is_tidied() {
     let (mut orch, observable) = wired(Config::default());
     refresh(&mut orch, discharging(10), true, "G502 X PLUS");
