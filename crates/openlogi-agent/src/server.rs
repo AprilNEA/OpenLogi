@@ -120,6 +120,8 @@ impl AgentServer {
                 let app_icon = config.app_settings.app_icon;
                 #[cfg(target_os = "macos")]
                 let show_in_menu_bar = config.app_settings.show_in_menu_bar;
+                #[cfg(target_os = "windows")]
+                let appearance = config.app_settings.appearance;
                 let language = config.app_settings.language.clone();
                 // The menu reads the config on the main thread, from its own
                 // copy.
@@ -146,6 +148,10 @@ impl AgentServer {
                 // item now rather than at the next agent launch.
                 #[cfg(target_os = "macos")]
                 crate::tray::set_visible(show_in_menu_bar, app_icon);
+                // The Windows popup menu tracks the panel's resolved light/dark
+                // appearance, so refresh it on reload too.
+                #[cfg(target_os = "windows")]
+                crate::tray_windows::set_appearance(appearance);
                 // And the interface language: re-resolve the process locale.
                 // Both tray menus rebuild each time they open and pick it up
                 // alone.

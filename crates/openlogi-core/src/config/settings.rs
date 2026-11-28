@@ -32,6 +32,19 @@ pub enum Appearance {
     Dark,
 }
 
+impl Appearance {
+    /// Whether this preference resolves to a dark surface when the host OS is
+    /// `system_dark`.
+    #[must_use]
+    pub const fn resolves_dark(self, system_dark: bool) -> bool {
+        match self {
+            Self::System => system_dark,
+            Self::Light => false,
+            Self::Dark => true,
+        }
+    }
+}
+
 /// User-selected scale for text and rem-based interface spacing.
 ///
 /// The core stores a semantic choice rather than GPUI pixels; the desktop maps

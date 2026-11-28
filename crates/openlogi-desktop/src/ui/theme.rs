@@ -483,10 +483,10 @@ pub fn apply_from_settings(window: Option<&mut Window>, cx: &mut App) {
         }
     }
 
-    let mode = match appearance {
-        Appearance::System => ThemeMode::from(os_appearance),
-        Appearance::Light => ThemeMode::Light,
-        Appearance::Dark => ThemeMode::Dark,
+    let mode = if appearance.resolves_dark(ThemeMode::from(os_appearance).is_dark()) {
+        ThemeMode::Dark
+    } else {
+        ThemeMode::Light
     };
     Theme::change(mode, window, cx);
 

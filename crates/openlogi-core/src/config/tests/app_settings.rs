@@ -259,3 +259,22 @@ fn an_unknown_update_channel_is_rejected() {
     .expect_err("an unknown channel must not load as another one");
     assert!(error.to_string().contains("nightly"), "{error}");
 }
+
+#[test]
+fn appearance_resolves_dark_for_every_preference_and_os_mode() {
+    let cases = [
+        (Appearance::System, false, false),
+        (Appearance::System, true, true),
+        (Appearance::Light, false, false),
+        (Appearance::Light, true, false),
+        (Appearance::Dark, false, true),
+        (Appearance::Dark, true, true),
+    ];
+    for (preference, system_dark, expected) in cases {
+        assert_eq!(
+            preference.resolves_dark(system_dark),
+            expected,
+            "preference={preference:?} system_dark={system_dark}"
+        );
+    }
+}
